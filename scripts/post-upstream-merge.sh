@@ -18,13 +18,17 @@ echo "=== Applying post-merge customizations ==="
 
 # -----------------------------------------------------------------------------
 # 1. Electron version override
-#    Upstream uses ^27, we need ^37 for the macOS _cornerMask CPU fix.
-#    (Fixed in Electron 37: https://github.com/electron/electron/pull/48376)
+#    Upstream uses ^27, we need at least ^37 for the macOS _cornerMask CPU fix
+#    (https://github.com/electron/electron/pull/48376), and ^41 to clear the
+#    advisories that affect every Electron before 41.7.1.
+#
+#    41.x is the newest line installable on Node 20; Electron 43+ requires
+#    Node >= 22.12 for its own installer. Raise this when the toolchain moves.
 # -----------------------------------------------------------------------------
 echo ""
-echo "1. Pinning Electron to ^37..."
+echo "1. Pinning Electron to ^41..."
 cd "$ROOT"
-npm pkg set devDependencies.electron="^37.0.0"
+npm pkg set devDependencies.electron="^41.7.1"
 echo "   ✓ package.json updated"
 
 # -----------------------------------------------------------------------------
@@ -244,7 +248,7 @@ echo ""
 echo "=== Done ==="
 echo ""
 echo "Customizations applied:"
-echo "  • Electron pinned to ^37 (fixes macOS idle CPU usage)"
+echo "  • Electron pinned to ^41 (macOS idle CPU fix + security advisories)"
 echo "  • Ukrainian language + Turkish removal overlay (custom-language.js)"
 echo "  • Collapse/Expand All overlay (custom-collapse.js)"
 echo ""

@@ -31,7 +31,11 @@ yarn-error.log*
 .env.local
 
 # Package manager
-package-lock.json
+# package-lock.json is deliberately NOT ignored: it is the only record of the
+# exact dependency tree that was audited, and the app vendors marked, mermaid
+# and DOMPurify straight out of node_modules at postinstall - so the lockfile
+# now determines what actually ships to users, not just what developers build
+# with. Ignoring it would make `npm audit` results unreproducible.
 yarn.lock
 pnpm-lock.yaml
 
@@ -46,6 +50,11 @@ fonts/*.ttf
 fonts/*.woff
 fonts/*.woff2
 !fonts/README.md
+
+# Runtime libraries copied out of node_modules by scripts/vendor-libs.js on
+# postinstall. Generated, not authored - the versions are pinned by
+# package-lock.json, so committing them would just duplicate node_modules.
+libs/vendor/
 
 # Claude Code documentation (local only)
 CLAUDE.md
