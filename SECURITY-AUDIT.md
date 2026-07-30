@@ -24,6 +24,37 @@ Practically: opening an untrusted markdown file in this application should be tr
 
 **Provenance:** every Critical and High finding is **inherited from upstream** (`OmniCoreST/omnicore-markdown-viewer`) — `git blame` attributes the vulnerable lines in `renderer.js` and `main.js` to upstream authors (`can.kyq61-droid`, `Can Kaya`). The fork-specific files (`custom-tabs.js`, `custom-theme.js`, `custom-language.js`, `custom-collapse.js`, `custom-performance.js`) contain **no injection sinks** — they use `textContent` or static HTML literals. The fork introduces one Low finding (SEC-24, session persistence amplifier). This does not reduce the risk of publishing: publishing the fork publishes the vulnerabilities.
 
+## Remediation status
+
+Findings are being fixed in the order given under *Remediation order* at the end of this
+document. Everything marked FIXED below is covered by a regression test in
+`test-render-security.js` (`npm run test:security`) that was written **before** the fix and
+observed to fail without it.
+
+| Finding | Status | How |
+|---|---|---|
+| SEC-26 | **FIXED** | `renderMarkdownFull` reordered to parse → assemble → sanitize → insert, so DOMPurify is the last step before DOM insertion in *both* render paths. |
+| SEC-02 | **FIXED** | Mermaid bodies escaped at every interpolation site, and inserted as text rather than markup. |
+| SEC-03 | **FIXED** | Slider `src`/`alt` escaped before assembly. |
+| SEC-04 | **FIXED** | OmniWare DSL and error text escaped before assembly. Mitigated at the pipeline level by sanitize-last; not yet escaped at source in `omniwire/omniware.js`. |
+| SEC-01 | **FIXED** (mitigated, feature retained) | `@@@html` frames are pinned to `sandbox="allow-scripts"` with no `allow-same-origin` — enforced both on emission and by a global DOMPurify `afterSanitizeAttributes` hook, so markdown cannot author an un-sandboxed iframe. The frame therefore has an opaque origin and cannot reach `window.parent`. The feature is kept rather than removed. |
+| SEC-23 | **FIXED** | The `postMessage` resize listener now identifies the sender by matching `event.source` against the managed frames instead of trusting an index from the message body, and coerces/clamps the reported height. No attacker-controlled string reaches a selector. |
+| SEC-10 | **FIXED** earlier | Runtime libraries vendored locally; no CDN load. |
+| SEC-16/17/18 | **FIXED** earlier | Dependency upgrades (24 advisories → 0). |
+
+Two hardening changes were made beyond the original findings, both regression-tested:
+
+- **Local image paths.** DOMPurify's default URI allowlist drops Windows drive paths and
+  `file://` URLs, which are ordinary usage in a local viewer, so an `<img src>` hook keeps
+  drive-letter and `file:///<drive>` paths. The same hook *removes* UNC (`\\host\share`),
+  protocol-relative (`//host/share`) and remote `file://host/` image sources — DOMPurify
+  keeps the first two by default because they parse as relative references. On Windows those
+  are fetched with no user interaction and can hand the user's NTLM credentials to a host
+  named by untrusted markdown.
+- **Raw-HTML frame ownership.** `@@@html` documents are attached after sanitization, keyed by
+  a content hash with a per-key occurrence budget, so a frame can only ever receive a block
+  from the current render and a marker authored directly in markdown receives nothing.
+
 ---
 
 ## SEC-01 — `@@@html` blocks execute arbitrary attacker JavaScript (deliberate sanitizer bypass)

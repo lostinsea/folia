@@ -44,6 +44,7 @@ test-*.md
 test-*.js
 # ...but the tab-overlay regression harness is a real, committed test.
 !test-tab-refresh.js
+!test-render-security.js
 
 # Optional local fonts (users can download separately)
 fonts/*.ttf
