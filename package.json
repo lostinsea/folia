@@ -13,6 +13,7 @@
     "build-linux-deb": "electron-builder --linux deb",
     "build-mac": "electron-builder --mac",
     "release": "node scripts/release.js",
+    "test:tabs": "electron test-tab-refresh.js",
     "start-dev": "NODE_ENV=development electron ."
   },
   "keywords": [

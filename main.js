@@ -104,6 +104,9 @@ let fileToOpen = null;
 // File watching state
 let fileWatcher = null;
 let watchedFilePath = null;
+// Set while the renderer has asked us to stop reporting external changes
+// (unsaved edits in progress). Tab switches must not silently undo it.
+let watchingPaused = false;
 let lastModifiedTime = null;
 
 // ============================================
@@ -239,6 +242,10 @@ let fileChangeDebounce = null;
 function startFileWatching(filePath) {
   // Stop any existing watcher
   stopFileWatching();
+
+  // Explicitly arming the watcher for a file clears any earlier pause, so a
+  // stale paused flag cannot leave the new file silently unwatched.
+  watchingPaused = false;
 
   if (!fs.existsSync(filePath)) {
     console.error("Cannot watch non-existent file:", filePath);
@@ -980,15 +987,35 @@ ipcMain.on("start-file-watching", (event, data) => {
 });
 
 ipcMain.on("pause-file-watching", () => {
+  watchingPaused = true;
   pauseFileWatching();
 });
 
 ipcMain.on("resume-file-watching", () => {
+  watchingPaused = false;
   resumeFileWatching();
 });
 
 ipcMain.on("stop-file-watching", () => {
+  watchingPaused = false;
   stopFileWatching();
+});
+
+// The tab overlay (custom-tabs.js) sends this on every tab switch. Without a
+// handler the watcher stays pinned to whichever file was opened last, so
+// external changes to any other open tab are never reported.
+ipcMain.on("set-active-file", (event, filePath) => {
+  if (!filePath || watchedFilePath === filePath) {
+    return;
+  }
+  if (watchingPaused) {
+    // The renderer paused watching because of unsaved edits. Remember the new
+    // target so resume-file-watching arms the right file, but do not re-arm
+    // here - that would undo the pause the renderer explicitly asked for.
+    watchedFilePath = filePath;
+    return;
+  }
+  startFileWatching(filePath);
 });
 
 // Handle file reload request

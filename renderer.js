@@ -7420,6 +7420,21 @@ window.renderMarkdown = renderMarkdown;
 window.viewer = viewer;
 window.markdownEditor = markdownEditor;
 window.updateFileInfo = updateFileInfo;
+// Exposed so overlay modules (custom-*.js) can localise their own messages.
+window.i18n = i18n;
+// Exposed so the tab overlay can restore per-tab unsaved state on a switch.
+// Without it this flag is global across tabs, and the refresh/exit guards that
+// depend on it would silently discard another tab's unsaved edits.
+window.setUnsavedState = function (value) {
+  hasUnsavedChanges = !!value;
+  updateUnsavedIndicator();
+};
+// Exposed so the tab overlay can take down a stale "File Updated" prompt.
+// It is already an implicit global today (classic script), but the overlay
+// must not depend on that: `fileUpdateNotificationShown` is module-private,
+// so a DOM-only dismissal would leave it stuck true and silently swallow the
+// next change notification for up to 10s.
+window.dismissFileUpdateNotification = dismissFileUpdateNotification;
 
 // Expose currentFilePath with getter/setter so custom-tabs.js
 // setting window.currentFilePath also updates the local variable.
