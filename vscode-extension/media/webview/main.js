@@ -8,7 +8,7 @@ const vscode = acquireVsCodeApi();
 // ============================================
 // CONFIGURATION
 // ============================================
-const ZOOM_CONFIG = { level: 100, step: 10, min: 50, max: 200 };
+const ZOOM_CONFIG = { level: 100, step: 10, min: 50, max: 400 };
 
 // ============================================
 // STATE

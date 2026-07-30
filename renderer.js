@@ -45,7 +45,7 @@ const ZOOM_CONFIG = {
   level: 100,
   step: 10,
   min: 50,
-  max: 200
+  max: 400
 };
 
 // ============================================
@@ -660,6 +660,10 @@ document.addEventListener('keydown', (e) => {
 
 // Update zoom display
 function updateZoom() {
+  // Clamp defensively: four separate call sites increment/decrement by step
+  // before calling in, so a max that is not a whole number of steps from the
+  // default would otherwise overshoot the bound.
+  zoomLevel = Math.min(ZOOM_CONFIG.max, Math.max(ZOOM_CONFIG.min, zoomLevel));
   viewer.style.zoom = `${zoomLevel / 100}`;
   zoomResetBtn.textContent = `${zoomLevel}%`;
 }
