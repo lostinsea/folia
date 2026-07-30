@@ -22,13 +22,14 @@ echo "=== Applying post-merge customizations ==="
 #    (https://github.com/electron/electron/pull/48376), and ^41 to clear the
 #    advisories that affect every Electron before 41.7.1.
 #
-#    41.x is the newest line installable on Node 20; Electron 43+ requires
-#    Node >= 22.12 for its own installer. Raise this when the toolchain moves.
+#    Pinned to ^43, the current line. Electron 43+ needs Node >= 22.12 (see
+#    .npmrc for why); the repo pins that in .nvmrc and enforces it via
+#    engine-strict, so this pin and the Node pin must be raised together.
 # -----------------------------------------------------------------------------
 echo ""
-echo "1. Pinning Electron to ^41..."
+echo "1. Pinning Electron to ^43..."
 cd "$ROOT"
-npm pkg set devDependencies.electron="^41.7.1"
+npm pkg set devDependencies.electron="^43.2.0"
 echo "   ✓ package.json updated"
 
 # -----------------------------------------------------------------------------
@@ -248,7 +249,7 @@ echo ""
 echo "=== Done ==="
 echo ""
 echo "Customizations applied:"
-echo "  • Electron pinned to ^41 (macOS idle CPU fix + security advisories)"
+echo "  • Electron pinned to ^43 (macOS idle CPU fix + security advisories)"
 echo "  • Ukrainian language + Turkish removal overlay (custom-language.js)"
 echo "  • Collapse/Expand All overlay (custom-collapse.js)"
 echo ""

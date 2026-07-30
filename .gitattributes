@@ -1,0 +1,25 @@
+# Without this, git's core.safecrlf guard rejects `git add` for any file that is
+# LF in the working tree on a machine with core.autocrlf=true, because the
+# LF -> repo -> CRLF round trip is not reversible. Several files here are written
+# with LF by tooling regardless of platform, so pinning their end-of-line form
+# is more honest than converting them by hand after every regeneration.
+
+# npm rewrites these with LF on every install / `npm pkg set`, on every platform.
+package.json text eol=lf
+package-lock.json text eol=lf
+
+# Read by version managers and by CI setup-node actions, which expect LF.
+.nvmrc text eol=lf
+.npmrc text eol=lf
+
+# Shell scripts must be LF or they fail on Linux and macOS with an unhelpful
+# "bad interpreter" error when the shebang line ends in a stray carriage return.
+*.sh text eol=lf
+
+# Binary assets: never apply end-of-line conversion.
+*.png binary
+*.ico binary
+*.icns binary
+*.ttf binary
+*.woff binary
+*.woff2 binary

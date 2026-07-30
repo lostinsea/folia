@@ -294,10 +294,40 @@ Download the latest release from the [Releases page](https://github.com/OmniCore
 
 ### Build from Source
 
+**Prerequisite: Node.js 22.12 or newer.** The exact version this project is
+developed against is in [`.nvmrc`](.nvmrc).
+
+Electron 43 no longer ships a `postinstall` hook; it downloads its binary lazily
+on first run, using a downloader that is ESM-only and needs Node >= 22.12. To
+stop that turning into a confusing failure at `npm start` time, `.npmrc` sets
+`engine-strict=true`, so an unsupported Node fails fast at install with an
+explicit `EBADENGINE` instead. (Electron bundles its own Node - 43 ships Node 24
+- so this requirement applies only to the install/build toolchain, never to the
+running application.)
+
+If you use a version manager:
+
+```bash
+# fnm, nvs, Volta, or nvm on macOS/Linux - all read .nvmrc directly
+nvm use
+```
+
+```powershell
+# nvm-windows does not read .nvmrc, so pass the version explicitly
+nvm install (Get-Content .nvmrc)
+nvm use (Get-Content .nvmrc)
+```
+
 1. Install dependencies:
 ```bash
 npm install
 ```
+
+This also runs `scripts/vendor-libs.js`, which copies marked, Mermaid, DOMPurify
+and the Fira Code fonts out of `node_modules` into `libs/vendor/` and `fonts/`.
+Those files are generated, not committed. The application loads them from disk -
+it deliberately does **not** fetch anything from a CDN at runtime, so it renders
+fully offline and the versions you audit are the versions you ship.
 
 ## Running the Application
 
