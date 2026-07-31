@@ -45,6 +45,11 @@ test-*.js
 # ...but the tab-overlay regression harness is a real, committed test.
 !test-tab-refresh.js
 !test-render-security.js
+!test-popup-security.js
+!test-packaging.js
+
+# Written by the popup suite so a redirected run is still inspectable.
+test-popup-results.txt
 
 # Optional local fonts (users can download separately)
 fonts/*.ttf

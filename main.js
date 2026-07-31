@@ -5,6 +5,205 @@ const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
+const crypto = require("crypto");
+
+// ============================================
+// POPUP DOCUMENT ESCAPING
+//
+// The image, OmniWare, mermaid and table popups are built by concatenating
+// markdown-derived values into a fresh HTML document that is then loaded into a
+// real window. That document is parsed as a full document, so an injected
+// <script> executes - these helpers are what stops markdown from reaching it
+// (SEC-05/06/07). The popups additionally run without Node integration and
+// under a nonce CSP, so an escape that is ever missed is contained rather than
+// fatal.
+// ============================================
+
+// For text and quoted attribute values in the generated markup.
+function escapeHtml(value) {
+  return String(value == null ? "" : value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+// For values embedded inside a <script> element. JSON alone is not enough: the
+// HTML tokenizer ends a script block at the first `</script`, whatever the
+// JavaScript string context, which is exactly how the old template-literal
+// escaping was defeated. Escaping `<` as \u003c removes that sequence, and the
+// U+2028/U+2029 escapes keep the result a valid JavaScript literal.
+function toScriptLiteral(value) {
+  return JSON.stringify(String(value == null ? "" : value))
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
+// Same problem for a whole object rather than a single string. `<` can only
+// occur inside a JSON string, so escaping it as \u003c after stringifying
+// keeps the result valid JSON and valid JavaScript while making `</script`
+// unrepresentable.
+function toJsonLiteral(value) {
+  return JSON.stringify(value === undefined ? null : value)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
+// A CSP nonce for the scripts this file generates itself. Regenerated per
+// document so a value cannot be predicted and reused by injected markup.
+function makeNonce() {
+  return crypto.randomBytes(16).toString("base64");
+}
+
+// Content-Security-Policy for the generated popup documents.
+//
+// This, not the regex filtering below, is the real control. These documents are
+// loaded from a temp file, so they run with a file:// origin - and a file://
+// document in Electron can read other local files: `fetch('file:///C:/Windows/
+// win.ini')` from one of these popups returns 200 with the file body, and an
+// outbound POST to an arbitrary host succeeds. So any markup injection that
+// executes script is local-file theft plus exfiltration, whether or not Node
+// integration is on.
+//
+// `script-src 'nonce-...'` means only the scripts generated here run: injected
+// <script> elements, injected inline handlers such as `<img onerror=...>` and
+// `javascript:` URLs are all refused by the browser regardless of whether the
+// string filtering below happened to catch them. `connect-src 'none'` stops the
+// fetch/XHR read-and-exfiltrate path outright. All four verified by probe.
+function popupCsp(nonce, extraImgSrc) {
+  return [
+    "default-src 'none'",
+    `script-src 'nonce-${nonce}'`,
+    "style-src 'unsafe-inline'",
+    `img-src data: file:${extraImgSrc ? " " + extraImgSrc : ""}`,
+    "font-src file: data:",
+    "connect-src 'none'",
+    "form-action 'none'",
+    "base-uri 'none'",
+    "frame-src 'none'",
+    "frame-ancestors 'none'",
+    "object-src 'none'",
+  ].join("; ");
+}
+
+// Defence in depth for the mermaid popup, which has to interpolate real SVG
+// markup and so cannot simply escape it. The primary controls for that window
+// are the CSP above and the absence of Node integration; this removes the
+// obvious script vectors from a diagram that mermaid's own sanitizer may have
+// let through.
+function stripActiveSvgContent(svg) {
+  // The parser decodes character references at attribute-value time, so
+  // `javascript&#58;alert(1)` and `javascript&colon;alert(1)` would both survive
+  // a raw `javascript:` match and still execute. Decode the references this
+  // filter cares about first.
+  const decoded = String(svg == null ? "" : svg)
+    .replace(/&colon;/gi, ":")
+    .replace(/&#(x)?([0-9a-f]+);?/gi, (match, hex, code) => {
+      const n = hex ? parseInt(code, 16) : parseInt(code, 10);
+      return n === 58 || n === 9 || n === 10 || n === 13 ? String.fromCharCode(n) : match;
+    });
+  return decoded
+    .replace(/<script[\s\S]*?<\/script\s*>/gi, "")
+    .replace(/<script[\s\S]*?>/gi, "")
+    // `<meta http-equiv="refresh">` relocates the popup. The navigation guard in
+    // registerPopup() is the control that actually stops it; this keeps the
+    // element out of the document in the first place.
+    .replace(/<meta[\s\S]*?>/gi, "")
+    .replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, "")
+    .replace(/\son[a-z]+\s*=\s*'[^']*'/gi, "")
+    .replace(/\son[a-z]+\s*=\s*[^\s>]+/gi, "")
+    .replace(/j\s*a\s*v\s*a\s*s\s*c\s*r\s*i\s*p\s*t\s*:/gi, "");
+}
+
+// Only local files, `data:image/*` and http(s) sources make sense in the image
+// popup. Anything else - notably `javascript:` - is dropped.
+//
+// Remote share forms are rejected before anything else. On Windows an <img>
+// pointing at `\\host\share\x.png`, `//host/share/x.png` or `file://host/...`
+// makes Chromium perform an automatic SMB fetch with no user interaction,
+// handing the current user's NTLM hash to a host the markdown author chose.
+// The renderer's sanitizer hook already strips these, but this helper exists
+// precisely so the popup does not depend on that hook being correct.
+function safeImageSrc(value) {
+  const src = String(value == null ? "" : value).trim();
+  if (!src) return "";
+  if (/^[\\/]{2}/.test(src)) return ""; // \\host\share and //host/share
+  if (/^\\\\\?\\/.test(src)) return ""; // \\?\UNC\... extended form
+  if (/^file:\/\/(?!\/)/i.test(src)) return ""; // file://host/share
+  if (/^file:\/{4,}/i.test(src)) return ""; // file:////host/share
+  // Checked before the scheme rejection below: a bare Windows path such as
+  // "C:\pics\a.png" otherwise looks like a URL with the scheme "C:" and was
+  // silently dropped.
+  if (/^[a-zA-Z]:[\\/]/.test(src)) return src;
+  if (/^(?:https?:|file:|data:image\/)/i.test(src)) return src;
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(src)) return "";
+  return src; // relative path
+}
+
+// Applied to every popup window so they cannot drift apart again.
+//
+// `popupKind` is passed through as a process argument so the preload can expose
+// only the one API that window legitimately needs: without it every popup gets
+// every bridge method, and script that executes in (say) the mermaid popup can
+// drive the image popup's save-to-disk path.
+const POPUP_WEB_PREFERENCES = {
+  nodeIntegration: false,
+  contextIsolation: true,
+  preload: path.join(__dirname, "popup-preload.js"),
+};
+
+// webContents.id -> popup kind, so IPC handlers can verify that a message came
+// from the kind of window that is allowed to send it.
+const popupKinds = new Map();
+
+function popupWebPreferences(kind) {
+  return {
+    ...POPUP_WEB_PREFERENCES,
+    additionalArguments: [`--popup-kind=${kind}`],
+  };
+}
+
+// Registers a popup and locks it to the document the main process gave it.
+//
+// The CSP governs what a document may execute and connect to; it says nothing
+// about that document being *replaced*. Attacker-controlled markup can carry
+// `<meta http-equiv="refresh">` - directly, or tucked inside an SVG
+// <foreignObject> - and relocate the whole popup to a remote page. Chromium has
+// no CSP directive for this (`navigate-to` was never implemented), so it has to
+// be denied in the main process. It matters more than it looks: the preload
+// survives a navigation, so without this the attacker's page inherits
+// `popupBridge` and, on the image popup, its write-to-disk method.
+//
+// `will-navigate` does not fire for the initial `loadFile`/`loadURL`, so every
+// navigation reaching this handler is one we did not initiate.
+function registerPopup(win, kind) {
+  const id = win.webContents.id;
+  popupKinds.set(id, kind);
+  win.on("closed", () => popupKinds.delete(id));
+
+  const denyNavigation = (event, url) => {
+    event.preventDefault();
+    console.warn(`Blocked navigation from ${kind} popup to: ${url}`);
+  };
+  win.webContents.on("will-navigate", denyNavigation);
+  win.webContents.on("will-redirect", denyNavigation);
+  win.webContents.on("will-frame-navigate", denyNavigation);
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    console.warn(`Blocked window.open from ${kind} popup to: ${url}`);
+    return { action: "deny" };
+  });
+
+  return win;
+}
+
+function isPopupOfKind(webContents, kind) {
+  return !!webContents && popupKinds.get(webContents.id) === kind;
+}
 
 // ============================================
 // WINDOW STATE PERSISTENCE
@@ -1066,13 +1265,12 @@ ipcMain.on("open-mermaid-popup", (event, data) => {
     height: 900,
     backgroundColor: isDarkMode ? "#1a1a1a" : "#ffffff",
     autoHideMenuBar: true,
-    webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
-    },
+    webPreferences: popupWebPreferences("mermaid"),
     title: "Mermaid Diagram - Zoom with mouse wheel, Pan by dragging",
     icon: path.join(__dirname, "markdown_viewer_icon.png"),
   });
+
+  registerPopup(popupWindow, "mermaid");
 
   popupWindow.setMenu(null);
 
@@ -1080,10 +1278,12 @@ ipcMain.on("open-mermaid-popup", (event, data) => {
   const tempHtmlPath = path.join(os.tmpdir(), "omnicore-temp-mermaid.html");
 
   // Create HTML with pan/zoom using matrix transform approach
+  const nonce = makeNonce();
   const htmlContent = `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta http-equiv="Content-Security-Policy" content="${popupCsp(nonce)}">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Mermaid Diagram</title>
     <style>
@@ -1156,15 +1356,15 @@ ipcMain.on("open-mermaid-popup", (event, data) => {
     <div class="ui-overlay">
         <h1>Mermaid Diagram</h1>
         <p>• Scroll to Zoom (at cursor)<br>• Click & Drag to Pan</p>
-        <button onclick="resetView()">Reset View</button>
-        <button id="pdfBtn" onclick="savePDF()">Save as PDF</button>
+        <button id="resetBtn">Reset View</button>
+        <button id="pdfBtn">Save as PDF</button>
     </div>
     <div id="svg-container-wrapper" style="width: 100%; height: 100%; position: relative;">
         <div id="viewport" style="transform-origin: 0 0;">
-            ${svgContent}
+            ${stripActiveSvgContent(svgContent)}
         </div>
     </div>
-    <script>
+    <script nonce="${nonce}">
         const svgWrapper = document.getElementById('svg-container-wrapper');
         const viewport = document.getElementById('viewport');
         const mermaidSvg = viewport.querySelector('svg');
@@ -1283,8 +1483,6 @@ ipcMain.on("open-mermaid-popup", (event, data) => {
         }
 
         window.savePDF = async function() {
-            const { ipcRenderer } = require('electron');
-
             const pdfBtn = document.getElementById('pdfBtn');
             const originalText = pdfBtn.textContent;
             pdfBtn.textContent = 'Saving...';
@@ -1336,10 +1534,7 @@ ipcMain.on("open-mermaid-popup", (event, data) => {
             await new Promise(resolve => setTimeout(resolve, 200));
 
             // Request PDF export from main process
-            ipcRenderer.send('mermaid-export-pdf');
-
-            // Listen for result
-            ipcRenderer.once('mermaid-pdf-result', (event, result) => {
+            popupBridge.exportMermaidPdf((result) => {
                 // Remove PDF container and restore normal view
                 pdfContainer.remove();
                 svgWrapper.style.display = '';
@@ -1360,6 +1555,12 @@ ipcMain.on("open-mermaid-popup", (event, data) => {
                 }, 1500);
             });
         }
+
+        // Wired here rather than with inline onclick attributes: the document's
+        // CSP allows only nonce-carrying scripts, and an inline handler counts
+        // as script the browser cannot verify, so it would never fire.
+        document.getElementById('resetBtn').addEventListener('click', () => window.resetView());
+        document.getElementById('pdfBtn').addEventListener('click', () => window.savePDF());
     </script>
 </body>
 </html>`;
@@ -1440,13 +1641,12 @@ ipcMain.on("open-omniware-popup", (event, data) => {
     height: 900,
     backgroundColor: isDarkMode ? "#1a1a1a" : "#f8f6f1",
     autoHideMenuBar: true,
-    webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
-    },
+    webPreferences: popupWebPreferences("omniware"),
     title: "OmniWare Wireframe",
     icon: path.join(__dirname, "markdown_viewer_icon.png"),
   });
+
+  registerPopup(popupWindow, "omniware");
 
   popupWindow.setMenu(null);
 
@@ -1460,16 +1660,18 @@ ipcMain.on("open-omniware-popup", (event, data) => {
     ? `<style>${getOmniWareDarkCSS(true)}</style>`
     : "";
 
-  const escapedDsl = dslCode
-    .replace(/\\/g, "\\\\")
-    .replace(/`/g, "\\`")
-    .replace(/\$/g, "\\$");
+  // JSON-encoded, with `<` escaped, so the value cannot terminate the script
+  // element it lives in. The previous escaping protected the JavaScript
+  // template literal but not the surrounding <script> (SEC-06).
+  const dslLiteral = toScriptLiteral(dslCode);
 
   const tempHtmlPath = path.join(os.tmpdir(), "omnicore-temp-omniware.html");
+  const nonce = makeNonce();
   const htmlContent = `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta http-equiv="Content-Security-Policy" content="${popupCsp(nonce)}">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OmniWare Wireframe</title>
     <style>
@@ -1504,20 +1706,20 @@ ipcMain.on("open-omniware-popup", (event, data) => {
 </head>
 <body>
     <div class="toolbar">
-        <button onclick="exportPDF()">Export PDF</button>
+        <button id="exportPdfBtn">Export PDF</button>
     </div>
     <div id="render-target"></div>
 
-    <script>${omniwareJs}</script>
-    <script>
-        const { ipcRenderer } = require('electron');
-
-        const dsl = \`${escapedDsl}\`;
+    <script nonce="${nonce}">${omniwareJs}</script>
+    <script nonce="${nonce}">
+        const dsl = ${dslLiteral};
         OmniWare.render(dsl, document.getElementById('render-target'));
 
-        function exportPDF() {
-            ipcRenderer.send('omniware-export-pdf');
-        }
+        // Listener rather than an inline onclick: the CSP on this document
+        // permits only nonce-carrying script.
+        document.getElementById('exportPdfBtn').addEventListener('click', () => {
+            popupBridge.exportOmniwarePdf();
+        });
 
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') window.close();
@@ -1585,13 +1787,12 @@ ipcMain.on("open-image-popup", (event, data) => {
     height: 900,
     backgroundColor: isDarkMode ? "#1a1a1a" : "#f0f0f0",
     autoHideMenuBar: true,
-    webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
-    },
+    webPreferences: popupWebPreferences("image"),
     title,
     icon: path.join(__dirname, "markdown_viewer_icon.png"),
   });
+
+  registerPopup(popupWindow, "image");
 
   popupWindow.setMenu(null);
 
@@ -1604,11 +1805,13 @@ ipcMain.on("open-image-popup", (event, data) => {
   const accentHover = isDarkMode ? "#4FCDD6" : "#1f8089";
   const subTextColor = isDarkMode ? "#a0a0a0" : "#666";
 
+  const nonce = makeNonce();
   const htmlContent = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>${alt || "Image Viewer"}</title>
+  <meta http-equiv="Content-Security-Policy" content="${popupCsp(nonce, "https: http: blob:")}">
+  <title>${escapeHtml(alt || "Image Viewer")}</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html, body {
@@ -1699,17 +1902,17 @@ ipcMain.on("open-image-popup", (event, data) => {
     <h1>Image Viewer</h1>
     <p>• Scroll to zoom (at cursor)<br>• Drag to pan</p>
     <span id="zoom-label">100%</span>
-    <button onclick="resetView()">Reset View</button>
+    <button id="resetBtn">Reset View</button>
     <hr class="divider">
-    <button id="btn-png" class="btn-secondary" onclick="saveImage('png')">⬇ Save as PNG</button>
-    <button id="btn-jpg" class="btn-secondary" onclick="saveImage('jpeg')">⬇ Save as JPG</button>
+    <button id="btn-png" class="btn-secondary">⬇ Save as PNG</button>
+    <button id="btn-jpg" class="btn-secondary">⬇ Save as JPG</button>
   </div>
   <div id="canvas">
     <div id="viewport">
-      <img id="the-img" src="${src}" alt="${alt || ""}">
+      <img id="the-img" src="${escapeHtml(safeImageSrc(src))}" alt="${escapeHtml(alt || "")}">
     </div>
   </div>
-  <script>
+  <script nonce="${nonce}">
     const canvas = document.getElementById('canvas');
     const viewport = document.getElementById('viewport');
     const theImg = document.getElementById('the-img');
@@ -1776,7 +1979,6 @@ ipcMain.on("open-image-popup", (event, data) => {
     };
 
     window.saveImage = function(format) {
-      const { ipcRenderer } = require('electron');
       const btnId = format === 'jpeg' ? 'btn-jpg' : 'btn-png';
       const btn = document.getElementById(btnId);
       const origText = btn.textContent;
@@ -1794,8 +1996,7 @@ ipcMain.on("open-image-popup", (event, data) => {
       ctx.drawImage(theImg, 0, 0);
       const dataUrl = offscreen.toDataURL(format === 'jpeg' ? 'image/jpeg' : 'image/png', 0.95);
 
-      ipcRenderer.send('image-popup-save', { dataUrl, format });
-      ipcRenderer.once('image-popup-save-result', (_, result) => {
+      popupBridge.saveImage(dataUrl, format, (result) => {
         if (result.success) {
           btn.textContent = 'Saved!';
           setTimeout(() => { btn.textContent = origText; btn.disabled = false; }, 1500);
@@ -1808,6 +2009,12 @@ ipcMain.on("open-image-popup", (event, data) => {
         }
       });
     };
+
+    // Listeners rather than inline onclick attributes, which the document's
+    // nonce CSP would refuse to run.
+    document.getElementById('resetBtn').addEventListener('click', () => window.resetView());
+    document.getElementById('btn-png').addEventListener('click', () => window.saveImage('png'));
+    document.getElementById('btn-jpg').addEventListener('click', () => window.saveImage('jpeg'));
   </script>
 </body>
 </html>`;
@@ -1824,9 +2031,37 @@ ipcMain.on("open-image-popup", (event, data) => {
 });
 
 // Handle image save request from image popup
+// Largest data URL the image popup may hand back. A rendered image of a
+// realistic screenshot is well under this; the cap stops a hostile page from
+// making the main process buffer an unbounded string before writing it.
+const MAX_IMAGE_DATA_URL_BYTES = 64 * 1024 * 1024;
+
 ipcMain.on("image-popup-save", async (event, { dataUrl, format }) => {
-  const ext = format === "jpeg" ? "jpg" : "png";
-  const filterName = format === "jpeg" ? "JPEG Image" : "PNG Image";
+  // Only the image popup may drive this. Without the check any popup that runs
+  // script can open a save dialog and write bytes of its choosing.
+  if (!isPopupOfKind(event.sender, "image")) return;
+
+  // The payload must be an image data URL produced by canvas.toDataURL, not an
+  // arbitrary string: the bytes are decoded and written to disk verbatim.
+  if (typeof dataUrl !== "string" || dataUrl.length > MAX_IMAGE_DATA_URL_BYTES) {
+    event.reply("image-popup-save-result", {
+      success: false,
+      error: "Unsupported image data",
+    });
+    return;
+  }
+  const match = /^data:image\/(png|jpeg);base64,([A-Za-z0-9+/=\s]+)$/.exec(dataUrl);
+  if (!match) {
+    event.reply("image-popup-save-result", {
+      success: false,
+      error: "Unsupported image data",
+    });
+    return;
+  }
+
+  const format2 = format === "jpeg" ? "jpeg" : "png";
+  const ext = format2 === "jpeg" ? "jpg" : "png";
+  const filterName = format2 === "jpeg" ? "JPEG Image" : "PNG Image";
   const win = BrowserWindow.fromWebContents(event.sender);
 
   try {
@@ -1840,9 +2075,10 @@ ipcMain.on("image-popup-save", async (event, { dataUrl, format }) => {
       return;
     }
 
-    const base64 = dataUrl.split(",")[1];
-    const buffer = Buffer.from(base64, "base64");
-    fs.writeFileSync(result.filePath, buffer);
+    const buffer = Buffer.from(match[2], "base64");
+    // Async: the payload may be up to MAX_IMAGE_DATA_URL_BYTES, and a
+    // synchronous write of that size stalls every window in the app.
+    await fs.promises.writeFile(result.filePath, buffer);
     event.reply("image-popup-save-result", { success: true });
   } catch (err) {
     event.reply("image-popup-save-result", {
@@ -1870,6 +2106,8 @@ ipcMain.on("open-table-popup", (event, data) => {
     icon: path.join(__dirname, "markdown_viewer_icon.png"),
   });
 
+  registerPopup(popupWindow, "table");
+
   popupWindow.setMenu(null);
 
   // Write a temporary HTML file in system temp directory
@@ -1893,10 +2131,12 @@ ipcMain.on("open-table-popup", (event, data) => {
   const tabulatorCss = fs.readFileSync(tabulatorCssPath, "utf8");
 
   // Create HTML with embedded Tabulator
+  const nonce = makeNonce();
   const htmlContent = `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta http-equiv="Content-Security-Policy" content="${popupCsp(nonce, "blob:")}">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Interactive Table</title>
     <style>
@@ -2082,14 +2322,14 @@ ipcMain.on("open-table-popup", (event, data) => {
         <div class="header">
             <h1>Interactive Table Viewer</h1>
             <div class="controls">
-                <button onclick="clearFilters()">
+                <button id="clearFiltersBtn">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <line x1="18" y1="6" x2="6" y2="18"></line>
                         <line x1="6" y1="6" x2="18" y2="18"></line>
                     </svg>
                     Clear Filters
                 </button>
-                <button onclick="exportCSV()">
+                <button id="exportCsvBtn">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
                         <polyline points="7 10 12 15 17 10"></polyline>
@@ -2097,7 +2337,7 @@ ipcMain.on("open-table-popup", (event, data) => {
                     </svg>
                     Export CSV
                 </button>
-                <button onclick="exportJSON()">
+                <button id="exportJsonBtn">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
                         <polyline points="7 10 12 15 17 10"></polyline>
@@ -2115,11 +2355,16 @@ ipcMain.on("open-table-popup", (event, data) => {
         </div>
     </div>
 
-    <script>
+    <script nonce="${nonce}">
         ${tabulatorJs}
 
-        // Initialize Tabulator
-        const tableData = ${JSON.stringify(tableData)};
+        // Initialize Tabulator. toJsonLiteral, not JSON.stringify: table cells
+        // come from the markdown document, and JSON.stringify leaves the
+        // less-than character untouched, so a cell containing a closing script
+        // tag ended this element and everything after it was parsed as markup
+        // (the SEC-06 class of bug, in a window that can read local files
+        // because it runs from file://).
+        const tableData = ${toJsonLiteral(tableData)};
 
         const table = new Tabulator("#data-table", {
             data: tableData.data,
@@ -2149,6 +2394,12 @@ ipcMain.on("open-table-popup", (event, data) => {
         function clearFilters() {
             table.clearHeaderFilter();
         }
+
+        // Listeners rather than inline onclick attributes, which this
+        // document's nonce CSP would refuse to run.
+        document.getElementById('clearFiltersBtn').addEventListener('click', clearFilters);
+        document.getElementById('exportCsvBtn').addEventListener('click', exportCSV);
+        document.getElementById('exportJsonBtn').addEventListener('click', exportJSON);
 
         // Keyboard shortcut
         document.addEventListener('keydown', (e) => {

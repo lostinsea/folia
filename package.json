@@ -17,7 +17,10 @@
     "release": "node scripts/release.js",
     "test:tabs": "electron test-tab-refresh.js",
     "start-dev": "NODE_ENV=development electron .",
-    "test:security": "electron test-render-security.js"
+    "test:security": "electron test-render-security.js",
+    "test:popups": "electron test-popup-security.js",
+    "test:packaging": "node test-packaging.js",
+    "test": "npm run test:packaging && npm run test:tabs && npm run test:security && npm run test:popups"
   },
   "keywords": [
     "markdown",
@@ -63,6 +66,7 @@
       "index.html",
       "main.js",
       "renderer.js",
+      "popup-preload.js",
       "styles.css",
       "README.md",
       "LICENSE.txt",
@@ -74,6 +78,7 @@
       "file-icon.ico",
       "omnicore-letterhead-logo.png",
       "libs/**/*",
+      "fonts/**/*",
       "omniwire/**/*",
       "omniware-config.js",
       "utils.js",
