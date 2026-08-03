@@ -61,7 +61,46 @@ function inPageVisualProbe() {
         document.querySelectorAll(selector),
       );
 
+      // Every check below is viewport-relative, so an element that happens to
+      // sit below the fold reports as unsound no matter how healthy it is: all
+      // five sample points land outside the viewport and `sampled` comes back
+      // 0. That is a property of where the page happens to be scrolled, not of
+      // the element, and it made the third diagram in any document permanently
+      // red. Scroll each element into view first so the probe answers the
+      // question it actually claims to answer: "when the user looks at this,
+      // is it sound?"
+      //
+      // Scrolling is state, so capture every scrollable container up front and
+      // put it back afterwards - callers assert on scroll position elsewhere
+      // and a diagnostic probe must not move the thing under test.
+      var doScroll =
+        opts.scrollIntoView !== false && nodes.length > 0;
+      var savedScroll = [];
+      if (doScroll) {
+        Array.prototype.forEach.call(
+          document.querySelectorAll("*"),
+          function (n) {
+            if (
+              n.scrollHeight > n.clientHeight + 1 ||
+              n.scrollWidth > n.clientWidth + 1
+            ) {
+              savedScroll.push({
+                el: n,
+                top: n.scrollTop,
+                left: n.scrollLeft,
+              });
+            }
+          },
+        );
+      }
+
       nodes.forEach(function (el, i) {
+        if (doScroll && typeof el.scrollIntoView === "function") {
+          // block:'center' maximises the in-view area, which matters for an
+          // element taller than the viewport: the centre sample still lands
+          // inside even when the 15%/85% ones cannot.
+          el.scrollIntoView({ block: "center", inline: "nearest" });
+        }
         var rect = el.getBoundingClientRect();
 
         // --- rendered at all -------------------------------------------------
@@ -184,8 +223,14 @@ function inPageVisualProbe() {
           clippedX: clippedX,
           clippedY: clippedY,
           clipper: clipper,
+          scrolledIntoView: doScroll,
           sound: sound,
         });
+      });
+
+      savedScroll.forEach(function (s) {
+        s.el.scrollTop = s.top;
+        s.el.scrollLeft = s.left;
       });
 
       var bad = records.filter(function (r) {

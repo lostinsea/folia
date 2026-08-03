@@ -24,7 +24,8 @@
     "test:visual": "electron test-visual-utils-selfcheck.js",
     "test:startup": "electron test-startup-perf.js",
     "test:search": "electron test-search.js",
-    "test": "npm run test:packaging && npm run test:startup && npm run test:tabs && npm run test:security && npm run test:popups && npm run test:visual && npm run test:search && npm run test:mermaid"
+    "test:patch": "electron test-render-patch.js",
+    "test": "npm run test:packaging && npm run test:startup && npm run test:tabs && npm run test:security && npm run test:popups && npm run test:visual && npm run test:search && npm run test:mermaid && npm run test:patch"
   },
   "keywords": [
     "markdown",

@@ -1647,6 +1647,21 @@ viewer.addEventListener('click', (e) => {
       // Try to find the target element by ID
       let targetElement = document.getElementById(targetId);
 
+      // An in-document anchor must resolve to *document content*. The app's own
+      // chrome owns plain ids like #viewer, #toc and #search, and
+      // assignHeadingIds() deliberately steps around them (a heading "# Viewer"
+      // is given id "viewer-1"). Without this guard, [Jump](#viewer) matched the
+      // app container instead, and scrolled to the top of the document with no
+      // error - the failure looked like "anchors are flaky" rather than a
+      // collision. Reject anything outside the viewer and let the slug search
+      // below find the real heading. Note the explicit `=== viewer` arm:
+      // Node.contains() reports true for the node itself, so checking only
+      // containment lets the container through - which is precisely the id
+      // that collides.
+      if (targetElement && (targetElement === viewer || !viewer.contains(targetElement))) {
+        targetElement = null;
+      }
+
       // If not found by ID, try to find by searching all headers
       if (!targetElement) {
         const headers = viewer.querySelectorAll('h1, h2, h3, h4, h5, h6');
@@ -1657,11 +1672,11 @@ viewer.addEventListener('click', (e) => {
             targetElement = header;
             break;
           }
-          // Also check if the generated ID from text matches
-          const headerText = header.textContent.trim().toLowerCase()
-            .replace(/[^\w\s-]/g, '') // Remove punctuation
-            .replace(/\s+/g, '-') // Replace spaces with hyphens
-            .replace(/^-+|-+$/g, ''); // Remove leading/trailing hyphens
+          // Also check if the generated ID from text matches. Uses the same
+          // slugifier as assignHeadingIds() - an independent copy here drifted
+          // (it stripped non-ASCII via \w, so it could never match the Unicode
+          // slug a Cyrillic or CJK heading is actually given).
+          const headerText = slugifyHeading(header.textContent);
           if (headerText === targetId.toLowerCase()) {
             targetElement = header;
             break;
@@ -2691,6 +2706,65 @@ searchPrevBtn.addEventListener('click', () => { flushPendingSearch(); previousMa
 searchCloseBtn.addEventListener('click', toggleSearchPanel);
 
 // Index/TOC functionality
+// Heading ids are derived from the heading text, not from its position.
+//
+// They used to be `header-${index}`, which made every id in the document shift
+// the moment a heading was inserted or removed. Two things are keyed off these
+// ids - the collapsedHeaders map and the TOC's dataset.headerId - so adding one
+// heading near the top silently moved every section's collapsed state onto its
+// neighbour. Measured on a three-heading document: collapsed state
+// (Alpha, Beta, Gamma) = (true, false, true) became (false, true, false) after
+// a single heading was inserted above them. That misfires constantly in this
+// app specifically, because documents are expected to be rewritten underneath
+// the reader and re-rendered.
+//
+// marked does not supply ids of its own here: `headerIds: true` is still passed
+// in the options at the top of this file, but that option was removed from
+// marked's core in v8/v9 (it lives in marked-gfm-heading-id now) and is silently
+// ignored by the vendored 9.1.6 build, so nothing was generating slugs. In-page
+// anchor links like [see](#some-heading) therefore never resolved either; they
+// do now.
+function slugifyHeading(text) {
+  return String(text)
+    .toLowerCase()
+    .trim()
+    // \w is ASCII-only and would erase a Cyrillic or CJK heading entirely,
+    // sending it to the positional fallback and re-creating the shifting bug
+    // for non-Latin documents.
+    .replace(/[^\p{L}\p{N}\s-]/gu, '')
+    .replace(/\s+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+function assignHeadingIds(headers) {
+  const used = new Set();
+  // Elements that survived incremental patching keep the id they were given on
+  // an earlier render. Reserving those first is what makes the ids stable: a
+  // newly inserted heading with the same text takes the -1 suffix rather than
+  // stealing the slug an existing collapsed section is keyed by.
+  //
+  // An id can also arrive from raw HTML in the document itself, and nothing
+  // stops an author writing the same one twice. Duplicates are re-slugged
+  // rather than left alone, because collapsedHeaders and expandToHeader() both
+  // resolve ids with getElementById, which would silently address only the
+  // first of them.
+  headers.forEach(h => {
+    if (!h.id) return;
+    if (used.has(h.id)) { h.removeAttribute('id'); return; }
+    used.add(h.id);
+  });
+  headers.forEach(h => {
+    if (h.id) return;
+    const base = slugifyHeading(h.textContent) || 'section';
+    let id = base;
+    let n = 1;
+    while (used.has(id) || document.getElementById(id)) id = `${base}-${n++}`;
+    used.add(id);
+    h.id = id;
+  });
+}
+
 function buildTableOfContents() {
   const headers = viewer.querySelectorAll('h1, h2, h3, h4, h5, h6');
 
@@ -2699,14 +2773,10 @@ function buildTableOfContents() {
     return;
   }
 
+  assignHeadingIds(headers);
   indexList.innerHTML = '';
 
-  headers.forEach((header, index) => {
-    // Add ID to header if it doesn't have one
-    if (!header.id) {
-      header.id = `header-${index}`;
-    }
-
+  headers.forEach((header) => {
     const level = parseInt(header.tagName.substring(1));
     const item = document.createElement('div');
     item.className = `index-item level-${level}`;
@@ -2744,6 +2814,11 @@ function buildTableOfContents() {
 const collapsedHeaders = new Map(); // persist collapsed state across re-renders by header id
 
 function makeHeadersCollapsible() {
+  // Idempotent: re-wrapping an already-wrapped viewer would nest each section
+  // inside a fresh wrapper on every call. patchViewerDOM() normally flattens
+  // first, but not every render path goes through it.
+  flattenCollapsibleSections();
+
   const headers = viewer.querySelectorAll('h1, h2, h3, h4, h5, h6');
   if (headers.length === 0) return;
 
@@ -2768,6 +2843,7 @@ function makeHeadersCollapsible() {
     // Wrap in a collapsible div
     const wrapper = document.createElement('div');
     wrapper.className = 'collapsible-section';
+    wrapper.dataset.mvCollapsible = '1'; // marks this wrapper as ours to unwrap
     wrapper.dataset.forHeader = header.id;
     header.after(wrapper);
     sectionElements.forEach(el => wrapper.appendChild(el));
@@ -2777,18 +2853,28 @@ function makeHeadersCollapsible() {
       header.classList.add('collapsed');
       wrapper.classList.add('collapsed');
     }
-
-    // Click handler
-    header.addEventListener('click', (e) => {
-      // Don't toggle if user is selecting text or clicking a link inside header
-      if (e.target.tagName === 'A') return;
-
-      const isCollapsed = header.classList.toggle('collapsed');
-      wrapper.classList.toggle('collapsed', isCollapsed);
-      collapsedHeaders.set(header.id, isCollapsed);
-    });
   });
 }
+
+// One delegated listener for the whole viewer instead of one per heading per
+// render. This is not just a micro-optimisation: now that patchViewerDOM()
+// actually preserves unchanged nodes, a preserved heading survives into the next
+// render, and re-attaching a handler to it each time would stack them - two
+// handlers toggle twice, so the section would stop responding to clicks
+// entirely. Delegation cannot accumulate.
+viewer.addEventListener('click', (e) => {
+  const header = e.target.closest && e.target.closest('h1, h2, h3, h4, h5, h6');
+  if (!header || !header.id || !viewer.contains(header)) return;
+  // Don't toggle if the user clicked a link inside the heading
+  if (e.target.tagName === 'A' || (e.target.closest && e.target.closest('a'))) return;
+
+  const wrapper = viewer.querySelector(`.collapsible-section[data-mv-collapsible][data-for-header="${CSS.escape(header.id)}"]`);
+  if (!wrapper) return; // heading with no body — nothing to collapse
+
+  const isCollapsed = header.classList.toggle('collapsed');
+  wrapper.classList.toggle('collapsed', isCollapsed);
+  collapsedHeaders.set(header.id, isCollapsed);
+});
 
 // Auto-expand collapsed sections when navigating via TOC
 function expandToHeader(headerId) {
@@ -3334,14 +3420,74 @@ function _blockHash(str) {
   return (h >>> 0).toString(36);
 }
 
+// Wrappers that post-processing puts *around* a hashed block. The hash lives on
+// the inner element, so a wrapper that is not listed here is invisible to the
+// diff and its whole subtree gets replaced on every render even when unchanged.
+// This list started as just code/table and quietly missed omniware and zoomable
+// images: an unrelated edit elsewhere in the document was measured replacing an
+// untouched top-level image wrapper.
+const _BLOCK_WRAPPER_CLASSES = [
+  'code-block-container',
+  'table-container',
+  'omniware-container',
+  'img-zoom-container',
+  'mermaid-container',
+];
+
 // Get block hash from an element, looking inside known wrapper divs if needed
 function _getBlockHash(el) {
   if (el.dataset && el.dataset.blockHash) return el.dataset.blockHash;
-  // code-block-container / table-container wrap the real element as first non-button child
-  if (el.classList && (el.classList.contains('code-block-container') || el.classList.contains('table-container'))) {
-    for (const child of el.children) {
-      if (child.tagName !== 'BUTTON' && child.dataset && child.dataset.blockHash) return child.dataset.blockHash;
-    }
+  if (el.classList && _BLOCK_WRAPPER_CLASSES.some((c) => el.classList.contains(c))) {
+    // Search the subtree rather than only direct children: wrappers nest (an
+    // img-zoom-container inside a figure, a table-container inside a scroller).
+    const inner = el.querySelector('[data-block-hash]');
+    if (inner) return inner.dataset.blockHash;
+  }
+  return null;
+}
+
+// makeHeadersCollapsible() restructures the viewer from a flat list of top-level
+// blocks into [h1, div.collapsible-section, h2, div.collapsible-section, ...],
+// where each wrapper swallows every block belonging to that section. The freshly
+// parsed HTML patchViewerDOM() diffs against is, by contrast, always flat.
+//
+// That mismatch silently defeated the entire incremental-patch optimisation.
+// From the first heading onwards the positional comparison lines a wrapper up
+// against an ordinary block; _getBlockHash() has no idea what a
+// .collapsible-section is and returns null, so `nHash && oHash` is false and the
+// wrapper - containing the whole section - gets replaceChild'd wholesale.
+// Measured on a 60-heading / 60-code-block document: viewer.children was 2, and
+// a re-render preserved 1 of 1263 nodes (0%). Everything downstream that keys
+// off node identity therefore ran from scratch every time - Prism re-highlighted
+// all 60 code blocks, copy buttons were rebuilt, the TOC and the collapsible
+// wrappers themselves were rebuilt, images reloaded and scroll anchoring was
+// lost.
+//
+// Flattening first restores the invariant patchViewerDOM was written against.
+// The unwrapped blocks are the *same nodes*, so they keep their data-block-hash
+// and their post-processing, and the diff can actually match them.
+function flattenCollapsibleSections() {
+  // Scoped to wrappers this app created, identified by a marker attribute.
+  // DOMPurify's config keeps `class`, so a document may legitimately contain a
+  // hand-written <div class="collapsible-section"> of its own; unwrapping that
+  // would silently delete the author's div - along with its id, styles and any
+  // other attributes - on every re-render.
+  //
+  // Static NodeList in document order. Unwrapping an outer section promotes any
+  // nested section to be a child of the viewer; that nested element is still
+  // connected and still in this list, so a single pass handles arbitrary depth.
+  viewer.querySelectorAll('.collapsible-section[data-mv-collapsible]').forEach(section => {
+    section.replaceWith(...Array.from(section.childNodes));
+  });
+}
+
+// Resolve an element to the .mermaid node it represents, seeing through the
+// container the maximize button wraps a drawn diagram in.
+function _mermaidNode(el) {
+  if (!el || !el.classList) return null;
+  if (el.classList.contains('mermaid')) return el;
+  if (el.classList.contains('mermaid-container')) {
+    return el.querySelector(':scope > .mermaid');
   }
   return null;
 }
@@ -3349,6 +3495,8 @@ function _getBlockHash(el) {
 // Patch viewer's top-level children in-place — only replace nodes that actually changed.
 // Unchanged nodes (same hash) are left untouched, preserving scroll position and event listeners.
 function patchViewerDOM(newHtml) {
+  flattenCollapsibleSections();
+
   const temp = document.createElement('div');
   temp.innerHTML = newHtml;
 
@@ -3357,32 +3505,114 @@ function patchViewerDOM(newHtml) {
   newEls.forEach(el => { el.dataset.blockHash = _blockHash(el.outerHTML); });
 
   const oldEls = Array.from(viewer.children);
-  const maxLen = Math.max(newEls.length, oldEls.length);
 
-  for (let i = 0; i < maxLen; i++) {
-    const nEl = newEls[i];
-    const oEl = oldEls[i];
-
-    if (!nEl) { oEl.remove(); continue; }
-    if (!oEl) { viewer.appendChild(nEl); continue; }
-
-    // Mermaid: old element already has rendered SVG — compare source only
-    if (nEl.classList.contains('mermaid') && oEl.classList.contains('mermaid')) {
-      const nSrc = nEl.dataset.mermaidSrc || nEl.textContent.trim();
-      const oSrc = oEl.dataset.mermaidSrc || '';
-      if (nSrc !== oSrc) viewer.replaceChild(nEl, oEl);
-      continue; // keep existing SVG if same source
+  // Identity key for a top-level block, used to match old nodes to new ones.
+  // Mermaid is special-cased: a drawn diagram's markup is its rendered <svg>,
+  // which never equals the freshly parsed source, so it is keyed by diagram
+  // source instead. A block whose identity cannot be established returns null
+  // and is deliberately never matched.
+  const keyOf = (el, isNew) => {
+    const m = _mermaidNode(el);
+    if (m) {
+      const src = isNew
+        ? m.dataset.mermaidSrc || m.textContent.trim()
+        : m.dataset.mermaidSrc || '';
+      return 'm:' + src;
     }
+    const h = isNew ? el.dataset.blockHash : _getBlockHash(el);
+    return h ? 'h:' + h : null;
+  };
 
-    // General: compare content hashes
-    const nHash = nEl.dataset.blockHash;
-    const oHash = _getBlockHash(oEl);
-    if (nHash && oHash && nHash === oHash) continue; // identical — skip
+  const newKeys = newEls.map((el) => keyOf(el, true));
+  const oldKeys = oldEls.map((el) => keyOf(el, false));
 
-    viewer.replaceChild(nEl, oEl);
+  // Match old blocks to new ones by longest common subsequence rather than by
+  // position. The previous implementation compared index i to index i, which is
+  // correct only for edits that change a block in place. Insert one paragraph
+  // in the middle of a document and every block after it shifts by one, so
+  // every subsequent comparison mismatches and the entire tail is rebuilt -
+  // measured as "inserted a paragraph between 5 and 6, preserved 1-5, replaced
+  // 6-10". That is the single most common edit an author (or an agent writing
+  // to the file) makes, so the optimisation was missing its main case.
+  //
+  // LCS keeps the matched blocks as the *same DOM nodes*, so their Prism
+  // highlighting, copy buttons, zoom handlers, loaded images and scroll
+  // anchoring all survive an insertion anywhere above them.
+  const pairs = _lcsPairs(newKeys, oldKeys);
+
+  const reusedOld = new Array(oldEls.length).fill(false);
+  const matchFor = new Array(newEls.length).fill(null);
+  for (const [ni, oi] of pairs) {
+    matchFor[ni] = oldEls[oi];
+    reusedOld[oi] = true;
+  }
+
+  // Anything the new document no longer contains goes first, leaving the viewer
+  // holding exactly the reused nodes in their final relative order.
+  oldEls.forEach((el, i) => {
+    if (!reusedOld[i]) el.remove();
+  });
+
+  // Then walk the target sequence, inserting only the genuinely new blocks.
+  let ref = viewer.firstChild;
+  for (let i = 0; i < newEls.length; i++) {
+    const node = matchFor[i] || newEls[i];
+    if (node === ref) {
+      ref = ref.nextSibling;
+      continue;
+    }
+    viewer.insertBefore(node, ref);
   }
 
   resyncSearchAfterRender();
+}
+
+// Longest common subsequence over two key arrays, returned as [newIndex,
+// oldIndex] pairs in increasing order. Null keys are treated as never equal, so
+// a block whose identity could not be determined is always rebuilt rather than
+// wrongly reused.
+//
+// Falls back to a positional pairing for pathologically large documents: the DP
+// table is O(n*m), and beyond a few thousand blocks per side the allocation
+// costs more than the rebuild it saves.
+function _lcsPairs(a, b) {
+  const n = a.length;
+  const m = b.length;
+  if (n === 0 || m === 0) return [];
+  if (n * m > 4000000) {
+    const pairs = [];
+    for (let i = 0; i < Math.min(n, m); i++) {
+      if (a[i] !== null && a[i] === b[i]) pairs.push([i, i]);
+    }
+    return pairs;
+  }
+
+  const w = m + 1;
+  const dp = new Uint32Array((n + 1) * w);
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i * w + j] =
+        a[i] !== null && a[i] === b[j]
+          ? dp[(i + 1) * w + j + 1] + 1
+          : Math.max(dp[(i + 1) * w + j], dp[i * w + j + 1]);
+    }
+  }
+
+  const pairs = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (a[i] !== null && a[i] === b[j]) {
+      pairs.push([i, j]);
+      i++;
+      j++;
+    } else if (dp[(i + 1) * w + j] >= dp[i * w + j + 1]) {
+      i++;
+    } else {
+      j++;
+    }
+  }
+  return pairs;
 }
 
 // Every re-render can silently detach part or all of searchMatches, because the
@@ -3486,10 +3716,15 @@ function renderLightFormat(content, generation) {
   addCodeBlockCopyButtons();
 }
 
-// Highlight only elements not yet processed by Prism
+// Highlight only elements not yet processed by Prism.
+//
+// Scope is document-wide rather than viewer-only because the full render path
+// used to call Prism.highlightAll(), which walks the whole document; narrowing
+// to #viewer would silently stop highlighting code blocks that live in dialogs
+// and preview panes.
 function highlightNewElements() {
   if (typeof Prism === 'undefined') return;
-  viewer.querySelectorAll('pre code:not(.prism-highlighted)').forEach(el => {
+  document.querySelectorAll('pre code:not(.prism-highlighted)').forEach(el => {
     Prism.highlightElement(el);
     el.classList.add('prism-highlighted');
   });
@@ -3842,9 +4077,14 @@ async function renderMarkdownFull(content, generation) {
         : (cb) => window.setTimeout(cb, 0);
       requestIdle(() => {
         if (generation !== renderGeneration) { hideLoadingScreenFor(generation); return; } // stale check
-        Prism.highlightAll();
-        // Mark all as highlighted to support targeted highlighting
-        viewer.querySelectorAll('pre code').forEach(el => el.classList.add('prism-highlighted'));
+        // Was Prism.highlightAll() followed by blanket-stamping every `pre code`
+        // as highlighted. highlightAll() ignores the .prism-highlighted marker
+        // entirely, so once patchViewerDOM started actually preserving code
+        // blocks this re-tokenised all of them on every render anyway - measured
+        // on a 60-code-block document: all 60 <code> nodes were preserved, yet
+        // 0 of their 540 syntax spans survived. highlightNewElements() honours
+        // the marker, so only genuinely new blocks are highlighted.
+        highlightNewElements();
         // Add copy buttons to code blocks after syntax highlighting
         addCodeBlockCopyButtons();
         // Hide loading screen after syntax highlighting is done

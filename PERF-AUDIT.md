@@ -177,6 +177,11 @@ app.whenReady().then(async () => {
 
 ### PERF-04 — Mermaid documents miss the light-format fast path for tiny edits
 
+> **STATUS: FIXED** (see "Incremental patching root cause" below). Mermaid
+> documents still route through `'full'`, but that path is no longer expensive:
+> `patchViewerDOM()` now preserves the drawn diagram, so the cost that made the
+> fast path desirable is gone.
+
 - **File:line:** `renderer.js:2888-2898`, `renderer.js:3077-3385`, `renderer.js:3241-3263`
 - **Code:**
   ```js
@@ -210,6 +215,12 @@ app.whenReady().then(async () => {
 
 ### PERF-05 — Code-heavy updates still re-highlight every code block
 
+> **STATUS: FIXED.** The full render path called `Prism.highlightAll()`, which
+> ignores the `.prism-highlighted` marker the light path honours, so every code
+> block was re-tokenised on every render. Replaced with
+> `highlightNewElements()` (document-scoped, so it keeps `highlightAll`'s reach
+> into dialogs). Measured span preservation went 0/540 -> 540/540.
+
 - **File:line:** `renderer.js:3047-3055`, `renderer.js:3375-3383`, `renderer.js:3577-3635`
 - **Code:**
   ```js
@@ -231,6 +242,34 @@ app.whenReady().then(async () => {
 - **Estimated gain:** about **60ms per edit** on code-heavy documents.
 
 ### PERF-06 — TOC and collapsible sections are rebuilt every render
+
+> **STATUS: FIXED, and it was far worse than this entry estimated.**
+>
+> Investigating the ~30ms rebuild uncovered that the incremental-patch
+> optimisation was defeated *entirely* on any document containing a heading.
+> `makeHeadersCollapsible()` restructures `#viewer` into
+> `[h1, div.collapsible-section, ...]`, while the freshly parsed HTML is flat,
+> so `patchViewerDOM()`'s positional diff misaligned from the first heading
+> onward and `_getBlockHash()` returned null for every wrapper. Measured on a
+> 60-heading document: **1 of 1263 nodes preserved (0%)** — a one-word edit
+> rebuilt the whole document.
+>
+> Fixes, in the order they were found:
+> 1. `flattenCollapsibleSections()` before diffing (0% -> 52%)
+> 2. `Prism.highlightAll()` -> `highlightNewElements()` (52% -> **100%**,
+>    1201/1202 — the one replacement is the block that actually changed)
+> 3. Content-derived slug ids replacing positional `header-${index}`, so
+>    collapse state and anchors survive an inserted heading
+> 4. One delegated click listener instead of per-heading listeners (they
+>    stacked, and *parity* of the count decided whether sections responded)
+> 5. `_mermaidNode()` so a drawn diagram wrapped in `.mermaid-container` is
+>    still matched — found by looking at a screenshot, not by any assertion
+> 6. LCS (keyed) diff instead of index-to-index comparison, so inserting or
+>    deleting a block no longer rebuilds the entire tail below it
+> 7. `omniware-container` / `img-zoom-container` added to the wrapper list
+>
+> Guarded by `test-render-patch.js` (`npm run test:patch`), 49 assertions, each
+> proven to fail when its fix is individually reverted.
 
 - **File:line:** `renderer.js:2275-2366`, `renderer.js:3043-3044`, `renderer.js:3365-3368`
 - **Code:**

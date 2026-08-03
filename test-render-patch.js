@@ -1,0 +1,629 @@
+// Regression harness for the incremental render pipeline: patchViewerDOM(),
+// heading identity, and the collapsible-section wrappers built on top of them.
+// Run with: npm run test:patch
+//
+// Everything here guards one root defect and its two consequences.
+//
+// The defect: makeHeadersCollapsible() rewrites the viewer from a flat list of
+// top-level blocks into [h1, div.collapsible-section, h2, ...], while the freshly
+// parsed HTML that patchViewerDOM() diffs against is always flat. From the first
+// heading onwards the positional comparison lined a wrapper up against an
+// ordinary block, _getBlockHash() returned null for the wrapper, and the whole
+// section was replaced. On a 60-heading / 60-code-block document that meant
+// 1 of 1263 nodes survived a one-word edit - the incremental-patch optimisation
+// was, in practice, doing nothing at all on any document with a heading in it.
+//
+// Consequence 1: heading ids were positional (`header-${index}`), and the
+// collapsed-state map is keyed by them, so inserting a heading migrated every
+// section's collapsed state onto its neighbour. Ids are now content-derived
+// slugs, which also makes in-document anchor links work for the first time
+// (marked 9 ignores the `headerIds: true` option still passed to setOptions).
+//
+// Consequence 2: nothing downstream could ever reuse a node, which hid the fact
+// that the full render path called Prism.highlightAll() - a whole-document
+// re-tokenise that ignores the .prism-highlighted marker.
+//
+// Note on what is asserted: node-survival counts, not milliseconds. A timing
+// threshold would be flaky on shared hardware and would not say what broke;
+// "the paragraph I edited is the only block that was replaced" is exact.
+
+const { app, BrowserWindow } = require("electron");
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+
+require("./main.js");
+
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mdv-patch-"));
+
+// Heading-rich and code-rich: headings are what triggers the wrapper
+// mismatch, and code blocks are the most expensive thing a needless replace
+// throws away (Prism spans plus the copy button).
+function buildDoc(introText) {
+  let doc = `# Document\n\n${introText}\n\n`;
+  for (let i = 1; i <= 40; i++) {
+    doc += `## Section ${i}\n\nBody text for section ${i}.\n\n`;
+    doc += "```js\nconst x" + i + " = " + i + ";\n```\n\n";
+  }
+  return doc;
+}
+const DOC = buildDoc("Intro paragraph.");
+const DOC_EDITED = buildDoc("Intro paragraph, edited.");
+
+// Three named sections, so collapsed state can be tracked per section by name
+// rather than by position - which is the whole point of the fix.
+const DOC_ABC = "# Alpha\n\nalpha body\n\n# Beta\n\nbeta body\n\n# Gamma\n\ngamma body\n";
+const DOC_ZABC = "# Zero\n\nzero body\n\n" + DOC_ABC;
+
+const results = [];
+function check(name, ok, detail) {
+  results.push({ name, ok, detail: ok ? "" : String(detail) });
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}${ok ? "" : "  -> " + detail}`);
+}
+
+function writeReport(summary) {
+  const lines = results.map((r) => `${r.ok ? "PASS" : "FAIL"}  ${r.name}${r.ok ? "" : "  -> " + r.detail}`);
+  lines.push(summary);
+  try {
+    fs.writeFileSync(path.join(__dirname, "test-render-patch-results.txt"), lines.join("\n") + "\n");
+  } catch (e) {
+    console.log("could not write test-render-patch-results.txt: " + e.message);
+  }
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function waitFor(exec, label, expression, timeoutMs = 30000) {
+  const started = Date.now();
+  let last;
+  while (Date.now() - started < timeoutMs) {
+    last = await exec(expression);
+    if (last) return last;
+    await sleep(100);
+  }
+  throw new Error(`timed out after ${timeoutMs}ms waiting for ${label} (last: ${JSON.stringify(last)})`);
+}
+
+// A render is only finished once the idle callback that highlights code and
+// hides the loading overlay has run. Polling for that is what makes the
+// preservation counts below meaningful rather than racing the pipeline.
+const RENDER_SETTLED = `
+  (() => {
+    const pending = viewer.querySelectorAll('pre code:not(.prism-highlighted)').length;
+    const overlayUp = loadingScreen.classList.contains('active');
+    return pending === 0 && !overlayUp;
+  })()
+`;
+
+async function render(exec, markdown, mode) {
+  await exec(`renderMarkdown(${JSON.stringify(markdown)}, ${JSON.stringify(mode)})`);
+  await waitFor(exec, `render(${mode}) to settle`, RENDER_SETTLED);
+}
+
+// Tag every element currently under the viewer. Survivors of the next render
+// are exactly the nodes patchViewerDOM reused. An expando property is used
+// rather than an attribute so that tagging cannot itself change any element's
+// serialised HTML and therefore its block hash.
+const TAG_ALL = `
+  (() => {
+    let n = 0;
+    viewer.querySelectorAll('*').forEach(el => { el.__probeTag = ++n; });
+    return n;
+  })()
+`;
+
+// After a render, makeHeadersCollapsible() has already folded the viewer into
+// [h1, div.collapsible-section, ...], so viewer.children is NOT the list of
+// top-level blocks - a 10-paragraph document reads as 2 children. Descend
+// through the app's own wrappers to recover the flat block list the diff
+// actually operates on. (A probe that skipped this reported total:2 and made
+// every preservation assertion look broken.)
+const TOP_BLOCKS = `
+  (() => {
+    const out = [];
+    for (const el of viewer.children) {
+      if (el.classList && el.classList.contains('collapsible-section') && el.dataset.mvCollapsible) {
+        out.push(...el.children);
+      } else {
+        out.push(el);
+      }
+    }
+    return out;
+  })()
+`;
+
+async function run(win) {
+  const exec = (c) => win.webContents.executeJavaScript(c, true);
+
+  await exec(`localStorage.clear(); null`);
+
+  // ---------------------------------------------------------------------
+  // 1. Heading ids are content-derived, not positional.
+  //    Reverting to `header-${index}` fails every assertion in this section.
+  // ---------------------------------------------------------------------
+  await render(exec, DOC_ABC, "full");
+  const ids = await exec(`JSON.stringify([...viewer.querySelectorAll('h1')].map(h => h.id))`);
+  const idList = JSON.parse(ids);
+  check("heading ids are slugs derived from the heading text", JSON.stringify(idList) === JSON.stringify(["alpha", "beta", "gamma"]), ids);
+  check("no heading keeps a positional header-N id", !idList.some((i) => /^header-\d+$/.test(i)), ids);
+
+  // An in-document anchor link is the user-visible half of the same fix: marked
+  // 9 emits no id at all, so [x](#beta) resolved to nothing before this.
+  const anchorOk = await exec(`!!document.getElementById('beta') && document.getElementById('beta').tagName === 'H1'`);
+  check("an in-document anchor target resolves by slug", anchorOk === true, anchorOk);
+
+  // ---------------------------------------------------------------------
+  // 2. Collapsed state survives a heading being inserted above it.
+  //    This is the defect a reader actually hits: an agent rewrites the file,
+  //    a heading appears near the top, and every collapsed section shifts.
+  //    With positional ids the observed result was
+  //    (alpha,beta,gamma) = (true,false,true) -> (false,true,false).
+  // ---------------------------------------------------------------------
+  await exec(`
+    (() => {
+      // Guarded so that a regression in section 1 reports as a failed
+      // assertion here rather than throwing and skipping every later section.
+      ['alpha','gamma'].forEach(id => { const h = document.getElementById(id); if (h) h.click(); });
+      return true;
+    })()
+  `);
+  const before = await exec(`JSON.stringify({alpha: !!collapsedHeaders.get('alpha'), beta: !!collapsedHeaders.get('beta'), gamma: !!collapsedHeaders.get('gamma')})`);
+  check("clicking a heading collapses exactly that section", before === JSON.stringify({ alpha: true, beta: false, gamma: true }), before);
+
+  await render(exec, DOC_ZABC, "full");
+  const after = await exec(`JSON.stringify({zero: !!collapsedHeaders.get('zero'), alpha: !!collapsedHeaders.get('alpha'), beta: !!collapsedHeaders.get('beta'), gamma: !!collapsedHeaders.get('gamma')})`);
+  check("collapsed state stays with its own section when a heading is inserted above", after === JSON.stringify({ zero: false, alpha: true, beta: false, gamma: true }), after);
+
+  // The map is bookkeeping; what the reader sees is the class on the wrapper.
+  const domState = await exec(`
+    JSON.stringify(['zero','alpha','beta','gamma'].map(id => {
+      const w = viewer.querySelector('.collapsible-section[data-for-header="' + id + '"]');
+      return id + '=' + (w ? (w.classList.contains('collapsed') ? '1' : '0') : 'missing');
+    }))
+  `);
+  check("the rendered wrappers show the same collapsed state as the map", domState === JSON.stringify(["zero=0", "alpha=1", "beta=0", "gamma=1"]), domState);
+
+  // ---------------------------------------------------------------------
+  // 3. Slug collisions and non-Latin headings.
+  //    \w is ASCII-only; using it here would slug a Cyrillic heading to the
+  //    empty string, send it to the fallback, and re-create the shifting bug
+  //    for non-Latin documents.
+  // ---------------------------------------------------------------------
+  await render(exec, "# Notes\n\na\n\n# Notes\n\nb\n\n# Привет мир\n\nc\n\n# Другой раздел\n\nd\n", "full");
+  const ids2 = await exec(`JSON.stringify([...viewer.querySelectorAll('h1')].map(h => h.id))`);
+  const idList2 = JSON.parse(ids2);
+  check("repeated heading text produces distinct ids", idList2[0] === "notes" && idList2[1] === "notes-1", ids2);
+  check("a non-Latin heading keeps a meaningful slug", idList2[2] === "привет-мир" && idList2[3] === "другой-раздел", ids2);
+  check("every heading has a unique id", new Set(idList2).size === idList2.length, ids2);
+
+  // ---------------------------------------------------------------------
+  // 4. patchViewerDOM actually preserves unchanged blocks.
+  //    Without flattenCollapsibleSections() this measured 1 preserved node out
+  //    of 1263 on the equivalent document, and topLevelKept was 1.
+  // ---------------------------------------------------------------------
+  for (const mode of ["full", "light-format"]) {
+    await render(exec, DOC, "full");
+    const tagged = await exec(TAG_ALL);
+    await render(exec, DOC_EDITED, mode);
+
+    const survivors = JSON.parse(
+      await exec(`
+        (() => {
+          flattenCollapsibleSections();
+          const all = [...viewer.querySelectorAll('*')];
+          const top = [...viewer.children];
+          return JSON.stringify({
+            nodesNow: all.length,
+            preserved: all.filter(el => el.__probeTag).length,
+            topLevelNow: top.length,
+            topLevelKept: top.filter(el => el.__probeTag).length,
+            replacedTags: top.filter(el => !el.__probeTag).map(el => el.tagName)
+          });
+        })()
+      `),
+    );
+    check(`[${mode}] the tagging probe saw a populated document`, tagged > 100 && survivors.topLevelNow > 100, JSON.stringify({ tagged, survivors }));
+    check(
+      `[${mode}] a one-paragraph edit replaces exactly one top-level block`,
+      survivors.topLevelKept === survivors.topLevelNow - 1 && JSON.stringify(survivors.replacedTags) === JSON.stringify(["P"]),
+      JSON.stringify(survivors),
+    );
+    check(
+      `[${mode}] almost every node in the document survives the re-render`,
+      survivors.preserved / survivors.nodesNow > 0.95,
+      JSON.stringify(survivors),
+    );
+
+    // ------------------------------------------------------------------
+    // 5. Preserved code blocks are not re-tokenised.
+    //    The full path called Prism.highlightAll(), which ignores the
+    //    .prism-highlighted marker: every <code> node survived and 0 of its
+    //    540 syntax spans did.
+    // ------------------------------------------------------------------
+    const prism = JSON.parse(
+      await exec(`
+        (() => {
+          const spans = [...viewer.querySelectorAll('pre code span')];
+          const codes = [...viewer.querySelectorAll('pre code')];
+          return JSON.stringify({
+            spanTotal: spans.length,
+            spanKept: spans.filter(el => el.__probeTag).length,
+            codeTotal: codes.length,
+            codeKept: codes.filter(el => el.__probeTag).length,
+            buttons: viewer.querySelectorAll('.code-block-container button').length
+          });
+        })()
+      `),
+    );
+    check(`[${mode}] the document really does contain highlighted code to preserve`, prism.spanTotal > 100 && prism.codeTotal === 40, JSON.stringify(prism));
+    check(`[${mode}] preserved code blocks keep their syntax highlighting spans`, prism.spanKept === prism.spanTotal, JSON.stringify(prism));
+    check(`[${mode}] every code block still has exactly one copy button`, prism.buttons === prism.codeTotal, JSON.stringify(prism));
+  }
+
+  // ---------------------------------------------------------------------
+  // 6. The collapse toggle keeps working across re-renders.
+  //    Now that headings survive a render, re-attaching a listener per heading
+  //    per render stacks them. Each stacked handler flips header.classList
+  //    again, so the parity of the listener count decides the outcome: with an
+  //    odd number the last handler happens to write the right value to the live
+  //    wrapper and the bug is invisible. Asserting after one, two and three
+  //    re-renders covers both parities - checking only one of them is how this
+  //    assertion first passed against the very code it was written to reject.
+  //    Delegation cannot accumulate, so all three counts behave identically.
+  // ---------------------------------------------------------------------
+  for (const extraRenders of [1, 2, 3]) {
+    await render(exec, "# Unrelated\n\nresets the heading nodes\n", "full");
+    await render(exec, DOC_ABC, "full");
+    for (let i = 0; i < extraRenders; i++) await render(exec, DOC_ABC, "light-format");
+
+    const toggles = JSON.parse(
+      await exec(`
+        (() => {
+          collapsedHeaders.clear();
+          const h = document.getElementById('beta');
+          const w = viewer.querySelector('.collapsible-section[data-for-header="beta"]');
+          if (!h || !w) return JSON.stringify({ err: 'beta section missing', seq: [] });
+          w.classList.remove('collapsed');
+          h.classList.remove('collapsed');
+          const seq = [];
+          h.click(); seq.push(w.classList.contains('collapsed'));
+          h.click(); seq.push(w.classList.contains('collapsed'));
+          h.click(); seq.push(w.classList.contains('collapsed'));
+          return JSON.stringify({ seq, map: collapsedHeaders.get('beta') });
+        })()
+      `),
+    );
+    check(
+      `after ${extraRenders} re-render(s) a heading still toggles its own section`,
+      JSON.stringify(toggles.seq) === JSON.stringify([true, false, true]),
+      JSON.stringify(toggles),
+    );
+    check(
+      `after ${extraRenders} re-render(s) the collapsed map agrees with the DOM`,
+      toggles.map === true,
+      JSON.stringify(toggles),
+    );
+  }
+
+  // A link inside a heading must navigate, not collapse the section.
+  await render(exec, "# Plain\n\nbody\n\n# [Linked](https://example.invalid/x)\n\nmore body\n", "full");
+  const linkGuard = await exec(`
+    (() => {
+      const a = viewer.querySelector('h1 a');
+      if (!a) return 'no link in heading';
+      const h = a.closest('h1');
+      const w = viewer.querySelector('.collapsible-section[data-for-header="' + h.id + '"]');
+      const evt = new MouseEvent('click', { bubbles: true, cancelable: true });
+      a.dispatchEvent(evt);
+      return w.classList.contains('collapsed') ? 'collapsed' : 'ok';
+    })()
+  `);
+  check("clicking a link inside a heading does not collapse the section", linkGuard === "ok", linkGuard);
+
+  // ---------------------------------------------------------------------
+  // 7. Wrapping is idempotent.
+  //    makeHeadersCollapsible() is reachable from paths that do not run
+  //    patchViewerDOM() first; without its own flatten it would nest every
+  //    section inside a fresh wrapper on each call.
+  // ---------------------------------------------------------------------
+  await render(exec, DOC_ABC, "full");
+  const idem = JSON.parse(
+    await exec(`
+      (() => {
+        const once = viewer.querySelectorAll('.collapsible-section').length;
+        makeHeadersCollapsible();
+        const twice = viewer.querySelectorAll('.collapsible-section').length;
+        makeHeadersCollapsible();
+        makeHeadersCollapsible();
+        return JSON.stringify({ once, twice, thrice: viewer.querySelectorAll('.collapsible-section').length });
+      })()
+    `),
+  );
+  check("re-wrapping an already-wrapped viewer does not nest wrappers", idem.once > 0 && idem.once === idem.twice && idem.twice === idem.thrice, JSON.stringify(idem));
+
+  // Flattening must restore the original block order, not merely remove divs.
+  const flatOrder = await exec(`
+    (() => {
+      flattenCollapsibleSections();
+      return [...viewer.children].map(el => el.tagName + (el.id ? '#' + el.id : '')).join(',');
+    })()
+  `);
+  check("flattening restores the original top-level block order", flatOrder === "H1#alpha,P,H1#beta,P,H1#gamma,P", flatOrder);
+
+  // ---------------------------------------------------------------------
+  // 8. A rendered mermaid diagram survives a re-render.
+  //    Once drawn, a .mermaid element is wrapped in div.mermaid-container by
+  //    the maximize button, so patchViewerDOM's mermaid branch - which used to
+  //    require the 'mermaid' class on BOTH sides - stopped matching after the
+  //    first render and threw the drawn diagram away. The full path redrew it,
+  //    so nothing failed; it was found by looking at a screenshot.
+  // ---------------------------------------------------------------------
+  const MERMAID_DOC = "# Diagram Doc\n\nIntro.\n\n```mermaid\ngraph LR\n  PatchA --> PatchB\n```\n";
+  const MERMAID_DOC2 = MERMAID_DOC.replace("Intro.", "Intro, edited.");
+  await exec(`renderMarkdown(${JSON.stringify(MERMAID_DOC)}, 'full')`);
+  await waitFor(exec, "the diagram to be drawn", `viewer.querySelectorAll('.mermaid svg').length === 1`);
+  await waitFor(exec, "the maximize button to wrap it", `viewer.querySelectorAll('.mermaid-container').length === 1`);
+
+  // The mode is chosen by the app, not forced: detectRenderMode() always
+  // returns 'full' for a document containing a mermaid fence, so forcing
+  // 'light-format' here would test a state the app can never reach.
+  const mermaidMode = await exec(`detectRenderMode(${JSON.stringify(MERMAID_DOC)}, ${JSON.stringify(MERMAID_DOC2)})`);
+  check("a mermaid document is still routed through the full render path", mermaidMode === "full", mermaidMode);
+
+  await exec(`
+    (() => {
+      viewer.querySelector('.mermaid-container').__probeCon = 1;
+      viewer.querySelector('.mermaid').__probeMer = 1;
+      return true;
+    })()
+  `);
+  await exec(`renderMarkdown(${JSON.stringify(MERMAID_DOC2)})`);
+  await waitFor(exec, "the edited paragraph to appear", `viewer.textContent.includes('Intro, edited.')`);
+  await waitFor(exec, "a drawn diagram after the re-render", `viewer.querySelectorAll('.mermaid svg').length === 1`);
+
+  const mermaidState = JSON.parse(
+    await exec(`
+      (() => {
+        const c = viewer.querySelector('.mermaid-container');
+        const m = viewer.querySelector('.mermaid');
+        return JSON.stringify({
+          containerSurvived: !!(c && c.__probeCon),
+          mermaidSurvived: !!(m && m.__probeMer),
+          drawn: viewer.querySelectorAll('.mermaid svg').length,
+          labels: m ? m.textContent.replace(/\\s+/g, ' ').trim() : '',
+          maxBtns: viewer.querySelectorAll('.mermaid-maximize-btn').length,
+          errorCards: viewer.querySelectorAll('.mermaid [style*="color: red"]').length
+        });
+      })()
+    `),
+  );
+  check("the drawn diagram element is reused rather than replaced", mermaidState.containerSurvived && mermaidState.mermaidSurvived, JSON.stringify(mermaidState));
+  check("the diagram is still drawn, with its own labels, after the re-render", mermaidState.drawn === 1 && /PatchA/.test(mermaidState.labels) && /PatchB/.test(mermaidState.labels), JSON.stringify(mermaidState));
+  check("the diagram did not collect a second maximize button or an error card", mermaidState.maxBtns === 1 && mermaidState.errorCards === 0, JSON.stringify(mermaidState));
+
+  // ---------------------------------------------------------------------
+  // 9. A .collapsible-section the DOCUMENT author wrote is not eaten.
+  //    DOMPurify keeps `class`, so a document can legitimately contain one.
+  //    An unscoped flatten deleted the author's div - and its id, styles and
+  //    every other attribute - on every re-render.
+  // ---------------------------------------------------------------------
+  const AUTHORED = '# Authored\n\n<div class="collapsible-section" id="mine" data-for-header="pwn" style="border:1px solid red">author content</div>\n\ntail\n';
+  await render(exec, AUTHORED, "full");
+  await render(exec, AUTHORED, "light-format");
+  await render(exec, AUTHORED, "light-format");
+  const authored = JSON.parse(
+    await exec(`
+      (() => {
+        const el = viewer.querySelector('#mine');
+        return JSON.stringify({
+          present: !!el,
+          keptAttrs: el ? (el.getAttribute('style') || '') : '',
+          text: el ? el.textContent : '',
+          ownWrappers: viewer.querySelectorAll('.collapsible-section[data-mv-collapsible]').length
+        });
+      })()
+    `),
+  );
+  check("a document-authored .collapsible-section survives repeated re-renders", authored.present === true && authored.text === "author content", JSON.stringify(authored));
+  check("its attributes are not stripped by the flatten pass", /red/.test(authored.keptAttrs), JSON.stringify(authored));
+
+  // ---------------------------------------------------------------------
+  // 10. Duplicate ids arriving from raw HTML are re-slugged.
+  //     collapsedHeaders and expandToHeader() both resolve ids with
+  //     getElementById, which silently addresses only the first of a pair.
+  // ---------------------------------------------------------------------
+  await render(exec, '<h1 id="dup">First</h1>\n\na\n\n<h1 id="dup">Second</h1>\n\nb\n', "full");
+  const dupes = await exec(`JSON.stringify([...viewer.querySelectorAll('h1')].map(h => h.id))`);
+  const dupList = JSON.parse(dupes);
+  check("two headings sharing a raw-HTML id do not both keep it", dupList.length === 2 && new Set(dupList).size === 2, dupes);
+  check("the first heading keeps the id the author wrote", dupList[0] === "dup", dupes);
+
+  // ---------------------------------------------------------------------
+  // 11. Post-processing does not double-inject over preserved nodes.
+  //     Everything that adds a button guards on a wrapper already existing;
+  //     preserved nodes are the case those guards now actually have to handle.
+  // ---------------------------------------------------------------------
+  const INJ = "# Inject\n\nintro\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n```js\nconst a = 1;\n```\n";
+  await render(exec, INJ, "full");
+  await render(exec, INJ.replace("intro", "intro edited"), "full");
+  await render(exec, INJ.replace("intro", "intro edited twice"), "full");
+  const injected = JSON.parse(
+    await exec(`
+      JSON.stringify({
+        copy: viewer.querySelectorAll('.code-block-container button').length,
+        codeContainers: viewer.querySelectorAll('.code-block-container').length,
+        tableBtns: viewer.querySelectorAll('.table-maximize-btn').length,
+        tableContainers: viewer.querySelectorAll('.table-container').length
+      })
+    `),
+  );
+  check("preserved code blocks do not accumulate copy buttons or wrappers", injected.copy === 1 && injected.codeContainers === 1, JSON.stringify(injected));
+  check("preserved tables do not accumulate maximize buttons or wrappers", injected.tableBtns === 1 && injected.tableContainers === 1, JSON.stringify(injected));
+
+  // ---------------------------------------------------------------------
+  // 12. Inserting a block in the MIDDLE preserves the blocks after it.
+  //     The diff used to compare index i to index i, so a single inserted
+  //     paragraph shifted every later block by one and the whole tail was
+  //     rebuilt. Reverting to the positional loop preserves only the blocks
+  //     ABOVE the insertion point and fails both assertions here.
+  //     This is the most common edit shape there is - an agent appending a
+  //     section to a file the reader has open - so it is the case the whole
+  //     optimisation exists for.
+  // ---------------------------------------------------------------------
+  const paras = (extra) => {
+    let md = "# Middle\n\n";
+    for (let i = 1; i <= 10; i++) {
+      md += `paragraph number ${i}\n\n`;
+      if (extra && i === 5) md += "freshly inserted paragraph\n\n";
+    }
+    return md;
+  };
+  await render(exec, paras(false), "light-format");
+  await exec(TAG_ALL);
+  await render(exec, paras(true), "light-format");
+  const mid = JSON.parse(
+    await exec(`
+      (() => {
+        const tops = ${TOP_BLOCKS};
+        const texts = tops.map(el => el.textContent.trim());
+        return JSON.stringify({
+          total: tops.length,
+          tagged: tops.filter(el => el.__probeTag !== undefined).length,
+          inserted: texts.filter(t => t === 'freshly inserted paragraph').length,
+          after6kept: tops.filter(el => el.__probeTag !== undefined &&
+            /^paragraph number (6|7|8|9|10)$/.test(el.textContent.trim())).length,
+          order: texts.filter(t => /^paragraph number|freshly/.test(t)).join('|')
+        });
+      })()
+    `),
+  );
+  check("the inserted paragraph appears exactly once, in the right place", mid.inserted === 1 && /number 5\|freshly inserted paragraph\|paragraph number 6/.test(mid.order), JSON.stringify(mid));
+  check("every paragraph AFTER the insertion point is the same DOM node", mid.after6kept === 5, JSON.stringify(mid));
+
+  // Deletion is the same problem mirrored.
+  await render(exec, paras(false), "light-format");
+  await exec(TAG_ALL);
+  await render(exec, paras(false).replace("paragraph number 3\n\n", ""), "light-format");
+  const del = JSON.parse(
+    await exec(`
+      (() => {
+        const tops = ${TOP_BLOCKS};
+        return JSON.stringify({
+          gone: tops.filter(el => el.textContent.trim() === 'paragraph number 3').length,
+          tailKept: tops.filter(el => el.__probeTag !== undefined &&
+            /^paragraph number (4|5|6|7|8|9|10)$/.test(el.textContent.trim())).length
+        });
+      })()
+    `),
+  );
+  check("a deleted paragraph is removed and the blocks below it are reused", del.gone === 0 && del.tailKept === 7, JSON.stringify(del));
+
+  // ---------------------------------------------------------------------
+  // 13. A heading whose slug collides with one of the app's own element ids
+  //     must still be reachable by anchor. `# Viewer` is given id "viewer-1"
+  //     to avoid clashing with the #viewer container, so a link to #viewer
+  //     has to fall through to the slug search. Reverting the containment
+  //     guard in the anchor handler makes this scroll to the top instead.
+  // ---------------------------------------------------------------------
+  await render(exec, "# Intro\n\n[Jump](#viewer)\n\n" + "filler\n\n".repeat(60) + "# Viewer\n\nthe real section\n\n" + "tail filler\n\n".repeat(60), "full");
+  const collide = JSON.parse(
+    await exec(`
+      (async () => {
+        const heads = [...viewer.querySelectorAll('h1')];
+        const target = heads.find(h => h.textContent.trim() === 'Viewer');
+        const link = [...viewer.querySelectorAll('a')].find(a => a.getAttribute('href') === '#viewer');
+        contentWrapper.scrollTop = 0;
+        if (link) link.click();
+        // The handler scrolls with behavior:'smooth'; wait for it to settle.
+        let last = -1, stable = 0;
+        for (let i = 0; i < 60 && stable < 4; i++) {
+          await new Promise(r => setTimeout(r, 50));
+          if (contentWrapper.scrollTop === last) stable++; else { stable = 0; last = contentWrapper.scrollTop; }
+        }
+        const hRect = target ? target.getBoundingClientRect() : null;
+        const cRect = contentWrapper.getBoundingClientRect();
+        return JSON.stringify({
+          headingId: target ? target.id : null,
+          globalViewerIsContainer: document.getElementById('viewer') === viewer,
+          hadLink: !!link,
+          scrollTop: Math.round(contentWrapper.scrollTop),
+          headingOffsetFromTop: hRect ? Math.round(hRect.top - cRect.top) : null
+        });
+      })()
+    `),
+  );
+  check("a heading colliding with an app id is renamed, not left ambiguous", collide.headingId === "viewer-1" && collide.globalViewerIsContainer === true, JSON.stringify(collide));
+  // The real assertion: clicking [Jump](#viewer) must land on the HEADING.
+  // Without the containment guard, document.getElementById('viewer') returns
+  // the app container, whose offset resolves to the very top - scrollTop 0.
+  check("clicking an anchor that collides with an app id scrolls to the heading", collide.hadLink === true && collide.scrollTop > 200, JSON.stringify(collide));
+  check("the heading ends up at the top of the reading area, not off screen", collide.headingOffsetFromTop !== null && Math.abs(collide.headingOffsetFromTop) < 60, JSON.stringify(collide));
+
+  // ---------------------------------------------------------------------
+  // 14. Wrappers added by post-processing must be visible to the diff.
+  //     img-zoom-container / omniware-container were not in the wrapper list,
+  //     so _getBlockHash() returned null for them and an unrelated edit
+  //     elsewhere replaced an untouched image on every render. Removing them
+  //     from _BLOCK_WRAPPER_CLASSES drops imgKept to 0.
+  // ---------------------------------------------------------------------
+  const IMGDOC = '# Images\n\nintro paragraph\n\n<img src="x.png" alt="one">\n\ntail paragraph\n';
+  await render(exec, IMGDOC, "full");
+  await exec(TAG_ALL);
+  await render(exec, IMGDOC.replace("intro paragraph", "intro paragraph edited"), "full");
+  const imgs = JSON.parse(
+    await exec(`
+      (() => {
+        const tops = ${TOP_BLOCKS};
+        const wrapped = tops.filter(el => el.querySelector && el.querySelector('img'));
+        return JSON.stringify({
+          imgBlocks: wrapped.length,
+          imgKept: wrapped.filter(el => el.__probeTag !== undefined).length,
+          tailKept: tops.filter(el => el.__probeTag !== undefined &&
+            el.textContent.trim() === 'tail paragraph').length
+        });
+      })()
+    `),
+  );
+  check("an untouched top-level image block is reused when an unrelated block changes", imgs.imgBlocks === 1 && imgs.imgKept === 1, JSON.stringify(imgs));
+  check("the block after the image is reused too", imgs.tailKept === 1, JSON.stringify(imgs));
+
+  const noErrors = await exec(`JSON.stringify(window.__testErrors || [])`);
+  check("no uncaught renderer errors", noErrors === "[]", noErrors);
+}
+
+app.whenReady().then(async () => {
+  if (!BrowserWindow.getAllWindows().length) {
+    console.log("FAIL  no window at ready - another instance is probably holding the single-instance lock.");
+  }
+
+  const watchdog = setTimeout(() => {
+    const summary = "=== timed out after 180s ===";
+    console.log(summary);
+    writeReport(summary);
+    app.exit(1);
+  }, 180000);
+
+  const win = BrowserWindow.getAllWindows()[0];
+  try {
+    if (win.webContents.isLoading()) {
+      await new Promise((r) => win.webContents.once("did-finish-load", r));
+    }
+    await win.webContents.executeJavaScript(
+      `window.__testErrors = []; window.addEventListener('error', e => window.__testErrors.push(String(e.message))); null`,
+      true,
+    );
+    await run(win);
+  } catch (e) {
+    check("harness completed without throwing", false, String(e && e.stack));
+  }
+
+  clearTimeout(watchdog);
+  const passed = results.filter((r) => r.ok).length;
+  const summary = `=== ${passed}/${results.length} passed ===`;
+  console.log(summary);
+  writeReport(summary);
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch (e) {}
+  app.exit(passed === results.length ? 0 : 1);
+});

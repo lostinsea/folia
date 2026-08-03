@@ -319,7 +319,7 @@ async function run(win) {
 
   // Ordinary markdown must be completely unaffected.
   await render(
-    "# Title\n\n## Sub\n\nSome **bold** and `code` and [a link](https://example.com).\n\n" +
+    "# Title\n\n## Sub\n\nSome **bold** and `code` and [a link](https://example.invalid).\n\n" +
       "| a | b |\n|---|---|\n| 1 | 2 |\n\n" +
       "```js\nconst x = 1;\n```\n\n" +
       "![pic](local.png)\n\n" +
@@ -336,7 +336,7 @@ async function run(win) {
         h2: v.querySelectorAll('h2').length,
         strong: v.querySelectorAll('strong').length,
         code: v.querySelectorAll('code').length,
-        link: !!v.querySelector('a[href="https://example.com"]'),
+        link: !!v.querySelector('a[href="https://example.invalid"]'),
         table: v.querySelectorAll('table tbody tr').length,
         pre: v.querySelectorAll('pre').length,
         img: !!v.querySelector('img[src="local.png"]'),
