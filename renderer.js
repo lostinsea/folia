@@ -2810,8 +2810,31 @@ function buildTableOfContents() {
   });
 }
 
-// Collapsible headers - wrap content between headers in collapsible sections
-const collapsedHeaders = new Map(); // persist collapsed state across re-renders by header id
+// Collapsed state, persisted across re-renders.
+//
+// Keyed by document *and* heading id. A bare heading-id key leaked state
+// between files: two tabs that both contain "## Setup" resolve to the same
+// slug, so collapsing that section in one document silently collapsed it in
+// the other the next time it rendered. Keying by the open file makes the map
+// self-scoping, which is more robust than clearing it on transitions -
+// currentFilePath is written from two places (updateFileInfo and the
+// window.currentFilePath setter), so a transition hook would have to catch
+// both and would silently rot if a third appeared.
+//
+// Known limitation, stated rather than hidden: two headings with identical
+// text in the same document are indistinguishable to a content-based diff. If
+// you collapse the first "# Notes" and then insert another "# Notes" above it,
+// the collapsed state stays with the first *position*, not the original
+// section. Slug ids, node identity and LCS matching all fail this case equally
+// - the blocks are byte-identical - so it is inherent rather than a defect in
+// any one of them. It is also strictly better than the previous positional
+// `header-${index}` scheme, where inserting ANY heading shifted every
+// section's state.
+const collapsedHeaders = new Map();
+
+function _collapseKey(headerId) {
+  return (currentFilePath || '<untitled>') + '\u0000' + headerId;
+}
 
 function makeHeadersCollapsible() {
   // Idempotent: re-wrapping an already-wrapped viewer would nest each section
@@ -2849,10 +2872,15 @@ function makeHeadersCollapsible() {
     sectionElements.forEach(el => wrapper.appendChild(el));
 
     // Restore collapsed state
-    if (collapsedHeaders.get(header.id)) {
-      header.classList.add('collapsed');
-      wrapper.classList.add('collapsed');
-    }
+    // Both arms matter. This used to only ADD the class, which was invisible
+    // while every render rebuilt the DOM - but patchViewerDOM now reuses
+    // unchanged nodes, and "# Setup" is byte-identical across documents, so a
+    // heading collapsed in one file was reused *still carrying* .collapsed
+    // when a different file rendered. Now that the map is document-scoped it
+    // is the single source of truth, so drive the class in both directions.
+    const shouldCollapse = !!collapsedHeaders.get(_collapseKey(header.id));
+    header.classList.toggle('collapsed', shouldCollapse);
+    wrapper.classList.toggle('collapsed', shouldCollapse);
   });
 }
 
@@ -2873,7 +2901,7 @@ viewer.addEventListener('click', (e) => {
 
   const isCollapsed = header.classList.toggle('collapsed');
   wrapper.classList.toggle('collapsed', isCollapsed);
-  collapsedHeaders.set(header.id, isCollapsed);
+  collapsedHeaders.set(_collapseKey(header.id), isCollapsed);
 });
 
 // Auto-expand collapsed sections when navigating via TOC
@@ -2891,7 +2919,7 @@ function expandToHeader(headerId) {
       if (parentHeaderId) {
         const parentHeader = document.getElementById(parentHeaderId);
         if (parentHeader) parentHeader.classList.remove('collapsed');
-        collapsedHeaders.set(parentHeaderId, false);
+        collapsedHeaders.set(_collapseKey(parentHeaderId), false);
       }
     }
     el = el.parentElement;

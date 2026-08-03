@@ -167,11 +167,11 @@ async function run(win) {
       return true;
     })()
   `);
-  const before = await exec(`JSON.stringify({alpha: !!collapsedHeaders.get('alpha'), beta: !!collapsedHeaders.get('beta'), gamma: !!collapsedHeaders.get('gamma')})`);
+  const before = await exec(`JSON.stringify({alpha: !!collapsedHeaders.get(_collapseKey('alpha')), beta: !!collapsedHeaders.get(_collapseKey('beta')), gamma: !!collapsedHeaders.get(_collapseKey('gamma'))})`);
   check("clicking a heading collapses exactly that section", before === JSON.stringify({ alpha: true, beta: false, gamma: true }), before);
 
   await render(exec, DOC_ZABC, "full");
-  const after = await exec(`JSON.stringify({zero: !!collapsedHeaders.get('zero'), alpha: !!collapsedHeaders.get('alpha'), beta: !!collapsedHeaders.get('beta'), gamma: !!collapsedHeaders.get('gamma')})`);
+  const after = await exec(`JSON.stringify({zero: !!collapsedHeaders.get(_collapseKey('zero')), alpha: !!collapsedHeaders.get(_collapseKey('alpha')), beta: !!collapsedHeaders.get(_collapseKey('beta')), gamma: !!collapsedHeaders.get(_collapseKey('gamma'))})`);
   check("collapsed state stays with its own section when a heading is inserted above", after === JSON.stringify({ zero: false, alpha: true, beta: false, gamma: true }), after);
 
   // The map is bookkeeping; what the reader sees is the class on the wrapper.
@@ -289,7 +289,7 @@ async function run(win) {
           h.click(); seq.push(w.classList.contains('collapsed'));
           h.click(); seq.push(w.classList.contains('collapsed'));
           h.click(); seq.push(w.classList.contains('collapsed'));
-          return JSON.stringify({ seq, map: collapsedHeaders.get('beta') });
+          return JSON.stringify({ seq, map: collapsedHeaders.get(_collapseKey('beta')) });
         })()
       `),
     );
@@ -586,6 +586,36 @@ async function run(win) {
   );
   check("an untouched top-level image block is reused when an unrelated block changes", imgs.imgBlocks === 1 && imgs.imgKept === 1, JSON.stringify(imgs));
   check("the block after the image is reused too", imgs.tailKept === 1, JSON.stringify(imgs));
+
+  // ---------------------------------------------------------------------
+  // 15. Collapsed state must not leak between documents.
+  //     Slug ids are content-derived, so two different files that both
+  //     contain "# Setup" produce the same id. With a bare id key, collapsing
+  //     that section in one tab collapsed it in the other - a direct
+  //     consequence of moving off positional ids, and exactly the multi-tab
+  //     case this app is built around. Reverting _collapseKey() to the raw
+  //     header id makes docB.collapsedInB true.
+  // ---------------------------------------------------------------------
+  const DOC_A = "# Setup\n\nalpha body for document A\n\n# Other\n\ntail\n";
+  const DOC_B = "# Setup\n\nbeta body for document B\n\n# Different\n\ntail\n";
+
+  await exec(`window.currentFilePath = 'C:/docs/A.md'; null`);
+  await render(exec, DOC_A, "full");
+  await exec(`document.getElementById('setup') && document.getElementById('setup').click(); null`);
+  const collapsedInA = await exec(`!!(document.getElementById('setup') || {}).classList && document.getElementById('setup').classList.contains('collapsed')`);
+
+  await exec(`window.currentFilePath = 'C:/docs/B.md'; null`);
+  await render(exec, DOC_B, "full");
+  const collapsedInB = await exec(`!!(document.getElementById('setup') || {}).classList && document.getElementById('setup').classList.contains('collapsed')`);
+
+  await exec(`window.currentFilePath = 'C:/docs/A.md'; null`);
+  await render(exec, DOC_A, "full");
+  const backInA = await exec(`!!(document.getElementById('setup') || {}).classList && document.getElementById('setup').classList.contains('collapsed')`);
+
+  check("collapsing a heading in one document actually collapses it", collapsedInA === true, String(collapsedInA));
+  check("a same-named heading in a DIFFERENT document is not collapsed too", collapsedInB === false, String(collapsedInB));
+  check("returning to the first document restores its own collapsed state", backInA === true, String(backInA));
+  await exec(`window.currentFilePath = null; null`);
 
   const noErrors = await exec(`JSON.stringify(window.__testErrors || [])`);
   check("no uncaught renderer errors", noErrors === "[]", noErrors);
