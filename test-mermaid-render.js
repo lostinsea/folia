@@ -39,6 +39,19 @@ const filePlain = path.join(dir, "plain.md");
 const jsPlain = JSON.stringify(filePlain);
 const DOC_PLAIN = "# Plain\n\nNo diagrams here at all.\n";
 
+// Section 11 needs a document tall enough to actually scroll, and a diagram the
+// SVG cache has never seen (a cache hit would leave toRender empty and the
+// render would never reach ensureMermaid at all - a vacuous pass).
+const fileLong = path.join(dir, "long.md");
+const jsLong = JSON.stringify(fileLong);
+const DOC_LONG = "# Long\n\n" + "Filler paragraph so the document scrolls.\n\n".repeat(400);
+const fileRace = path.join(dir, "race.md");
+const jsRace = JSON.stringify(fileRace);
+const DOC_RACE = "# Race\n\n```mermaid\ngraph LR\n  RaceOnly1 --> RaceOnly2\n```\n";
+const fileRace2 = path.join(dir, "race2.md");
+const jsRace2 = JSON.stringify(fileRace2);
+const DOC_RACE2 = "# Race2\n\n```mermaid\ngraph LR\n  RaceTwo1 --> RaceTwo2\n```\n";
+
 const DOC = `# Diagrams
 
 A flowchart:
@@ -129,6 +142,9 @@ async function run(win) {
 
   fs.writeFileSync(fileM, DOC, "utf8");
   fs.writeFileSync(filePlain, DOC_PLAIN, "utf8");
+  fs.writeFileSync(fileLong, DOC_LONG, "utf8");
+  fs.writeFileSync(fileRace, DOC_RACE, "utf8");
+  fs.writeFileSync(fileRace2, DOC_RACE2, "utf8");
 
   await exec(`
     localStorage.clear();
@@ -604,6 +620,387 @@ async function run(win) {
   // Section 9 is currently last, but leaving mermaid.run wrapped would silently
   // contaminate any section added after it.
   await exec(`window.__runProbeRestore(), true`);
+
+  // --- 10. Mermaid is loaded lazily, not on every launch -------------------
+  // PERF-03: the 3.5MB bundle cost about 128ms of every startup even for
+  // documents with no diagrams, which is most of them. It is now injected on
+  // first actual need. The saving is only real if it genuinely stays unloaded,
+  // and the app is only correct if it genuinely arrives when a diagram appears -
+  // so assert both halves.
+  //
+  // A reload is used to get a clean JS realm: by this point in the suite mermaid
+  // has obviously been loaded, and `window.mermaid` is sticky for the lifetime
+  // of the page. Clearing the saved tabs first stops the restored session from
+  // rendering a diagram during boot and loading it before we can look.
+  await exec(`
+    (() => {
+      window.CustomTabs.getTabs().forEach(t => { t.hasUnsavedChanges = false; });
+      localStorage.clear();
+      return true;
+    })()
+  `);
+  await new Promise((resolve) => {
+    win.webContents.once("did-finish-load", resolve);
+    win.webContents.reload();
+  });
+  // Wait for the app to be genuinely ready rather than guessing. A fixed sleep
+  // here would turn any future startup slowdown into a false pass: the
+  // "mermaid is not loaded" assertions below are trivially true on a page that
+  // has not finished booting.
+  await waitFor(
+    exec,
+    "the reloaded window to finish booting",
+    `typeof renderMarkdown === 'function' && !!document.getElementById('viewer')`,
+  );
+
+  const atBoot = await exec(`
+    ({ mermaidLoaded: typeof window.mermaid !== 'undefined',
+       scriptTags: [...document.querySelectorAll('script[src]')]
+         .filter(s => /mermaid/.test(s.src)).length,
+       ensureExists: typeof ensureMermaid === 'function' })
+  `);
+  check(
+    "mermaid is not loaded at startup",
+    atBoot.mermaidLoaded === false && atBoot.scriptTags === 0,
+    JSON.stringify(atBoot),
+  );
+  check(
+    "the lazy loader is present to fetch it later",
+    atBoot.ensureExists === true,
+    JSON.stringify(atBoot),
+  );
+
+  // A document with no diagrams must not drag it in either. Wait for the render
+  // to actually complete before concluding mermaid stayed away - a fixed sleep
+  // that expired mid-render would pass for the wrong reason.
+  await exec(`renderMarkdown(window.fs.readFileSync(${jsPlain}, 'utf8'), 'full')`);
+  await waitFor(
+    exec,
+    "the plain document to finish rendering",
+    `document.getElementById('viewer').textContent.trim().startsWith('Plain')`,
+  );
+  check(
+    "a document with no diagrams does not load mermaid",
+    (await exec(`typeof window.mermaid !== 'undefined'`)) === false,
+    "mermaid was loaded while rendering a plain markdown document",
+  );
+
+  // A document WITH a diagram must load it, initialise it, and draw.
+  await exec(`renderMarkdown(window.fs.readFileSync(${jsM}, 'utf8'), 'full')`);
+  await waitFor(exec, "the lazily loaded mermaid to draw", DIAGRAMS_READY);
+  const afterDiagram = await exec(`
+    ({ loaded: typeof window.mermaid !== 'undefined',
+       api: typeof window.mermaid === 'undefined' ? null : typeof mermaid.run,
+       svgs: document.querySelectorAll('#viewer .mermaid svg').length })
+  `);
+  check(
+    "opening a document with a diagram loads mermaid on demand and renders it",
+    afterDiagram.loaded === true &&
+      afterDiagram.api === "function" &&
+      afterDiagram.svgs > 0,
+    JSON.stringify(afterDiagram),
+  );
+
+  // --- 11. A superseded render must not resume and edit the new document ----
+  // Making the bundle lazy inserted a new suspension point into
+  // renderMarkdownFull: `await ensureMermaid()`. The previous stale-render check
+  // sits above it, so a render that loses the race while parked there used to
+  // wake up and run the rest of the function - TOC build, collapsible headers,
+  // slider/zoom setup, and a scroll reset - against whatever document had since
+  // won. Measured before the fix: the user's scroll position was slammed from
+  // 400 back to 0 and the table of contents was rebuilt a second time.
+  //
+  // The eager build had no such window: it entered the mermaid mutex
+  // synchronously right after patchViewerDOM, so there was nothing to lose a
+  // race to. This is a regression introduced by PERF-03 and it is why the two
+  // generation checks around the mermaid block exist.
+  //
+  // ensureMermaid is parked on a deferred rather than raced against a real
+  // 3.5MB fetch, so the test is deterministic instead of timing-dependent.
+  const realTypes = await exec(`
+    (() => {
+      window.__saved = { ensure: window.ensureMermaid, mermaid: window.mermaid,
+                         toc: window.buildTableOfContents };
+      window.__parked = false;
+      window.__tocCalls = [];
+      window.ensureMermaid = () => {
+        window.__parked = true;
+        return new Promise(res => { window.__release = res; });
+      };
+      window.buildTableOfContents = function () {
+        window.__tocCalls.push(1);
+        return window.__saved.toc.apply(this, arguments);
+      };
+      // Counted separately from the TOC: the check immediately after
+      // ensureMermaid exists specifically to stop a losing render from driving
+      // the mermaid engine over nodes that patchViewerDOM has already detached.
+      // Without its own assertion, the later check would mask it and the first
+      // one could be deleted with the suite still green.
+      window.__runCalls = 0;
+      window.__saved.run = window.mermaid.run;
+      window.mermaid.run = function (...a) {
+        window.__runCalls++;
+        return window.__saved.run.apply(this, a);
+      };
+      return { ensure: typeof window.__saved.ensure, toc: typeof window.__saved.toc,
+               run: typeof window.__saved.run };
+    })()
+  `);
+  check(
+    "the race probe patched real functions, not undefined",
+    realTypes.ensure === "function" &&
+      realTypes.toc === "function" &&
+      realTypes.run === "function",
+    JSON.stringify(realTypes) + " - if any is undefined the section below " +
+      "cannot fail and is vacuous",
+  );
+
+  // Render A: a diagram document, which parks inside the stubbed ensureMermaid.
+  exec(`renderMarkdown(window.fs.readFileSync(${jsRace}, 'utf8'), 'full')`).catch(() => {});
+  await waitFor(exec, "the losing render to park inside ensureMermaid", `window.__parked === true`);
+
+  // Render B supersedes it, and the user scrolls down in that new document.
+  await exec(`renderMarkdown(window.fs.readFileSync(${jsLong}, 'utf8'), 'full')`);
+  await waitFor(
+    exec,
+    "the winning render to settle",
+    `document.getElementById('viewer').textContent.trim().startsWith('Long')`,
+  );
+  const staged = await exec(`
+    (() => {
+      const sc = document.getElementById('viewer').parentElement;
+      sc.scrollTop = 400;
+      return { scrollTop: sc.scrollTop, tocCalls: window.__tocCalls.length,
+               runCalls: window.__runCalls };
+    })()
+  `);
+  check(
+    "the race fixture actually scrolled, so a reset would be detectable",
+    staged.scrollTop > 0,
+    JSON.stringify(staged) + " - the long fixture did not produce a scrollbar",
+  );
+
+  await exec(`window.__release(); null`);
+  await sleep(1500);
+  const afterStale = await exec(`
+    ({ scrollTop: document.getElementById('viewer').parentElement.scrollTop,
+       tocCalls: window.__tocCalls.length,
+       runCalls: window.__runCalls,
+       text: document.getElementById('viewer').textContent.trim().slice(0, 4) })
+  `);
+  check(
+    "a superseded render does not drive mermaid over its detached nodes",
+    afterStale.runCalls === staged.runCalls,
+    JSON.stringify({ staged, afterStale }),
+  );
+  check(
+    "a superseded render does not reset the winning document's scroll position",
+    afterStale.scrollTop === staged.scrollTop,
+    JSON.stringify({ staged, afterStale }),
+  );
+  check(
+    "a superseded render does not rebuild the winning document's contents",
+    afterStale.tocCalls === staged.tocCalls,
+    JSON.stringify({ staged, afterStale }),
+  );
+
+  await exec(`
+    (() => {
+      window.ensureMermaid = window.__saved.ensure;
+      window.mermaid = window.__saved.mermaid;
+      window.mermaid.run = window.__saved.run;
+      window.buildTableOfContents = window.__saved.toc;
+      return true;
+    })()
+  `);
+
+  // --- 11b. The same race, but lost inside mermaid.run --------------------
+  // Once the bundle is loaded, ensureMermaid resolves immediately and the check
+  // above it cannot fire. The remaining exposure is the mutex plus the draw
+  // itself, which is where the time actually goes on a diagram-heavy document.
+  // This scenario supersedes the render there instead, so the second generation
+  // check has coverage of its own; without it the first check masks it entirely
+  // and it could be deleted with the suite still green.
+  const race2Ready = await exec(`
+    (() => {
+      window.__parked2 = false;
+      window.__tocCalls2 = 0;
+      window.__savedRun2 = window.mermaid.run;
+      window.__savedToc2 = window.buildTableOfContents;
+      window.mermaid.run = function (...a) {
+        window.__parked2 = true;
+        // Resolves without drawing rather than deferring to the real engine.
+        // Drawing detached nodes throws, and the guard in the catch block would
+        // then be what stops the damage - masking the check this scenario is
+        // meant to cover. A successful draw whose render simply lost the race
+        // is also the more faithful case.
+        return new Promise(res => { window.__release2 = () => res(); });
+      };
+      window.buildTableOfContents = function () {
+        window.__tocCalls2++;
+        return window.__savedToc2.apply(this, arguments);
+      };
+      return typeof window.__savedRun2 === 'function' &&
+             typeof window.__savedToc2 === 'function';
+    })()
+  `);
+  check(
+    "the second race probe patched real functions, not undefined",
+    race2Ready === true,
+    "mermaid.run or buildTableOfContents was not a function; the section " +
+      "below would be vacuous",
+  );
+
+  exec(`renderMarkdown(window.fs.readFileSync(${jsRace2}, 'utf8'), 'full')`).catch(() => {});
+  await waitFor(exec, "the losing render to park inside mermaid.run", `window.__parked2 === true`);
+
+  await exec(`renderMarkdown(window.fs.readFileSync(${jsLong}, 'utf8'), 'full')`);
+  await waitFor(
+    exec,
+    "the winning render to settle",
+    `document.getElementById('viewer').textContent.trim().startsWith('Long')`,
+  );
+  const staged2 = await exec(`
+    (() => {
+      const sc = document.getElementById('viewer').parentElement;
+      sc.scrollTop = 400;
+      return { scrollTop: sc.scrollTop, tocCalls: window.__tocCalls2 };
+    })()
+  `);
+  check(
+    "the second race fixture actually scrolled, so a reset would be detectable",
+    staged2.scrollTop > 0,
+    JSON.stringify(staged2),
+  );
+
+  await exec(`window.__release2(); null`);
+  await sleep(1500);
+  const afterStale2 = await exec(`
+    ({ scrollTop: document.getElementById('viewer').parentElement.scrollTop,
+       tocCalls: window.__tocCalls2 })
+  `);
+  check(
+    "a render superseded while drawing does not reset the new scroll position",
+    afterStale2.scrollTop === staged2.scrollTop,
+    JSON.stringify({ staged2, afterStale2 }),
+  );
+  check(
+    "a render superseded while drawing does not rebuild the new contents",
+    afterStale2.tocCalls === staged2.tocCalls,
+    JSON.stringify({ staged2, afterStale2 }),
+  );
+
+  await exec(`
+    (() => {
+      window.mermaid.run = window.__savedRun2;
+      window.buildTableOfContents = window.__savedToc2;
+      return true;
+    })()
+  `);
+
+  // --- 11c. A stale render must not paint its failure over the winner ------
+  // The catch block rewrites every .mermaid element that has no <svg> yet with a
+  // red error card. Those elements belong to whatever document is on screen now,
+  // not to the render that failed - so a losing render that throws (a missing
+  // bundle, a draw over nodes patchViewerDOM already detached) used to deface
+  // the winning document's diagrams while they were still being drawn.
+  //
+  // Staging that needs the winner's diagrams on screen but not yet drawn. The
+  // mermaid mutex provides exactly that: the winner patches its DOM, then
+  // queues behind the loser's parked draw, so its .mermaid blocks sit there
+  // empty and defaceable for as long as the loser is stuck.
+  const race3Ready = await exec(`
+    (() => {
+      window.__parkedA = false;
+      window.__parkedB = false;
+      window.__savedRun3 = window.mermaid.run;
+      window.mermaid.run = function (...a) {
+        if (!window.__parkedA) {
+          window.__parkedA = true;
+          return new Promise((res, rej) => {
+            window.__failA = () => rej(new Error('stale draw failed'));
+          });
+        }
+        if (!window.__parkedB) {
+          window.__parkedB = true;
+          return new Promise((res) => {
+            window.__finishB = () => res(window.__savedRun3.apply(window.mermaid, a));
+          });
+        }
+        return window.__savedRun3.apply(window.mermaid, a);
+      };
+      // Both fixtures must actually reach the engine; a cache hit would leave
+      // toRender empty, skip mermaid.run entirely and never park.
+      mermaidSvgCache.clear();
+      return typeof window.__savedRun3 === 'function';
+    })()
+  `);
+  check(
+    "the third race probe patched a real mermaid.run",
+    race3Ready === true,
+    "mermaid.run was not a function; the section below would be vacuous",
+  );
+
+  exec(`renderMarkdown(window.fs.readFileSync(${jsRace}, 'utf8'), 'full')`).catch(() => {});
+  await waitFor(exec, "the losing render to park in its draw", `window.__parkedA === true`);
+  exec(`renderMarkdown(window.fs.readFileSync(${jsRace2}, 'utf8'), 'full')`).catch(() => {});
+  await waitFor(
+    exec,
+    "the winning render's undrawn diagrams to reach the DOM",
+    `(() => {
+       const v = document.getElementById('viewer');
+       // Keyed on the WINNER's own heading. Waiting only for "a .mermaid with
+       // no svg" is satisfied immediately by the loser's own parked diagram,
+       // so the loser's catch then defaces its own element and the winner's
+       // patchViewerDOM overwrites the evidence - the bug stays invisible.
+       if (!v.textContent.includes('Race2')) return false;
+       const b = [...v.querySelectorAll('.mermaid')];
+       return b.length > 0 && b.every(x => !x.querySelector('svg'));
+     })()`,
+  );
+
+  // Failing A is what releases the mutex, so B can only park after this point -
+  // waiting for __parkedB before failing A would hang forever. Parking B is what
+  // makes the ordering deterministic: without it, B's draw and A's catch race,
+  // and when B wins it fills in the <svg> that makes A's catch skip the element.
+  // The bug then hides behind a coin flip.
+  await exec(`window.__failA(); null`);
+  await waitFor(exec, "the winner's draw to start while its diagram is undrawn", `window.__parkedB === true`);
+  const beforeFail = await exec(`
+    ({ blocks: document.querySelectorAll('#viewer .mermaid').length,
+       drawn: [...document.querySelectorAll('#viewer .mermaid')].filter(x => x.querySelector('svg')).length })
+  `);
+  check(
+    "the winner has undrawn diagrams on screen, so defacing them is possible",
+    beforeFail.blocks > 0 && beforeFail.drawn === 0,
+    JSON.stringify(beforeFail) + " - nothing defaceable, section is vacuous",
+  );
+
+  await exec(`window.__finishB(); null`);
+  await waitFor(exec, "the winning diagram to finish drawing", DIAGRAMS_READY);
+  // Asserting on the winner's actual diagram content rather than on the error
+  // card. Measured without the guard: the stale render replaced the winner's
+  // diagram source with its red error card, the winner's own draw then choked
+  // on that HTML ("No diagram type detected matching given configuration for
+  // text: <div style='color: red...'>") and mermaid substituted its own error
+  // graphic - which removes the card again. Counting cards therefore reports
+  // clean on a document whose diagram has been destroyed.
+  const afterFail = await exec(`
+    (() => {
+      const svg = document.querySelector('#viewer .mermaid svg');
+      return { text: svg ? svg.textContent : null,
+               cards: document.body.innerHTML.split('Mermaid Rendering Error').length - 1 };
+    })()
+  `);
+  check(
+    "a failed stale render does not corrupt the winner's diagram",
+    afterFail.cards === 0 &&
+      typeof afterFail.text === "string" &&
+      afterFail.text.includes("RaceTwo1") &&
+      afterFail.text.includes("RaceTwo2"),
+    JSON.stringify({ beforeFail, afterFail }),
+  );
+  await exec(`window.mermaid.run = window.__savedRun3; true`);
 }
 
 app.whenReady().then(async () => {

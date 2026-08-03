@@ -20,8 +20,10 @@
       actually ships. Do not reintroduce CDN <script> tags here.
     -->
     <script src="libs/vendor/marked.min.js"></script>
-    <script src="libs/vendor/mermaid.min.js"></script>
-    <script src="libs/vendor/purify.min.js"></script>
+        <!-- mermaid.min.js is NOT loaded here: it is 3.5MB and cost ~128ms of every
+             launch even for documents with no diagrams. renderer.js fetches it on
+             first actual need via ensureMermaid(). See PERF-03 in PERF-AUDIT.md. -->
+        <script src="libs/vendor/purify.min.js"></script>
     <!-- PrismJS - Bundled Core and Language Components -->
     <script src="libs/prismjs/prism-bundle.js"></script>
   </head>

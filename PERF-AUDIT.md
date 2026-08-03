@@ -4,9 +4,9 @@
 
 | ID | Issue | Measured impact | Estimated fix effort | ROI |
 |---|---|---:|---|---|
-| PERF-01 | `main.js` eagerly loads heavy optional modules on startup | `require("html-to-docx")` = **370.1ms**; `require("electron-updater")` = **174.7ms**; **544.8ms** total main-thread startup blocking before the window loads | Low | High |
-| PERF-02 | Search rewrites the entire rendered DOM on every keystroke | On a **2.0MB / 2001-heading** doc, `highlightSearchTerm()` took **316.0ms** JS time for a common term (3591 matches) | Medium | High |
-| PERF-03 | Mermaid is eagerly loaded at startup even for plain markdown | Shipped `libs/vendor/mermaid.min.js` is **3259.3KB**; fresh load/eval of the same Mermaid 10.6.1 payload took **178.6ms**; startup first paint was **594ms** after `loadFile()` | Medium | High |
+| PERF-01 | **[FIXED]** `main.js` eagerly loads heavy optional modules on startup | `require("html-to-docx")` = **370.1ms**; `require("electron-updater")` = **174.7ms**; **544.8ms** total main-thread startup blocking before the window loads | Low | High |
+| PERF-02 | **[FIXED]** Search rewrites the entire rendered DOM on every keystroke | On a **2.0MB / 2001-heading** doc, `highlightSearchTerm()` took **316.0ms** JS time for a common term (3591 matches) | Medium | High |
+| PERF-03 | **[FIXED]** Mermaid is eagerly loaded at startup even for plain markdown | Shipped `libs/vendor/mermaid.min.js` is **3259.3KB**; measured against the real shipped build, launches that open no diagram went from **473ms to 348ms** (about **125ms** saved) | Medium | High |
 | PERF-04 | Any doc containing Mermaid is forced down the full render path for small text edits | On a **225KB / 20-diagram** doc, a 1-line edit still ran `renderMarkdownFull()` for **93.9ms** even though `mermaid.run()` was **not called** | Medium | High |
 | PERF-05 | Code-heavy updates still re-highlight and re-wrap all code blocks | On a **1.46MB / 200-code-block** doc, a small edit still spent **48.5ms** in Prism highlighting + **9.9ms** adding copy buttons | Medium | High |
 | PERF-06 | TOC + collapsible-section rebuild runs on every render | On a **2.0MB / 2001-heading** doc, `buildTableOfContents()` + `makeHeadersCollapsible()` cost **27.1ms** on full render and about **30ms** on changed renders | Medium | Medium |
@@ -74,6 +74,10 @@ app.whenReady().then(async () => {
 
 ### PERF-01 — Eager main-process `require()`s block startup
 
+> **Status: fixed** (commit `2416fc3`). `html-to-docx` and `electron-updater` are now
+> loaded through `getHTMLtoDOCX()` / `getAutoUpdater()` on first use. Guarded by
+> `test-startup-perf.js`, which reads the real `require.cache`.
+
 - **File:line:** `main.js:49-50`, `main.js:66`
 - **Code:**
   ```js
@@ -92,6 +96,14 @@ app.whenReady().then(async () => {
 - **Estimated gain:** roughly **0.5s off cold startup**.
 
 ### PERF-02 — Search does full-document DOM surgery on every input event
+
+> **Status: fixed** (commit `acd59ce`). Highlighting is debounced at 150ms, with an
+> explicit flush before any action that depends on the highlights being current.
+> `normalize()` is now called once per parent instead of once per match, and
+> current-match tracking is O(1). Two bugs surfaced while fixing it were fixed in
+> the same commit: nav buttons went dead for the debounce window, and search state
+> was never invalidated when the document re-rendered underneath it. Guarded by
+> `test-search.js` (25 assertions).
 
 - **File:line:** `renderer.js:2126-2189`, `renderer.js:2253-2254`
 - **Code:**
@@ -117,6 +129,33 @@ app.whenReady().then(async () => {
 - **Estimated gain:** remove roughly **250-300ms per keystroke** on very large docs.
 
 ### PERF-03 — Mermaid is eagerly loaded on every launch
+
+> **Status: fixed.** `index.html` no longer carries a `<script>` tag for mermaid;
+> `ensureMermaid()` in `renderer.js` injects it on first actual need. Re-measured
+> with `bench-mermaid-startup.js` against the shipped build, 7 interleaved
+> cold-cache runs with a discarded warm-up pair: **473ms eager vs 348ms lazy**
+> (minimum; medians agreed), so about **125ms off every launch** that does not
+> open a diagram — which is most of them.
+>
+> The audit's 178.6ms figure above was measured by re-evaluating the payload in
+> an iframe in the same process, and is not reliable: V8's code cache makes a
+> repeat in-process eval roughly 10x cheaper (113ms -> 9.6ms when checked), so
+> that method understates a genuinely cold load. The 125ms figure comes from
+> real application launches instead.
+>
+> Prism was deliberately left eager. It is 96KB against mermaid's 3.2MB, it is
+> needed by almost every document rather than a minority, and the loading screen
+> is already gated on its `requestIdleCallback` completing.
+>
+> Making the load lazy introduced a new suspension point inside
+> `renderMarkdownFull`, which opened a race the eager build could not have: a
+> superseded render would resume after the load and keep editing the document
+> that had replaced it - resetting the scroll position, rebuilding the table of
+> contents, and, if its draw failed, overwriting the winning document's diagram
+> source with an error card (the winner's own draw then rendered mermaid's
+> "Syntax error in text" graphic). Three generation checks around the mermaid
+> block close it; `test-mermaid-render.js` sections 11, 11b and 11c cover them
+> individually, and each was confirmed to fail with its own check removed.
 
 - **File:line:** `index.html:22-26`
 - **Code:**

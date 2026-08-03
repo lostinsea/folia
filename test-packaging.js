@@ -126,6 +126,55 @@ function main() {
     if (!/^(https?:|data:)/i.test(ref)) referenced.add(ref);
   }
 
+  // 4. Assets loaded lazily at runtime by injecting a <script> or <link>, or by
+  //    any other runtime construct. These have no static tag in index.html, so
+  //    step 2 cannot see them - which is the same invisibility problem this
+  //    whole file exists for, one level deeper. Removing mermaid's eager
+  //    <script> tag for PERF-03 silently dropped it from this test's coverage
+  //    until this step was added.
+  //
+  //    The scan is deliberately construct-agnostic: it matches any string
+  //    literal that looks like a shipped asset path, so `new Worker(...)`,
+  //    `setAttribute('src', ...)`, `import(...)` and `new URL(...)` are all
+  //    caught without needing a rule each. An earlier version keyed on
+  //    `.src = '...'` specifically, which meant a future asset added through
+  //    any other construct would have slipped past in silence.
+  //
+  //    Over-matching is the safe direction here: a path named in a comment or
+  //    an error message only adds an assertion that the file ships, which it
+  //    should. Under-matching is the failure that actually costs anything.
+  const runtimeSources = fs
+    .readdirSync(ROOT)
+    .filter((f) => f.endsWith(".js") && !/^(test-|bench-|probe-)/.test(f));
+  const assetLiteralRe =
+    /['"`]((?:libs|fonts|assets)\/[^'"`$\\\s]+\.(?:js|mjs|css|woff2?|ttf|eot|svg|png|jpg|gif))['"`]/g;
+  // A path built by interpolation cannot be resolved statically. Rather than
+  // quietly missing it, say so.
+  const unresolvableRe = /`(?:libs|fonts|assets)\/[^`]*\$\{/g;
+  const unresolvable = [];
+  for (const file of runtimeSources) {
+    const src = read(file);
+    while ((m = assetLiteralRe.exec(src))) referenced.add(m[1]);
+    if (unresolvableRe.test(src)) unresolvable.push(file);
+    unresolvableRe.lastIndex = 0;
+  }
+  check(
+    "no runtime asset path is built by interpolation the scanner cannot resolve",
+    unresolvable.length === 0,
+    `template-literal asset paths in ${unresolvable.join(", ")} cannot be ` +
+      "checked statically; either make the path a literal or extend this step",
+  );
+  // A canary rather than a count. "at least one dynamic reference exists" was
+  // satisfied by mermaid alone, so it stayed green - and stayed reassuring -
+  // even if a newly added lazy asset was being missed entirely.
+  check(
+    "the known lazily-loaded bundle is discovered by the scanner",
+    referenced.has("libs/vendor/mermaid.min.js"),
+    "mermaid.min.js is injected at runtime by ensureMermaid() but this scan " +
+      "did not find it; if lazy loading was removed, delete this check, but " +
+      "if the loader merely changed shape, the scanner is now blind",
+  );
+
   console.log(`\n  ${referenced.size} runtime references discovered\n`);
 
   for (const ref of [...referenced].sort()) {
