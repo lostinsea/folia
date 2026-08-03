@@ -50,12 +50,14 @@ test-*.js
 !test-mermaid-render.js
 !test-visual-utils.js
 !test-visual-utils-selfcheck.js
+!test-startup-perf.js
 
 # Written by the popup and mermaid suites so a redirected run is still
 # inspectable - Electron drops buffered stdout on app.exit().
 test-popup-results.txt
 test-mermaid-results.txt
 test-visual-results.txt
+test-startup-perf-results.txt
 
 # Scratch benchmark output
 bench-*.txt

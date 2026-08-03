@@ -22,7 +22,8 @@
     "test:packaging": "node test-packaging.js",
     "test:mermaid": "electron test-mermaid-render.js",
     "test:visual": "electron test-visual-utils-selfcheck.js",
-    "test": "npm run test:packaging && npm run test:tabs && npm run test:security && npm run test:popups && npm run test:visual && npm run test:mermaid"
+    "test:startup": "electron test-startup-perf.js",
+    "test": "npm run test:packaging && npm run test:startup && npm run test:tabs && npm run test:security && npm run test:popups && npm run test:visual && npm run test:mermaid"
   },
   "keywords": [
     "markdown",

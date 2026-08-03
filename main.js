@@ -246,7 +246,14 @@ function saveWindowState() {
   }, 400);
 }
 const { exec } = require("child_process");
-const HTMLtoDOCX = require("html-to-docx");
+
+// PERF-01: html-to-docx costs ~370ms to require and is only needed by the two
+// DOCX export handlers, which most sessions never invoke. Loaded on first use.
+let _HTMLtoDOCX = null;
+function getHTMLtoDOCX() {
+  if (!_HTMLtoDOCX) _HTMLtoDOCX = require("html-to-docx");
+  return _HTMLtoDOCX;
+}
 
 // Helper modules
 const {
@@ -260,11 +267,24 @@ const {
 // ============================================
 // CONDITIONAL IMPORTS
 // ============================================
+// PERF-01: electron-updater costs ~175ms to require. It is only reachable in
+// packaged builds (see checkForUpdatesOnStartup) and via explicit user action,
+// so it is loaded on first use rather than at startup. getAutoUpdater() returns
+// null if the module is unavailable, preserving the previous truthiness checks.
 let autoUpdater = null;
-try {
-  autoUpdater = require("electron-updater").autoUpdater;
-} catch (err) {
-  console.log("electron-updater not available:", err.message);
+let autoUpdaterInitialized = false;
+
+function getAutoUpdater() {
+  if (autoUpdaterInitialized) return autoUpdater;
+  autoUpdaterInitialized = true;
+  try {
+    autoUpdater = require("electron-updater").autoUpdater;
+  } catch (err) {
+    console.log("electron-updater not available:", err.message);
+    return null;
+  }
+  configureAutoUpdater(autoUpdater);
+  return autoUpdater;
 }
 
 // ============================================
@@ -980,7 +1000,7 @@ ipcMain.on("export-word", async (event, data) => {
     `;
 
     // Convert HTML to DOCX
-    const docxBuffer = await HTMLtoDOCX(fullHtml, null, {
+    const docxBuffer = await getHTMLtoDOCX()(fullHtml, null, {
       table: { row: { cantSplit: true } },
       footer: true,
       pageNumber: true,
@@ -1085,7 +1105,7 @@ ipcMain.on("export-word-corporate", async (event, data) => {
       </html>
     `;
 
-    const docxBuffer = await HTMLtoDOCX(fullHtml, null, {
+    const docxBuffer = await getHTMLtoDOCX()(fullHtml, null, {
       table: { row: { cantSplit: true } },
       footer: true,
       pageNumber: true,
@@ -2600,7 +2620,10 @@ app.on("window-all-closed", () => {
 const isPortable = !!process.env.PORTABLE_EXECUTABLE_DIR;
 let downloadedUpdatePath = null; // path to downloaded installer, set in update-downloaded event
 
-if (autoUpdater) {
+// Called once by getAutoUpdater() on first use. These handlers used to be
+// attached at module load; deferring them is safe because nothing can emit
+// before the module they belong to has been required.
+function configureAutoUpdater(autoUpdater) {
   // Configure auto-updater
   autoUpdater.autoDownload = false; // Don't download automatically, let user decide
   autoUpdater.autoInstallOnAppQuit = !isPortable; // Pointless for portable builds
@@ -2694,7 +2717,8 @@ ipcMain.handle("get-readme-path", () => {
 // IPC handlers for update actions
 ipcMain.on("check-for-updates", () => {
   log("Manual update check requested");
-  if (!autoUpdater) {
+  const updater = getAutoUpdater();
+  if (!updater) {
     log("Auto-updater not available");
     if (mainWindow && mainWindow.webContents) {
       mainWindow.webContents.send("update-status", {
@@ -2705,7 +2729,7 @@ ipcMain.on("check-for-updates", () => {
     return;
   }
   if (app.isPackaged) {
-    autoUpdater.checkForUpdates();
+    updater.checkForUpdates();
   } else {
     log("Skipping update check in development mode");
     if (mainWindow && mainWindow.webContents) {
@@ -2719,14 +2743,16 @@ ipcMain.on("check-for-updates", () => {
 
 ipcMain.on("download-update", () => {
   log("Download update requested");
-  if (autoUpdater) {
-    autoUpdater.downloadUpdate();
+  const updater = getAutoUpdater();
+  if (updater) {
+    updater.downloadUpdate();
   }
 });
 
 ipcMain.on("install-update", () => {
   log("Install update requested");
-  if (!autoUpdater) return;
+  const updater = getAutoUpdater();
+  if (!updater) return;
 
   if (isPortable && downloadedUpdatePath) {
     // Portable .exe: quitAndInstall() doesn't work.
@@ -2749,17 +2775,19 @@ ipcMain.on("install-update", () => {
       log("Portable update batch failed:", err.message);
     }
   } else if (!isPortable) {
-    autoUpdater.quitAndInstall(false, true);
+    updater.quitAndInstall(false, true);
   }
 });
 
 // Check for updates after app is ready (only in production)
 function checkForUpdatesOnStartup() {
-  if (app.isPackaged && autoUpdater) {
+  if (!app.isPackaged) return;
+  const updater = getAutoUpdater();
+  if (updater) {
     // Wait a few seconds after app starts before checking for updates
     setTimeout(() => {
       log("Checking for updates on startup...");
-      autoUpdater.checkForUpdates().catch((err) => {
+      updater.checkForUpdates().catch((err) => {
         log("Error checking for updates:", err.message);
       });
     }, 5000);
