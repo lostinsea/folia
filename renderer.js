@@ -566,7 +566,14 @@ function applyInterfaceLang(lang) {
 
 const TIMING = {
   previewDebounceDelay: 400,   // Editor input debounce (was 3000ms)
-  previewRenderDelay: 400      // Preview render debounce
+  previewRenderDelay: 400,     // Preview render debounce
+  // PERF-02: highlightSearchTerm() walks and rewrites the whole rendered tree.
+  // On a 2MB / 2001-heading document a common term measured 316ms, which was
+  // paid on every single keystroke. 150ms is below the ~200ms threshold where
+  // a UI stops feeling immediate, while still collapsing a burst of typing
+  // into one pass. Navigation (Enter / next / prev) flushes it, so the delay
+  // is never observable as a wrong or missing result.
+  searchDebounceDelay: 150
 };
 
 // Debounce delay constant used in formatting operations
@@ -2408,16 +2415,29 @@ function updateFileMenuRecent() {
 // Search functionality
 let searchMatches = [];
 let currentMatchIndex = -1;
+let currentMatchEl = null; // see highlightCurrentMatch()
+// Declared here rather than next to the debounce helpers below so the whole
+// search-state block is contiguous: syncSearchNavDisabled() reads
+// pendingSearchTerm, and it is defined above the debounce section, so declaring
+// it there would leave a temporal-dead-zone trap for any future top-level call.
+let searchDebounceTimer = null;
+let pendingSearchTerm = null;
 
 function clearSearchHighlights() {
   const highlights = viewer.querySelectorAll('.search-highlight');
+  // PERF-02: normalize() merges every adjacent text node under a parent, so
+  // calling it per highlight repeated the same work once for each match in
+  // that parent. Collect the parents and normalize each exactly once.
+  const parents = new Set();
   highlights.forEach(highlight => {
     const parent = highlight.parentNode;
     parent.replaceChild(document.createTextNode(highlight.textContent), highlight);
-    parent.normalize();
+    parents.add(parent);
   });
+  parents.forEach(parent => parent.normalize());
   searchMatches = [];
   currentMatchIndex = -1;
+  currentMatchEl = null;
   updateSearchCounter();
 }
 
@@ -2499,26 +2519,38 @@ function highlightSearchTerm(searchTerm) {
 }
 
 function highlightCurrentMatch() {
-  searchMatches.forEach((match, index) => {
-    if (index === currentMatchIndex) {
-      match.classList.add('current');
-      match.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    } else {
-      match.classList.remove('current');
-    }
-  });
+  // PERF-02: this used to loop over every match on each next/prev, which is
+  // O(matches) per keypress - 3591 class toggles to move by one on the
+  // benchmark document. Only two elements ever change, so track the outgoing
+  // one instead of rediscovering it.
+  if (currentMatchEl && currentMatchEl !== searchMatches[currentMatchIndex]) {
+    currentMatchEl.classList.remove('current');
+  }
+  const match = searchMatches[currentMatchIndex];
+  currentMatchEl = match || null;
+  if (!match) return;
+  match.classList.add('current');
+  match.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+// A disabled button swallows clicks, so the nav buttons must not be disabled
+// while a debounced search is pending: the zero-match state describes the
+// PREVIOUS term, and leaving them dead for the debounce window would make their
+// flush-on-click handler unreachable in exactly the case it exists for - type a
+// new term, then immediately click next.
+function syncSearchNavDisabled() {
+  const enabled = searchMatches.length > 0 || pendingSearchTerm != null;
+  searchPrevBtn.disabled = !enabled;
+  searchNextBtn.disabled = !enabled;
 }
 
 function updateSearchCounter() {
   if (searchMatches.length > 0) {
     searchCounter.textContent = i18n('search.counter', {current: currentMatchIndex + 1, total: searchMatches.length});
-    searchPrevBtn.disabled = false;
-    searchNextBtn.disabled = false;
   } else {
     searchCounter.textContent = i18n('search.zero');
-    searchPrevBtn.disabled = true;
-    searchNextBtn.disabled = true;
   }
+  syncSearchNavDisabled();
 }
 
 function nextMatch() {
@@ -2542,19 +2574,63 @@ function toggleSearchPanel() {
     searchInput.focus();
     searchInput.select();
   } else {
+    // Cancel any debounced highlight first: letting it fire after the clear
+    // would repopulate highlights into a closed panel with an empty input.
+    cancelPendingSearch();
     clearSearchHighlights();
     searchInput.value = '';
   }
 }
 
 // Search event listeners
+//
+// PERF-02: highlighting is debounced rather than run per keystroke. The pending
+// term is kept so any action that depends on the highlights being current -
+// Enter, the next/prev buttons, closing the panel - can flush it first. Without
+// that flush, typing and immediately pressing Enter would navigate the previous
+// term's matches, which is worse than the cost this is avoiding.
+//
+// searchDebounceTimer / pendingSearchTerm are declared with the rest of the
+// search state above.
+
+function flushPendingSearch() {
+  if (pendingSearchTerm === null) return;
+  clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = null;
+  const term = pendingSearchTerm;
+  pendingSearchTerm = null;
+  highlightSearchTerm(term);
+}
+
+function cancelPendingSearch() {
+  clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = null;
+  pendingSearchTerm = null;
+}
+
+function scheduleSearch(term) {
+  pendingSearchTerm = term;
+  clearTimeout(searchDebounceTimer);
+  // An empty or too-short term clears highlights, which is cheap and must feel
+  // instant - there is nothing to debounce away.
+  if (!term || term.length < 2) {
+    flushPendingSearch();
+    return;
+  }
+  searchDebounceTimer = setTimeout(flushPendingSearch, TIMING.searchDebounceDelay);
+  // A term is now pending, so the displayed match state is stale. Re-enable the
+  // nav buttons immediately or the pending term can never be flushed by a click.
+  syncSearchNavDisabled();
+}
+
 searchInput.addEventListener('input', (e) => {
-  highlightSearchTerm(e.target.value);
+  scheduleSearch(e.target.value);
 });
 
 searchInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
     e.preventDefault();
+    flushPendingSearch();
     if (e.shiftKey) {
       previousMatch();
     } else {
@@ -2565,8 +2641,8 @@ searchInput.addEventListener('keydown', (e) => {
   }
 });
 
-searchNextBtn.addEventListener('click', nextMatch);
-searchPrevBtn.addEventListener('click', previousMatch);
+searchNextBtn.addEventListener('click', () => { flushPendingSearch(); nextMatch(); });
+searchPrevBtn.addEventListener('click', () => { flushPendingSearch(); previousMatch(); });
 searchCloseBtn.addEventListener('click', toggleSearchPanel);
 
 // Index/TOC functionality
@@ -3259,6 +3335,40 @@ function patchViewerDOM(newHtml) {
     if (nHash && oHash && nHash === oHash) continue; // identical — skip
 
     viewer.replaceChild(nEl, oEl);
+  }
+
+  resyncSearchAfterRender();
+}
+
+// Every re-render can silently detach part or all of searchMatches, because the
+// highlight spans live inside the blocks patchViewerDOM() just replaced. Leaving
+// that state alone makes the search UI lie. Measured on a re-render that swapped
+// the document out from under an active search: 30 matches recorded, 0 of them
+// still attached, counter still reading "1 of 30", next button still enabled,
+// and clicking it advanced the counter to "2 of 30" while nothing moved on
+// screen - on a document that no longer contained the term at all.
+//
+// This matters more here than in a typical viewer: files are expected to change
+// underneath the reader (that is the app's whole purpose), so a re-render during
+// an active search is the normal case, not an edge case.
+function resyncSearchAfterRender() {
+  const term = searchInput.value;
+  const active = searchPanel.classList.contains('visible') && !!term;
+
+  // Bail only when there is genuinely nothing to do. Note that "no matches" is
+  // NOT the same as "no search": a term that matched nothing in the old tree
+  // must still be retried against the new one, or the panel would keep claiming
+  // zero matches after the file grew the very text the user is looking for.
+  if (!active && searchMatches.length === 0 && pendingSearchTerm == null) return;
+
+  clearSearchHighlights(); // drops references to the old tree
+
+  if (active) {
+    // Re-apply against the new tree through the normal debounce, so a burst of
+    // renders (a file being rewritten repeatedly) costs one pass, not one each.
+    scheduleSearch(term);
+  } else {
+    cancelPendingSearch();
   }
 }
 
