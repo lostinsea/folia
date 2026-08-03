@@ -21,6 +21,7 @@ require("./main.js");
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mdv-sec-"));
 
 const results = [];
+const skipped = [];
 function check(name, ok, detail) {
   results.push({ name, ok, detail });
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${ok ? "" : "  -> " + detail}`);
@@ -568,6 +569,460 @@ async function run(win) {
     JSON.stringify(imgs),
   );
 
+  // ==========================================================================
+  // SEC-12 - a link to a local file was handed straight to shell.openPath()
+  //
+  // The threat model is a markdown document that arrives with sibling files
+  // under the same author's control (a cloned repo, an unpacked archive, a
+  // shared folder). hrefs resolve relative to the document's own directory, so
+  // "[architecture diagram](./setup.exe)" was one click away from executing an
+  // attacker-supplied binary through the system shell - with no prompt, and no
+  // indication in the link text that anything but a diagram would open.
+  //
+  // Every assertion below drives the REAL anchor-click handler on a REAL file
+  // on disk; nothing is asserted about source text. shell.openPath, confirm(),
+  // ipcRenderer.send and fs.existsSync are stubbed only so the harness can
+  // observe what the handler decided to do (and so a native confirm() does not
+  // block executeJavaScript forever, as it does in test-tab-refresh.js).
+  // ==========================================================================
+  const s12dir = path.join(dir, "sec12");
+  fs.mkdirSync(s12dir, { recursive: true });
+  for (const f of [
+    "setup.exe",
+    "script.ps1",
+    "report.docm",
+    "notes.txt",
+    "diagram.svg",
+    "linked.md",
+  ]) {
+    fs.writeFileSync(path.join(s12dir, f), "placeholder");
+  }
+  const s12doc = path.join(s12dir, "doc.md");
+  fs.writeFileSync(s12doc, "# doc\n");
+
+  await exec(`
+    (() => {
+      const { shell, ipcRenderer } = require('electron');
+      const nodeFs = require('fs');
+      window.__s12 = { openPath: [], ipc: [], notes: [], confirms: [], exists: [] };
+      window.__s12ConfirmAnswer = false;
+      window.__s12Restore = {
+        openPath: shell.openPath,
+        send: ipcRenderer.send,
+        confirm: window.confirm,
+        notify: window.showNotification,
+        existsSync: nodeFs.existsSync,
+      };
+      shell.openPath = (p) => { window.__s12.openPath.push(String(p)); return Promise.resolve(''); };
+      ipcRenderer.send = function (channel, ...args) {
+        if (channel === 'open-file-path') { window.__s12.ipc.push(String(args[0])); return; }
+        return window.__s12Restore.send.call(ipcRenderer, channel, ...args);
+      };
+      // Recorded, then delegated - the handler still needs a truthful answer.
+      nodeFs.existsSync = function (p) {
+        window.__s12.exists.push(String(p));
+        return window.__s12Restore.existsSync.call(nodeFs, p);
+      };
+      window.showNotification = (m) => { window.__s12.notes.push(String(m)); };
+      window.confirm = (m) => {
+        window.__s12.confirms.push(String(m));
+        return window.__s12ConfirmAnswer === true;
+      };
+      window.currentFilePath = ${JSON.stringify(s12doc)};
+      return null;
+    })()
+  `);
+
+  const s12Reset = () =>
+    exec(`
+      (() => {
+        const s = window.__s12;
+        s.openPath.length = 0; s.ipc.length = 0;
+        s.notes.length = 0; s.confirms.length = 0; s.exists.length = 0;
+        return null;
+      })()
+    `);
+
+  // Click the rendered anchor whose visible text matches, then report what the
+  // handler did. Selecting by link text is deliberate: it is the only thing the
+  // reader sees, and the whole point of the finding is that it says nothing
+  // about what will be opened.
+  const s12Click = async (text) => {
+    await s12Reset();
+    const clicked = await exec(`
+      (() => {
+        const a = Array.from(document.querySelectorAll('#viewer a'))
+          .find((x) => x.textContent.trim() === ${JSON.stringify(text)});
+        if (!a) return { found: false };
+        a.click();
+        return { found: true, href: a.getAttribute('href') };
+      })()
+    `);
+    await sleep(120);
+    const state = await exec(`window.__s12`);
+    return { ...state, clicked };
+  };
+
+  await render(
+    [
+      "# Local links",
+      "",
+      "[exe](./setup.exe)",
+      "",
+      "[ps1](./script.ps1)",
+      "",
+      "[docm](./report.docm)",
+      "",
+      "[txt](./notes.txt)",
+      "",
+      "[svg](./diagram.svg)",
+      "",
+      "[md](./linked.md)",
+      "",
+      "[unc](//attacker.invalid/share/payload.txt)",
+      "",
+    ].join("\n"),
+    "full",
+  );
+
+  for (const [label, text] of [
+    ["Windows executable", "exe"],
+    ["PowerShell script", "ps1"],
+    ["macro-enabled Office document", "docm"],
+  ]) {
+    const r = await s12Click(text);
+    check(
+      `SEC-12 a link to a ${label} is refused outright`,
+      r.clicked.found === true &&
+        r.openPath.length === 0 &&
+        r.ipc.length === 0 &&
+        r.confirms.length === 0 &&
+        r.notes.length === 1,
+      JSON.stringify(r),
+    );
+  }
+
+  const s12Txt = await s12Click("txt");
+  check(
+    "FEATURE an inert document (.txt) still opens without a prompt",
+    s12Txt.openPath.length === 1 &&
+      s12Txt.openPath[0].endsWith("notes.txt") &&
+      s12Txt.confirms.length === 0,
+    JSON.stringify(s12Txt),
+  );
+
+  const s12Md = await s12Click("md");
+  check(
+    "FEATURE a markdown link still opens inside the app, never via the shell",
+    s12Md.ipc.length === 1 &&
+      s12Md.ipc[0].endsWith("linked.md") &&
+      s12Md.openPath.length === 0,
+    JSON.stringify(s12Md),
+  );
+
+  // .svg is in neither set: script-capable when the system handler is a
+  // browser, but a legitimate thing to link to. It must ask.
+  await exec(`window.__s12ConfirmAnswer = false; null`);
+  const s12SvgNo = await s12Click("svg");
+  check(
+    "SEC-12 an unrecognised type asks first, and declining opens nothing",
+    s12SvgNo.confirms.length === 1 &&
+      s12SvgNo.confirms[0].includes("diagram.svg") &&
+      s12SvgNo.openPath.length === 0,
+    JSON.stringify(s12SvgNo),
+  );
+
+  await exec(`window.__s12ConfirmAnswer = true; null`);
+  const s12SvgYes = await s12Click("svg");
+  check(
+    "FEATURE accepting the prompt opens the unrecognised type",
+    s12SvgYes.confirms.length === 1 &&
+      s12SvgYes.openPath.length === 1 &&
+      s12SvgYes.openPath[0].endsWith("diagram.svg"),
+    JSON.stringify(s12SvgYes),
+  );
+  await exec(`window.__s12ConfirmAnswer = false; null`);
+
+  const s12Unc = await s12Click("unc");
+  check(
+    "SEC-12 a protocol-relative UNC link is blocked and never reaches the filesystem",
+    // The href assertion is load-bearing: without it this would still pass if
+    // DOMPurify had stripped the href and the handler never ran at all.
+    s12Unc.clicked.href === "//attacker.invalid/share/payload.txt" &&
+      s12Unc.notes.length === 1 &&
+      s12Unc.openPath.length === 0 &&
+      s12Unc.confirms.length === 0 &&
+      !s12Unc.exists.some((p) => /attacker\.invalid/i.test(p)),
+    JSON.stringify(s12Unc),
+  );
+
+  // The backslash form cannot be authored in markdown (marked eats the
+  // escapes), so it is injected as a real anchor. What is under test is the
+  // handler, not the parser. The ordering assertion is the important half: on
+  // Windows, fs.existsSync() on a UNC path opens the SMB connection and leaks
+  // an NTLMv2 challenge/response before anything is ever "opened".
+  await s12Reset();
+  const s12Unc2 = await exec(`
+    (async () => {
+      const a = document.createElement('a');
+      a.setAttribute('href', '\\\\\\\\attacker.invalid\\\\share\\\\payload.txt');
+      a.textContent = 'unc2';
+      document.getElementById('viewer').appendChild(a);
+      a.click();
+      await new Promise((r) => setTimeout(r, 120));
+      const s = window.__s12;
+      a.remove();
+      return { openPath: s.openPath.slice(), confirms: s.confirms.slice(), exists: s.exists.slice(), notes: s.notes.slice() };
+    })()
+  `);
+  check(
+    "SEC-12 a backslash UNC link is blocked before fs.existsSync() touches the network",
+    s12Unc2.openPath.length === 0 &&
+      s12Unc2.confirms.length === 0 &&
+      s12Unc2.exists.length === 0 &&
+      s12Unc2.notes.length === 1,
+    JSON.stringify(s12Unc2),
+  );
+
+  // --- symlinks and directories -------------------------------------------
+  // The policy is decided from the extension, so it has to be decided from the
+  // extension of what the link *actually resolves to*. A symlink named
+  // diagram.png pointing at payload.ps1 is opened by the shell as the script.
+  // Symlinks are ordinary on the macOS and Linux release targets.
+  const s12link = path.join(s12dir, "diagram-link.png");
+  let symlinksAvailable = true;
+  try {
+    fs.symlinkSync(path.join(s12dir, "script.ps1"), s12link, "file");
+  } catch (e) {
+    // Windows needs Developer Mode or SeCreateSymbolicLinkPrivilege.
+    symlinksAvailable = false;
+    console.log(
+      `SKIP  SEC-12 symlink coverage - cannot create a symlink here (${e.code || e.message})`,
+    );
+    skipped.push("SEC-12 symlink");
+  }
+
+  const s12subdir = path.join(s12dir, "subfolder");
+  fs.mkdirSync(s12subdir, { recursive: true });
+
+  await render(
+    [
+      "# Resolution",
+      "",
+      "[symlink](./diagram-link.png)",
+      "",
+      "[folder](./subfolder)",
+      "",
+    ].join("\n"),
+    "full",
+  );
+
+  if (symlinksAvailable) {
+    const s12Sym = await s12Click("symlink");
+    check(
+      "SEC-12 a symlink with a safe-looking name is judged by its real target",
+      s12Sym.clicked.found === true &&
+        s12Sym.openPath.length === 0 &&
+        s12Sym.confirms.length === 0 &&
+        s12Sym.notes.length === 1,
+      JSON.stringify(s12Sym),
+    );
+  }
+
+  const s12Dir = await s12Click("folder");
+  check(
+    "FEATURE a link to a folder still opens it, and is not mistaken for an executable",
+    s12Dir.clicked.found === true &&
+      s12Dir.openPath.length === 1 &&
+      s12Dir.openPath[0].endsWith("subfolder") &&
+      s12Dir.notes.length === 0,
+    JSON.stringify(s12Dir),
+  );
+
+  // An extensionless file is ambiguous, not automatically hostile. LICENSE,
+  // README, Makefile and .bashrc are ordinary link targets; an earlier
+  // revision of this fix refused them all outright and told the user they
+  // were executables.
+  fs.writeFileSync(path.join(s12dir, "LICENSE"), "MIT\n");
+  await render("# Ext\n\n[license](./LICENSE)\n", "full");
+  await exec(`window.__s12ConfirmAnswer = true; null`);
+  const s12Lic = await s12Click("license");
+  await exec(`window.__s12ConfirmAnswer = false; null`);
+  check(
+    "SEC-12 an extensionless file asks rather than being refused as an executable",
+    s12Lic.clicked.found === true &&
+      s12Lic.confirms.length === 1 &&
+      s12Lic.confirms[0].includes("LICENSE") &&
+      s12Lic.openPath.length === 1,
+    JSON.stringify(s12Lic),
+  );
+
+  await exec(`
+    (() => {
+      const { shell, ipcRenderer } = require('electron');
+      const nodeFs = require('fs');
+      const r = window.__s12Restore;
+      shell.openPath = r.openPath;
+      ipcRenderer.send = r.send;
+      nodeFs.existsSync = r.existsSync;
+      window.confirm = r.confirm;
+      window.showNotification = r.notify;
+      return null;
+    })()
+  `);
+
+  // ==========================================================================
+  // SEC-13 / SEC-14 - attacker-controlled strings reaching innerHTML in the
+  // app's own chrome (notes tooltip, All-Notes panel, recent-files menu).
+  //
+  // These are not part of the rendered document, so the render-pipeline
+  // assertions above say nothing about them. `data-note-id`, `data-note-title`,
+  // `data-note-content` and `data-note-color` are all explicitly allowlisted in
+  // the DOMPurify config, so their values arrive here exactly as authored.
+  // ==========================================================================
+  const NOTE_PAYLOAD_ID = `1"><img src=x onerror="window.__pwned='note-id'">`;
+  const NOTE_PAYLOAD_COLOR = `red"><img src=x onerror="window.__pwned='note-color'">`;
+  const htmlAttr = (s) =>
+    s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  await render(
+    [
+      "# Notes chrome",
+      "",
+      `Here is <span class="noted-text" data-note-id="${htmlAttr(NOTE_PAYLOAD_ID)}" ` +
+        `data-note-color="${htmlAttr(NOTE_PAYLOAD_COLOR)}" ` +
+        `data-note-title="Title" data-note-content="Body">noted</span> text.`,
+      "",
+    ].join("\n"),
+    "full",
+  );
+
+  const attrsSurvived = await exec(`
+    (() => {
+      const el = document.querySelector('#viewer .noted-text');
+      if (!el) return { found: false };
+      return {
+        found: true,
+        id: el.getAttribute('data-note-id'),
+        color: el.getAttribute('data-note-color'),
+      };
+    })()
+  `);
+  // Without this the two assertions below could pass simply because DOMPurify
+  // stripped the attributes and there was never anything to escape.
+  check(
+    "SEC-13 the payload really does survive DOMPurify into data-note-* (control)",
+    attrsSurvived.found === true &&
+      attrsSurvived.id === NOTE_PAYLOAD_ID &&
+      attrsSurvived.color === NOTE_PAYLOAD_COLOR,
+    JSON.stringify(attrsSurvived),
+  );
+
+  const panel = await exec(`
+    (() => {
+      window.__pwned = null;
+      window.__e2eErrors.length = 0;
+      updateNotesList();
+      const list = document.getElementById('notesList');
+      const idSpan = list.querySelector('.notes-item-id');
+      const item = list.querySelector('.notes-item');
+      let clickThrew = null;
+      try { item && item.click(); } catch (e) { clickThrew = String(e && e.message || e); }
+      return {
+        injected: list.querySelectorAll('img, script, iframe').length,
+        idText: idSpan ? idSpan.textContent : null,
+        borderLeftColor: item ? getComputedStyle(item).borderLeftColor : null,
+        clickThrew,
+        pwned: window.__pwned,
+      };
+    })()
+  `);
+  await sleep(200);
+  check(
+    "SEC-13 a data-note-id payload renders as text in the All-Notes panel",
+    panel.injected === 0 &&
+      panel.idText === "#" + NOTE_PAYLOAD_ID &&
+      (await exec(`window.__pwned`)) === null,
+    JSON.stringify(panel),
+  );
+  check(
+    "SEC-13 a data-note-color payload is normalized away rather than applied",
+    panel.borderLeftColor === "rgb(255, 102, 0)",
+    JSON.stringify(panel),
+  );
+  // The listener runs asynchronously, so a broken selector surfaces as an
+  // uncaught error rather than a throw at the .click() call site - checking
+  // only clickThrew would miss it entirely.
+  const panelClickErrors = await exec(`window.__e2eErrors.slice()`);
+  check(
+    "SEC-13 clicking the panel item does not break the attribute selector",
+    panel.clickThrew === null && panelClickErrors.length === 0,
+    JSON.stringify({ clickThrew: panel.clickThrew, errors: panelClickErrors }),
+  );
+
+  const tip = await exec(`
+    (() => {
+      window.__pwned = null;
+      const el = document.querySelector('#viewer .noted-text');
+      showNoteTooltip(el, true);
+      const t = document.getElementById('noteTooltip');
+      return {
+        injected: t.querySelectorAll('img, script, iframe').length,
+        text: t.textContent,
+        closeButtons: t.querySelectorAll('.note-tooltip-close').length,
+      };
+    })()
+  `);
+  await sleep(200);
+  check(
+    "SEC-13 a data-note-id payload renders as text in the note tooltip",
+    tip.injected === 0 &&
+      tip.text.includes(NOTE_PAYLOAD_ID) &&
+      (await exec(`window.__pwned`)) === null,
+    JSON.stringify(tip),
+  );
+  check(
+    "FEATURE the pinned tooltip still has a working close button",
+    tip.closeButtons === 1,
+    JSON.stringify(tip),
+  );
+  await exec(`closeNoteTooltip(); null`);
+
+  // SEC-14: `<`, `>`, `"` and `&` are all legal in filenames on the Linux and
+  // macOS release targets, and recent files are persisted, so a hostile name
+  // re-arms the payload on every launch.
+  const RECENT_PAYLOAD = `/tmp/<img src=x onerror="window.__pwned='recent'">.md`;
+  const recent = await exec(`
+    (() => {
+      window.__pwned = null;
+      const saved = localStorage.getItem('recentFiles');
+      try {
+        saveRecentFile(${JSON.stringify(RECENT_PAYLOAD)});
+        updateFileMenuRecent();
+        const host = document.getElementById('fileMenuRecent');
+        const name = host.querySelector('.tools-menu-recent-name');
+        return {
+          injected: host.querySelectorAll('img, script, iframe').length,
+          nameText: name ? name.textContent : null,
+          pathText: host.querySelector('.tools-menu-recent-path').textContent,
+        };
+      } finally {
+        if (saved === null) localStorage.removeItem('recentFiles');
+        else localStorage.setItem('recentFiles', saved);
+        updateFileMenuRecent();
+      }
+    })()
+  `);
+  await sleep(200);
+  check(
+    "SEC-14 a hostile filename renders as text in the recent-files menu",
+    recent.injected === 0 &&
+      recent.nameText === `<img src=x onerror="window.__pwned='recent'">.md` &&
+      recent.pathText === RECENT_PAYLOAD &&
+      (await exec(`window.__pwned`)) === null,
+    JSON.stringify(recent),
+  );
+
   // Nothing above should have produced an uncaught renderer error.
   const errs = await exec(`window.__e2eErrors`);
   check(
@@ -617,7 +1072,10 @@ app.whenReady().then(async () => {
 
   const failed = results.filter((r) => !r.ok).length;
   clearTimeout(watchdog);
-  console.log(`\n=== ${results.length - failed}/${results.length} passed ===`);
+  console.log(
+    `\n=== ${results.length - failed}/${results.length} passed ===` +
+      (skipped.length ? `  (${skipped.length} skipped: ${skipped.join(", ")})` : ""),
+  );
   try {
     fs.rmSync(dir, { recursive: true, force: true });
   } catch (e) {

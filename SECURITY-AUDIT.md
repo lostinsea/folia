@@ -48,6 +48,9 @@ document. Everything marked FIXED below is covered by a regression test — in
 | SEC-11 | **FIXED for the four popup windows**; open for the main window | `registerPopup()` denies `will-navigate`, `will-redirect`, `will-frame-navigate` and `setWindowOpenHandler` on every popup, and `<meta>` is stripped from mermaid SVG. See below — the CSP alone did **not** cover this. |
 | SEC-08 | **FIXED for the four popup windows**; open for the main window | Popups run `nodeIntegration: false, contextIsolation: true` behind `popup-preload.js`, which exposes only fixed channels — and only the single API that popup kind needs, selected by a `--popup-kind=` process argument, so script in one popup cannot drive another's privileged path. |
 | SEC-10 | **FIXED** earlier | Runtime libraries vendored locally; no CDN load. |
+| SEC-13 | **FIXED** | Notes tooltip and All-Notes panel rebuilt with `createElement` + `textContent` instead of `innerHTML`. Two further sinks the audit missed were found in the same pass — one of them (`data-note-color` into a `style` attribute) genuinely exploitable. Colour values are now normalized at source and four `[data-note-id="…"]` selectors use `CSS.escape`. See the SEC-13 entry. |
+| SEC-14 | **FIXED** | Recent-files menu entries rebuilt with `createElement` + `textContent`. |
+| SEC-12 | **FIXED** | Local-file links now go through an extension policy applied to the *resolved* path (`realpathSync`, so a symlink is judged by its real target). Executables, script/macro formats and auto-mounting disk images are refused outright; inert documents and media open directly; `.svg`/`.pdf`/`.rtf` and anything unrecognised require an explicit confirmation naming the file. UNC / protocol-relative paths are rejected *before* `fs.existsSync()`, which was itself the network probe. |
 | SEC-16/17/18 | **FIXED** earlier | Dependency upgrades (24 advisories → 0). |
 
 ### Why the popup CSP is the primary control, not defence in depth
@@ -487,6 +490,58 @@ Related, same code path: `path.isAbsolute()` treats `\\attacker.example\share\x.
 
 **Fix.** Allowlist safe extensions for `shell.openPath` (documents, images), refuse executables outright, and show an explicit confirmation dialog naming the file for anything else. Reject UNC paths and paths that escape the document's directory.
 
+**FIXED.** `renderer.js` now decides what a local-file link may do from the file that will
+**actually** open, not from the href:
+
+1. **UNC / protocol-relative** (`^(\\\\|//)`) — rejected *before* `fs.existsSync()`. The
+   ordering is the whole point: `existsSync()` on a UNC path is itself the SMB connection,
+   so a check placed after it leaks the NTLMv2 handshake even when nothing is opened. The
+   same check is repeated on the resolved path, because a symlink can point at a share
+   even when the href did not.
+2. **`resolveLinkTarget()`** collapses symlinks, junctions and `..` via
+   `fs.realpathSync.native()`, and the extension test runs on the result. Without this the
+   whole policy is decorative: a symlink named `diagram.png` pointing at `payload.ps1`
+   opens as the script. Symlinks are ordinary on the macOS and Linux release targets. (A
+   Windows `.lnk` is *not* a filesystem link and realpath leaves it alone — which is why
+   `.lnk` is itself in `EXECUTABLE_EXTS`.)
+3. **`EXECUTABLE_EXTS`** — refused outright with a notification, no prompt. Beyond the
+   obvious binaries and interpreters this includes the macro-enabled Office formats and
+   the class of formats whose *handler* is the exploit: `.iso`/`.img`/`.vhd`/`.vhdx`
+   (the shell mounts them on open), `.chm`, `.jnlp`, `.diagcab`, `.settingcontent-ms`,
+   `.library-ms`, `.search-ms`, `.scf`, `.theme`, `.terminal`, `.workflow`. This arm is
+   deliberately ahead of the directory arm, because a macOS `.app` bundle *is* a directory
+   and opening it launches it.
+4. **Directories** — opened directly. A folder link is ordinary and nothing is executed.
+5. **Extensionless files** — a `confirm()`, not a refusal, except on Unix where the
+   execute bit is set (then refused). `README`, `LICENSE`, `Makefile` and `.bashrc` all
+   have `path.extname() === ''`; an earlier revision of this fix refused every one of them
+   and told the user they were executables. On Windows the shell cannot run an
+   extensionless file at all.
+6. **`SAFE_OPEN_EXTS`** — inert documents, images and media open directly.
+
+Anything **unrecognised** falls through to a `confirm()` naming the file. That default is
+deliberate: a denylist that fails open ages badly. `.svg` (script-capable when the system
+handler is a browser), **`.pdf`** (attacker-controlled bytes into a large parser with an
+embedded scripting engine) and **`.rtf`** (a repeat in-the-wild RCE vector whose default
+Windows handler is now Word) are all in this bucket rather than the safe one.
+
+**Not fixed:** path containment. A link may still point outside the document's directory
+(`../../elsewhere/notes.txt`). Containment was considered and rejected as the wrong
+control here — cross-directory links are ordinary and legitimate in real documentation
+trees, and the extension policy is what actually blocks the dangerous outcome regardless
+of where the file lives. `realpathSync` also means a symlink cannot be used to disguise
+where the target really is.
+
+**Coverage:** 13 assertions in `test-render-security.js`, all driving the real
+anchor-click handler against real files on disk. Proven non-vacuous by individual reverts:
+
+| Reverted | Observed failure |
+|---|---|
+| extension policy | `./setup.exe` handed straight to `shell.openPath`, no prompt |
+| UNC guard | `fs.existsSync('\\\\attacker.invalid\\share\\payload.txt')` fires |
+| `realpathSync` | `diagram-link.png` → `script.ps1` opened via `shell.openPath` |
+| directory arm | a folder link is prompted for as an unknown file type |
+
 ---
 
 ## SEC-13 — Unescaped `data-note-id` in the notes tooltip and notes list
@@ -515,6 +570,51 @@ The same unescaped `#${noteId}` appears in the All Notes panel at `renderer.js:2
 
 **Fix.** Escape `noteId` identically to `title`/`content`, or better, validate it as `/^\d+$/` (the codebase already assumes it is numeric — see `parseInt` at `renderer.js:2432` and the `\d+` regex at `renderer.js:4662`).
 
+**FIXED.** Both templates were rebuilt out of DOM nodes with `textContent` rather than
+patched with another escape call — escaping is a per-site decision that has to be got
+right every time, and this finding exists precisely because two adjacent lines got it
+right and the third did not.
+
+Two further sinks in `updateNotesList()` that this audit **missed** were found while
+making the change:
+
+- `${color}` was interpolated into a `style="…"` **attribute**, which is a strictly worse
+  position than element text — `"` closes the attribute and admits further markup. This
+  was **exploitable**, and by a shorter route than the `#${noteId}` the audit did call
+  out. `extractNoteColor()` returned `data-note-color` **verbatim** for `.noted-text`
+  (only the `.note-label` and `.noted-image` branches were regex-constrained), and
+  `data-note-color` is on the DOMPurify allowlist. It is now assigned as a CSSOM property,
+  which cannot escape into markup at all, **and** normalized at source.
+- `${type}` was interpolated raw. It is one of three hardcoded constants (`'Label'`,
+  `'Image'`, `'Text'`) selected by which class the note carries, so it was never
+  attacker-influenced.
+
+**`normalizeNoteColor()`** was added because the property assignment alone only protects
+*this* site. The same unvalidated value is round-tripped back into **raw markdown source**
+by the note editor — `data-note-color="${color}"` and `text-decoration-color:${color}`
+at `renderer.js:5793/5833/5859` — so a hostile value re-enters the document as markup on
+save. Sanitize-last keeps that from reaching script execution, but it should never have
+depended on that. Every read path (`extractNoteColor`, the editor's `noteSelectedColor`,
+the post-render styling pass, and `syncNoteAddToOriginal`) now goes through it, and
+anything that is not `#rgb`/`#rrggbb` collapses to the default.
+
+**Attribute-selector injection** was found in the same area and fixed: four
+`querySelector(\`[data-note-id="${id}"]\`)` sites built a selector out of the same
+allowlisted attribute. A `"` in the value throws a `SyntaxError` from inside an event
+listener — an attacker-triggerable crash of the notes UI. All four now use `CSS.escape`,
+matching the pattern already used for the collapsible-section selector.
+
+The tooltip's inline `onclick="closeNoteTooltip()"` was also converted to
+`addEventListener` — it is not a vulnerability by itself, but it is exactly what blocks
+extending the popup nonce-CSP (SEC-09) to the main window.
+
+**Coverage:** 7 assertions in `test-render-security.js`, including a *control* assertion
+that the payload really does survive DOMPurify into `data-note-*` — without it the rest
+could pass simply because the attributes had been stripped. Proven non-vacuous: switching
+the three `textContent` assignments back to `innerHTML` injects a live `<img>` into all
+three surfaces; dropping `normalizeNoteColor` leaves the CSSOM setter as the only barrier;
+dropping `CSS.escape` raises `Failed to execute 'querySelector' … is not a valid selector`.
+
 ---
 
 ## SEC-14 — Unescaped filename and path in the recent-files menu
@@ -535,6 +635,11 @@ item.innerHTML = `
 Rated Medium rather than High because it is not reachable on Windows (`<>` are illegal in NTFS filenames) and requires the user to open the menu.
 
 **Fix.** Use `textContent` on two child spans, as `custom-tabs.js:392-394` already does correctly for tab titles.
+
+**FIXED** exactly as described — the item is now built with `createElement` and
+`textContent` for both the name and the path. Covered by an assertion that a filename
+containing `<img src=x onerror=…>` reaches the menu as text; reverting the assignment to
+`innerHTML` injects a live element.
 
 ---
 
@@ -832,6 +937,6 @@ Recorded so a reader knows where the audit's boundaries are.
 3. **SEC-05 / SEC-06 / SEC-07** — escape the popup interpolations and flip those three windows to `nodeIntegration: false`.
 4. **SEC-11 / SEC-09** — add `will-navigate` + `setWindowOpenHandler` guards and a CSP.
 5. **SEC-10 / SEC-16** — move marked/mermaid/DOMPurify to local files and bump versions.
-6. **SEC-12 / SEC-13 / SEC-14 / SEC-15** — the remaining injection and one-click-execution fixes.
+6. **SEC-12 / SEC-13 / SEC-14 / SEC-15** — the remaining injection and one-click-execution fixes. **Done.**
 7. **SEC-08** — the `contextIsolation: true` + preload refactor. Largest effort; do it last, but note that until it lands, every other fix is a single missed escape away from RCE. Path validation on the IPC handlers must land together with this.
 8. **SEC-17 / SEC-18 / SEC-19** — dependency and CI hardening.

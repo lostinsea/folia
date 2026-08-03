@@ -417,6 +417,9 @@ const UI_STRINGS = {
     'confirm.unsavedExit': 'You have unsaved changes. Exit edit mode anyway?',
     'confirm.unsavedOpenFile': 'You have unsaved changes. Discard changes and open "${name}"?',
     'confirm.clearRecent': 'Are you sure you want to clear all recent files?',
+    'confirm.openExternal': 'This link opens a file with an external application:\n\n${name}\n\nOnly continue if you trust this document. Open it?',
+    'notif.blockedExecutable': 'Blocked: this link points to an executable file (${name}). Markdown documents cannot launch programs.',
+    'notif.blockedNetworkPath': 'Blocked: this link points to a network location, which can leak your credentials.',
     'alert.openFirst': 'Please open a markdown file first before exporting to PDF.',
     'alert.openFirstWord': 'Please open a markdown file first before exporting to Word.',
     'alert.noFileOpen': 'No file is currently open.',
@@ -1118,7 +1121,7 @@ function syncNoteAddToOriginal(noteHtml, selectedText, noteId, rawTitle, rawCont
   if (!colorMatch) colorMatch = noteHtml.match(/style="color:([^"]*)"/);
   const escT = escTitleMatch ? escTitleMatch[1] : '';
   const escC = escContentMatch ? escContentMatch[1] : '';
-  const col = colorMatch ? colorMatch[1] : '#ff6600';
+  const col = normalizeNoteColor(colorMatch ? colorMatch[1] : NOTE_COLOR_DEFAULT);
 
   function buildOrigNoteHtml(origText) {
     return wrapWithNoteSpan(origText, noteId, escT, escC, col);
@@ -1610,6 +1613,7 @@ function applyNoteStyles() {
       const m = styleAttr.match(/color:\s*(#[0-9a-fA-F]{3,8})/);
       if (m) color = m[1];
     }
+    if (color) color = normalizeNoteColor(color);
     if (color && color.length >= 7) {
       const r = parseInt(color.slice(1,3), 16);
       const g = parseInt(color.slice(3,5), 16);
@@ -1628,6 +1632,107 @@ logoLink.addEventListener('click', (e) => {
   e.preventDefault();
   shell.openExternal('https://www.omnicore.com.tr');
 });
+
+// Extension policy for links that resolve to a local file (SEC-12).
+//
+// Markdown-family extensions are handled separately and open inside the app.
+// Everything else falls into one of three buckets:
+//   - EXECUTABLE_EXTS  refused outright, no prompt
+//   - SAFE_OPEN_EXTS   handed to the system handler directly
+//   - anything else     opened only after an explicit confirmation naming
+//                       the file
+//
+// The default for an UNRECOGNISED extension is deliberately "ask", not
+// "allow": new dangerous types appear over time, and a denylist that fails
+// open is worth very little.
+//
+// The decision is made on the *resolved* path (see resolveLinkTarget below),
+// not on the href, so a `notes.txt` symlink pointing at `payload.ps1` is
+// judged as the PowerShell script it actually is.
+const EXECUTABLE_EXTS = new Set([
+  // Windows
+  '.exe', '.msi', '.msix', '.msixbundle', '.appx', '.appxbundle', '.bat',
+  '.cmd', '.com', '.scr', '.pif', '.hta', '.cpl', '.lnk', '.url', '.reg',
+  '.msc', '.msp', '.gadget', '.inf', '.dll', '.ocx', '.sys', '.chm', '.xll',
+  '.ws', '.sct', '.jnlp', '.website', '.scf',
+  // Formats whose *handler* is the exploit: the shell mounts disk images on
+  // open, and these control-panel/search/theme formats have each been used
+  // in the wild to run a command or leak NTLM credentials.
+  '.iso', '.img', '.vhd', '.vhdx', '.wim', '.diagcab',
+  '.settingcontent-ms', '.library-ms', '.search-ms', '.searchconnector-ms',
+  '.theme', '.themepack', '.deskthemepack',
+  // Script interpreters (cross-platform)
+  '.ps1', '.psm1', '.psd1', '.vbs', '.vbe', '.wsf', '.wsh', '.js', '.jse',
+  '.mjs', '.cjs', '.py', '.pyw', '.rb', '.pl', '.php', '.jar',
+  // Unix / macOS
+  '.sh', '.bash', '.zsh', '.fish', '.ksh', '.csh', '.run', '.bin', '.out',
+  '.command', '.app', '.desktop', '.appimage', '.deb', '.rpm', '.pkg', '.dmg',
+  '.terminal', '.workflow',
+  // Office macro-enabled formats execute code without any further prompt
+  '.docm', '.xlsm', '.pptm', '.dotm', '.xltm', '.potm', '.xlam', '.ppam',
+]);
+
+// Deliberately excluded from this list, and therefore behind a confirmation:
+//   .svg  - script-capable whenever the system handler is a browser
+//   .pdf  - the linked bytes are attacker-controlled in this threat model, and
+//           the reader is a large parser with an embedded scripting engine
+//   .rtf  - repeatedly an in-the-wild RCE vector, and the default handler on
+//           Windows is now Word
+// The rest are formats whose handler is a viewer, not an interpreter.
+const SAFE_OPEN_EXTS = new Set([
+  '.txt', '.text', '.log', '.csv', '.tsv', '.json', '.xml', '.yml', '.yaml',
+  '.ini', '.toml',
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tif', '.tiff', '.ico',
+  '.avif', '.heic',
+  '.mp3', '.wav', '.flac', '.ogg', '.m4a', '.mp4', '.webm', '.mov', '.mkv',
+]);
+
+const MARKDOWN_EXTS = new Set(['.md', '.markdown', '.mmd', '.mermaid', '.ow']);
+
+// Resolve what a link will *actually* open, and describe it.
+//
+// Deciding policy from the href's own extension is not enough: a symlink named
+// `diagram.png` pointing at `payload.command` is opened by the shell as the
+// script, not as an image, and symlinks are ordinary on the macOS and Linux
+// release targets. realpathSync collapses symlinks, junctions and `..`
+// segments, so every later decision is made about the file that will really
+// be handed to the OS.
+//
+// Note this does *not* follow a Windows `.lnk` shortcut - that is not a
+// filesystem link and realpath leaves it alone - which is why `.lnk` is itself
+// in EXECUTABLE_EXTS.
+function resolveLinkTarget(targetPath) {
+  let realPath = targetPath;
+  try {
+    realPath = fs.realpathSync.native(targetPath);
+  } catch (e) {
+    // Broken symlink, permission error, or a filesystem that cannot resolve
+    // the name. Fall back to the literal path; the caller still runs the full
+    // policy over it, so the failure mode is "asks the user", not "opens".
+  }
+  let isDirectory = false;
+  let isExecutableBit = false;
+  try {
+    const st = fs.statSync(realPath);
+    isDirectory = st.isDirectory();
+    // Only meaningful off Windows, where NTFS has no execute bit and the
+    // shell decides purely from the extension.
+    isExecutableBit = process.platform !== 'win32' && (st.mode & 0o111) !== 0;
+  } catch (e) {
+    /* treated as a plain file below */
+  }
+  return {
+    realPath,
+    ext: path.extname(realPath).toLowerCase(),
+    isDirectory,
+    isExecutableBit,
+  };
+}
+
+// UNC and protocol-relative paths. On Windows every filesystem call on such a
+// path opens an outbound SMB connection and leaks an NTLMv2 challenge/response
+// - so this has to be checked *before* fs is touched, not after.
+const isNetworkPath = (p) => /^(\\\\|\/\/)/.test(p);
 
 // Handle links in rendered markdown
 viewer.addEventListener('click', (e) => {
@@ -1730,16 +1835,70 @@ viewer.addEventListener('click', (e) => {
         targetPath = path.resolve(currentDir, targetPath);
       }
 
+      // Reject network paths BEFORE touching the filesystem. path.isAbsolute()
+      // treats \\attacker\share\x as absolute on Windows, so the existsSync()
+      // below would itself open an outbound SMB connection and leak an NTLMv2
+      // challenge/response - the probe happens even if nothing is ever opened.
+      // DOMPurify permits such an href: its IS_ALLOWED_URI regex accepts any
+      // scheme-less value starting with a non-[a-z] character. (SEC-12)
+      if (isNetworkPath(targetPath)) {
+        showNotification(i18n('notif.blockedNetworkPath'), 5000);
+        return;
+      }
+
       // Check if the file exists
       if (fs.existsSync(targetPath)) {
-        // Check if it's a markdown or mermaid file
-        const ext = path.extname(targetPath).toLowerCase();
-        if (['.md', '.markdown', '.mmd', '.mermaid', '.ow'].includes(ext)) {
+        // Decide on what will actually open, not on what the href claims -
+        // see resolveLinkTarget(). (SEC-12)
+        const resolved = resolveLinkTarget(targetPath);
+        const ext = resolved.ext;
+        const openPath = resolved.realPath;
+        const displayName = path.basename(openPath);
+
+        // A symlink may point at a network location even when the href did
+        // not, so the same check has to be repeated on the resolved path.
+        if (isNetworkPath(openPath)) {
+          showNotification(i18n('notif.blockedNetworkPath'), 5000);
+          return;
+        }
+
+        if (EXECUTABLE_EXTS.has(ext)) {
+          // The threat model includes documents cloned from untrusted repos or
+          // unpacked from archives - i.e. the markdown arrives alongside
+          // sibling files the same author controls, and hrefs resolve relative
+          // to the document's own directory. A link reading "[architecture
+          // diagram](./setup.exe)" was one click from handing the file to the
+          // shell. No extension in this set is worth a prompt; refuse outright.
+          //
+          // This arm is deliberately ahead of the directory arm below: a macOS
+          // .app bundle *is* a directory, and opening it launches it.
+          showNotification(i18n('notif.blockedExecutable', { name: displayName }), 6000);
+        } else if (MARKDOWN_EXTS.has(ext)) {
           // Open the markdown file in this app
-          ipcRenderer.send('open-file-path', targetPath);
+          ipcRenderer.send('open-file-path', openPath);
+        } else if (resolved.isDirectory) {
+          // Opening a folder shows it in the file manager; nothing is executed.
+          shell.openPath(openPath);
+        } else if (ext === '') {
+          // An extensionless file is genuinely ambiguous. On Unix the execute
+          // bit is what makes it dangerous, so consult it; on Windows the
+          // shell cannot run such a file at all, and README / LICENSE /
+          // Makefile / .bashrc are ordinary things to link to - refusing them
+          // outright (as an earlier revision did) broke real documents.
+          if (resolved.isExecutableBit) {
+            showNotification(i18n('notif.blockedExecutable', { name: displayName }), 6000);
+          } else if (confirm(i18n('confirm.openExternal', { name: displayName }))) {
+            shell.openPath(openPath);
+          }
+        } else if (SAFE_OPEN_EXTS.has(ext)) {
+          shell.openPath(openPath);
         } else {
-          // Open other files with system default app
-          shell.openPath(targetPath);
+          // Everything else - .svg (script-capable when the system handler is
+          // a browser), .pdf, .rtf, archives, unknown types - opens only after
+          // the user is told which file it is.
+          if (confirm(i18n('confirm.openExternal', { name: displayName }))) {
+            shell.openPath(openPath);
+          }
         }
       } else {
         showNotification(i18n('notif.fileNotFound') + path.basename(targetPath), 4000);
@@ -2446,10 +2605,19 @@ function updateFileMenuRecent() {
   recentFiles.forEach(file => {
     const item = document.createElement('div');
     item.className = 'tools-menu-recent-item';
-    item.innerHTML = `
-      <span class="tools-menu-recent-name">${file.name}</span>
-      <span class="tools-menu-recent-path">${file.path}</span>
-    `;
+    // Filesystem-derived strings, built as DOM nodes rather than interpolated
+    // into innerHTML. `<`, `>`, `"` and `&` are all legal in filenames on
+    // Linux and macOS - both are release targets - so a file inside an
+    // untrusted archive could execute script the moment the File menu was
+    // opened, and recent files are persisted, so it re-armed on every launch.
+    // custom-tabs.js already builds tab titles this way. (SEC-14)
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'tools-menu-recent-name';
+    nameSpan.textContent = file.name;
+    const pathSpan = document.createElement('span');
+    pathSpan.className = 'tools-menu-recent-path';
+    pathSpan.textContent = file.path;
+    item.append(nameSpan, pathSpan);
 
     item.addEventListener('click', () => {
       // Check for unsaved changes before opening
@@ -2982,21 +3150,47 @@ function updateNotesList() {
     item.dataset.noteTitle = title.toLowerCase();
     item.style.borderLeftColor = color;
 
-    const escTitle = title.replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const escContent = content.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    // Same sinks as the tooltip: noteId reaches innerHTML unescaped while
+    // title and content beside it are hand-escaped. This panel renders
+    // automatically whenever the document contains any note, so unlike the
+    // tooltip it needs no hover to fire. Rebuilt with DOM nodes. (SEC-13)
+    //
+    // `color` comes from extractNoteColor(), which now normalizes to #rrggbb
+    // at source, and is applied as a CSSOM property rather than assembled into
+    // a style="..." string. Before this change it was interpolated into the
+    // attribute, where a `"` in an attacker-authored data-note-color closed it.
+    const header = document.createElement('div');
+    header.className = 'notes-item-header';
 
-    item.innerHTML = `
-      <div class="notes-item-header">
-        <span class="notes-item-id">#${noteId}</span>
-        <span class="notes-item-title" style="color:${color}">${escTitle || i18n('note')}</span>
-      </div>
-      ${escContent ? `<div class="notes-item-content">${escContent}</div>` : ''}
-      <div class="notes-item-type">${type}</div>
-    `;
+    const idSpan = document.createElement('span');
+    idSpan.className = 'notes-item-id';
+    idSpan.textContent = '#' + noteId;
+
+    const titleSpan = document.createElement('span');
+    titleSpan.className = 'notes-item-title';
+    titleSpan.style.color = color;
+    titleSpan.textContent = title || i18n('note');
+
+    header.append(idSpan, titleSpan);
+    item.appendChild(header);
+
+    if (content) {
+      const contentDiv = document.createElement('div');
+      contentDiv.className = 'notes-item-content';
+      contentDiv.textContent = content;
+      item.appendChild(contentDiv);
+    }
+
+    const typeDiv = document.createElement('div');
+    typeDiv.className = 'notes-item-type';
+    typeDiv.textContent = type;
+    item.appendChild(typeDiv);
 
     item.addEventListener('click', () => {
       // Scroll to note in viewer
-      const target = viewer.querySelector(`[data-note-id="${noteId}"]`);
+      // CSS.escape: noteId comes from a DOMPurify-allowlisted data attribute,
+      // so a `"` in it would otherwise break out of the attribute selector.
+      const target = viewer.querySelector(`[data-note-id="${CSS.escape(noteId)}"]`);
       if (!target) return;
       const noteRect = target.getBoundingClientRect();
       const wrapperRect = contentWrapper.getBoundingClientRect();
@@ -5495,7 +5689,9 @@ function openNoteDialogForEdit(noteEl) {
     // New format: data-note-color attribute
     const dataColor = noteEl.getAttribute('data-note-color');
     if (dataColor) {
-      noteSelectedColor = dataColor;
+      // Normalized because this value is written straight back into raw
+      // markdown source when the note is saved (see the rebuild sites below).
+      noteSelectedColor = normalizeNoteColor(dataColor);
     } else {
       // Legacy fallback: inline style color
       const styleAttr = noteEl.getAttribute('style') || '';
@@ -6261,8 +6457,32 @@ editTextSaveBtn.addEventListener('click', () => {
 
 let noteTooltipPinned = false;
 
+// `data-note-color` is on the DOMPurify allowlist, so its value survives
+// sanitization with full attacker control if the document authored the span
+// by hand. Constrain it here, at the single point every consumer reads it
+// through, rather than at each of the six sites that interpolate it.
+//
+// This is not theoretical hardening: the note *editor* round-trips this value
+// straight back into raw HTML - `data-note-color="${color}"` and
+// `text-decoration-color:${color}` - when a note is edited, so an unvalidated
+// value re-enters the markdown source as markup. Sanitize-last keeps that from
+// becoming script execution, but it should never have depended on that.
+//
+// `#rrggbb` is the only form the rest of the code accepts: several call sites
+// do `color.slice(1,3)` and parse hex pairs.
+const NOTE_COLOR_DEFAULT = '#ff6600';
+function normalizeNoteColor(value) {
+  if (typeof value !== 'string') return NOTE_COLOR_DEFAULT;
+  const v = value.trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(v)) return v;
+  // Expand the 3-digit shorthand rather than rejecting it, so hand-authored
+  // `#f60` keeps working with the slice-based consumers.
+  if (/^#[0-9a-fA-F]{3}$/.test(v)) return '#' + v[1] + v[1] + v[2] + v[2] + v[3] + v[3];
+  return NOTE_COLOR_DEFAULT;
+}
+
 function extractNoteColor(noted) {
-  let noteColor = '#ff6600';
+  let noteColor = NOTE_COLOR_DEFAULT;
   const isLabel = noted.classList.contains('note-label');
   const isImage = noted.classList.contains('noted-image');
   if (isLabel) {
@@ -6294,7 +6514,7 @@ function extractNoteColor(noted) {
       }
     }
   }
-  return noteColor;
+  return normalizeNoteColor(noteColor);
 }
 
 function showNoteTooltip(noted, pinned) {
@@ -6313,14 +6533,40 @@ function showNoteTooltip(noted, pinned) {
 
   const noteId = noted.getAttribute('data-note-id') || '';
 
-  let html = '';
+  // Built with DOM nodes rather than an innerHTML template. title and content
+  // were hand-escaped for < and > only, and noteId was not escaped at all -
+  // an inconsistency that reads as an oversight rather than a trust decision.
+  // All three come from data-note-* attributes, which are explicitly
+  // whitelisted in the DOMPurify config, so their values reach here with full
+  // author control. textContent removes the entire class of problem instead of
+  // adding a third variant of manual escaping. (SEC-13)
+  noteTooltip.replaceChildren();
   if (pinned) {
-    html += `<button class="note-tooltip-close" onclick="closeNoteTooltip()">&times;</button>`;
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'note-tooltip-close';
+    closeBtn.textContent = '\u00d7';
+    // Was an inline onclick=, which a CSP without 'unsafe-inline' rejects.
+    closeBtn.addEventListener('click', () => closeNoteTooltip());
+    noteTooltip.appendChild(closeBtn);
   }
-  if (title) html += `<div class="note-tooltip-title">${title.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>`;
-  if (content) html += `<div class="note-tooltip-content">${content.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>`;
-  if (noteId) html += `<div class="note-tooltip-id">#${noteId}</div>`;
-  noteTooltip.innerHTML = html;
+  if (title) {
+    const el = document.createElement('div');
+    el.className = 'note-tooltip-title';
+    el.textContent = title;
+    noteTooltip.appendChild(el);
+  }
+  if (content) {
+    const el = document.createElement('div');
+    el.className = 'note-tooltip-content';
+    el.textContent = content;
+    noteTooltip.appendChild(el);
+  }
+  if (noteId) {
+    const el = document.createElement('div');
+    el.className = 'note-tooltip-id';
+    el.textContent = '#' + noteId;
+    noteTooltip.appendChild(el);
+  }
 
   noteTooltip.style.left = '50%';
   noteTooltip.style.transform = 'translateX(-50%)';
@@ -7876,7 +8122,7 @@ function insertContentAtCursor(content) {
 
 // Update a note in the DOM without full re-render (preserves mermaid, prism, scroll)
 function patchNoteInDOM(noteId, updates) {
-  const elements = viewer.querySelectorAll(`[data-note-id="${noteId}"]`);
+  const elements = viewer.querySelectorAll(`[data-note-id="${CSS.escape(noteId)}"]`);
   if (!elements.length) {
     // Fall back to full re-render
     renderMarkdown(originalMarkdown, 'full');
@@ -8045,7 +8291,7 @@ ctxNotesPanelEdit.addEventListener('click', () => {
   const nid = notesPanelContextNoteId;
   hideNotesPanelContextMenu();
   if (!nid || !currentFilePath) return;
-  const noteEl = viewer.querySelector(`[data-note-id="${nid}"]`);
+  const noteEl = viewer.querySelector(`[data-note-id="${CSS.escape(nid)}"]`);
   if (!noteEl) return;
   openNoteDialogForEdit(noteEl);
 });
@@ -8055,7 +8301,7 @@ ctxNotesPanelDelete.addEventListener('click', () => {
   const nid = notesPanelContextNoteId;
   hideNotesPanelContextMenu();
   if (!nid || !currentFilePath) return;
-  const noteEl = viewer.querySelector(`[data-note-id="${nid}"]`);
+  const noteEl = viewer.querySelector(`[data-note-id="${CSS.escape(nid)}"]`);
   if (!noteEl) return;
 
   const isLabel = noteEl.classList.contains('note-label');
