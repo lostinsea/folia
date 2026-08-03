@@ -31,6 +31,19 @@ function check(name, ok, detail) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Poll a page-side condition rather than guessing with a fixed sleep, so the
+// fast path stays fast and a slow machine does not produce a false failure.
+async function waitForCondition(exec, expression, timeoutMs = 8000) {
+  const started = Date.now();
+  let last = false;
+  while (Date.now() - started < timeoutMs) {
+    last = await exec(expression);
+    if (last) return true;
+    await sleep(100);
+  }
+  return last === true;
+}
+
 // mtime has 1ms resolution but writes can land inside the same tick; bump the
 // mtime explicitly so the change is unambiguously detectable.
 function write(file, content) {
@@ -680,6 +693,182 @@ async function run(win) {
     "the document viewer is rendered, on screen and unoccluded",
     viewerVisual.count === 1 && viewerVisual.soundCount === 1,
     JSON.stringify(viewerVisual.unsound),
+  );
+
+  // ---- Scenario 6b: a superseded render must not strand the overlay ------
+  // renderMarkdownFull() opens with showLoadingScreen() and hides it at the
+  // very end. It also bails out mid-way if a newer render has started, and that
+  // bail-out used to `return` without hiding - so the full-screen,
+  // click-blocking overlay stayed up forever.
+  //
+  // This is not a hypothetical: it fired on the ordinary startup path. Restoring
+  // a tab began a full render, a second render superseded it, and the winner
+  // took the light-format path which neither shows nor hides the overlay. The
+  // app booted to a permanent "Loading..." screen with the document invisible
+  // behind it - which is precisely what the visual probe above reported before
+  // the fix, naming loadingScreen as the occluder.
+  //
+  // Supersession is forced directly rather than hoped for: two renders are
+  // started in the same turn, so the first is guaranteed to be stale by the
+  // time it reaches the bail-out.
+  //
+  // The winner MUST be a light-format render. Two overlapping 'full' renders
+  // would not reproduce the bug - the winner would hide the overlay itself and
+  // the loser's missing hide would be invisible. Only the full-superseded-by-
+  // light ordering leaves nobody responsible for hiding it, which is exactly
+  // the ordering the startup path produces.
+  //
+  // That ordering is only real if renderMarkdown actually takes the light path.
+  // It falls back to a FULL render when _lastRenderedContent is null (see
+  // renderer.js renderMarkdown), and two full renders would silently restore the
+  // vacuous version of this test - it would pass with the fix reverted. Assert
+  // the precondition locally rather than trusting scenario ordering.
+  const lightPathAvailable = await exec(`_lastRenderedContent !== null`);
+  check(
+    "the light-format path is reachable, so this scenario is not vacuous",
+    lightPathAvailable === true,
+    "_lastRenderedContent is null; renderMarkdown would fall back to a full render",
+  );
+  await exec(`
+    (() => {
+      renderMarkdown('# Superseded render\\n\\nfirst', 'full');
+      renderMarkdown('# Winning render\\n\\nsecond', 'light-format');
+      return true;
+    })()
+  `);
+  const overlayState = await waitForCondition(
+    exec,
+    `(() => {
+       const el = document.getElementById('loadingScreen');
+       return el && !el.classList.contains('active');
+     })()`,
+    8000,
+  );
+  check(
+    "a superseded render does not leave the loading overlay up",
+    overlayState === true,
+    JSON.stringify(
+      await exec(
+        `({ active: document.getElementById('loadingScreen').classList.contains('active'),
+            viewer: document.getElementById('viewer').textContent.slice(0, 40) })`,
+      ),
+    ),
+  );
+
+  // And the overlay must not be covering anything even when it is inactive.
+  const overlayVisual = await inspectVisual(win, "#viewer", {
+    minWidth: 200,
+    minHeight: 100,
+  });
+  check(
+    "the viewer is still unoccluded after overlapping renders",
+    overlayVisual.count === 1 && overlayVisual.soundCount === 1,
+    JSON.stringify(overlayVisual.unsound),
+  );
+
+  // ---- Scenario 6c: the overlay is owned, not shared ---------------------
+  // Hiding on the way out of a superseded render is only half correct. If the
+  // render that superseded it is ALSO a full render, it is still working, and a
+  // loser that hides unconditionally would uncover a half-built document - the
+  // overlay would drop on the FIRST completion instead of the last.
+  //
+  // Ownership makes both directions right, so assert both here: the loser must
+  // stay quiet while a newer full render owns the overlay, and the overlay must
+  // still come down once that winner finishes.
+  const ownership = await exec(`
+    (() => {
+      const el = document.getElementById('loadingScreen');
+      renderMarkdown('# Loser\\n\\n' + 'aaa '.repeat(200), 'full');
+      renderMarkdown('# Winner\\n\\n' + 'bbb '.repeat(400), 'full');
+      return { shownAtStart: el.classList.contains('active') };
+    })()
+  `);
+  check(
+    "two overlapping full renders raise the overlay",
+    ownership.shownAtStart === true,
+    JSON.stringify(ownership),
+  );
+
+  // The loser reaches its bail-out well before the winner finishes, but sampling
+  // "mid-flight" by wall clock would be a flaky race. Assert the invariant that
+  // actually protects the winner instead: a stale generation must not be able to
+  // take the overlay down. This is deterministic and fails loudly if the
+  // ownership check is removed or weakened.
+  const staleCannotHide = await exec(`
+    (() => {
+      const el = document.getElementById('loadingScreen');
+      const before = el.classList.contains('active');
+      hideLoadingScreenFor(-1);      // a generation that never owned it
+      const afterStale = el.classList.contains('active');
+      hideLoadingScreenFor(0);       // the "nobody owns it" sentinel
+      const afterSentinel = el.classList.contains('active');
+      return { before, afterStale, afterSentinel };
+    })()
+  `);
+  check(
+    "a superseded render cannot take the overlay away from the current one",
+    staleCannotHide.before === true &&
+      staleCannotHide.afterStale === true &&
+      staleCannotHide.afterSentinel === true,
+    JSON.stringify(staleCannotHide),
+  );
+
+  const settled = await waitForCondition(
+    exec,
+    `(() => {
+       const el = document.getElementById('loadingScreen');
+       return el && !el.classList.contains('active');
+     })()`,
+    8000,
+  );
+  check(
+    "the winning full render still clears the overlay when it finishes",
+    settled === true,
+    JSON.stringify(staleCannotHide),
+  );
+  check(
+    "the winner ends up owning the rendered document",
+    (await exec(`document.getElementById('viewer').textContent.includes('Winner')`)) === true,
+    await exec(`document.getElementById('viewer').textContent.slice(0, 30)`),
+  );
+
+  // ---- Scenario 6d: the idle callback must carry a deadline --------------
+  // The winning render hides the overlay from inside a requestIdleCallback. A
+  // bare requestIdleCallback has NO deadline - the browser may defer it
+  // indefinitely on a page that never goes idle, which would strand the overlay
+  // for the winner in the same way the missing hide stranded it for the loser.
+  // The {timeout} option is what bounds that, so assert it is actually passed.
+  // The deadline itself is enforced by the browser, not by this code, so the
+  // passing of the option IS the contract worth checking here.
+  await exec(`
+    (() => {
+      const real = window.requestIdleCallback;
+      window.__idleSeen = [];
+      window.requestIdleCallback = function (cb, opts) {
+        window.__idleSeen.push(opts || null);
+        return real.call(window, cb, opts);
+      };
+      window.__restoreIdle = () => { window.requestIdleCallback = real; };
+      renderMarkdown('# Idle deadline\\n\\nbody text', 'full');
+      return true;
+    })()
+  `);
+  await waitForCondition(
+    exec,
+    `(() => {
+       const el = document.getElementById('loadingScreen');
+       return el && !el.classList.contains('active');
+     })()`,
+    8000,
+  );
+  const idleSeen = await exec(`window.__idleSeen`);
+  await exec(`(window.__restoreIdle(), true)`);
+  check(
+    "the render's idle callback is given a timeout so the overlay cannot be stranded",
+    Array.isArray(idleSeen) &&
+      idleSeen.length > 0 &&
+      idleSeen.every((o) => o && typeof o.timeout === "number" && o.timeout > 0),
+    JSON.stringify(idleSeen),
   );
 
   // Closing every tab must disarm the watcher, so an external change cannot

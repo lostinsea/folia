@@ -1997,6 +1997,28 @@ function hideLoadingScreen() {
   loadingScreen.classList.remove('active');
 }
 
+// Which full render currently owns the overlay. Only the owner may hide it.
+//
+// Without this, a superseded render that hides the overlay on its way out would
+// uncover a NEWER full render that is still working - the overlay would be
+// guaranteed to drop on the FIRST completion rather than the last. Ownership
+// makes both cases correct: if a newer full render took over, the loser stays
+// quiet; if the winner took the light-format path (which never touches the
+// overlay), the loser is still the owner and must clear it, which is exactly the
+// startup case that stranded the app behind a permanent "Loading..." screen.
+let loadingScreenOwner = 0;
+
+function showLoadingScreenFor(generation) {
+  loadingScreenOwner = generation;
+  showLoadingScreen();
+}
+
+function hideLoadingScreenFor(generation) {
+  if (generation !== loadingScreenOwner) return;
+  loadingScreenOwner = 0;
+  hideLoadingScreen();
+}
+
 // File update notification functions
 function showFileUpdateNotification() {
   if (fileUpdateNotificationShown) {
@@ -3337,7 +3359,7 @@ async function renderMarkdown(content, forceMode = null) {
 // Full render pipeline
 async function renderMarkdownFull(content, generation) {
   // Show loading screen
-  showLoadingScreen();
+  showLoadingScreenFor(generation);
 
   // Give browser time to render the loading screen before heavy processing
   await new Promise(resolve => setTimeout(resolve, 10));
@@ -3483,7 +3505,15 @@ async function renderMarkdownFull(content, generation) {
   // Bail out if a newer render started while this one was awaiting, otherwise a
   // stale render repaints over fresher content (and reattaches its raw-HTML
   // documents on top of it).
-  if (generation !== renderGeneration) return;
+  //
+  // The hide is not optional. This function opens with showLoadingScreen(), and
+  // the overlay is full-screen and click-blocking, so returning without hiding
+  // strands the entire UI behind it. That is exactly what happened on the
+  // ordinary startup path: restoring a tab began a full render, a second render
+  // superseded it, this branch returned, and the winning render took the
+  // light-format path that never shows or hides the overlay - so the app booted
+  // to a permanent "Loading..." screen with the document invisible behind it.
+  if (generation !== renderGeneration) { hideLoadingScreenFor(generation); return; }
   patchViewerDOM(html);
   applyRawHtmlDocuments();
 
@@ -3629,17 +3659,24 @@ async function renderMarkdownFull(content, generation) {
 
     // Apply syntax highlighting with PrismJS (asynchronously to avoid blocking)
     if (typeof Prism !== 'undefined') {
-      // Use requestIdleCallback for non-blocking syntax highlighting
-      const highlightCallback = window.requestIdleCallback || window.setTimeout;
-      highlightCallback(() => {
-        if (generation !== renderGeneration) { hideLoadingScreen(); return; } // stale check
+      // Use requestIdleCallback for non-blocking syntax highlighting.
+      // The timeout is load-bearing: a bare requestIdleCallback has no deadline
+      // at all, so on a page that never goes idle the callback - and with it
+      // hideLoadingScreen() below - may never run, leaving the click-blocking
+      // overlay up indefinitely. 1000ms keeps highlighting off the critical
+      // path while bounding how long the overlay can survive.
+      const requestIdle = window.requestIdleCallback
+        ? (cb) => window.requestIdleCallback(cb, { timeout: 1000 })
+        : (cb) => window.setTimeout(cb, 0);
+      requestIdle(() => {
+        if (generation !== renderGeneration) { hideLoadingScreenFor(generation); return; } // stale check
         Prism.highlightAll();
         // Mark all as highlighted to support targeted highlighting
         viewer.querySelectorAll('pre code').forEach(el => el.classList.add('prism-highlighted'));
         // Add copy buttons to code blocks after syntax highlighting
         addCodeBlockCopyButtons();
         // Hide loading screen after syntax highlighting is done
-        hideLoadingScreen();
+        hideLoadingScreenFor(generation);
         if (notesPanel.classList.contains('visible')) updateNotesList();
         updateShowNotesToggleVisibility();
         applyNoteStyles();
@@ -3648,7 +3685,7 @@ async function renderMarkdownFull(content, generation) {
       // Add copy buttons even without Prism
       addCodeBlockCopyButtons();
       // Hide loading screen if no syntax highlighting needed
-      hideLoadingScreen();
+      hideLoadingScreenFor(generation);
       if (notesPanel.classList.contains('visible')) updateNotesList();
       updateShowNotesToggleVisibility();
       applyNoteStyles();
@@ -3658,7 +3695,7 @@ async function renderMarkdownFull(content, generation) {
     viewer.innerHTML = `<div style="color: red; padding: 20px;">
       <strong>Error rendering markdown:</strong><br>${error.message}
     </div>`;
-    hideLoadingScreen();
+    hideLoadingScreenFor(generation);
   }
 }
 
