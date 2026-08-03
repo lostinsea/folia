@@ -20,7 +20,9 @@
     "test:security": "electron test-render-security.js",
     "test:popups": "electron test-popup-security.js",
     "test:packaging": "node test-packaging.js",
-    "test": "npm run test:packaging && npm run test:tabs && npm run test:security && npm run test:popups"
+    "test:mermaid": "electron test-mermaid-render.js",
+    "test:visual": "electron test-visual-utils-selfcheck.js",
+    "test": "npm run test:packaging && npm run test:tabs && npm run test:security && npm run test:popups && npm run test:visual && npm run test:mermaid"
   },
   "keywords": [
     "markdown",
@@ -49,7 +51,7 @@
     "html-to-docx": "^1.8.0",
     "html2canvas": "^1.4.1",
     "marked": "^9.1.6",
-    "mermaid": "^10.6.1",
+    "mermaid": "^11.16.0",
     "prismjs": "^1.30.0"
   },
   "overrides": {

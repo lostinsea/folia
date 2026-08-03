@@ -22,9 +22,31 @@ const { parseEmojis } = require('./emoji-parser');
 // INITIALIZATION
 // ============================================
 
+// Resolve the effective dark/light state from the persisted preference.
+//
+// Two keys exist: custom-theme.js owns 'themeMode' ('light' | 'dark' |
+// 'desktop') and is the source of truth; the upstream toggle writes the legacy
+// binary 'darkMode'. They only stay in step because custom-theme.js applies a
+// change by *clicking* the upstream toggle - an undocumented dependency that
+// silently breaks the moment anything writes 'themeMode' directly. Resolving
+// both here, in the same order custom-theme.js uses, removes that coupling and
+// closes the ~150ms window at startup during which mermaid was configured from
+// the legacy key while the body was about to be themed from the new one.
+function resolveDarkPreference() {
+  const mode =
+    localStorage.getItem('themeMode') ||
+    (localStorage.getItem('darkMode') === 'enabled'
+      ? 'dark'
+      : localStorage.getItem('darkMode') === 'disabled'
+        ? 'light'
+        : 'desktop');
+  if (mode === 'dark') return true;
+  if (mode === 'light') return false;
+  return window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
+
 function initializeMermaidWithTheme() {
-  const isDark = localStorage.getItem('darkMode') === 'enabled';
-  mermaid.initialize(getMermaidConfig(isDark));
+  mermaid.initialize(getMermaidConfig(resolveDarkPreference()));
 }
 
 // Initial mermaid setup
@@ -900,11 +922,17 @@ darkModeToggle.addEventListener('click', (e) => {
   localStorage.setItem('darkMode', isDarkMode ? 'enabled' : 'disabled');
   darkModeToggle.classList.toggle('active', isDarkMode);
 
-  // Re-initialize Mermaid with new theme if there are diagrams
-  const mermaidElements = document.querySelectorAll('.mermaid');
-  if (mermaidElements.length > 0) {
-    updateMermaidTheme(isDarkMode);
-  }
+  // Re-initialize Mermaid with the new theme.
+  // This must run unconditionally. It used to be guarded by
+  // "if there are .mermaid elements on screen", but updateMermaidTheme's first
+  // two steps - clearing the baked-colour SVG cache and calling
+  // mermaid.initialize() - are exactly the ones that must happen even when no
+  // diagram is visible. Skipping them left mermaid configured with the
+  // previous theme, so the next document opened rendered its diagrams in the
+  // wrong theme (white boxes in a dark app). That is the normal startup path:
+  // the theme is resolved before any file is open. updateMermaidTheme already
+  // returns early once it has re-initialised if there is nothing to re-render.
+  updateMermaidTheme(isDarkMode);
 
   // Update OmniWare dark mode
   updateOmniWareDarkMode(isDarkMode);
@@ -1354,10 +1382,11 @@ langSubmenu.querySelectorAll('.tools-submenu-item').forEach(item => {
   });
 });
 
-// Load dark mode preference on startup
+// Load dark mode preference on startup.
+// Uses the same resolution as initializeMermaidWithTheme so the body class and
+// mermaid's configured theme cannot disagree on the very first paint.
 function loadDarkModePreference() {
-  const darkMode = localStorage.getItem('darkMode');
-  if (darkMode === 'enabled') {
+  if (resolveDarkPreference()) {
     document.body.classList.add('dark-mode');
     darkModeToggle.classList.add('active');
   }
@@ -1366,7 +1395,38 @@ function loadDarkModePreference() {
 // Update Mermaid theme based on dark mode.
 // Only re-renders the mermaid SVG elements in-place — no full page re-render.
 // All other dark mode styling is handled instantly by the .dark-mode CSS class.
-async function updateMermaidTheme(isDark) {
+//
+// Re-entrancy: mermaid.run() and mermaidSvgCache are shared mutable state, and
+// several unrelated paths drive them - a theme toggle, a document render, and
+// the insert/edit-diagram commands. Two of them overlapping would run mermaid
+// over the same nodes and, worse, let the loser finish last and repopulate the
+// cache with wrong-theme SVGs after the winner cleared it, silently recreating
+// the bug this function exists to prevent. queueMermaidWork() is the single
+// mutex for all of them: every mermaid.run() and every cache write in this file
+// goes through it, so the last requested state is always the one that wins.
+//
+// Because work is serialised, a superseded update cannot exist, so there is
+// deliberately no generation/epoch token - it could never fire.
+//
+// Callers must not nest queueMermaidWork() inside queued work: the inner call
+// would wait on the outer one and deadlock.
+let mermaidWorkQueue = Promise.resolve();
+let mermaidRunSeq = 0;
+
+function queueMermaidWork(fn) {
+  const run = () => fn();
+  // Both handlers are wired so a rejected job cannot stall every later one.
+  mermaidWorkQueue = mermaidWorkQueue.then(run, run);
+  return mermaidWorkQueue;
+}
+
+function updateMermaidTheme(isDark) {
+  return queueMermaidWork(() => applyMermaidTheme(isDark));
+}
+
+async function applyMermaidTheme(isDark) {
+  const seq = ++mermaidRunSeq;
+
   mermaidSvgCache.clear(); // SVG colours are baked into the SVG, must re-render
   mermaid.initialize(getMermaidConfig(isDark));
 
@@ -1380,7 +1440,7 @@ async function updateMermaidTheme(isDark) {
     if (!src) return;
     el.textContent = src;
     el.removeAttribute('data-processed');
-    el.id = `mermaid-${Date.now()}-${index}`;
+    el.id = `mermaid-${seq}-${index}`;
     toRender.push(el);
   });
 
@@ -1982,16 +2042,31 @@ function reloadCurrentFile() {
 
 // Before printToPDF: main signals renderer to drop dark mode for a clean light export
 // Letterhead is handled by main.js via printToPDF headerTemplate/footerTemplate (every page)
-ipcRenderer.on('prepare-for-pdf-export', () => {
+//
+// Mermaid colours are baked into the emitted SVG, so removing the body class is
+// not enough on its own: a document exported from dark mode used to produce a
+// light page carrying dark diagrams. Re-theme the diagrams and only report
+// ready once that has finished, or printToPDF races the re-render.
+ipcRenderer.on('prepare-for-pdf-export', async () => {
   document.body.classList.remove('dark-mode');
+  try {
+    await updateMermaidTheme(false);
+  } catch (e) {
+    console.warn('Mermaid light re-theme for PDF export failed:', e);
+  }
   // Double rAF ensures the style change is painted before main calls printToPDF
   requestAnimationFrame(() => requestAnimationFrame(() => ipcRenderer.send('pdf-export-ready')));
 });
 
-ipcRenderer.on('pdf-export-result', (event, data) => {
+ipcRenderer.on('pdf-export-result', async (event, data) => {
   // Restore dark mode if it was active before the export
-  if (localStorage.getItem('darkMode') === 'enabled') {
+  if (resolveDarkPreference()) {
     document.body.classList.add('dark-mode');
+    try {
+      await updateMermaidTheme(true);
+    } catch (e) {
+      console.warn('Mermaid dark re-theme after PDF export failed:', e);
+    }
   }
   if (data.success) {
     console.log('PDF exported successfully to:', data.path);
@@ -3439,12 +3514,15 @@ async function renderMarkdownFull(content, generation) {
 
       // Only render new/changed diagrams
       if (toRender.length > 0) {
-        await mermaid.run({ nodes: toRender, suppressErrors: false });
-        // Store newly rendered SVGs in cache
-        toRender.forEach(el => {
-          if (el.querySelector('svg')) {
-            mermaidSvgCache.set(el.dataset.mermaidSrc, el.innerHTML);
-          }
+        // Shares the mermaid mutex with theme updates - see queueMermaidWork.
+        await queueMermaidWork(async () => {
+          await mermaid.run({ nodes: toRender, suppressErrors: false });
+          // Store newly rendered SVGs in cache
+          toRender.forEach(el => {
+            if (el.querySelector('svg')) {
+              mermaidSvgCache.set(el.dataset.mermaidSrc, el.innerHTML);
+            }
+          });
         });
       }
 
@@ -6695,10 +6773,13 @@ async function renderMermaidInDOM(code, mode, replaceTarget) {
   }
 
   try {
-    await mermaid.run({ nodes: [mermaidEl], suppressErrors: false });
-    if (mermaidEl.querySelector('svg')) {
-      mermaidSvgCache.set(code, mermaidEl.innerHTML);
-    }
+    // Shares the mermaid mutex with theme updates - see queueMermaidWork.
+    await queueMermaidWork(async () => {
+      await mermaid.run({ nodes: [mermaidEl], suppressErrors: false });
+      if (mermaidEl.querySelector('svg')) {
+        mermaidSvgCache.set(code, mermaidEl.innerHTML);
+      }
+    });
   } catch (err) {
     // Mermaid may detach the element from DOM on error — re-attach so delete still works
     if (!mermaidEl.isConnected) {

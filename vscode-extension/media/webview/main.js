@@ -550,12 +550,18 @@ document.addEventListener('wheel', function(e) {
 // RENDER MARKDOWN
 // ============================================
 
+// Retained so a theme change can re-render. mermaid bakes theme colours into
+// the emitted SVG, so re-initialising mermaid alone leaves existing diagrams in
+// the old theme - the markdown has to be rendered again.
+var lastRenderedMarkdown = null;
+
 async function renderMarkdown(content) {
   showLoadingScreen();
   await new Promise(function(resolve) { setTimeout(resolve, 10); });
 
   try {
     content = removeBOM(content);
+    lastRenderedMarkdown = content;
 
     // Extract mermaid blocks and replace with placeholders
     var mermaidBlocks = [];
@@ -840,6 +846,21 @@ function extractTableData(table) {
 // MESSAGE HANDLER (from extension host)
 // ============================================
 
+// Serialises renders. Before theme-changed re-rendered the document it was a
+// synchronous handler and could not overlap a content-updated render; now that
+// it is async, two renders in flight would double-write viewer.innerHTML and
+// both call mermaid.run over whatever DOM happened to be current. Queueing
+// makes the last message win, which is the desired outcome for both senders.
+var renderQueue = Promise.resolve();
+
+function queueRender(markdown) {
+  var run = function () {
+    return renderMarkdown(markdown);
+  };
+  renderQueue = renderQueue.then(run, run);
+  return renderQueue;
+}
+
 window.addEventListener('message', function(event) {
   var msg = event.data;
 
@@ -847,14 +868,17 @@ window.addEventListener('message', function(event) {
     case 'content-updated':
       currentFilePath = msg.filePath;
       applyTheme(msg.isDark);
-      renderMarkdown(msg.content);
+      queueRender(msg.content);
       break;
 
     case 'theme-changed':
       applyTheme(msg.isDark);
-      // Re-render if we have content
-      if (viewer.innerHTML && currentFilePath) {
-        // Theme change re-render is handled by mermaid re-init
+      // Re-render the document, not just re-init mermaid. mermaid writes theme
+      // colours directly into the SVG it emits, so diagrams already on screen
+      // keep the old theme until their markdown is rendered again - which is
+      // how dark diagrams used to survive onto a light background.
+      if (lastRenderedMarkdown != null) {
+        queueRender(lastRenderedMarkdown);
       }
       break;
   }

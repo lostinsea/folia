@@ -8,6 +8,10 @@ const { app, BrowserWindow } = require("electron");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const {
+  inspectVisual,
+  captureScreenshot,
+} = require("./test-visual-utils");
 
 require("./main.js");
 
@@ -652,6 +656,32 @@ async function run(win) {
     JSON.stringify(beforeStray),
   );
 
+  // Visual smoke: the assertions above all read state the code believes it has
+  // rendered. None of them would notice the tab bar being covered by an
+  // overlay, collapsed to zero height, or pushed off screen - which is exactly
+  // how a tab bug looks to a user. Assert the pixels-level facts directly.
+  // See test-visual-utils.js for why this is a DOM probe and not a pixel diff.
+  // inspectVisual installs the probe itself, so no separate injection here.
+  const tabsVisual = await inspectVisual(win, ".tab", {
+    minWidth: 20,
+    minHeight: 10,
+  });
+  check(
+    "every open tab is rendered, on screen, unoccluded and unclipped",
+    tabsVisual.count >= 1 && tabsVisual.soundCount === tabsVisual.count,
+    JSON.stringify({ count: tabsVisual.count, unsound: tabsVisual.unsound }),
+  );
+
+  const viewerVisual = await inspectVisual(win, "#viewer", {
+    minWidth: 200,
+    minHeight: 100,
+  });
+  check(
+    "the document viewer is rendered, on screen and unoccluded",
+    viewerVisual.count === 1 && viewerVisual.soundCount === 1,
+    JSON.stringify(viewerVisual.unsound),
+  );
+
   // Closing every tab must disarm the watcher, so an external change cannot
   // raise a "reload?" prompt over the welcome screen. Clear the dirty state
   // left by earlier scenarios first - closeTab() on a dirty tab raises a
@@ -726,6 +756,13 @@ app.whenReady().then(async () => {
 
   const failed = results.filter((r) => !r.ok).length;
   clearTimeout(watchdog);
+  // Screenshot as a debugging artifact, never a baseline - see
+  // test-visual-utils.js. Captured on failure so the failing screen can be
+  // inspected without re-running the suite by hand.
+  if (failed > 0) {
+    const shot = await captureScreenshot(win, "tab-refresh-FAILED");
+    if (shot) console.log("failure screenshot: " + shot);
+  }
   console.log(`\n=== ${results.length - failed}/${results.length} passed ===`);
   try {
     fs.rmSync(dir, { recursive: true, force: true });
