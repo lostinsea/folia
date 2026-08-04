@@ -1194,6 +1194,94 @@ async function run(win) {
     JSON.stringify(cssState.styleText),
   );
 
+  // The three bypass classes below were all found by independent review AFTER
+  // the first version of this filter passed its own tests, and all three were
+  // confirmed live against Chromium (the engine really does resolve them to a
+  // fetch) before being fixed. They are the reason the filter now normalises
+  // through Chromium's own parser instead of trusting hand-written regexes:
+  //
+  //   1. `url("ht\<LF>tps://…")` - a backslash-newline line continuation inside
+  //      a string is consumed by CSS and produces nothing, so the engine sees a
+  //      scheme where the regex saw none.
+  //   2. `\75rl(…)`, `\69mage-set(…)`, `@im\70ort` - the *identifier* can be
+  //      escaped too, not just the value inside it.
+  //   3. an SVG-namespaced <style>, whose localName is lower case.
+  await render(
+    "# Escapes\n\n" +
+      '<div id="esc-nl" style="background-image:url(&quot;ht\\\ntps://probe.invalid/nl&quot;)">a</div>\n\n' +
+      '<div id="esc-fn" style="background-image:\\75rl(//probe.invalid/share/fn.png)">b</div>\n\n' +
+      "<div id=\"esc-set\" style=\"background-image:\\69mage-set('https://probe.invalid/set2.png' 1x)\">c</div>\n\n" +
+      '<div id="esc-var" style="--evil:url(&quot;ht\\\ntps://probe.invalid/varleak&quot;);background-image:var(--evil)">d</div>\n\n' +
+      '<style>@im\\70ort "https://probe.invalid/escaped-import.css"; .z { background: url(https://probe.invalid/z.png); }</style>\n\n' +
+      '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">' +
+      "<style>.s{background:url(&quot;https://probe.invalid/svgstyle&quot;)}</style>" +
+      '<rect id="esc-svgrect" width="10" height="10" style="fill:red;background-image:url(https://probe.invalid/svgattr)"/>' +
+      "</svg>\n",
+    "full",
+    1200,
+  );
+  const escState = await exec(`
+    (() => {
+      const at = (id) => {
+        const el = document.getElementById(id);
+        return el ? (el.getAttribute('style') || '') : 'NO-ELEMENT';
+      };
+      const styles = [...document.querySelectorAll('#viewer style')].map(s => s.textContent);
+      return {
+        nl: at('esc-nl'),
+        fn: at('esc-fn'),
+        set: at('esc-set'),
+        varLeak: at('esc-var'),
+        svgRect: at('esc-svgrect'),
+        styleTexts: styles,
+        // Control: the SVG must actually have survived sanitization, otherwise
+        // the SVG assertions below pass because nothing rendered.
+        svgPresent: !!document.querySelector('#viewer svg')
+      };
+    })()
+  `);
+  check(
+    "SEC-21 a backslash-newline line continuation does not hide a scheme",
+    noProbe(escState.nl),
+    JSON.stringify(escState.nl),
+  );
+  check(
+    "SEC-21 an escaped url() identifier (\\75rl) is still filtered",
+    noProbe(escState.fn),
+    JSON.stringify(escState.fn),
+  );
+  check(
+    "SEC-21 an escaped image-set() identifier (\\69mage-set) is still filtered",
+    noProbe(escState.set),
+    JSON.stringify(escState.set),
+  );
+  // Custom properties are stored as raw token streams and are NOT canonicalised
+  // by the engine, so var() is an independent route to a live URL.
+  check(
+    "SEC-21 a remote URL smuggled through a CSS custom property is filtered",
+    noProbe(escState.varLeak),
+    JSON.stringify(escState.varLeak),
+  );
+  check(
+    "SEC-21 an escaped at-keyword (@im\\70ort) does not survive",
+    Array.isArray(escState.styleTexts) &&
+      escState.styleTexts.every((t) => !/probe\.invalid/.test(t)) &&
+      escState.styleTexts.every((t) => !/@im/i.test(t)),
+    JSON.stringify(escState.styleTexts),
+  );
+  check(
+    "SEC-21 an SVG-namespaced <style> is filtered too (localName is lower case)",
+    escState.svgPresent === true &&
+      Array.isArray(escState.styleTexts) &&
+      escState.styleTexts.every((t) => !/svgstyle/.test(t)),
+    JSON.stringify({ present: escState.svgPresent, styles: escState.styleTexts }),
+  );
+  check(
+    "SEC-21 a style attribute on an SVG element is filtered",
+    noProbe(escState.svgRect),
+    JSON.stringify(escState.svgRect),
+  );
+
   // The SEC-21 hook rewrites the `style` attribute on EVERY sanitized document,
   // so it can plausibly break ordinary formatting rather than only the hostile
   // case. The assertions above cannot see that - they read attribute text, not

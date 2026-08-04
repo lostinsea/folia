@@ -197,17 +197,30 @@ function isLocalImagePath(value) {
 // because `img-src https:` is deliberately open so that ordinary documents can
 // show remote images. So the URLs *inside* CSS are filtered here instead.
 //
-// CSS allows `\68 ttps:` style escapes anywhere in a token, so the value is
-// decoded before it is judged; testing the raw text would be trivially bypassed.
-const CSS_ESCAPE = /\\([0-9a-fA-F]{1,6})[ \t\r\n\f]?|\\([^\r\n\f])/g;
+// CSS allows `\68 ttps:` numeric escapes AND `\<newline>` line continuations
+// inside a string, so the value is decoded before it is judged; testing the raw
+// text would be trivially bypassed.
+//
+// The line-continuation branch is load-bearing and was missing in the first
+// version of this filter: per CSS Syntax L3 4.3.5 a backslash followed by a
+// newline inside a string is consumed and produces *nothing*, so
+// `url("ht\<LF>tps://evil/")` is `https://evil/` to Chromium. Decoding it to
+// anything other than the empty string - including leaving it alone - lets that
+// straight through.
+const CSS_ESCAPE =
+  /\\([0-9a-fA-F]{1,6})[ \t\r\n\f]?|\\(\r\n|[\r\n\f])|\\([^\r\n\f])/g;
 function decodeCssEscapes(value) {
-  return String(value == null ? '' : value).replace(CSS_ESCAPE, (m, hex, ch) => {
-    if (!hex) return ch;
-    const code = parseInt(hex, 16);
-    // 0 and lone surrogates are not representable; CSS maps them to U+FFFD.
-    if (!code || (code >= 0xd800 && code <= 0xdfff) || code > 0x10ffff) return '\uFFFD';
-    return String.fromCodePoint(code);
-  });
+  return String(value == null ? '' : value).replace(
+    CSS_ESCAPE,
+    (m, hex, newline, ch) => {
+      if (newline !== undefined) return '';
+      if (hex === undefined) return ch;
+      const code = parseInt(hex, 16);
+      // 0 and lone surrogates are not representable; CSS maps them to U+FFFD.
+      if (!code || (code >= 0xd800 && code <= 0xdfff) || code > 0x10ffff) return '\uFFFD';
+      return String.fromCodePoint(code);
+    },
+  );
 }
 
 const CSS_ANY_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
@@ -268,6 +281,62 @@ function sanitizeCssText(css) {
     });
 }
 
+// Hand-written CSS tokenising is a losing game: the first version of this
+// filter was defeated by a backslash-newline line continuation, because the
+// regex judged text that Chromium would go on to parse differently. Rather than
+// keep patching the tokeniser, the string is first run through Chromium's own
+// parser and read back in canonical form. Escapes are resolved, `image-set("x")`
+// becomes `image-set(url("x"))`, quoting is normalised, and unparseable
+// declarations are dropped exactly as they would be at render time. Whatever
+// comes out is, by construction, what the engine will act on - so the filter and
+// the engine can no longer disagree about what a value says.
+//
+// Both probes below are detached from the document and never adopted, so
+// parsing them fetches nothing.
+function normalizeCssDeclarations(css) {
+  const text = String(css == null ? '' : css);
+  if (!text) return text;
+  try {
+    const probe = document.createElement('div');
+    probe.style.cssText = text;
+    // An empty result means the engine rejected everything. Returning the
+    // original text keeps the regex pass below as the control rather than
+    // silently discarding a document's styling on a parser quirk.
+    return probe.style.cssText || text;
+  } catch (e) {
+    return text;
+  }
+}
+
+function normalizeCssStyleSheet(css) {
+  const text = String(css == null ? '' : css);
+  if (!text) return text;
+  try {
+    const sheet = new CSSStyleSheet();
+    // replaceSync ignores @import by specification - which also disposes of
+    // escaped spellings such as `@\69mport` that a regex would have to
+    // enumerate.
+    sheet.replaceSync(text);
+    const rules = Array.from(sheet.cssRules, (r) => r.cssText).join('\n');
+    return rules || '';
+  } catch (e) {
+    return text;
+  }
+}
+
+// Custom properties are the one thing the normaliser above does NOT canonicalise
+// - they are stored as raw token streams, so `--x: url("ht\<LF>tps://evil/")`
+// survives verbatim and `background-image: var(--x)` then resolves it to a live
+// URL. Measured directly, not assumed. That is why the regex pass still runs
+// after normalisation instead of being replaced by it.
+function filterCssDeclarations(css) {
+  return sanitizeCssText(normalizeCssDeclarations(css));
+}
+
+function filterCssStyleSheet(css) {
+  return sanitizeCssText(normalizeCssStyleSheet(css));
+}
+
 let sanitizerHooksInstalled = false;
 function installSanitizerHooks() {
   if (sanitizerHooksInstalled) return;
@@ -280,7 +349,13 @@ function installSanitizerHooks() {
   // the frame's scripts (so @@@html blocks and their resize postMessage keep
   // working) while denying it any access to the parent document.
   DOMPurify.addHook('afterSanitizeAttributes', (node) => {
-    if (node.tagName === 'IFRAME') {
+    // localName, not tagName: tagName is upper-cased only for HTML-namespace
+    // elements. An SVG <style> reports tagName 'style' in lower case, so
+    // comparing against 'STYLE' skipped SVG stylesheets entirely - and DOMPurify
+    // keeps SVG by default, so `<svg><style>…url(https://evil)…</style></svg>`
+    // in ordinary markdown went completely unfiltered. Measured, not assumed.
+    const tag = node.localName ? String(node.localName).toLowerCase() : '';
+    if (tag === 'iframe') {
       node.setAttribute('sandbox', 'allow-scripts');
       // The only iframe this app intends to produce is the @@@html block, which
       // is built from `srcdoc`. A `src` therefore never comes from us - and
@@ -298,12 +373,12 @@ function installSanitizerHooks() {
     // read here is the one DOMPurify has already accepted and normalised.
     if (node.hasAttribute && node.hasAttribute('style')) {
       const raw = node.getAttribute('style');
-      const safe = sanitizeCssText(raw);
+      const safe = filterCssDeclarations(raw);
       if (safe !== raw) node.setAttribute('style', safe);
     }
-    if (node.tagName === 'STYLE') {
+    if (tag === 'style') {
       const raw = node.textContent;
-      const safe = sanitizeCssText(raw);
+      const safe = filterCssStyleSheet(raw);
       if (safe !== raw) node.textContent = safe;
     }
   });

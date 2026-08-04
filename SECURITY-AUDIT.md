@@ -55,7 +55,7 @@ document. Everything marked FIXED below is covered by a regression test — in
 | SEC-19 | **FIXED** | Release workflow: every action pinned to a commit SHA (+ Dependabot to keep the pins moving), `softprops/action-gh-release` moved off the unmaintained v1, `npm ci` instead of `npm install`, `contents: write` narrowed to the publish job only, `persist-credentials: false` on checkout. Also fixed a defect the audit missed: the workflow pinned Node 18 against `engines.node >= 22.12.0` + `engine-strict=true`, so it could not have built at all. Code signing remains open. |
 | SEC-27 | **FIXED** | OmniWare's hand-drawn fonts were `@import`ed from fonts.googleapis.com and silently refused by the popup CSP, so every wireframe rendered in generic `cursive`. Fonts vendored locally and emitted as `@font-face` by `omniwareFontFaceCss()`. Found by the error sentinel, not by the audit. |
 | SEC-20 | **FIXED** | Popup documents were written to a fixed, world-guessable path under the shared temp directory. Now each goes into its own `mkdtempSync` directory (0700) and is created with `flag: "wx"`, so a pre-planted symlink causes an error instead of a redirected write. The same treatment for the portable-update batch script, whose `exec()` with an interpolated path also became `spawn()` with an argv array. Fixing this also fixed a plain functional bug: two popups of the same kind shared one filename, so the second overwrote the first and whichever closed first deleted the other's document. |
-| SEC-21 | **FIXED** (both halves) | `<iframe src>` is stripped in the sanitizer hook (see SEC-11). `style` stays in the allowlist — notes, themes and upstream markdown all need it — so the URLs *inside* CSS are filtered instead: `url()`, `image-set()` and `@import` may name only a relative path, a local drive path or an inert `data:image/…` (SVG excluded). Values are CSS-unescaped before being judged, and remote ones are rewritten to `about:blank`. This matters because `img-src https:` is deliberately open, so the CSP does **not** stop a `background-image` beacon. |
+| SEC-21 | **FIXED** (both halves, hardened after review) | `<iframe src>` is stripped in the sanitizer hook (see SEC-11). `style` stays in the allowlist — notes, themes and upstream markdown all need it — so the URLs *inside* CSS are filtered instead: `url()`, `image-set()` and `@import` may name only a relative path, a local drive path or an inert `data:image/…` (SVG excluded). Values are CSS-unescaped before being judged, and remote ones are rewritten to `about:blank`. This matters because `img-src https:` is deliberately open, so the CSP does **not** stop a `background-image` beacon. |
 | SEC-22 | **FIXED** | `exec()` with an interpolated path on the WSL export route became `execFile()` with an argument vector, so no shell ever re-parses the filename. **Caveat: not executed end-to-end** — the branch is `process.platform === "linux"` only and this machine is Windows. Syntax- and review-checked, not run. |
 | SEC-24 | **WON'T FIX** (by design) | Session restore re-opens the previously-open documents on launch. That is the feature the fork exists for, and every injection route it could re-arm (SEC-01..07, SEC-12/13/14, SEC-21, SEC-26) is now closed at the source. Recorded so the trade is explicit rather than overlooked. |
 | SEC-25 | **FIXED** | The no-op `sanitize: false` option is deleted from `marked.setOptions`, with a comment naming DOMPurify as the sole sanitization boundary. Info-severity documentation defect; nothing behavioural changed, so it carries no test. |
@@ -1124,7 +1124,7 @@ Code signing needs a certificate and a secret store; it is a real gap and is
 recorded here rather than quietly dropped.
 
 **Also noted, out of scope here:** there is no CI workflow that *runs the tests*
-— 391 assertions across 9 suites, and a release is cut with no gate at all.
+— 421 assertions across 9 suites, and a release is cut with no gate at all.
 Headless Electron on a Linux runner needs `xvfb` and is its own piece of work.
 
 ---
@@ -1261,6 +1261,53 @@ assertion caught it; the tokenizer now treats a hex escape as a single unit.
 exactly the five blocking assertions — style attribute, CSS escape, protocol-relative,
 `image-set()`, `<style>` element — while the three "legitimate CSS survives" controls stay
 green, which is the correct signature for a control that only removes things.
+
+### The first version of this filter was broken, and dual review found it
+
+The regex filter above passed its own tests and was committed. Two independent reviews then
+found **three separate bypass classes**, none of which the tests covered. Each was confirmed
+live against Chromium — the engine really does resolve them into a network fetch — before
+being fixed:
+
+| # | Payload | Why the regex missed it | Found by |
+|---|---|---|---|
+| 1 | `url("ht\`<LF>`tps://evil/")` | A backslash-newline inside a CSS string is a **line continuation**: it is consumed and produces nothing (CSS Syntax L3 §4.3.5). The engine sees `https:`; the regex saw `ht\<LF>tps` with no scheme and classed it "relative, therefore safe". | Opus |
+| 2 | `\75rl(…)`, `\69mage-set(…)`, `@im\70ort` | Escapes were decoded inside the *value* but the filter still matched the **identifier** by literal text. The identifier can be escaped too. | Codex |
+| 3 | `<svg><style>…</style></svg>` | The `<style>` branch tested `tagName === 'STYLE'`. `tagName` is upper-cased only for HTML-namespace elements; an SVG `<style>` reports lower-case `style`, so SVG stylesheets were skipped **entirely**. DOMPurify keeps SVG by default. | Opus |
+
+**The lesson is structural, not three separate patches.** All three are the same failure:
+a hand-written tokenizer disagreeing with the engine that will actually parse the string.
+Patching three regexes would leave the fourth unfound. So the filter now **delegates
+tokenizing to Chromium** and filters the canonical result:
+
+- A style attribute is assigned to a detached element's `style.cssText` and read back.
+  Escapes are resolved, `image-set("x")` becomes `image-set(url("x"))`, quoting is
+  normalised, and unparseable declarations are dropped exactly as they would be at render
+  time. `\75rl(//evil/)` comes back as `url("//evil/")` — which the existing check then
+  rejects.
+- A `<style>` element's text goes through `new CSSStyleSheet()` + `replaceSync()`.
+  `replaceSync` ignores `@import` **by specification**, which disposes of every escaped
+  spelling (`@\69mport`, `@im\70ort`, `@IMPORT`) without enumerating any of them.
+- Both probes are detached and never adopted into the document, so parsing them fetches
+  nothing. Verified.
+
+**The regex pass is still there, and still necessary.** Measured: Chromium does **not**
+canonicalise CSS custom properties — they are stored as raw token streams. `--evil:
+url("ht\<LF>tps://evil/")` survives normalisation verbatim, and `background-image:
+var(--evil)` then resolves it to a live URL (confirmed via `getComputedStyle`). Neither
+reviewer raised this; it turned up while probing the engine's actual behaviour rather than
+reasoning about it. So normalisation handles the standard declarations and the (now
+line-continuation-aware) regex handles what normalisation leaves raw.
+
+**Proof (R43).** Reverting `renderer.js` to the first committed version fails six of the
+seven new assertions. The seventh — a `style` attribute on an SVG *element* — passes either
+way, because attribute handling was never namespace-sensitive; it is kept as coverage
+against a future regression, not claimed as a proof.
+
+**Method note.** The bypasses were not found by reading the regexes, and would not have been.
+They were found by executing candidate payloads against Chromium and comparing what the
+engine resolved against what the filter believed. Any future change here should be validated
+the same way.
 
 ---
 
