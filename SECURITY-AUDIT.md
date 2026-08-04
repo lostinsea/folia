@@ -44,7 +44,7 @@ document. Everything marked FIXED below is covered by a regression test — in
 | SEC-06 | **FIXED** | OmniWare popup: DSL embedded via `toScriptLiteral()`, which escapes `<`, `>`, U+2028 and U+2029 so `</script` is unrepresentable. |
 | SEC-07 | **FIXED** | Mermaid popup: SVG passes through `stripActiveSvgContent()`, which now decodes numeric character references before stripping so `javascript&#58;` cannot survive the filter. The CSP below is the primary control. |
 | SEC-15 | **FIXED** | Table popup: table data embedded via a new `toJsonLiteral()` (`JSON.stringify` + `\u003c`/`\u003e`/U+2028/U+2029 escaping). `JSON.stringify` alone does not escape `<`, so a cell containing `</script>` terminated the generated script element. |
-| SEC-09 | **FIXED for the four popup windows**; open for the main window | Every generated popup document now carries a per-document nonce CSP: `default-src 'none'; script-src 'nonce-…'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`. All inline `on*=` handlers were converted to `addEventListener` to satisfy it. |
+| SEC-09 | **FIXED** (popups and main window) | Every generated popup document carries a per-document nonce CSP: `default-src 'none'; script-src 'nonce-…'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'`. All inline `on*=` handlers were converted to `addEventListener` to satisfy it. The main window now has a measured CSP too (`index.html:6-40`); see the SEC-09 entry for the directive-by-directive measurements, the `'unsafe-inline'` concession `@@@html` forces, and the `frame-ancestors` finding. |
 | SEC-11 | **FIXED** (popups and main window) | `registerPopup()` denies `will-navigate`, `will-redirect`, `will-frame-navigate` and `setWindowOpenHandler` on every popup, and `<meta>` is stripped from mermaid SVG. The main window now installs the same four guards, `<form>` is in `FORBID_TAGS`, `<area href>` is routed through the link policy, and `<iframe src>` is stripped in the sanitizer hook. See below — the CSP alone did **not** cover this. |
 | SEC-08 | **FIXED for the four popup windows**; open for the main window | Popups run `nodeIntegration: false, contextIsolation: true` behind `popup-preload.js`, which exposes only fixed channels — and only the single API that popup kind needs, selected by a `--popup-kind=` process argument, so script in one popup cannot drive another's privileged path. |
 | SEC-10 | **FIXED** earlier | Runtime libraries vendored locally; no CDN load. |
@@ -52,6 +52,7 @@ document. Everything marked FIXED below is covered by a regression test — in
 | SEC-14 | **FIXED** | Recent-files menu entries rebuilt with `createElement` + `textContent`. |
 | SEC-12 | **FIXED** | Local-file links now go through an extension policy applied to the *resolved* path (`realpathSync`, so a symlink is judged by its real target). Executables, script/macro formats and auto-mounting disk images are refused outright; inert documents and media open directly; `.svg`/`.pdf`/`.rtf` and anything unrecognised require an explicit confirmation naming the file. UNC / protocol-relative paths are rejected *before* `fs.existsSync()`, which was itself the network probe. |
 | SEC-16/17/18 | **FIXED** earlier | Dependency upgrades (24 advisories → 0). |
+| SEC-27 | **FIXED** | OmniWare's hand-drawn fonts were `@import`ed from fonts.googleapis.com and silently refused by the popup CSP, so every wireframe rendered in generic `cursive`. Fonts vendored locally and emitted as `@font-face` by `omniwareFontFaceCss()`. Found by the error sentinel, not by the audit. |
 
 ### Why the popup CSP is the primary control, not defence in depth
 
@@ -399,6 +400,138 @@ I grepped `main.js`, `renderer.js` and `index.html` for `Content-Security`, `ses
 Electron logs an explicit "Insecure Content-Security-Policy" warning for exactly this configuration.
 
 **Fix.** Add a restrictive CSP. Note this requires resolving SEC-10 first (the current CDN `<script>` tags would be blocked by `script-src 'self'` — which is the point).
+
+### FIXED — popups first, then the main window
+
+The popup documents were done earlier (nonce CSP, see SEC-05/06/07/15). The main
+window is now covered too, `index.html:6-40`.
+
+Every directive was **measured**, not reasoned about, with a throwaway probe that
+injected a candidate policy at runtime and reported what stopped working:
+
+| Directive | Measurement |
+|---|---|
+| `script-src 'self' 'unsafe-inline'` | With plain `'self'` the `@@@html` srcdoc frame's script stopped running — **and so did the app's own height-reporting script**, which lives in the same srcdoc (`buildRawHtmlDocument()`, `renderer.js:260`). `'unsafe-inline'` is a deliberate, recorded concession. |
+| no `'unsafe-eval'` | Measured: mermaid 11 and Prism render without it. |
+| `style-src 'self' 'unsafe-inline'` | Inline `style` attributes are an allowed sanitizer output (SEC-21) and the theme system writes inline styles. |
+| `img-src 'self' file: data: blob: https:` | `https:` kept **deliberately** — remote images in markdown are a real feature. Cleartext `http:` excluded. The read-receipt exposure is recorded here rather than traded away. |
+| `connect-src 'self' https://translate.googleapis.com` | The translate feature is the only outbound call the app makes. |
+| `default-src 'none'` + no `frame-src` | `frame-src` falls back to `'none'`, which still permits `about:srcdoc` frames (measured) while blocking every remote and local-file frame. |
+| `object-src 'none'`, `base-uri 'none'`, `form-action 'none'` | Complements the `FORBID_TAGS: ['form']` and navigation guards of SEC-11. |
+
+**Honest limitation.** CSP inheritance is the whole story here: an `about:srcdoc`
+frame runs under its embedder's policy, so `@@@html` cannot be given a stricter
+one than the window it sits in (blob: and data: inherit too; only a real custom
+protocol would escape). `'unsafe-inline'` therefore stays. The value this policy
+delivers is constraining what the window may **load and reach** — not defending
+against inline injection, which is moot anyway while `nodeIntegration: true`
+(SEC-08). Tightening `script-src` requires moving `@@@html` onto a custom
+protocol; that is a real option, and it is not done.
+
+**Two findings that came out of doing this, neither in the original audit:**
+
+1. **`frame-ancestors` is silently ignored in a `<meta>` policy**, and Chromium
+   logs an error for it on every load. It was present in the first draft of
+   `index.html` *and* had already shipped in `popupCsp()` (`main.js`), so every
+   popup open logged an error nobody was reading. Removed from both — it was
+   meaningless anyway for top-level Electron windows that nothing can embed.
+   (Same class: `sandbox` and `report-uri` are also meta-ignored.)
+2. **The new CSP shadowed an existing SEC-11 test.** The `@@@html`
+   subframe-navigation test began failing with `ERR_BLOCKED_BY_CSP`: with no
+   `frame-src`, Chromium refuses the navigation *before* `will-frame-navigate`
+   fires — and a CSP-blocked navigation still **commits an error document**, so
+   `frame.url` becomes the target either way, destroying the test's
+   discriminator. It could not be repaired by changing the target, because the
+   policy permits no frame destination at all. Rewritten: the end-to-end check
+   asserts the invariant, and the guard itself is driven directly with
+   `webContents.emit("will-frame-navigate", …)` and a synthetic event — which
+   additionally covers the `isMainFrame` early-return branch that no end-to-end
+   test can reach.
+
+**Collateral cleanup.** `index.html`'s two remaining inline `onclick` attributes
+(the file-update toast's Reload and Dismiss) are gone; Dismiss is now bound in
+`custom-tabs.js`'s `bindUpdatePrompt()`.
+
+**Tests.** 9 assertions in `test-render-security.js`, which bypass DOMPurify on
+purpose (building nodes with `document.createElement`) so the layer under test is
+the *policy*, not the sanitizer. Revert-proven: disabling the meta fails 7 of 9
+(the 2 controls correctly stay green); deleting the `will-frame-navigate`
+listener fails the "armed and denies" assertion; deleting the `isMainFrame`
+early return fails the "defers to will-navigate" assertion.
+
+---
+
+## SEC-27 — OmniWare's hand-drawn fonts were silently blocked by the popup CSP *(found by the error sentinel, not in the original audit)*
+
+**Severity: Low** (privacy + a visibly broken feature) · Confidence 10/10 · Upstream
+
+**Location:** `omniwire/omniware.js` (the `STYLES` template), `omniwire/omniware_preview.html`
+
+OmniWare's stylesheet pulled its two fonts with
+`@import url('https://fonts.googleapis.com/…')`. The popup CSP (SEC-06) allows no
+remote stylesheet, so the import was **refused on every wireframe** and the whole
+surface fell back to generic `cursive`. The only symptom was a console message,
+and nothing was reading the popup consoles — this is precisely the class of
+defect the error sentinel below was built to catch, and it was its first find.
+
+Two problems in one: a **broken feature** (the hand-drawn look is the entire
+point of OmniWare) and, had the CSP allowed it, a **third-party request on every
+diagram open**.
+
+**Fix.** Vendor the fonts rather than relax the CSP — consistent with SEC-16's
+un-CDN'ing. `@fontsource/architects-daughter` and `@fontsource/patrick-hand` are
+copied into `fonts/` by `scripts/vendor-libs.js`; `omniwareFontFaceCss()` in
+`main.js` emits `@font-face` rules into the popup `<head>`. The URLs must be
+**absolute** — these popups are written to `%TEMP%`, so a relative URL resolves
+against the temp directory — and are built with `url.pathToFileURL()` rather than
+string concatenation, which breaks on install paths containing a space or `#`.
+`popupCsp()`'s existing `font-src file: data:` already permits them.
+
+**Accepted gap:** the VS Code extension copies (`vscode-extension/media/omniwire/*`)
+still use the remote `@import`. That surface's CSP explicitly allows
+`fonts.googleapis.com`/`gstatic.com`, so it *works*; the offline/privacy nicety is
+deliberately out of scope here.
+
+**Test.** One assertion in `test-popup-security.js` — and the *first version of it
+was vacuous*, which is recorded because it is an easy trap:
+`document.fonts.check('16px "Patrick Hand"')` returns **true for a family nobody
+defined**, because the spec asks "can this font spec be rendered" and fallback
+always can. Reverting the fix did not fail it. It now asserts (a) a `FontFace`
+for the family is registered with `status === 'loaded'`, and (b) canvas
+`measureText` of the same string differs from a deliberately-absent family — the
+only evidence the vendored woff2 is what is actually being drawn with. Both
+reverts now fail as they should, and the rendered wireframe was checked by eye in
+`screenshots/omniware-fonts.png`.
+
+---
+
+## Continuous error sentinel *(test infrastructure, added while fixing SEC-09)*
+
+Prompted by the user reporting they could *see* syntax errors on screen during
+test runs while every suite reported 0 failures. The suites were blind to two
+whole classes of problem: **console errors** (parse failures, CSP refusals,
+rejected promises) and **errors that only exist as pixels** — mermaid draws its
+"Syntax error in text" bomb graphic and reports nothing, and a broken `<img>` is
+silent by design.
+
+`startErrorSentinel(win, opts)` in `test-visual-utils.js` watches both angles
+continuously for the whole run: a main-process `console-message` listener plus a
+300 ms in-page DOM poll, capturing a screenshot at the first sighting of each
+distinct problem. It is attached in all six Electron suites, one per window — 32
+of them in the popup suite, since each popup is a separate window with its own
+console.
+
+Deliberately-failing scenarios use narrow `mute()`/`unmute()` windows, and the
+mute *extent* is itself asserted (mermaid: "muted exactly once, and the mute
+really caught the failure it was opened for"; popups: "the injection probe was
+actually refused") — otherwise a scenario that stopped failing would go vacuous
+in silence.
+
+**It found three real defects on its first runs:** the two `frame-ancestors`
+console errors above, the OmniWare font regression (SEC-27), and a broken
+`<img src="x.png">` in a `test-render-patch.js` fixture — which was fixed by
+pointing the fixture at a real image, i.e. by removing the broken image from the
+app under test rather than teaching the harness to tolerate it.
 
 ---
 

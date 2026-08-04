@@ -11,6 +11,7 @@ const path = require("path");
 const {
   inspectVisual,
   captureScreenshot,
+  startErrorSentinel,
 } = require("./test-visual-utils");
 
 require("./main.js");
@@ -54,6 +55,7 @@ function write(file, content) {
 
 async function run(win) {
   const exec = (code) => win.webContents.executeJavaScript(code, true);
+  const sentinel = startErrorSentinel(win, { label: "tabs" });
 
   write(fileA, "# Alpha\n\nALPHA_V1\n");
   write(fileB, "# Beta\n\nBETA_V1\n");
@@ -904,6 +906,13 @@ async function run(win) {
 
   const errors = await exec(`window.__e2eErrors || []`);
   check("no uncaught renderer errors", errors.length === 0, JSON.stringify(errors));
+
+  const sentinelReport = await sentinel.stop();
+  check(
+    "nothing rendered a visible error at any point during the suite",
+    sentinelReport.hits.length === 0,
+    JSON.stringify(sentinelReport.hits),
+  );
 }
 
 app.whenReady().then(async () => {

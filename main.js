@@ -86,9 +86,45 @@ function popupCsp(nonce, extraImgSrc) {
     "form-action 'none'",
     "base-uri 'none'",
     "frame-src 'none'",
-    "frame-ancestors 'none'",
+    // No frame-ancestors: it is ignored when the policy is delivered in a
+    // <meta> element, and Chromium logs an error for it every time one of
+    // these popups opens. It bought nothing anyway - these are top-level
+    // Electron windows that nothing can embed, and frame-src 'none' above
+    // already stops them embedding anything themselves.
     "object-src 'none'",
   ].join("; ");
+}
+
+// Local @font-face rules for OmniWare's two hand-drawn fonts.
+//
+// OmniWare's embedded stylesheet used to `@import` these from
+// fonts.googleapis.com. The popup CSP allows no remote stylesheet, so the
+// import was refused and every wireframe rendered in generic `cursive` - a
+// visibly broken feature that produced only a console message nobody was
+// watching. The fonts are vendored by scripts/vendor-libs.js; see the comment
+// there for why vendoring rather than allowing the domain.
+//
+// These popups are written to a temp directory, so the URL has to be absolute.
+// pathToFileURL, not string concatenation: an installation path containing a
+// space or a '#' silently produces a URL that resolves to nothing.
+function omniwareFontFaceCss() {
+  const url = (file) =>
+    require("url").pathToFileURL(path.join(__dirname, "fonts", file)).href;
+  return `
+@font-face {
+  font-family: 'Architects Daughter';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('${url("architects-daughter-latin-400-normal.woff2")}') format('woff2');
+}
+@font-face {
+  font-family: 'Patrick Hand';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('${url("patrick-hand-latin-400-normal.woff2")}') format('woff2');
+}`;
 }
 
 // Defence in depth for the mermaid popup, which has to interpolate real SVG
@@ -1729,6 +1765,7 @@ ipcMain.on("open-omniware-popup", (event, data) => {
     <meta http-equiv="Content-Security-Policy" content="${popupCsp(nonce)}">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>OmniWare Wireframe</title>
+    <style>${omniwareFontFaceCss()}</style>
     <style>
         body, html {
             margin: 0;

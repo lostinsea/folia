@@ -18,7 +18,10 @@ const OmniWare = (function () {
   // 1. EMBEDDED STYLES
   // ═══════════════════════════════════════════════════════════
   const STYLES = `
-@import url('https://fonts.googleapis.com/css2?family=Architects+Daughter&family=Patrick+Hand&display=swap');
+/* Fonts are provided by the host document as local @font-face rules - see
+   omniwareFontFaceCss() in main.js. This used to be an @import from
+   fonts.googleapis.com, which no popup CSP allows and which made the whole
+   hand-drawn look fall back to generic cursive. */
 
 :root {
   --ow-bg: #f8f6f1;

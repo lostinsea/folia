@@ -275,7 +275,6 @@ function buildRawHtmlDocument(code) {
 }
 
 // Registers the block's document and returns the iframe markup that will carry
-// Registers the block's document and returns the iframe markup that will carry
 // it. Call once per @@@html block, per render.
 //
 // The key is a 32-bit content hash chosen for stable DOM identity across

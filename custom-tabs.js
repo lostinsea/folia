@@ -1033,6 +1033,16 @@
     if (reloadBtn) {
       reloadBtn.onclick = reloadFromUpdatePrompt;
     }
+    // Both buttons used to carry inline onclick= attributes in index.html.
+    // Those are gone (SEC-09: they are the one thing a CSP cannot tell apart
+    // from injected markup), so Dismiss has to be wired here. Reload was
+    // already overridden below anyway - its inline handler called the
+    // *unguarded* reloadCurrentFile(), which discarded unsaved edits without
+    // asking.
+    const dismissBtn = document.getElementById("dismissFileUpdateBtn");
+    if (dismissBtn) {
+      dismissBtn.onclick = dismissUpdatePrompt;
+    }
   }
 
   // The overlay is loaded at the end of <body>, so DOMContentLoaded has not

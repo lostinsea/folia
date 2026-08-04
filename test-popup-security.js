@@ -13,6 +13,13 @@
 const { app, BrowserWindow, ipcMain, session } = require("electron");
 const fs = require("fs");
 const path = require("path");
+const { startErrorSentinel, captureScreenshot } = require("./test-visual-utils");
+
+// One watcher per popup window, collected as they are opened and drained at the
+// end of the run. Keyed by window id so a section that deliberately provokes an
+// error can mute the right one. See startErrorSentinel() in test-visual-utils.js.
+const popupSentinels = new Map();
+const sentinelOf = (popup) => popup && popupSentinels.get(popup.id);
 
 // ---------------------------------------------------------------------------
 // Where the exfil / navigation probes point.
@@ -105,6 +112,25 @@ async function openPopup(channel, payload, settleMs = 1800) {
     popup = BrowserWindow.getAllWindows().find((w) => !before.has(w.id)) || null;
   }
   if (!popup) return null;
+  // Every popup gets its own watcher: they are separate windows with separate
+  // consoles, so a sentinel on the main window sees nothing that happens in
+  // them. Started before the load settles so a failure during startup - the
+  // most likely moment for one - is not missed.
+  popupSentinels.set(
+    popup.id,
+    startErrorSentinel(popup, {
+      label: "popup-" + channel,
+      ignore: [
+        /net::ERR_NAME_NOT_RESOLVED/,
+        /Failed to load resource/i,
+        new RegExp(PROBE_HOST.replace(/\./g, "\\.")),
+        /example\.invalid/,
+      ],
+      // These popups are handed images on hosts chosen never to resolve
+      // (RFC 6761 .invalid), so a broken image here is the fixture, not a bug.
+      ignoreKinds: ["broken-image"],
+    }),
+  );
   if (popup.webContents.isLoading()) {
     await new Promise((resolve) => {
       popup.webContents.once("did-finish-load", resolve);
@@ -278,6 +304,64 @@ async function run() {
       dsl === trickyDsl,
       JSON.stringify({ got: dsl, want: trickyDsl }),
     );
+
+    // The hand-drawn fonts are the entire point of OmniWare's look. They were
+    // pulled from fonts.googleapis.com by an @import inside its stylesheet,
+    // which no popup CSP permits, so every wireframe rendered in the generic
+    // `cursive` fallback while the only symptom was a console message.
+    //
+    // document.fonts.check() is NOT usable here, and this comment exists
+    // because a first attempt used it and was proven vacuous by reverting the
+    // fix: check() answers "can this font spec be rendered", and a spec naming
+    // a family nobody defined is still renderable via fallback, so it returns
+    // true for a font that does not exist. Two things are asserted instead:
+    //   1. a FontFace for the family is actually registered and loaded, and
+    //   2. the glyphs measurably differ from the fallback - the only evidence
+    //      that the vendored woff2 is what is being drawn with.
+    const fonts = await popupEval(
+      popup,
+      `(async () => {
+         const families = ['Architects Daughter', 'Patrick Hand'];
+         // Force the fetch: @font-face files are lazy, and a family that has no
+         // rule at all simply resolves with nothing registered.
+         for (const f of families) { try { await document.fonts.load('40px "' + f + '"'); } catch (e) {} }
+         await document.fonts.ready;
+
+         const loaded = {};
+         for (const f of families) {
+           loaded[f] = [...document.fonts].some(ff => ff.family.replace(/["']/g, '') === f && ff.status === 'loaded');
+         }
+
+         // Same text, same fallback, only the first family differs. If the
+         // vendored face is really in use the widths cannot match.
+         const ctx = document.createElement('canvas').getContext('2d');
+         const sample = 'Wireframe handwriting 12345';
+         const widthOf = (fam) => { ctx.font = '40px "' + fam + '", monospace'; return ctx.measureText(sample).width; };
+         const base = widthOf('Mdv Deliberately Absent Family');
+         const distinct = {};
+         for (const f of families) distinct[f] = Math.abs(widthOf(f) - base) > 1;
+
+         return {
+           loaded,
+           distinct,
+           remoteImports: [...document.styleSheets].some(s => {
+             try { return [...s.cssRules].some(r => String(r.cssText).includes('fonts.googleapis.com')); }
+             catch (e) { return false; }
+           })
+         };
+       })()`,
+    );
+    check(
+      "FEATURE omniware's hand-drawn fonts load locally, with no remote import",
+      fonts &&
+        fonts.loaded["Architects Daughter"] === true &&
+        fonts.loaded["Patrick Hand"] === true &&
+        fonts.distinct["Architects Daughter"] === true &&
+        fonts.distinct["Patrick Hand"] === true &&
+        fonts.remoteImports === false,
+      JSON.stringify(fonts),
+    );
+    await captureScreenshot(popup, "omniware-fonts");
   }
   await closeAll();
 
@@ -390,6 +474,12 @@ async function run() {
 
     // Inject a script the way an XSS payload would, and confirm the browser
     // refuses to run it because it carries no nonce.
+    //
+    // Every refusal below is logged to the popup's console, so the watcher has
+    // to be muted here or the run fails on its own probes. Muted per popup and
+    // only for this block: a CSP refusal anywhere else in this suite is a real
+    // finding - that is how the OmniWare font regression was caught.
+    sentinelOf(popup).mute(`CSP ${label} popup: deliberate injection probe`);
     const injected = await popupEval(
       popup,
       `(async () => {
@@ -431,6 +521,18 @@ async function run() {
       injected && injected.fileRead === "blocked" && injected.exfil === "blocked",
       JSON.stringify(injected),
     );
+    // Assert the probe really did provoke refusals. Without this, a CSP that
+    // stopped being applied would show up here as a quiet, empty mute.
+    const probeMute = sentinelOf(popup).currentMute();
+    check(
+      `CSP ${label} popup's injection probe was actually refused by the policy`,
+      !!probeMute &&
+        probeMute.suppressed.some((s) =>
+          /Content Security Policy|violates the following/i.test(s.detail || ""),
+        ),
+      JSON.stringify(probeMute),
+    );
+    sentinelOf(popup).unmute();
     await closeAll();
   }
 
@@ -891,6 +993,21 @@ async function run() {
     "SEC-12 popups can only ever emit image loads, never any other request type",
     nonImage.length === 0,
     JSON.stringify(nonImage.slice(0, 5)),
+  );
+
+  // Every popup this suite opened was watched for console errors and for
+  // errors that only ever appear on screen. The count assertion is what keeps
+  // it honest: if openPopup ever stops attaching a watcher, an empty hit list
+  // would otherwise read as a clean run.
+  const popupHits = [];
+  for (const s of popupSentinels.values()) {
+    const r = await s.stop();
+    popupHits.push(...r.hits);
+  }
+  check(
+    "every popup was watched, and none rendered a visible error",
+    popupSentinels.size > 0 && popupHits.length === 0,
+    JSON.stringify({ watched: popupSentinels.size, hits: popupHits }),
   );
 }
 

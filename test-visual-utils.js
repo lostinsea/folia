@@ -302,9 +302,207 @@ async function captureScreenshot(win, name) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Error sentinel.
+//
+// Written after a run was observed to *show* errors on screen while every
+// assertion passed. That is the exact failure mode this module exists to close:
+// end-of-run screenshots only capture the final frame, and a red error graphic
+// that appears mid-suite and is then overwritten by the next render leaves no
+// trace in either the screenshots or the results.
+//
+// The sentinel watches continuously instead of at chosen moments, from two
+// independent angles:
+//
+//   * the renderer's console, via webContents 'console-message'. This is the
+//     only way to see a script parse failure, a CSP refusal or a rejected
+//     promise, none of which leave anything in the DOM.
+//   * the rendered document, polled. Some errors are *only* visual - mermaid
+//     draws its own red "Syntax error" graphic and reports nothing, and a
+//     broken <img> is silent by design.
+//
+// On the first sighting of each distinct problem it captures a screenshot, so
+// there is always an artifact showing what was on screen at that instant.
+//
+// Deliberate negative tests need mute()/unmute() around them, and those
+// windows are reported too - an un-reviewed mute is how a sentinel quietly
+// stops being a gate.
+// ---------------------------------------------------------------------------
+
+function inPageErrorScan() {
+  var out = [];
+  var seenText = {};
+
+  function push(kind, detail) {
+    var key = kind + "|" + detail;
+    if (seenText[key]) return;
+    seenText[key] = true;
+    out.push({ kind: kind, detail: String(detail).slice(0, 200) });
+  }
+
+  function scanDoc(doc, where) {
+    if (!doc || !doc.body) return;
+
+    // Mermaid's own failure graphic. It reports nothing to the console: the
+    // library catches the parse error and draws a bomb icon plus the words
+    // "Syntax error in text", so the DOM is the only place it is visible.
+    var errSvgs = doc.querySelectorAll(
+      'svg[aria-roledescription="error"], .mermaid svg .error-icon, .mermaid svg .error-text',
+    );
+    if (errSvgs.length) push("mermaid-error-graphic", where + " x" + errSvgs.length);
+
+    var body = doc.body.textContent || "";
+    var phrases = [
+      "Syntax error in text",
+      "Mermaid Rendering Error",
+      "Uncaught SyntaxError",
+      "SyntaxError:",
+      "No diagram type detected",
+    ];
+    for (var i = 0; i < phrases.length; i++) {
+      if (body.indexOf(phrases[i]) >= 0) push("error-text-on-screen", where + ": " + phrases[i]);
+    }
+
+    // A broken image is only detectable once it has settled: `complete` is
+    // true both for a finished load and for a failed one, and naturalWidth
+    // separates them. Images with no src are skipped - those are placeholders
+    // the app fills in later, not failures.
+    var imgs = doc.querySelectorAll("img");
+    for (var j = 0; j < imgs.length; j++) {
+      var im = imgs[j];
+      if (!im.getAttribute("src")) continue;
+      if (im.complete && im.naturalWidth === 0) {
+        push("broken-image", where + ": " + String(im.getAttribute("src")).slice(0, 120));
+      }
+    }
+  }
+
+  scanDoc(document, "top");
+
+  // Same-origin frames only. The @@@html sandbox frames are origin-opaque on
+  // purpose, so reaching into them throws; that is the feature working, not a
+  // gap, and their content is author HTML the app makes no promises about.
+  var frames = document.querySelectorAll("iframe");
+  for (var k = 0; k < frames.length; k++) {
+    try {
+      scanDoc(frames[k].contentDocument, "frame" + k);
+    } catch (e) {
+      /* opaque origin - expected */
+    }
+  }
+
+  return out;
+}
+
+const ERROR_SCAN_SOURCE = "(" + inPageErrorScan.toString() + ")()";
+
+/**
+ * Start watching a window for errors. Returns a handle; call stop() at the end
+ * of the suite and assert on the report.
+ *
+ * @param {BrowserWindow} win
+ * @param {object} [opts]
+ * @param {string} [opts.label]      prefix for screenshot filenames
+ * @param {RegExp[]} [opts.ignore]   console messages that are expected noise
+ * @param {string[]} [opts.ignoreKinds] whole categories to skip, e.g.
+ *        "broken-image" for a suite whose fixtures point at paths that are
+ *        deliberately absent
+ * @param {number} [opts.intervalMs] DOM poll period
+ */
+function startErrorSentinel(win, opts) {
+  const o = opts || {};
+  const label = o.label || "sentinel";
+  const ignore = o.ignore || [];
+  const ignoreKinds = new Set(o.ignoreKinds || []);
+  const hits = [];
+  const mutes = [];
+  const seen = new Set();
+  let muted = null;
+  let shots = 0;
+  let stopped = false;
+
+  const record = async (kind, detail) => {
+    if (stopped) return;
+    if (ignoreKinds.has(kind)) return;
+    const key = kind + "|" + detail;
+    if (seen.has(key)) return;
+    seen.add(key);
+    if (muted) {
+      muted.suppressed.push({ kind, detail });
+      return;
+    }
+    // Capture before anything else can repaint over it. The screenshot is an
+    // artifact for a human; the hit itself is what the assertion reads.
+    let shot = null;
+    if (shots < 12) {
+      shots += 1;
+      shot = await captureScreenshot(win, `${label}-error-${shots}`);
+    }
+    hits.push({ kind, detail, shot });
+  };
+
+  // Electron changed this event's signature; accept both forms rather than
+  // pinning to one and silently receiving `undefined` after an upgrade.
+  const onConsole = (event, level, message, line, sourceId) => {
+    const lvl = event && typeof event === "object" && "level" in event ? event.level : level;
+    const msg = event && typeof event === "object" && "message" in event ? event.message : message;
+    const src =
+      event && typeof event === "object" && "sourceId" in event ? event.sourceId : sourceId;
+    const text = String(msg || "");
+    const isError = lvl === "error" || lvl === 3 || /^\s*Uncaught\b/.test(text);
+    if (!isError) return;
+    if (ignore.some((re) => re.test(text))) return;
+    record("console-error", `${text} @ ${src || "?"}:${line || 0}`);
+  };
+  win.webContents.on("console-message", onConsole);
+
+  const timer = setInterval(async () => {
+    if (stopped || win.isDestroyed()) return;
+    try {
+      const found = await win.webContents.executeJavaScript(ERROR_SCAN_SOURCE, true);
+      for (const f of found || []) await record(f.kind, f.detail);
+    } catch (e) {
+      /* the page is mid-navigation or the harness is tearing down */
+    }
+  }, o.intervalMs || 300);
+
+  return {
+    /** Suppress recording while a deliberately-failing scenario runs. */
+    mute(reason) {
+      muted = { reason, suppressed: [] };
+      // Dedupe state is per-window: a message already seen unmuted must still
+      // be captured here, or a mute could silently record nothing and the
+      // "the probe really did fire" assertions would go vacuous.
+      seen.clear();
+    },
+    /** The mute currently in effect, so a suite can assert it caught what it opened for. */
+    currentMute() {
+      return muted;
+    },
+    unmute() {
+      if (muted) mutes.push(muted);
+      muted = null;
+      // Forget what was seen while muted, so a problem that outlives the
+      // muted window is still reported once it does.
+      seen.clear();
+    },
+    async stop() {
+      stopped = true;
+      clearInterval(timer);
+      try {
+        win.webContents.off("console-message", onConsole);
+      } catch (e) {
+        /* window already gone */
+      }
+      return { hits, mutes };
+    },
+  };
+}
+
 module.exports = {
   VISUAL_PROBE_SOURCE,
   inspectVisual,
   captureScreenshot,
+  startErrorSentinel,
   SHOT_DIR,
 };

@@ -25,7 +25,10 @@ const OmniWare = (function () {
   // 1. EMBEDDED STYLES
   // ═══════════════════════════════════════════════════════════
   const STYLES = `
-@import url('https://fonts.googleapis.com/css2?family=Architects+Daughter&family=Patrick+Hand&display=swap');
+@font-face { font-family: 'Architects Daughter'; font-style: normal; font-weight: 400; font-display: swap;
+  src: url('../fonts/architects-daughter-latin-400-normal.woff2') format('woff2'); }
+@font-face { font-family: 'Patrick Hand'; font-style: normal; font-weight: 400; font-display: swap;
+  src: url('../fonts/patrick-hand-latin-400-normal.woff2') format('woff2'); }
 
 :root {
   --ow-bg: #f8f6f1;

@@ -26,7 +26,7 @@ const { app, BrowserWindow, ipcMain } = require("electron");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { VISUAL_PROBE_SOURCE, inspectVisual, captureScreenshot } = require("./test-visual-utils");
+const { VISUAL_PROBE_SOURCE, inspectVisual, captureScreenshot, startErrorSentinel } = require("./test-visual-utils");
 
 require("./main.js");
 
@@ -139,6 +139,11 @@ const DIAGRAMS_READY = `
 
 async function run(win) {
   const exec = (code) => win.webContents.executeJavaScript(code, true);
+
+  // Watches the whole suite, not just the moments a screenshot is taken. See
+  // startErrorSentinel() for why: a red mermaid error graphic that appears and
+  // is then repainted over leaves no trace in an end-of-run screenshot.
+  const sentinel = startErrorSentinel(win, { label: "mermaid" });
 
   fs.writeFileSync(fileM, DOC, "utf8");
   fs.writeFileSync(filePlain, DOC_PLAIN, "utf8");
@@ -941,6 +946,12 @@ async function run(win) {
     "mermaid.run was not a function; the section below would be vacuous",
   );
 
+  // This section makes a render fail on purpose, so the "stale draw failed"
+  // console error below is the scenario working. Muted narrowly rather than
+  // added to the sentinel's ignore list: an ignore pattern would hide that
+  // message for the whole suite, including the places it would be a real bug.
+  sentinel.mute("deliberate stale-draw failure (race probe 3)");
+
   exec(`renderMarkdown(window.fs.readFileSync(${jsRace}, 'utf8'), 'full')`).catch(() => {});
   await waitFor(exec, "the losing render to park in its draw", `window.__parkedA === true`);
   exec(`renderMarkdown(window.fs.readFileSync(${jsRace2}, 'utf8'), 'full')`).catch(() => {});
@@ -1000,6 +1011,7 @@ async function run(win) {
       afterFail.text.includes("RaceTwo2"),
     JSON.stringify({ beforeFail, afterFail }),
   );
+  sentinel.unmute();
   await exec(`window.mermaid.run = window.__savedRun3; true`);
 
   // ==========================================================================
@@ -1170,6 +1182,28 @@ async function run(win) {
     "PERF-07 a catch-up pass from a superseded generation renders nothing",
     staleRun.count > 0 && staleRun.changed === 0,
     JSON.stringify(staleRun),
+  );
+
+  // Everything above ran with the sentinel watching. This is the assertion the
+  // end-of-run screenshot could never make: nothing visibly broke at any point
+  // during the suite, not merely at the moments we happened to look.
+  const sentinelReport = await sentinel.stop();
+  check(
+    "nothing rendered a visible error at any point during the suite",
+    sentinelReport.hits.length === 0,
+    JSON.stringify(sentinelReport.hits),
+  );
+  // A mute is the sentinel's only blind spot, so its extent is asserted too.
+  // Exactly one window, and it must have actually caught the failure it was
+  // opened for - otherwise the deliberate-failure scenario stopped failing and
+  // the section above went vacuous without saying so.
+  check(
+    "the sentinel was muted exactly once, for the deliberate failure",
+    sentinelReport.mutes.length === 1 &&
+      sentinelReport.mutes[0].suppressed.some((s) =>
+        /stale draw failed/.test(s.detail),
+      ),
+    JSON.stringify(sentinelReport.mutes),
   );
 }
 

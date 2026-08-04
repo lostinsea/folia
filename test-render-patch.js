@@ -133,6 +133,8 @@ const TOP_BLOCKS = `
 `;
 
 async function run(win) {
+  const { startErrorSentinel } = require("./test-visual-utils");
+  const sentinel = startErrorSentinel(win, { label: "patch" });
   const exec = (c) => win.webContents.executeJavaScript(c, true);
 
   await exec(`localStorage.clear(); null`);
@@ -566,7 +568,12 @@ async function run(win) {
   //     elsewhere replaced an untouched image on every render. Removing them
   //     from _BLOCK_WRAPPER_CLASSES drops imgKept to 0.
   // ---------------------------------------------------------------------
-  const IMGDOC = '# Images\n\nintro paragraph\n\n<img src="x.png" alt="one">\n\ntail paragraph\n';
+  // A real file, not a placeholder: this block is compared by DOM identity, and
+  // a src that 404s renders a broken-image icon that the error sentinel (quite
+  // rightly) fails the run for. Using an image that actually loads also makes
+  // the check stronger - the reused node is one that really painted.
+  const IMGDOC =
+    '# Images\n\nintro paragraph\n\n<img src="markdown_viewer_icon.png" alt="one">\n\ntail paragraph\n';
   await render(exec, IMGDOC, "full");
   await exec(TAG_ALL);
   await render(exec, IMGDOC.replace("intro paragraph", "intro paragraph edited"), "full");
@@ -619,6 +626,13 @@ async function run(win) {
 
   const noErrors = await exec(`JSON.stringify(window.__testErrors || [])`);
   check("no uncaught renderer errors", noErrors === "[]", noErrors);
+
+  const sentinelReport = await sentinel.stop();
+  check(
+    "nothing rendered a visible error at any point during the suite",
+    sentinelReport.hits.length === 0,
+    JSON.stringify(sentinelReport.hits),
+  );
 }
 
 app.whenReady().then(async () => {
