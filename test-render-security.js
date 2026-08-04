@@ -29,7 +29,11 @@ function check(name, ok, detail) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const { startErrorSentinel, proveSentinelAlive } = require("./test-visual-utils");
+const {
+  startErrorSentinel,
+  proveSentinelAlive,
+  captureScreenshot,
+} = require("./test-visual-utils");
 
 async function run(win) {
   const exec = (code) => win.webContents.executeJavaScript(code, true);
@@ -1103,6 +1107,137 @@ async function run(win) {
       frameState.sandbox === "allow-scripts",
     JSON.stringify(frameState),
   );
+
+  // SEC-21 - inline `style` cannot be removed from the allowlist (notes, themes
+  // and upstream markdown all use it), so CSS is a fetch surface the link policy
+  // never sees. `img-src https:` is deliberately open, so the CSP does not stop
+  // a background-image beacon either. These drive the real sanitizer.
+  await render(
+    "# CSS\n\n" +
+      '<div id="css-remote" style="color:rgb(1,2,3);background-image:url(https://probe.invalid/beacon?doc=secret)">a</div>\n\n' +
+      '<div id="css-escaped" style="background-image:url(\\68 ttps://probe.invalid/esc)">b</div>\n\n' +
+      '<div id="css-share" style="background-image:url(//probe.invalid/share/x.png)">c</div>\n\n' +
+      '<div id="css-imageset" style="background-image:-webkit-image-set(&quot;https://probe.invalid/set.png&quot; 1x)">d</div>\n\n' +
+      '<div id="css-data" style="background-image:url(data:image/png;base64,iVBORw0KGgo=)">e</div>\n\n' +
+      '<div id="css-relative" style="background-image:url(pics/local.png)">f</div>\n\n' +
+      "<style>@import url(https://probe.invalid/sheet.css); .x { background: url(https://probe.invalid/in-style.png); }</style>\n",
+    "full",
+    1200,
+  );
+  const cssState = await exec(`
+    (() => {
+      const at = (id) => {
+        const el = document.getElementById(id);
+        return el ? (el.getAttribute('style') || '') : 'NO-ELEMENT';
+      };
+      const styleEl = document.querySelector('#viewer style');
+      return {
+        remote: at('css-remote'),
+        escaped: at('css-escaped'),
+        share: at('css-share'),
+        imageset: at('css-imageset'),
+        data: at('css-data'),
+        relative: at('css-relative'),
+        styleText: styleEl ? styleEl.textContent : 'NO-STYLE-ELEMENT'
+      };
+    })()
+  `);
+  const noProbe = (s) => typeof s === "string" && !s.includes("probe.invalid");
+  check(
+    "SEC-21 a remote CSS url() in a style attribute is neutralised",
+    noProbe(cssState.remote) && cssState.remote.includes('url("about:blank")'),
+    JSON.stringify(cssState.remote),
+  );
+  // Control: neutralising the URL must not destroy the rest of the declaration,
+  // otherwise the fix is indistinguishable from dropping `style` altogether -
+  // which is the outcome this whole entry exists to avoid.
+  check(
+    "SEC-21 the surviving declarations in that style attribute are untouched",
+    typeof cssState.remote === "string" &&
+      /rgb\(1,\s*2,\s*3\)/.test(cssState.remote),
+    JSON.stringify(cssState.remote),
+  );
+  check(
+    "SEC-21 a CSS-escaped scheme (\\68 ttps:) does not bypass the filter",
+    noProbe(cssState.escaped) && cssState.escaped.includes('url("about:blank")'),
+    JSON.stringify(cssState.escaped),
+  );
+  check(
+    "SEC-21 a protocol-relative CSS url() is neutralised (SMB/NTLM leak)",
+    noProbe(cssState.share) && cssState.share.includes('url("about:blank")'),
+    JSON.stringify(cssState.share),
+  );
+  check(
+    "SEC-21 image-set(), which needs no url() wrapper, is neutralised too",
+    noProbe(cssState.imageset),
+    JSON.stringify(cssState.imageset),
+  );
+  check(
+    "SEC-21 an inert data:image URL is kept, so legitimate CSS still works",
+    typeof cssState.data === "string" &&
+      cssState.data.includes("data:image/png;base64"),
+    JSON.stringify(cssState.data),
+  );
+  check(
+    "SEC-21 a relative CSS url() is kept",
+    typeof cssState.relative === "string" &&
+      cssState.relative.includes("pics/local.png") &&
+      !cssState.relative.includes("about:blank"),
+    JSON.stringify(cssState.relative),
+  );
+  check(
+    "SEC-21 a <style> element's text is filtered, and @import removed entirely",
+    typeof cssState.styleText === "string" &&
+      cssState.styleText !== "NO-STYLE-ELEMENT" &&
+      !cssState.styleText.includes("probe.invalid") &&
+      !/@import/i.test(cssState.styleText),
+    JSON.stringify(cssState.styleText),
+  );
+
+  // The SEC-21 hook rewrites the `style` attribute on EVERY sanitized document,
+  // so it can plausibly break ordinary formatting rather than only the hostile
+  // case. The assertions above cannot see that - they read attribute text, not
+  // pixels. This renders a document of ordinary inline-styled markdown and
+  // leaves a screenshot for a human to look at, which is how the mermaid theme
+  // bug was caught after seventeen geometry assertions missed it.
+  await render(
+    "# Styled document\n\n" +
+      '<p style="color:#e06c75;font-size:20px">Coloured, larger text.</p>\n\n' +
+      '<p style="background:#2c313a;padding:12px;border-left:4px solid #61afef">' +
+      "A callout with a background, padding and a border.</p>\n\n" +
+      '<span style="font-weight:bold">Bold via inline style</span> and ' +
+      '<span style="text-decoration:underline">underline</span>.\n\n' +
+      "| Col | Value |\n|---|---|\n| a | 1 |\n| b | 2 |\n",
+    "full",
+    900,
+  );
+  const styledLook = await exec(`
+    (() => {
+      const ps = [...document.querySelectorAll('#viewer p')];
+      const cs = (el) => el ? getComputedStyle(el) : null;
+      const a = cs(ps[0]);
+      const b = cs(ps[1]);
+      return {
+        colour: a && a.color,
+        size: a && a.fontSize,
+        background: b && b.backgroundColor,
+        padding: b && b.paddingLeft,
+        border: b && b.borderLeftWidth
+      };
+    })()
+  `);
+  // Tier-1 gate for the same thing the screenshot shows, so this never depends
+  // on someone remembering to look.
+  check(
+    "SEC-21 ordinary inline styling still reaches the rendered page",
+    styledLook.colour === "rgb(224, 108, 117)" &&
+      styledLook.size === "20px" &&
+      styledLook.background === "rgb(44, 49, 58)" &&
+      styledLook.padding === "12px" &&
+      styledLook.border === "4px",
+    JSON.stringify(styledLook),
+  );
+  await captureScreenshot(win, "security-inline-styles");
 
   // An @@@html frame relocating itself is the one path that exercises the
   // will-frame-navigate branch. Without a test here, inverting the isMainFrame

@@ -60,6 +60,51 @@ function makeNonce() {
   return crypto.randomBytes(16).toString("base64");
 }
 
+/**
+ * Write a generated popup document to a private temp directory.
+ *
+ * SEC-20 — the previous paths were fixed and guessable
+ * (`os.tmpdir()/omnicore-temp-<kind>.html`). On Linux and macOS `os.tmpdir()`
+ * is the world-writable `/tmp`, so an unprivileged local process can pre-create
+ * that exact path as a symlink; `fs.writeFileSync` follows symlinks, which
+ * turns opening a popup into an arbitrary file write as the user.
+ * `mkdtempSync` creates a fresh directory with an unpredictable name and 0700
+ * permissions, and `flag: "wx"` refuses to write at all if anything is already
+ * sitting at the target.
+ *
+ * It also fixes a plain functional bug that had nothing to do with security:
+ * one fixed filename *per popup kind* meant a second mermaid diagram
+ * overwrote the first one's file, and whichever popup closed first deleted the
+ * file out from under the other.
+ *
+ * @returns {{dir: string, file: string}} pass to removePopupDocument() on close
+ */
+function writePopupDocument(kind, htmlContent) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omnicore-"));
+  const file = path.join(dir, `${kind}.html`);
+  fs.writeFileSync(file, htmlContent, {
+    encoding: "utf8",
+    flag: "wx",
+    mode: 0o600,
+  });
+  return { dir, file };
+}
+
+/**
+ * Remove a popup's temp directory and everything in it.
+ *
+ * The whole directory goes, not just the file: it is ours alone, and leaving
+ * empty directories behind on every popup close is its own slow leak.
+ */
+function removePopupDocument(tmp) {
+  if (!tmp || !tmp.dir) return;
+  try {
+    fs.rmSync(tmp.dir, { recursive: true, force: true });
+  } catch (err) {
+    console.error("Error cleaning up popup temp directory:", err);
+  }
+}
+
 // Content-Security-Policy for the generated popup documents.
 //
 // This, not the regex filtering below, is the real control. These documents are
@@ -281,7 +326,7 @@ function saveWindowState() {
     }
   }, 400);
 }
-const { exec } = require("child_process");
+const { execFile } = require("child_process");
 
 // PERF-01: html-to-docx costs ~370ms to require and is only needed by the two
 // DOCX export handlers, which most sessions never invoke. Loaded on first use.
@@ -828,12 +873,19 @@ ipcMain.on("open-folder-in-explorer", (event, filePath) => {
 // ============================================
 
 // Open a file with the system default app; handles WSL2 by converting to Windows path
+// SEC-22: `exec` runs its argument through a shell, where a path containing
+// `$(...)`, backticks or a backslash escape is interpreted rather than treated
+// as text - the surrounding double quotes do not neutralise any of those. The
+// path comes from a save dialog, so exploiting it needs the user's own
+// cooperation, but there is no reason to accept the risk: `execFile` passes the
+// argument vector to the process directly and never constructs a command line
+// for a shell to re-parse.
 function openFileAfterExport(filePath) {
   if (process.platform === "linux") {
     // In WSL2, use wslpath to get the Windows UNC path, then open with explorer.exe
-    exec(`wslpath -w "${filePath}"`, (err, winPath) => {
+    execFile("wslpath", ["-w", filePath], (err, winPath) => {
       if (!err && winPath && winPath.trim()) {
-        exec(`explorer.exe "${winPath.trim()}"`, (err2) => {
+        execFile("explorer.exe", [winPath.trim()], (err2) => {
           if (err2) shell.showItemInFolder(filePath);
         });
       } else {
@@ -1365,9 +1417,6 @@ ipcMain.on("open-mermaid-popup", (event, data) => {
 
   popupWindow.setMenu(null);
 
-  // Write a temporary HTML file in system temp directory
-  const tempHtmlPath = path.join(os.tmpdir(), "omnicore-temp-mermaid.html");
-
   // Create HTML with pan/zoom using matrix transform approach
   const nonce = makeNonce();
   const htmlContent = `<!DOCTYPE html>
@@ -1657,20 +1706,14 @@ ipcMain.on("open-mermaid-popup", (event, data) => {
 </html>`;
 
   // Write temp HTML file
-  fs.writeFileSync(tempHtmlPath, htmlContent);
+  const tmpDoc = writePopupDocument("mermaid", htmlContent);
 
   // Load the HTML file
-  popupWindow.loadFile(tempHtmlPath);
+  popupWindow.loadFile(tmpDoc.file);
 
   // Clean up temp file after window closes
   popupWindow.on("closed", () => {
-    try {
-      if (fs.existsSync(tempHtmlPath)) {
-        fs.unlinkSync(tempHtmlPath);
-      }
-    } catch (err) {
-      console.error("Error cleaning up temp file:", err);
-    }
+    removePopupDocument(tmpDoc);
   });
 
   // Handle PDF export request from this popup window
@@ -1756,7 +1799,6 @@ ipcMain.on("open-omniware-popup", (event, data) => {
   // template literal but not the surrounding <script> (SEC-06).
   const dslLiteral = toScriptLiteral(dslCode);
 
-  const tempHtmlPath = path.join(os.tmpdir(), "omnicore-temp-omniware.html");
   const nonce = makeNonce();
   const htmlContent = `<!DOCTYPE html>
 <html lang="en">
@@ -1820,8 +1862,8 @@ ipcMain.on("open-omniware-popup", (event, data) => {
 </body>
 </html>`;
 
-  fs.writeFileSync(tempHtmlPath, htmlContent, "utf8");
-  popupWindow.loadFile(tempHtmlPath);
+  const tmpDoc = writePopupDocument("omniware", htmlContent);
+  popupWindow.loadFile(tmpDoc.file);
 
   // Handle PDF export from popup
   const omniwarePdfHandler = async (event) => {
@@ -1861,11 +1903,7 @@ ipcMain.on("open-omniware-popup", (event, data) => {
   // Clean up temp file and listener on close
   popupWindow.on("closed", () => {
     ipcMain.removeListener("omniware-export-pdf", omniwarePdfHandler);
-    try {
-      fs.unlinkSync(tempHtmlPath);
-    } catch (e) {
-      /* ignore */
-    }
+    removePopupDocument(tmpDoc);
   });
 });
 
@@ -1888,7 +1926,6 @@ ipcMain.on("open-image-popup", (event, data) => {
 
   popupWindow.setMenu(null);
 
-  const tempHtmlPath = path.join(os.tmpdir(), "omnicore-temp-image.html");
   const bg = isDarkMode ? "#1a1a1a" : "#f0f0f0";
   const uiBg = isDarkMode ? "#2d2d2d" : "#ffffff";
   const uiBorder = isDarkMode ? "#404040" : "transparent";
@@ -2111,14 +2148,10 @@ ipcMain.on("open-image-popup", (event, data) => {
 </body>
 </html>`;
 
-  fs.writeFileSync(tempHtmlPath, htmlContent, "utf8");
-  popupWindow.loadFile(tempHtmlPath);
+  const tmpDoc = writePopupDocument("image", htmlContent);
+  popupWindow.loadFile(tmpDoc.file);
   popupWindow.on("closed", () => {
-    try {
-      fs.unlinkSync(tempHtmlPath);
-    } catch (e) {
-      /* ignore */
-    }
+    removePopupDocument(tmpDoc);
   });
 });
 
@@ -2201,9 +2234,6 @@ ipcMain.on("open-table-popup", (event, data) => {
   registerPopup(popupWindow, "table");
 
   popupWindow.setMenu(null);
-
-  // Write a temporary HTML file in system temp directory
-  const tempHtmlPath = path.join(os.tmpdir(), "omnicore-temp-table.html");
 
   // Read Tabulator files from local directory
   const tabulatorJsPath = path.join(
@@ -2504,20 +2534,14 @@ ipcMain.on("open-table-popup", (event, data) => {
 </html>`;
 
   // Write temp HTML file
-  fs.writeFileSync(tempHtmlPath, htmlContent);
+  const tmpDoc = writePopupDocument("table", htmlContent);
 
   // Load the HTML file
-  popupWindow.loadFile(tempHtmlPath);
+  popupWindow.loadFile(tmpDoc.file);
 
   // Clean up temp file after window closes
   popupWindow.on("closed", () => {
-    try {
-      if (fs.existsSync(tempHtmlPath)) {
-        fs.unlinkSync(tempHtmlPath);
-      }
-    } catch (err) {
-      console.error("Error cleaning up temp file:", err);
-    }
+    removePopupDocument(tmpDoc);
   });
 });
 
@@ -2875,17 +2899,41 @@ ipcMain.on("install-update", () => {
     // Portable .exe: quitAndInstall() doesn't work.
     // Launch the downloaded NSIS installer via a temp batch script (waits for app to exit first).
     try {
-      const batchPath = path.join(os.tmpdir(), "omnicore-update.bat");
+      // SEC-20: this used to be a fixed path in the shared temp directory,
+      // written and then executed - a local process that wins that race gets
+      // code execution as the user. mkdtempSync gives an unpredictable 0700
+      // directory, and "wx" refuses to write if anything is already there.
+      const batchDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "omnicore-update-"),
+      );
+      const batchPath = path.join(batchDir, "update.bat");
       const batch =
         [
           "@echo off",
           "timeout /t 2 /nobreak > nul",
           `start "" "${downloadedUpdatePath}"`,
-          'del "%~f0"',
+          // Step out of the directory before removing it, then use the
+          // self-deleting-batch idiom: `(goto) 2>nul` makes cmd release its
+          // handle on the script so the whole private directory can go, rather
+          // than leaving one behind on every portable update.
+          'cd /d "%TEMP%"',
+          `(goto) 2>nul & rmdir /s /q "${batchDir}"`,
         ].join("\r\n") + "\r\n";
-      fs.writeFileSync(batchPath, batch, "utf8");
-      const { exec } = require("child_process");
-      exec(`start /min "" cmd /c "${batchPath}"`);
+      fs.writeFileSync(batchPath, batch, {
+        encoding: "utf8",
+        flag: "wx",
+        mode: 0o600,
+      });
+      // spawn with an argument array rather than exec with an interpolated
+      // command string: the path never passes through a shell that could
+      // re-parse a quote in it. detached + windowsHide replaces `start /min`,
+      // so the updater outlives the app.quit() below without a console window.
+      const { spawn } = require("child_process");
+      spawn("cmd.exe", ["/c", batchPath], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true,
+      }).unref();
       log("Portable update: batch script launched, quitting app");
       app.quit();
     } catch (err) {

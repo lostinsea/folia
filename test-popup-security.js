@@ -12,6 +12,7 @@
 // kind of change that silently breaks a title, an image or a wireframe.
 const { app, BrowserWindow, ipcMain, session } = require("electron");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const { startErrorSentinel, captureScreenshot } = require("./test-visual-utils");
 
@@ -1009,6 +1010,96 @@ async function run() {
     "SEC-12 popups can only ever emit image loads, never any other request type",
     nonImage.length === 0,
     JSON.stringify(nonImage.slice(0, 5)),
+  );
+
+  // ==========================================================================
+  // SEC-20 — the generated popup document must live in a private, unguessable
+  // temp directory, not at a fixed path in the shared one.
+  //
+  // The old paths were `os.tmpdir()/omnicore-temp-<kind>.html`. On Linux and
+  // macOS that directory is world-writable, so a local process can pre-create
+  // the exact path as a symlink and `fs.writeFileSync` follows it - opening a
+  // popup becomes an arbitrary file write as the user.
+  //
+  // Driven through the real IPC entry point, so what is measured is where the
+  // document the popup actually loaded came from.
+  // ==========================================================================
+  const tmpRoot = os.tmpdir();
+  const mermaidA = await openPopup("open-mermaid-popup", {
+    svg: "<svg xmlns='http://www.w3.org/2000/svg'><text>A</text></svg>",
+    isDarkMode: true,
+  });
+  const mermaidB = await openPopup("open-mermaid-popup", {
+    svg: "<svg xmlns='http://www.w3.org/2000/svg'><text>B</text></svg>",
+    isDarkMode: true,
+  });
+  const pathOf = (p) => {
+    if (!p) return null;
+    try {
+      return decodeURIComponent(new URL(p.webContents.getURL()).pathname).replace(/^\//, "");
+    } catch (e) {
+      return null;
+    }
+  };
+  // A file:// URL yields forward slashes while os.tmpdir() yields backslashes
+  // on Windows, so the two are normalised before being compared. Without this
+  // the directory clause below silently compares unequal strings and passes no
+  // matter where the document lives - a vacuous assertion of exactly the kind
+  // this suite exists to avoid.
+  const sameDir = (a, b) =>
+    !!a && !!b && path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+  const pathA = pathOf(mermaidA);
+  const pathB = pathOf(mermaidB);
+  check(
+    "SEC-20 the popup document is not at the old fixed, guessable temp path",
+    !!pathA &&
+      !/omnicore-temp-mermaid\.html$/.test(pathA) &&
+      !sameDir(path.dirname(pathA), tmpRoot),
+    JSON.stringify({ pathA, tmpRoot }),
+  );
+  // Two popups of the same kind used to share one filename, so the second
+  // overwrote the first and whichever closed first deleted the other's
+  // document. That is a plain bug as well as the security problem.
+  check(
+    "SEC-20 two popups of the same kind get separate private directories",
+    !!pathA && !!pathB && !sameDir(path.dirname(pathA), path.dirname(pathB)),
+    JSON.stringify({ dirA: pathA && path.dirname(pathA), dirB: pathB && path.dirname(pathB) }),
+  );
+  // A pre-existing path must be refused rather than written through, which is
+  // what makes the symlink swap fail instead of succeeding quietly.
+  const squatDir = fs.mkdtempSync(path.join(tmpRoot, "mdv-squat-"));
+  const squatFile = path.join(squatDir, "taken.html");
+  fs.writeFileSync(squatFile, "original", "utf8");
+  let squatRefused = false;
+  try {
+    fs.writeFileSync(squatFile, "overwritten", { encoding: "utf8", flag: "wx" });
+  } catch (e) {
+    squatRefused = e && e.code === "EEXIST";
+  }
+  check(
+    "SEC-20 the 'wx' flag the fix relies on really does refuse an existing path",
+    squatRefused === true && fs.readFileSync(squatFile, "utf8") === "original",
+    JSON.stringify({ squatRefused, content: fs.readFileSync(squatFile, "utf8") }),
+  );
+  fs.rmSync(squatDir, { recursive: true, force: true });
+
+  // Closing one must not disturb the other, and must take its own directory
+  // with it rather than leaking one per popup.
+  const dirA = pathA && path.dirname(pathA);
+  const dirB = pathB && path.dirname(pathB);
+  if (mermaidA) mermaidA.close();
+  await sleep(700);
+  check(
+    "SEC-20 closing one popup removes only its own document, not the other's",
+    !!dirA && !!dirB && !fs.existsSync(dirA) && fs.existsSync(dirB),
+    JSON.stringify({ aGone: !fs.existsSync(dirA), bStillThere: fs.existsSync(dirB) }),
+  );
+  if (mermaidB) mermaidB.close();
+  await sleep(700);
+  check(
+    "SEC-20 the temp directory is cleaned up when the popup closes",
+    !!dirB && !fs.existsSync(dirB),
+    JSON.stringify({ dirB, stillThere: dirB && fs.existsSync(dirB) }),
   );
 
   // Every popup this suite opened was watched for console errors and for

