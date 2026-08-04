@@ -457,18 +457,34 @@ async function run() {
       String(csp).slice(0, 120),
     );
 
-    // The document's own script must still have run, otherwise the CSP has
-    // simply broken the popup and the assertions below would pass vacuously.
+    // The document's own script must still have RUN. Counting <script nonce>
+    // tags is not that test and was found vacuous in review: a tag can be
+    // present while its script never executed (refused, thrown, aborted), and a
+    // popup broken that way still passes every CSP probe below, because a
+    // broken popup refuses injected script just as convincingly as a working
+    // one. So each case names an effect that only exists once its own script
+    // has run - and the nonce is read back via the IDL property, which is the
+    // only way to see it after Chromium's nonce-hiding clears the attribute.
     const alive = await popupEval(
       popup,
       `(() => {
-         const nonced = [...document.querySelectorAll('script[nonce]')].length;
-         return { nonced, body: document.body.innerHTML.length };
+         const tags = [...document.querySelectorAll('script[nonce]')];
+         return {
+           nonced: tags.length,
+           // Nonce hiding: getAttribute('nonce') is emptied once the document
+           // is parsed, precisely so injected script cannot read and reuse it.
+           nonceReadable: tags.some(t => typeof t.nonce === 'string' && t.nonce.length > 0),
+           ran: ${JSON.stringify(label)} === 'mermaid'  ? (typeof window.resetView === 'function' && !!(document.getElementById('viewport') || {}).style.transform)
+              : ${JSON.stringify(label)} === 'omniware' ? document.getElementById('render-target').childElementCount > 0
+              : ${JSON.stringify(label)} === 'image'    ? typeof window.resetView === 'function'
+              : document.getElementById('data-table').childElementCount > 0,
+           body: document.body.innerHTML.length,
+         };
        })()`,
     );
     check(
-      `CSP ${label} popup still has its own nonce-carrying script`,
-      alive && alive.nonced > 0,
+      `CSP ${label} popup's own nonce-carrying script actually ran`,
+      alive && alive.nonced > 0 && alive.nonceReadable === true && alive.ran === true,
       JSON.stringify(alive),
     );
 
@@ -479,7 +495,7 @@ async function run() {
     // to be muted here or the run fails on its own probes. Muted per popup and
     // only for this block: a CSP refusal anywhere else in this suite is a real
     // finding - that is how the OmniWare font regression was caught.
-    sentinelOf(popup).mute(`CSP ${label} popup: deliberate injection probe`);
+    await sentinelOf(popup).mute(`CSP ${label} popup: deliberate injection probe`);
     const injected = await popupEval(
       popup,
       `(async () => {
@@ -532,7 +548,7 @@ async function run() {
         ),
       JSON.stringify(probeMute),
     );
-    sentinelOf(popup).unmute();
+    await sentinelOf(popup).unmute();
     await closeAll();
   }
 
@@ -1000,14 +1016,24 @@ async function run() {
   // it honest: if openPopup ever stops attaching a watcher, an empty hit list
   // would otherwise read as a clean run.
   const popupHits = [];
-  for (const s of popupSentinels.values()) {
+  const popupStalls = [];
+  for (const [id, s] of popupSentinels) {
     const r = await s.stop();
     popupHits.push(...r.hits);
+    for (const st of r.stalls) popupStalls.push({ popup: id, ...st });
   }
   check(
     "every popup was watched, and none rendered a visible error",
     popupSentinels.size > 0 && popupHits.length === 0,
     JSON.stringify({ watched: popupSentinels.size, hits: popupHits }),
+  );
+  // A sentinel that could not reach its window did not observe anything, so an
+  // empty hit list from it means nothing. Reported separately from hits so the
+  // two failure modes are never confused.
+  check(
+    "no popup sentinel stalled trying to reach its window",
+    popupStalls.length === 0,
+    JSON.stringify(popupStalls),
   );
 }
 

@@ -26,7 +26,7 @@ const { app, BrowserWindow, ipcMain } = require("electron");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { VISUAL_PROBE_SOURCE, inspectVisual, captureScreenshot, startErrorSentinel } = require("./test-visual-utils");
+const { VISUAL_PROBE_SOURCE, inspectVisual, captureScreenshot, startErrorSentinel, proveSentinelAlive, LIVENESS_MUTE_REASON } = require("./test-visual-utils");
 
 require("./main.js");
 
@@ -950,7 +950,7 @@ async function run(win) {
   // console error below is the scenario working. Muted narrowly rather than
   // added to the sentinel's ignore list: an ignore pattern would hide that
   // message for the whole suite, including the places it would be a real bug.
-  sentinel.mute("deliberate stale-draw failure (race probe 3)");
+  await sentinel.mute("deliberate stale-draw failure (race probe 3)");
 
   exec(`renderMarkdown(window.fs.readFileSync(${jsRace}, 'utf8'), 'full')`).catch(() => {});
   await waitFor(exec, "the losing render to park in its draw", `window.__parkedA === true`);
@@ -1011,7 +1011,7 @@ async function run(win) {
       afterFail.text.includes("RaceTwo2"),
     JSON.stringify({ beforeFail, afterFail }),
   );
-  sentinel.unmute();
+  await sentinel.unmute();
   await exec(`window.mermaid.run = window.__savedRun3; true`);
 
   // ==========================================================================
@@ -1187,6 +1187,17 @@ async function run(win) {
   // Everything above ran with the sentinel watching. This is the assertion the
   // end-of-run screenshot could never make: nothing visibly broke at any point
   // during the suite, not merely at the moments we happened to look.
+  // Prove the watcher was actually watching. Without this, "no errors were
+  // recorded" and "the watcher silently stopped working" are the same result -
+  // the exact vacuity this harness exists to eliminate. Both detection paths
+  // are checked because they fail independently.
+  const alive = await proveSentinelAlive(win, sentinel);
+  check(
+    "the error sentinel was demonstrably watching both channels",
+    alive.console === true && alive.dom === true,
+    JSON.stringify(alive),
+  );
+
   const sentinelReport = await sentinel.stop();
   check(
     "nothing rendered a visible error at any point during the suite",
@@ -1194,15 +1205,18 @@ async function run(win) {
     JSON.stringify(sentinelReport.hits),
   );
   // A mute is the sentinel's only blind spot, so its extent is asserted too.
-  // Exactly one window, and it must have actually caught the failure it was
-  // opened for - otherwise the deliberate-failure scenario stopped failing and
-  // the section above went vacuous without saying so.
+  // Exactly one *test-opened* window (proveSentinelAlive opens its own, which is
+  // subtracted by reason rather than by loosening this to a >= count), and it
+  // must have actually caught the failure it was opened for - otherwise the
+  // deliberate-failure scenario stopped failing and the section above went
+  // vacuous without saying so.
+  const testMutes = sentinelReport.mutes.filter(
+    (m) => m.reason !== LIVENESS_MUTE_REASON,
+  );
   check(
     "the sentinel was muted exactly once, for the deliberate failure",
-    sentinelReport.mutes.length === 1 &&
-      sentinelReport.mutes[0].suppressed.some((s) =>
-        /stale draw failed/.test(s.detail),
-      ),
+    testMutes.length === 1 &&
+      testMutes[0].suppressed.some((s) => /stale draw failed/.test(s.detail)),
     JSON.stringify(sentinelReport.mutes),
   );
 }

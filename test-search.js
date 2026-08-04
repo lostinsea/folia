@@ -19,7 +19,7 @@ const { app, BrowserWindow } = require("electron");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { inspectVisual, captureScreenshot, startErrorSentinel } = require("./test-visual-utils");
+const { inspectVisual, captureScreenshot, startErrorSentinel, proveSentinelAlive } = require("./test-visual-utils");
 
 require("./main.js");
 
@@ -526,6 +526,17 @@ async function run(win) {
       afterSwapBack.live === 12 &&
       afterSwapBack.inViewer === 12,
     JSON.stringify(afterSwapBack),
+  );
+
+  // Prove the watcher was actually watching. Without this, "no errors were
+  // recorded" and "the watcher silently stopped working" are the same result -
+  // the exact vacuity this harness exists to eliminate. Both detection paths
+  // are checked because they fail independently.
+  const alive = await proveSentinelAlive(win, sentinel);
+  check(
+    "the error sentinel was demonstrably watching both channels",
+    alive.console === true && alive.dom === true,
+    JSON.stringify(alive),
   );
 
   const sentinelReport = await sentinel.stop();

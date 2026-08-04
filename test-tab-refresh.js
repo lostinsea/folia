@@ -12,6 +12,7 @@ const {
   inspectVisual,
   captureScreenshot,
   startErrorSentinel,
+  proveSentinelAlive,
 } = require("./test-visual-utils");
 
 require("./main.js");
@@ -330,8 +331,45 @@ async function run(win) {
     ),
   );
 
-  // Realistic sequence: the prompt is raised while the tab is clean, the user
-  // then starts a view-mode edit, and only afterwards clicks Reload.
+  // Same for Dismiss. Its inline onclick was removed for SEC-09 (no inline
+  // handlers under the new CSP) and rebound in custom-tabs.js, which made this
+  // a silently-untested path: a click that no longer reaches
+  // dismissFileUpdateNotification() leaves the toast on screen until the
+  // 10-second auto-hide, and nothing else in the suite would notice. Driven
+  // through a real click on the real element, not by calling the function.
+  const dismissState = await exec(`
+    (() => {
+      const btn = document.getElementById('dismissFileUpdateBtn');
+      const toast = document.getElementById('fileUpdateToast');
+      if (!btn || !toast) return { missing: true, btn: !!btn, toast: !!toast };
+      toast.classList.add('show');
+      window.__dismissProbe = 0;
+      const orig = window.dismissFileUpdateNotification;
+      window.dismissFileUpdateNotification = function () {
+        window.__dismissProbe += 1;
+        return orig.apply(this, arguments);
+      };
+      try {
+        btn.click();
+      } finally {
+        window.dismissFileUpdateNotification = orig;
+      }
+      return {
+        bound: typeof btn.onclick === 'function',
+        calls: window.__dismissProbe,
+        visible: toast.classList.contains('show'),
+      };
+    })()
+  `);
+  check(
+    "prompt Dismiss button is bound and really dismisses the toast",
+    dismissState.bound === true &&
+      dismissState.calls === 1 &&
+      dismissState.visible === false,
+    JSON.stringify(dismissState),
+  );
+
+
   write(fileA, "# Alpha\n\nALPHA_V12\n");
   await sleep(2200);
   const promptBeforeDecline = await promptShown();
@@ -906,6 +944,17 @@ async function run(win) {
 
   const errors = await exec(`window.__e2eErrors || []`);
   check("no uncaught renderer errors", errors.length === 0, JSON.stringify(errors));
+
+  // Prove the watcher was actually watching. Without this, "no errors were
+  // recorded" and "the watcher silently stopped working" are the same result -
+  // the exact vacuity this harness exists to eliminate. Both detection paths
+  // are checked because they fail independently.
+  const alive = await proveSentinelAlive(win, sentinel);
+  check(
+    "the error sentinel was demonstrably watching both channels",
+    alive.console === true && alive.dom === true,
+    JSON.stringify(alive),
+  );
 
   const sentinelReport = await sentinel.stop();
   check(

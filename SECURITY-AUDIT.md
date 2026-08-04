@@ -534,6 +534,53 @@ console errors above, the OmniWare font regression (SEC-27), and a broken
 pointing the fixture at a real image, i.e. by removing the broken image from the
 app under test rather than teaching the harness to tolerate it.
 
+### What a dual-model review of the sentinel then found
+
+The sentinel was reviewed independently by two models. Everything below was
+verified by reverting the fix and watching the assertion fail, not by reading
+code.
+
+| Defect | Why it mattered |
+|---|---|
+| `record()` early-returned once `stop()` had been called, and `stop()` never awaited work already in flight | A real error observed in the very last poll was either dropped or landed in `hits` *after* the report had been read. The hit is now pushed **before** any `await`; only the screenshot, which needs a live window, is skipped while stopping. |
+| `setInterval` with an async callback | It re-fires whether or not the previous scan finished, so scans overlapped and interleaved their `record()` calls. Replaced with a chained `setTimeout`. |
+| Muting was racy | `console-message` crosses an IPC boundary, so it does **not** arrive merely because an awaited `executeJavaScript` resolved. A violation could land just after `unmute()` and fail the run non-deterministically. `mute()`, `unmute()` and `stop()` now `await drain()` — a renderer round-trip, a settle, a scan, and the pending records. |
+| `seen` was cleared only on `unmute()` | A message already recorded unmuted was silently skipped *inside* a later mute, making "the probe really fired" assertions vacuous. Now cleared on both edges. |
+| Nothing proved the watcher was alive | `hits.length === 0` and "the watcher silently stopped working" were the same result — the exact vacuity the harness exists to remove. `proveSentinelAlive()` now provokes a marked `console.error` **and** an on-screen error node inside a mute, and asserts **both channels** reported. They fail independently: breaking the console path reported `{console:false, dom:true}` and breaking the DOM poll reported `{console:true, dom:false}`. |
+| An unbounded `executeJavaScript` could hang the harness | Electron leaves the promise **pending forever** when a window is destroyed mid-call — it does not reject. The popup suite hung at teardown and surfaced only as an opaque 240 s suite timeout naming neither the phase nor the window. Every sentinel round-trip is now bounded and a stall is *reported* (`report.stalls`, asserted empty) rather than waited on. A window destroyed mid-flight is ordinary teardown and deliberately not counted as a stall. |
+
+### Two assertions that were passing while proving nothing
+
+Both were found by **reverting the fix** and seeing the test still pass. Neither
+was visible by reading the test.
+
+1. **`document.fonts.check('16px "Patrick Hand"')` returns `true` for a family
+   nobody ever defined.** The spec asks "can this font spec be rendered", and
+   fallback always can. Removing the entire `@font-face` injection did not fail
+   the test. It now requires a registered `FontFace` with `status === 'loaded'`
+   **and** a canvas `measureText` width that differs from a deliberately-absent
+   family.
+2. **Counting `<script nonce>` tags does not prove the script ran.** A
+   completely broken popup refuses injected script just as convincingly as a
+   working one, so every CSP probe stayed green either way. Replaced with a
+   per-popup-kind side effect that only exists once the real script executed
+   (`window.resetView`, `#render-target` children, `#data-table` rows). Proven:
+   with a deliberately mismatched nonce, all four fail and the sentinel catches
+   16 console errors — the old assertion passed.
+
+### A test that was failing for a reason that was not the app's fault
+
+`SEC-09 plugin content is refused by object-src 'none'` failed intermittently,
+and only when the security suite ran after another suite. It was not a timing
+race — polling for eight seconds still saw nothing. **Chromium only fetches
+`<object data>` once the element has been laid out, and it throttles rendering
+for an occluded or background window**, which is exactly what this window is
+during an unattended full-suite run. Never laid out, never fetched, never
+refused — against a policy that was working perfectly. The probe now forces
+layout synchronously, and the assertion reports the element's own geometry
+alongside the violation list so the two failure modes can never be confused
+again.
+
 ---
 
 ## SEC-10 — Core libraries loaded from a public CDN with no Subresource Integrity, into the Node-privileged renderer

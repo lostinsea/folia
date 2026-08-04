@@ -397,6 +397,26 @@ function inPageErrorScan() {
 const ERROR_SCAN_SOURCE = "(" + inPageErrorScan.toString() + ")()";
 
 /**
+ * Reject with a tagged, identifiable error if `p` has not settled in `ms`.
+ *
+ * Used only to bound the sentinel's own renderer round-trips: the instrument
+ * must never be able to hang the harness, because a hang surfaces as an opaque
+ * suite-wide timeout that names neither the phase nor the window.
+ */
+function withTimeout(p, ms, tag) {
+  let t;
+  const timeout = new Promise((_, reject) => {
+    t = setTimeout(() => {
+      const e = new Error(`timed out after ${ms}ms: ${tag}`);
+      e.isTimeout = true;
+      e.tag = tag;
+      reject(e);
+    }, ms);
+  });
+  return Promise.race([p, timeout]).finally(() => clearTimeout(t));
+}
+
+/**
  * Start watching a window for errors. Returns a handle; call stop() at the end
  * of the suite and assert on the report.
  *
@@ -408,6 +428,7 @@ const ERROR_SCAN_SOURCE = "(" + inPageErrorScan.toString() + ")()";
  *        "broken-image" for a suite whose fixtures point at paths that are
  *        deliberately absent
  * @param {number} [opts.intervalMs] DOM poll period
+ * @param {number} [opts.drainTimeoutMs] budget for each renderer round-trip
  */
 function startErrorSentinel(win, opts) {
   const o = opts || {};
@@ -416,13 +437,36 @@ function startErrorSentinel(win, opts) {
   const ignoreKinds = new Set(o.ignoreKinds || []);
   const hits = [];
   const mutes = [];
+  // Places where the sentinel could not reach the renderer within its budget.
+  // A stalled instrument is not a clean run, so this is reported alongside the
+  // hits and the suites assert it is empty.
+  const stalls = [];
   const seen = new Set();
   let muted = null;
   let shots = 0;
   let stopped = false;
+  let timer = null;
+  let inFlight = Promise.resolve();
+  // Async record() calls started from the console listener, which has no
+  // caller to await it. stop() and drain() settle these before reporting.
+  const pending = [];
+  const track = (p) => {
+    pending.push(p);
+    return p;
+  };
+
+  // A call issued while the window was alive and destroyed mid-flight never
+  // settles - Electron leaves the executeJavaScript promise pending forever
+  // rather than rejecting it. For popups, which this suite closes as it goes,
+  // that is ordinary teardown and not an instrument failure. It is only a real
+  // stall if the window is still there and simply did not answer.
+  const noteStall = (e) => {
+    if (!e || !e.isTimeout) return;
+    if (win.isDestroyed()) return;
+    stalls.push({ phase: e.tag, at: new Date().toISOString() });
+  };
 
   const record = async (kind, detail) => {
-    if (stopped) return;
     if (ignoreKinds.has(kind)) return;
     const key = kind + "|" + detail;
     if (seen.has(key)) return;
@@ -431,14 +475,19 @@ function startErrorSentinel(win, opts) {
       muted.suppressed.push({ kind, detail });
       return;
     }
-    // Capture before anything else can repaint over it. The screenshot is an
-    // artifact for a human; the hit itself is what the assertion reads.
-    let shot = null;
-    if (shots < 12) {
+    // Record the hit BEFORE anything async. `stopped` must not gate this:
+    // stop() can be reached while a scan is mid-flight, and dropping the hit
+    // there would turn a real error observed in the last poll into a clean
+    // run. Only the screenshot - which needs a live window - is skipped once
+    // the window is going away.
+    const hit = { kind, detail, shot: null };
+    hits.push(hit);
+    if (!stopped && shots < 12 && !win.isDestroyed()) {
       shots += 1;
-      shot = await captureScreenshot(win, `${label}-error-${shots}`);
+      // Capture before anything else can repaint over it. The screenshot is an
+      // artifact for a human; the hit itself is what the assertion reads.
+      hit.shot = await captureScreenshot(win, `${label}-error-${shots}`);
     }
-    hits.push({ kind, detail, shot });
   };
 
   // Electron changed this event's signature; accept both forms rather than
@@ -452,11 +501,18 @@ function startErrorSentinel(win, opts) {
     const isError = lvl === "error" || lvl === 3 || /^\s*Uncaught\b/.test(text);
     if (!isError) return;
     if (ignore.some((re) => re.test(text))) return;
-    record("console-error", `${text} @ ${src || "?"}:${line || 0}`);
+    // Tracked so stop() and drain() can wait for it. record() is async because
+    // of the screenshot, and an unawaited one could otherwise land in `hits`
+    // after the suite had already read its supposedly final report.
+    track(record("console-error", `${text} @ ${src || "?"}:${line || 0}`));
   };
   win.webContents.on("console-message", onConsole);
 
-  const timer = setInterval(async () => {
+  // One scan at a time, chained rather than overlapped. setInterval with an
+  // async callback fires again whether or not the previous scan finished, so a
+  // slow executeJavaScript (or a screenshot) used to let scans pile up and
+  // interleave their record() calls.
+  const scanOnce = async () => {
     if (stopped || win.isDestroyed()) return;
     try {
       const found = await win.webContents.executeJavaScript(ERROR_SCAN_SOURCE, true);
@@ -464,11 +520,58 @@ function startErrorSentinel(win, opts) {
     } catch (e) {
       /* the page is mid-navigation or the harness is tearing down */
     }
-  }, o.intervalMs || 300);
+  };
+  const tick = () => {
+    if (stopped) return;
+    inFlight = scanOnce().finally(() => {
+      if (!stopped) timer = setTimeout(tick, o.intervalMs || 300);
+    });
+  };
+  timer = setTimeout(tick, o.intervalMs || 300);
+
+  /**
+   * Wait until everything the renderer has already emitted has reached us.
+   *
+   * console-message crosses an IPC boundary, so it does NOT arrive just
+   * because an awaited executeJavaScript resolved. Without this, closing a
+   * mute right after a probe is a race: the violation the mute exists to
+   * absorb can land a moment later, unmuted, and fail the run
+   * non-deterministically.
+   *
+   * The round trip forces the renderer to process a message from us, which
+   * flushes what it queued before; the scan then covers the DOM side.
+   */
+  const drain = async () => {
+    if (!win.isDestroyed()) {
+      try {
+        // Bounded: a renderer wedged behind a native dialog (or one Chromium
+        // has throttled while occluded) never settles executeJavaScript, and an
+        // unbounded await here hangs the whole harness at teardown - reported
+        // only as an opaque suite-level timeout. A stall is a finding, so it is
+        // recorded and surfaced in the report rather than waited on forever.
+        await withTimeout(
+          win.webContents.executeJavaScript("void 0", true),
+          o.drainTimeoutMs || 5000,
+          "renderer round-trip",
+        );
+        await new Promise((r) => setTimeout(r, 60));
+        await withTimeout(scanOnce(), o.drainTimeoutMs || 5000, "dom scan");
+      } catch (e) {
+        noteStall(e);
+        /* otherwise: the page is mid-navigation or the harness is tearing down */
+      }
+    }
+    await Promise.allSettled(pending);
+    pending.length = 0;
+  };
 
   return {
+    drain,
     /** Suppress recording while a deliberately-failing scenario runs. */
-    mute(reason) {
+    async mute(reason) {
+      // Drain first: anything already emitted belongs to the *previous*
+      // section and must not be swallowed by this mute.
+      await drain();
       muted = { reason, suppressed: [] };
       // Dedupe state is per-window: a message already seen unmuted must still
       // be captured here, or a mute could silently record nothing and the
@@ -479,7 +582,10 @@ function startErrorSentinel(win, opts) {
     currentMute() {
       return muted;
     },
-    unmute() {
+    async unmute() {
+      // Drain before lifting the mute, so a violation still in flight from the
+      // deliberate failure is absorbed by the mute that was opened for it.
+      await drain();
       if (muted) mutes.push(muted);
       muted = null;
       // Forget what was seen while muted, so a problem that outlives the
@@ -487,16 +593,89 @@ function startErrorSentinel(win, opts) {
       seen.clear();
     },
     async stop() {
+      // Stop scheduling new scans before draining, so the final drain is the
+      // last thing that touches the window.
+      clearTimeout(timer);
+      await drain();
       stopped = true;
-      clearInterval(timer);
+      // Whatever was already running still gets to finish and report - but
+      // bounded, for the same reason drain() is: a scan awaiting a wedged
+      // renderer must not be able to hang teardown.
+      try {
+        await withTimeout(
+          Promise.allSettled([inFlight, ...pending]),
+          o.drainTimeoutMs || 5000,
+          "settle in-flight scans",
+        );
+      } catch (e) {
+        noteStall(e);
+      }
       try {
         win.webContents.off("console-message", onConsole);
       } catch (e) {
         /* window already gone */
       }
-      return { hits, mutes };
+      return { hits, mutes, stalls };
     },
   };
+}
+
+/**
+ * Reason string on the mute proveSentinelAlive() opens. Exported so a suite that
+ * asserts on the *extent* of its blind spots can subtract the liveness window
+ * without loosening the assertion to a bare count.
+ */
+const LIVENESS_MUTE_REASON = "sentinel liveness probe";
+
+/**
+ * Prove a sentinel is actually watching, by making it catch something on
+ * purpose.
+ *
+ * Without this, "no errors were recorded" is indistinguishable from "the
+ * watcher stopped working" — the exact vacuity this harness exists to avoid. It
+ * exercises BOTH detection paths independently, because they fail
+ * independently: the main-process console-message listener (which an Electron
+ * signature change could silently break) and the in-page DOM poll (which a
+ * navigation, a destroyed window or a rejected executeJavaScript could stall).
+ *
+ * Runs inside a mute, so the probes it provokes never count as findings.
+ *
+ * @returns {Promise<{console: boolean, dom: boolean}>} which paths reported.
+ */
+async function proveSentinelAlive(win, sentinel) {
+  const marker = "sentinel-liveness-probe-" + Date.now();
+  await sentinel.mute(LIVENESS_MUTE_REASON);
+  try {
+    await win.webContents.executeJavaScript(
+      `(() => {
+         console.error(${JSON.stringify(marker)});
+         // The DOM path looks for mermaid's error graphic by its phrases; give
+         // it one, in a node that is removed again immediately afterwards.
+         const d = document.createElement('div');
+         d.id = ${JSON.stringify(marker)};
+         d.textContent = 'Syntax error in text';
+         d.style.cssText = 'position:fixed;left:-9999px;top:0;';
+         document.body.appendChild(d);
+       })()`,
+      true,
+    );
+    // drain() runs a full scan and flushes queued console messages, so both
+    // paths have had their chance by the time it returns.
+    await sentinel.drain();
+    const m = sentinel.currentMute();
+    const got = (m && m.suppressed) || [];
+    const result = {
+      console: got.some((s) => s.kind === "console-error" && s.detail.includes(marker)),
+      dom: got.some((s) => s.kind === "error-text-on-screen"),
+    };
+    await win.webContents.executeJavaScript(
+      `(() => { const n = document.getElementById(${JSON.stringify(marker)}); if (n) n.remove(); })()`,
+      true,
+    );
+    return result;
+  } finally {
+    await sentinel.unmute();
+  }
 }
 
 module.exports = {
@@ -504,5 +683,7 @@ module.exports = {
   inspectVisual,
   captureScreenshot,
   startErrorSentinel,
+  proveSentinelAlive,
+  LIVENESS_MUTE_REASON,
   SHOT_DIR,
 };

@@ -29,7 +29,7 @@ function check(name, ok, detail) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const { startErrorSentinel } = require("./test-visual-utils");
+const { startErrorSentinel, proveSentinelAlive } = require("./test-visual-utils");
 
 async function run(win) {
   const exec = (code) => win.webContents.executeJavaScript(code, true);
@@ -94,7 +94,7 @@ async function run(win) {
   // what the SEC-02 assertions are checking for (an SVG that is *not* a real
   // diagram). Muted narrowly so the same graphic appearing anywhere else in
   // this suite still fails the run.
-  sentinel.mute("SEC-02 feeds mermaid an unparseable payload on purpose");
+  await sentinel.mute("SEC-02 feeds mermaid an unparseable payload on purpose");
 
   const mermaidPayload =
     "# Doc\n\n```mermaid\n<img src=x onerror=\"window.__pwned='mermaid-full'\">\n```\n";
@@ -257,7 +257,7 @@ async function run(win) {
   );
   // A real diagram is on screen now, so the unparseable payloads are gone and
   // the sentinel can go back on watch.
-  sentinel.unmute();
+  await sentinel.unmute();
 
   // Mermaid syntax containing '<' must round-trip. Class diagrams use '<|--',
   // which an over-eager escape would corrupt into something mermaid rejects.
@@ -566,6 +566,16 @@ async function run(win) {
     resized.present === true && resized.height >= 600,
     JSON.stringify(resized),
   );
+  // Since SEC-09 landed this assertion carries a second, heavier job, recorded
+  // here because it is not obvious from its name: it is the control for
+  // `script-src 'unsafe-inline'`.
+  //
+  // The height is written by a script buildRawHtmlDocument() appends inside the
+  // srcdoc document (renderer.js:260), and an about:srcdoc frame inherits the
+  // embedder's CSP. Drop 'unsafe-inline' and that script never runs: no error
+  // is logged anywhere, the frame silently stays at its 50px min-height, and
+  // every @@@html block in the app is clipped. Verified by reverting the CSP to
+  // `script-src 'self'` - this assertion reports height 0.
 
   // ==========================================================================
   // Local image paths - the sanitizer hook must be narrow
@@ -1132,10 +1142,17 @@ async function run(win) {
   `);
   check(
     "SEC-11 an @@@html frame cannot reach a remote origin",
-    frameNav.present === true &&
-      frameNav.ran === true &&
-      win.webContents.getURL() === urlBeforeFrame,
+    frameNav.present === true && win.webContents.getURL() === urlBeforeFrame,
     JSON.stringify({ frameNav, subframeUrls, urlBeforeFrame }),
+  );
+  // Separated from the assertion above on review: it is not a SEC-11 control at
+  // all, it is the control for SEC-09's 'unsafe-inline'. An about:srcdoc frame
+  // inherits the embedder's policy, so if 'unsafe-inline' were dropped from
+  // script-src this inline script would not run and `ran` goes false.
+  check(
+    "SEC-09 an inline script inside an @@@html srcdoc frame still runs",
+    frameNav.ran === true,
+    JSON.stringify(frameNav),
   );
 
   // The end-to-end probe above can no longer tell the two layers apart. Since
@@ -1303,6 +1320,22 @@ async function run(win) {
     exec(
       `window.__csp.some(v => v.d.indexOf(${JSON.stringify(dir)}) === 0 && v.u.indexOf(${JSON.stringify(frag)}) >= 0)`,
     );
+  // securitypolicyviolation is delivered asynchronously, and how long that
+  // takes varies with machine load - a fixed sleep is a coin flip that only
+  // ever loses on a busy machine (observed: object-src arriving after 600ms
+  // during a full-suite run, passing standalone). Poll for the violation
+  // instead, so a slow delivery costs time rather than correctness.
+  //
+  // Only usable for the POSITIVE assertions. Absence cannot be polled for, so
+  // the "not refused" cases keep a fixed settle.
+  const waitForCsp = async (frag, dir, budgetMs) => {
+    const deadline = Date.now() + (budgetMs || 8000);
+    for (;;) {
+      if (await cspHits(frag, dir)) return true;
+      if (Date.now() > deadline) return false;
+      await sleep(100);
+    }
+  };
 
   check(
     "SEC-09 a Content-Security-Policy meta is present in index.html",
@@ -1323,7 +1356,7 @@ async function run(win) {
   await sleep(600);
   check(
     "SEC-09 a remote <script src> is refused by script-src",
-    (await cspHits("probe.invalid", "script-src")) === true &&
+    (await waitForCsp("probe.invalid", "script-src")) === true &&
       (await exec(`window.__remoteScriptRan === false`)) === true,
     JSON.stringify(await exec(`window.__csp`)),
   );
@@ -1353,7 +1386,7 @@ async function run(win) {
   await sleep(600);
   check(
     "SEC-09 an outbound fetch to an unlisted host is refused by connect-src",
-    (await cspHits("probe.invalid", "connect-src")) === true,
+    (await waitForCsp("probe.invalid", "connect-src")) === true,
     JSON.stringify(await exec(`window.__csp`)),
   );
 
@@ -1389,21 +1422,44 @@ async function run(win) {
   check(
     "SEC-09 <base href> cannot retarget relative URLs (base-uri 'none')",
     baseState.changed === false &&
-      (await cspHits("probe.invalid", "base-uri")) === true,
+      (await waitForCsp("probe.invalid", "base-uri")) === true,
     JSON.stringify({ baseState, csp: await exec(`window.__csp`) }),
   );
 
-  await exec(`
-    const o = document.createElement('object');
-    o.data = 'https://probe.invalid/csp.swf';
-    document.body.appendChild(o);
-    null;
+  const objState = await exec(`
+    (() => {
+      const o = document.createElement('object');
+      o.id = '__cspObjectProbe';
+      o.data = 'https://probe.invalid/csp.swf';
+      document.body.appendChild(o);
+      // Reading layout here is load-bearing, not diagnostic. Chromium only
+      // fetches <object data> once the element has been laid out, and it
+      // throttles rendering for an occluded/background window - which is
+      // exactly what this window is during an unattended full-suite run. Left
+      // to itself the object is never laid out, never fetched, and never
+      // refused, so the assertion below failed intermittently (and only when
+      // run after another suite) against a policy that was working perfectly.
+      // getBoundingClientRect() forces the layout synchronously.
+      const r = o.getBoundingClientRect();
+      const cs = getComputedStyle(o);
+      return {
+        connected: o.isConnected,
+        w: r.width, h: r.height,
+        display: cs.display,
+        parent: o.parentElement && o.parentElement.tagName,
+        bodyChildren: document.body.children.length,
+      };
+    })()
   `);
   await sleep(600);
   check(
     "SEC-09 plugin content is refused by object-src 'none'",
-    (await cspHits("probe.invalid", "object-src")) === true,
-    JSON.stringify(await exec(`window.__csp`)),
+    (await waitForCsp("probe.invalid", "object-src")) === true,
+    // The element's own state is reported alongside the violation list: an
+    // <object> that never got a layout box is never fetched, so it would never
+    // provoke a violation either - a very different failure from "object-src
+    // stopped blocking", and indistinguishable from the violation list alone.
+    JSON.stringify({ objState, csp: await exec(`window.__csp`) }),
   );
 
   // img-src deliberately keeps https:. Remote images in markdown are a real
@@ -1423,7 +1479,7 @@ async function run(win) {
   await sleep(700);
   check(
     "SEC-09 img-src refuses cleartext http: but still allows https:",
-    (await cspHits("cleartext.png", "img-src")) === true &&
+    (await waitForCsp("cleartext.png", "img-src")) === true &&
       (await cspHits("secure.png", "img-src")) === false,
     JSON.stringify(await exec(`window.__csp`)),
   );
@@ -1498,6 +1554,17 @@ async function run(win) {
   // __e2eErrors only sees what window.onerror sees. The sentinel additionally
   // watches the renderer console and the rendered document, which is where a
   // CSP misconfiguration or a mermaid error graphic shows up.
+  // Prove the watcher was actually watching. Without this, "no errors were
+  // recorded" and "the watcher silently stopped working" are the same result -
+  // the exact vacuity this harness exists to eliminate. Both detection paths
+  // are checked because they fail independently.
+  const alive = await proveSentinelAlive(win, sentinel);
+  check(
+    "the error sentinel was demonstrably watching both channels",
+    alive.console === true && alive.dom === true,
+    JSON.stringify(alive),
+  );
+
   const sentinelReport = await sentinel.stop();
   check(
     "nothing rendered a visible error at any point during the suite",

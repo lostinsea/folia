@@ -133,7 +133,7 @@ const TOP_BLOCKS = `
 `;
 
 async function run(win) {
-  const { startErrorSentinel } = require("./test-visual-utils");
+  const { startErrorSentinel, proveSentinelAlive } = require("./test-visual-utils");
   const sentinel = startErrorSentinel(win, { label: "patch" });
   const exec = (c) => win.webContents.executeJavaScript(c, true);
 
@@ -626,6 +626,17 @@ async function run(win) {
 
   const noErrors = await exec(`JSON.stringify(window.__testErrors || [])`);
   check("no uncaught renderer errors", noErrors === "[]", noErrors);
+
+  // Prove the watcher was actually watching. Without this, "no errors were
+  // recorded" and "the watcher silently stopped working" are the same result -
+  // the exact vacuity this harness exists to eliminate. Both detection paths
+  // are checked because they fail independently.
+  const alive = await proveSentinelAlive(win, sentinel);
+  check(
+    "the error sentinel was demonstrably watching both channels",
+    alive.console === true && alive.dom === true,
+    JSON.stringify(alive),
+  );
 
   const sentinelReport = await sentinel.stop();
   check(
