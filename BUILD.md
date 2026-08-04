@@ -32,10 +32,17 @@ npm run build
 After the build completes, look in the `dist/` folder:
 ```
 dist/
-└── Omnicore Markdown Viewer 1.0.0.exe
+├── Omnicore.Markdown.Viewer.<version>.exe   <- portable, single file
+└── win-unpacked/                            <- the same app, unpacked
+    └── Markdown Viewer.exe
 ```
 
-This is your **standalone executable**!
+The portable `.exe` is your **standalone executable**. The version in the
+filename comes from `version` in `package.json`.
+
+Note that the running process is named **`Markdown Viewer`** (from
+`build.productName`), not `Omnicore...` — relevant when looking for it in Task
+Manager or with `Get-Process`.
 
 ## Alternative Build Options
 
@@ -43,7 +50,7 @@ This is your **standalone executable**!
 ```bash
 npm run build-installer
 ```
-Creates: `dist/Omnicore Markdown Viewer Setup 1.0.0.exe`
+Creates: `dist/Omnicore Markdown Viewer Setup <version>.exe`
 
 ### Build Everything
 ```bash
@@ -72,6 +79,15 @@ The portable .exe file can be:
 - Run `npm install` again
 - Try `npm run build` again
 
+**Build fails with `configuration.win should be one of these: null`?**
+- An unknown key is present in a `build.*` section. Run `npm run test:packaging`
+  — it names the offending key. See the Code Signing note above.
+
+**Build fails with `EPERM: operation not permitted, rename ...` inside
+`%LOCALAPPDATA%\electron-builder\Cache\nsis-resources-*`?**
+- A lock held by antivirus or indexing, not a configuration problem. Delete the
+  `electron-builder\Cache` folder and `dist/`, then rebuild.
+
 **Missing icon?**
 - Ensure `logo.png` is in the project root folder
 
@@ -81,10 +97,56 @@ The portable .exe file can be:
 
 ## Code Signing (Optional)
 
-For production distribution, consider code signing to avoid Windows SmartScreen warnings:
-1. Purchase a code signing certificate
-2. Configure in `package.json` under `build.win.certificateFile`
-3. Add certificate password to environment variables
+For production distribution, consider code signing to avoid Windows SmartScreen
+warnings:
+
+1. Purchase a code signing certificate.
+2. Configure it in `package.json` under **`build.win.signtoolOptions`**:
+   ```json
+   "win": {
+     "signtoolOptions": {
+       "certificateFile": "path/to/cert.pfx",
+       "certificatePassword": "..."
+     }
+   }
+   ```
+3. Prefer supplying the password from an environment variable
+   (`CSC_KEY_PASSWORD`) over committing it.
+
+> **electron-builder 26 moved these keys.** In v24 and earlier the settings
+> lived directly on `build.win` (`win.sign`, `win.certificateFile`,
+> `win.certificatePassword`, `win.signingHashAlgorithms`, `win.publisherName`).
+> In v26 they all moved under `win.signtoolOptions`, and because every platform
+> section in electron-builder's schema is `additionalProperties: false`, leaving
+> an old key in place **aborts the entire build** — not just signing.
+>
+> The failure is easy to misread: it reports
+> `configuration.win should be one of these: null`, which is a generic `anyOf`
+> failure and names no key. This repo hit exactly that. `npm run test:packaging`
+> now validates every `build.*` section against
+> `node_modules/app-builder-lib/scheme.json` and names any rejected key, so the
+> next breaking rename is caught in milliseconds instead of during a release.
+>
+> Azure Trusted Signing is the other option, under `win.azureSignOptions`;
+> it cannot be combined with `signtoolOptions`.
+
+## Auto-update is intentionally disabled
+
+`build.publish` is `null` in this fork, so no `app-update.yml` is written into
+the package and `electron-updater` has no feed to consult. The startup check
+still runs in packaged builds, fails to load a config, and is swallowed by the
+existing error handler — verified: no dialog, toast or console noise appears.
+
+This is deliberate, and differs from the parent project
+(`OmniCoreST/omnicore-markdown-viewer`), which publishes to its own GitHub
+releases. Keeping it `null` means a fork build can never be replaced by
+binaries from the parent repo, and it avoids opening an unsigned auto-update
+channel — which is a code-execution path — for a fork that publishes no
+releases. Consequently the fork's `version` is independent of the parent's and
+is not expected to track it.
+
+To enable updates later, set `build.publish` to this fork's own repo **and**
+sign the releases; do not point it at the parent.
 
 ## Clean Build
 

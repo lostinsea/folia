@@ -209,10 +209,14 @@ function main() {
   // tests run from the working tree and never invoke the packager. The release
   // workflow would have been the first thing to find out.
   //
-  // electron-builder ships its own JSON schema, and each platform section
-  // declares `additionalProperties: false`, so an unknown key is exactly the
-  // failure mode above. Validating key names against that schema costs
-  // milliseconds and needs no packaging run.
+  // electron-builder ships its own JSON schema and validates against it with
+  // ajv. We do the same thing here rather than hand-rolling a key walker: a
+  // first attempt only compared top-level key names per section, which caught
+  // the `win.sign` case but was blind to nested objects (`win.target[].*`,
+  // `extraResources[].*`, `directories.*`), to value-type changes
+  // (`win.icon` becoming an object), and to any section not in a hard-coded
+  // list. Delegating to the real validator covers all of those for free and
+  // cannot drift out of step with the sections the config actually uses.
   const schemaPath = path.join(
     ROOT,
     "node_modules",
@@ -223,48 +227,135 @@ function main() {
     check("electron-builder schema is available to validate against", false,
       "node_modules/app-builder-lib/scheme.json not found");
   } else {
-    const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
-    const sections = {
-      win: "WindowsConfiguration",
-      nsis: "NsisOptions",
-      portable: "PortableOptions",
-      linux: "LinuxConfiguration",
-      mac: "MacConfiguration",
-      dmg: "DmgOptions",
-      appImage: "AppImageOptions",
-      deb: "DebOptions",
-    };
-    // Control: if the schema ever stops exposing the definition this suite
-    // relies on, say so instead of silently checking nothing.
-    check(
-      "the schema exposes the platform definitions this check needs",
-      Object.values(sections).every(
-        (d) => !pkg.build[Object.keys(sections).find((k) => sections[k] === d)] ||
-          (schema.definitions &&
-            schema.definitions[d] &&
-            schema.definitions[d].properties),
-      ),
-    );
-    for (const [key, defName] of Object.entries(sections)) {
-      if (!pkg.build[key]) continue;
-      const def = schema.definitions && schema.definitions[defName];
-      if (!def || !def.properties) continue;
-      const unknown = Object.keys(pkg.build[key]).filter(
-        (k) => !(k in def.properties),
-      );
-      check(
-        `build.${key} has no keys electron-builder rejects`,
-        unknown.length === 0,
-        unknown.length ? `unknown: ${unknown.join(", ")}` : "",
-      );
+    let Ajv = null;
+    try {
+      Ajv = require("ajv");
+    } catch {
+      /* reported by the assertion below */
     }
-    const rootProps = schema.properties || {};
-    const unknownRoot = Object.keys(pkg.build).filter((k) => !(k in rootProps));
+    // Without this the whole check would silently vanish, which is exactly the
+    // blind spot that let the broken build ship in the first place.
+    check("ajv is available to validate the build config", Boolean(Ajv));
+    if (Ajv) {
+      const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
+      let validate = null;
+      try {
+        validate = new Ajv({ allErrors: true, strict: false }).compile(schema);
+      } catch (err) {
+        check("electron-builder schema compiles", false, err.message);
+      }
+      if (validate) {
+        const ok = validate(pkg.build);
+        const detail = ok
+          ? ""
+          : validate.errors
+              .map((e) => `${e.instancePath || "(root)"} ${e.message}`)
+              .slice(0, 6)
+              .join(" | ");
+        check(
+          "package.json build config satisfies the electron-builder schema",
+          ok,
+          detail,
+        );
+      }
+    }
+  }
+
+  // The auto-update feed must never point at the parent project. `publish` is
+  // null today (updates deliberately disabled — see BUILD.md), but if it is
+  // ever enabled it has to target this fork's own releases: pointing it at
+  // OmniCoreST would let upstream binaries silently replace a fork build,
+  // discarding every fix in this repo. Deliberately permissive about *whether*
+  // publishing is enabled, strict about *where* it points.
+  //
+  // The first version of this check only looked at `p.owner`, which review
+  // showed was easy to walk around. electron-builder accepts a provider
+  // shorthand string ("github"), an object with no owner/repo at all, and a
+  // combined `repo: "owner/name"` form; in every one of those cases it falls
+  // back to `package.json.repository` to resolve the target. A `generic`
+  // provider names the host in `url` instead. `publish` can also be set per
+  // platform, not just at the root. All of those are covered below.
+  {
+    const PARENT = /(^|[/.:@-])omnicorest($|[/.:-])/i;
+    const roots = [pkg.build && pkg.build.publish];
+    for (const plat of ["win", "mac", "linux"]) {
+      if (pkg.build && pkg.build[plat]) roots.push(pkg.build[plat].publish);
+    }
+    const repoUrl =
+      (pkg.repository &&
+        (typeof pkg.repository === "string"
+          ? pkg.repository
+          : pkg.repository.url)) ||
+      "";
+    const reasons = [];
+    for (const root of roots) {
+      if (root == null) continue;
+      for (const p of [].concat(root)) {
+        // Provider shorthand — target is resolved from package.json.repository.
+        if (typeof p === "string") {
+          if (PARENT.test(repoUrl)) {
+            reasons.push(`"${p}" shorthand resolves via repository ${repoUrl}`);
+          }
+          continue;
+        }
+        if (!p || typeof p !== "object") continue;
+        if (typeof p.owner === "string" && PARENT.test(p.owner)) {
+          reasons.push(`owner ${p.owner}`);
+          continue;
+        }
+        if (typeof p.repo === "string" && PARENT.test(p.repo)) {
+          reasons.push(`repo ${p.repo}`);
+          continue;
+        }
+        if (typeof p.url === "string" && PARENT.test(p.url)) {
+          reasons.push(`url ${p.url}`);
+          continue;
+        }
+        // No explicit target: electron-builder falls back to the repository
+        // field, so this is only safe if that field is not the parent.
+        if (!p.owner && !p.repo && !p.url && PARENT.test(repoUrl)) {
+          reasons.push(
+            `provider ${p.provider || "?"} resolves via repository ${repoUrl}`,
+          );
+        }
+      }
+    }
     check(
-      "build root has no keys electron-builder rejects",
-      unknownRoot.length === 0,
-      unknownRoot.length ? `unknown: ${unknownRoot.join(", ")}` : "",
+      "update feed does not point at the upstream parent repo",
+      reasons.length === 0,
+      reasons.length ? `publishes from ${reasons.join("; ")}` : "",
     );
+  }
+
+  // scripts/post-upstream-merge.sh re-pins Electron with `npm pkg set`. If that
+  // pin ever drifts below what package.json actually declares, running the
+  // script — which the docs tell you to do after every upstream merge —
+  // silently DOWNGRADES Electron and reintroduces the advisories the upgrade
+  // cleared. Nothing else in the repo ties these two numbers together.
+  {
+    const scriptPath = path.join(__dirname, "scripts", "post-upstream-merge.sh");
+    const declared =
+      (pkg.devDependencies && pkg.devDependencies.electron) || "";
+    if (!fs.existsSync(scriptPath)) {
+      check("post-upstream-merge.sh exists to be checked", false);
+    } else {
+      const script = fs.readFileSync(scriptPath, "utf8");
+      const m = script.match(/npm pkg set devDependencies\.electron="([^"]+)"/);
+      check(
+        "post-upstream-merge.sh pins an Electron version",
+        Boolean(m),
+        m ? "" : "no `npm pkg set devDependencies.electron=` line found",
+      );
+      if (m) {
+        check(
+          "post-upstream-merge.sh cannot downgrade Electron",
+          m[1] === declared,
+          m[1] === declared
+            ? ""
+            : `script pins ${m[1]} but package.json declares ${declared}`,
+        );
+      }
+    }
   }
 
   console.log(`\n=== ${pass} passed, ${fail} failed ===\n`);

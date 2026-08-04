@@ -42,11 +42,12 @@
   "homepage": "https://www.omnicore.com.tr",
   "repository": {
     "type": "git",
-    "url": "https://github.com/OmniCoreST/omnicore-markdown-viewer.git"
+    "url": "https://github.com/lostinsea/markdown-viewer.git"
   },
   "devDependencies": {
     "@fontsource/architects-daughter": "^5.3.0",
     "@fontsource/patrick-hand": "^5.3.0",
+    "ajv": "^8.20.0",
     "electron": "^43.2.0",
     "electron-builder": "^26.15.3",
     "png-to-ico": "^3.0.1"

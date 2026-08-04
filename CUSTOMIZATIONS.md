@@ -14,6 +14,17 @@ This approach means after an upstream merge, you only need to ensure these files
 1. Still present in the repository
 2. Still referenced in index.html
 
+> **Scope of the overlay convention (updated).** The overlay is still the
+> preferred home for *behavioural* customizations, and the files above are still
+> the first place to look. But this fork no longer tracks upstream by wholesale
+> merge — upstream changes are now taken as targeted cherry-picks, evaluated
+> individually. Keeping `main.js` / `renderer.js` byte-clean against upstream is
+> therefore no longer a binding constraint, and the security and performance
+> work (see `SECURITY-AUDIT.md` and `PERF-AUDIT.md`) edits those files directly.
+> Such edits are kept tightly scoped and commented with their finding ID so they
+> can be offered upstream later. Do not read point 2 under "Benefits" below as
+> forbidding that.
+
 ## Custom Features
 
 ### 1. Compact Header (custom-styles.css)
@@ -178,12 +189,12 @@ Regression coverage: `npm run test:tabs` (see below).
 2. Upstream has an unthrottled global `mousemove` listener firing on every pixel of movement
 
 **Solutions**:
-- **Electron upgraded to ^37** — fixes the `_cornerMask` bug (merged in [electron/electron#48376](https://github.com/electron/electron/pull/48376))
+- **Electron upgraded to ^43.2.0** — the `_cornerMask` bug is fixed from ^37 onward (merged in [electron/electron#48376](https://github.com/electron/electron/pull/48376)); ^41.7.1 or later is additionally required to clear the security advisories affecting every earlier line
 - **`backgroundThrottling: true`** in `main.js` BrowserWindow options — lets Electron reduce activity when window is in background
 - **`custom-performance.js`** — throttles mousemove to 80ms intervals, drops events entirely when window is unfocused, dismisses floating panels (recent files, toasts) on blur
-- **Electron upgrade is protected** via `scripts/post-upstream-merge.sh` which re-pins to `^37` after any upstream merge
+- **Electron upgrade is protected** via `scripts/post-upstream-merge.sh` which re-pins to `^43.2.0` after any upstream merge
 
-**Important**: If upstream merges reset `package.json` electron to `^27`, run `./scripts/post-upstream-merge.sh` to restore `^37`.
+**Important**: If an upstream merge resets `package.json` electron to `^27`, run `./scripts/post-upstream-merge.sh` to restore `^43.2.0`. Electron 43+ requires Node >= 22.12, which is pinned in `.nvmrc` and enforced by `engine-strict`, so the Electron pin and the Node pin must be raised together.
 
 ## How to Maintain After Upstream Merge
 
@@ -194,7 +205,7 @@ Regression coverage: `npm run test:tabs` (see below).
 ```
 
 This script automatically:
-- Re-pins Electron to `^37` (overwriting any upstream downgrade)
+- Re-pins Electron to `^43.2.0` (overwriting any upstream downgrade)
 - Checks all custom file references in `index.html`
 - Checks all custom files in `package.json` build list
 - Verifies `backgroundThrottling: true` in `main.js`

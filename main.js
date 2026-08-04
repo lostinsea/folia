@@ -2870,7 +2870,19 @@ ipcMain.on("check-for-updates", () => {
     return;
   }
   if (app.isPackaged) {
-    updater.checkForUpdates();
+    // Without a `.catch()` this rejects unhandled whenever no update feed is
+    // configured (`build.publish` is null in this fork, so no app-update.yml is
+    // packaged and loading the config always fails). Route it through the same
+    // status channel the renderer already handles instead.
+    Promise.resolve(updater.checkForUpdates()).catch((err) => {
+      log("Manual update check failed:", err.message);
+      if (mainWindow && mainWindow.webContents) {
+        mainWindow.webContents.send("update-status", {
+          status: "error",
+          error: err.message,
+        });
+      }
+    });
   } else {
     log("Skipping update check in development mode");
     if (mainWindow && mainWindow.webContents) {

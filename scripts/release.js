@@ -29,6 +29,22 @@ const ROOT_DIR = path.join(__dirname, '..');
 const PACKAGE_JSON_PATH = path.join(ROOT_DIR, 'package.json');
 const DIST_DIR = path.join(ROOT_DIR, 'dist');
 
+// The real release path uses `gh`, which targets whatever repo the checkout
+// points at. The dry-run path used to print a hard-coded upstream URL, so a
+// dry run reported that it would publish to the parent project. Derive it from
+// package.json instead so the two can never disagree.
+function repoSlug() {
+  try {
+    const repo = JSON.parse(fs.readFileSync(PACKAGE_JSON_PATH, 'utf8')).repository;
+    const url = typeof repo === 'string' ? repo : repo && repo.url;
+    const m = url && url.match(/github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/i);
+    if (m) return m[1];
+  } catch {
+    /* fall through */
+  }
+  return 'unknown/unknown';
+}
+
 // Colors for console output
 const colors = {
   reset: '\x1b[0m',
@@ -397,7 +413,7 @@ Existing installations will automatically detect this update.
     logDryRun(`Would upload ${artifacts.length} artifacts`);
     logDryRun('Release notes would be:');
     releaseNotes.split('\n').forEach(line => logDryRun(`  ${line}`));
-    return `https://github.com/OmniCoreST/omnicore-markdown-viewer/releases/tag/${tag}`;
+    return `https://github.com/${repoSlug()}/releases/tag/${tag}`;
   }
 
   // Check if release already exists
