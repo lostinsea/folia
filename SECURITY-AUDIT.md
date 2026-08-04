@@ -46,7 +46,7 @@ document. Everything marked FIXED below is covered by a regression test — in
 | SEC-15 | **FIXED** | Table popup: table data embedded via a new `toJsonLiteral()` (`JSON.stringify` + `\u003c`/`\u003e`/U+2028/U+2029 escaping). `JSON.stringify` alone does not escape `<`, so a cell containing `</script>` terminated the generated script element. |
 | SEC-09 | **FIXED** (popups and main window) | Every generated popup document carries a per-document nonce CSP: `default-src 'none'; script-src 'nonce-…'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'`. All inline `on*=` handlers were converted to `addEventListener` to satisfy it. The main window now has a measured CSP too (`index.html:6-40`); see the SEC-09 entry for the directive-by-directive measurements, the `'unsafe-inline'` concession `@@@html` forces, and the `frame-ancestors` finding. |
 | SEC-11 | **FIXED** (popups and main window) | `registerPopup()` denies `will-navigate`, `will-redirect`, `will-frame-navigate` and `setWindowOpenHandler` on every popup, and `<meta>` is stripped from mermaid SVG. The main window now installs the same four guards, `<form>` is in `FORBID_TAGS`, `<area href>` is routed through the link policy, and `<iframe src>` is stripped in the sanitizer hook. See below — the CSP alone did **not** cover this. |
-| SEC-08 | **FIXED for the four popup windows**; open for the main window | Popups run `nodeIntegration: false, contextIsolation: true` behind `popup-preload.js`, which exposes only fixed channels — and only the single API that popup kind needs, selected by a `--popup-kind=` process argument, so script in one popup cannot drive another's privileged path. |
+| SEC-08 | **FIXED for the four popup windows**; **deliberately deferred** for the main window | Popups run `nodeIntegration: false, contextIsolation: true` behind `popup-preload.js`, which exposes only fixed channels — and only the single API that popup kind needs, selected by a `--popup-kind=` process argument, so script in one popup cannot drive another's privileged path. The main window is measured and planned rather than done: 40 IPC channels, 70 call sites, 18 sync `fs`/`path`/`os` calls that become async, 6 renderer-only CommonJS modules with no loader once `require` disappears, and a 400-assertion harness that itself depends on `require` in the renderer. Sequenced plan recorded under SEC-08; **not** claimed as fixed. |
 | SEC-10 | **FIXED** earlier | Runtime libraries vendored locally; no CDN load. |
 | SEC-13 | **FIXED** | Notes tooltip and All-Notes panel rebuilt with `createElement` + `textContent` instead of `innerHTML`. Two further sinks the audit missed were found in the same pass — one of them (`data-note-color` into a `style` attribute) genuinely exploitable. Colour values are now normalized at source and four `[data-note-id="…"]` selectors use `CSS.escape`. See the SEC-13 entry. |
 | SEC-14 | **FIXED** | Recent-files menu entries rebuilt with `createElement` + `textContent`. |
@@ -385,6 +385,65 @@ I confirmed **no preload script exists** anywhere in the repo (no `preload:` key
 The table popup at `main.js:1856-1868` shows the correct configuration — the divergence appears to be incidental (Tabulator needs no Node) rather than a deliberate security decision, since the three popups that *do* handle attacker-controlled content are the insecure ones.
 
 **Fix.** The correct long-term fix is `contextIsolation: true`, `nodeIntegration: false`, `sandbox: true` on every window, with a minimal preload exposing a typed, validated API over `contextBridge`. This is a substantial refactor because `renderer.js` uses `fs`/`path` directly in ~40 places. As an interim step, at minimum flip the three popup windows (`main.js:1069, 1443, 1588`) to `nodeIntegration: false` — they have no legitimate Node requirement beyond `ipcRenderer.send`, which a 10-line preload can provide.
+
+### PARTIALLY FIXED — all four popups done; the main window deferred, with a plan
+
+**Done.** Every popup now runs `nodeIntegration: false, contextIsolation: true`
+behind its own minimal preload, exposing only that popup's own bridge API. Four
+assertions in `test-popup-security.js` pin it ("*popup exposes only its own
+bridge API"), so a popup cannot silently regain Node access.
+
+**Deferred: the main window** (`main.js:384`). This is a deliberate, measured
+decision rather than an omission, so the measurements are recorded here.
+
+| What has to move | Count |
+|---|---|
+| Distinct `ipcRenderer` channels to re-expose over `contextBridge` | 40 |
+| `ipcRenderer.*` call sites | 70 |
+| Direct `fs.*` / `path.*` / `os.*` calls that must become IPC round-trips (and therefore **async**, changing their callers' control flow) | 5 / 12 / 1 |
+| Local CommonJS modules the renderer `require()`s, which have no `require` once `nodeIntegration` is off | 6 (`utils`, `emoji-parser`, `mermaid-config`, `omniware-config`, `context-menu-utils`, `file-helpers` — 487 lines total, all `module.exports`) |
+| npm module `require()`d directly by the renderer | 1 (`html2canvas`) |
+| Lines in `renderer.js` | 8631 |
+
+The awkward part is not the count, it is the **`module.exports` modules**: none
+of them are shared with `main.js`, so they are renderer-only CommonJS with no
+loader once `require` disappears. Every one needs either a `<script>` tag and a
+global, or a bundler — and this project deliberately has no build step. That is
+a structural change to how the app is assembled, not a security patch.
+
+Two further consequences that make "just flip the flag" wrong:
+
+1. **`fs`/`path`/`os` calls become asynchronous.** 18 call sites currently
+   return synchronously; over IPC they cannot. Each caller's control flow
+   changes, and several sit inside the render pipeline whose ordering
+   invariants are exactly what PERF-04/05/06 and the mermaid race work were
+   about. This is where regressions would hide.
+2. **The test harnesses would all need reworking.** Every Electron suite drives
+   the app with `executeJavaScript("require('electron').ipcRenderer…")`, which
+   stops working the moment the renderer loses `require`. The 400-assertion
+   safety net would have to be rebuilt *first*, or the refactor is done blind.
+
+**Why deferring is defensible, and where it is not.** SEC-01..07, SEC-11,
+SEC-12, SEC-13/14, SEC-21 and SEC-26 closed the injection routes that would let
+an attacker reach this privilege in the first place, and SEC-09 constrains what
+the window can load and reach. What remains is that *if* an injection is ever
+found again, it is immediately RCE rather than defaced HTML. That is a real,
+unmitigated severity multiplier and it is **not** claimed to be fixed.
+
+**Order of work when it is picked up** (each step independently shippable and
+testable, which the all-at-once version is not):
+
+1. Rebuild the harnesses' renderer access on a test-only preload so they no
+   longer depend on `require` in the renderer.
+2. Give the 6 local modules a loader that works either way (plain `<script>` +
+   a namespaced global), leaving `module.exports` intact for Node consumers.
+3. Move the 18 `fs`/`path`/`os` call sites to IPC one at a time, converting
+   each caller to async.
+4. Replace the 70 `ipcRenderer` call sites with a `contextBridge` API that
+   validates its arguments — the channel list is fixed and small (40), so this
+   is mechanical once step 3 is done.
+5. Only then flip `nodeIntegration: false, contextIsolation: true`, and finally
+   `sandbox: true`.
 
 ---
 
