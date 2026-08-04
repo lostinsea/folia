@@ -52,6 +52,7 @@ document. Everything marked FIXED below is covered by a regression test — in
 | SEC-14 | **FIXED** | Recent-files menu entries rebuilt with `createElement` + `textContent`. |
 | SEC-12 | **FIXED** | Local-file links now go through an extension policy applied to the *resolved* path (`realpathSync`, so a symlink is judged by its real target). Executables, script/macro formats and auto-mounting disk images are refused outright; inert documents and media open directly; `.svg`/`.pdf`/`.rtf` and anything unrecognised require an explicit confirmation naming the file. UNC / protocol-relative paths are rejected *before* `fs.existsSync()`, which was itself the network probe. |
 | SEC-16/17/18 | **FIXED** earlier | Dependency upgrades (24 advisories → 0). |
+| SEC-19 | **FIXED** | Release workflow: every action pinned to a commit SHA (+ Dependabot to keep the pins moving), `softprops/action-gh-release` moved off the unmaintained v1, `npm ci` instead of `npm install`, `contents: write` narrowed to the publish job only, `persist-credentials: false` on checkout. Also fixed a defect the audit missed: the workflow pinned Node 18 against `engines.node >= 22.12.0` + `engine-strict=true`, so it could not have built at all. Code signing remains open. |
 | SEC-27 | **FIXED** | OmniWare's hand-drawn fonts were `@import`ed from fonts.googleapis.com and silently refused by the popup CSP, so every wireframe rendered in generic `cursive`. Fonts vendored locally and emitted as `@font-face` by `omniwareFontFaceCss()`. Found by the error sentinel, not by the audit. |
 
 ### Why the popup CSP is the primary control, not defence in depth
@@ -936,6 +937,37 @@ A DOMPurify sanitizer bypass in this application is not "an XSS" — given SEC-0
 Compounding this: `package.json` sets `"sign": null` (`build.win.sign`), so Windows releases are unsigned, and the app auto-updates from GitHub Releases via `electron-updater`.
 
 **Fix.** Pin `softprops/action-gh-release` to a full commit SHA. Switch to `npm ci`. Consider code signing for release binaries.
+
+### FIXED
+
+`.github/workflows/release.yml` rewritten, plus a new `.github/dependabot.yml`.
+
+| Change | Why |
+|---|---|
+| **Every** action pinned to a full commit SHA with a `# vX.Y.Z` comment | A tag is a mutable pointer. The audit called the `actions/*` namespace "acceptable per normal practice" — that judgement is withdrawn: after the 2025 `tj-actions/changed-files` compromise, pin-everything is the practice. The cost of pinning is staleness, which is why Dependabot lands in the same change. |
+| `softprops/action-gh-release@v1` → SHA of **v3.0.2** | v1 is unmaintained and runs on a Node runtime GitHub has retired. `action.yml` at the pinned SHA was checked: `files`, `draft`, `prerelease` and the `GITHUB_TOKEN` env are all still there, so it is a drop-in. |
+| `npm install` → `npm ci` | With `npm install` the lockfile is advisory, so a release build can pick up a transitive dependency nothing ever tested. Verified with `npm ci --dry-run`: the lockfile is in sync and the `postinstall` vendoring step still runs. |
+| Top-level `permissions: contents: read`; `contents: write` moved onto the `create-release` job only | The build matrix ran the whole npm dependency tree with a token that could publish releases. Now nothing but the publish step can. |
+| `persist-credentials: false` on checkout | The build jobs never push. Leaving the token in `.git/config` makes it readable by anything the build runs, including `postinstall` scripts. |
+| `fail_on_unmatched_files: true` | A matrix leg producing nothing previously published a half-built release in silence. |
+| `.github/dependabot.yml` added (github-actions + npm, weekly) | Pinning without automated bumps converts a supply-chain control into a permanently-vulnerable dependency. Dependabot rewrites the SHA *and* the version comment together. |
+
+**A defect the audit missed, found while fixing this: the release workflow was
+already broken and could not have produced a build.** It hard-coded
+`node-version: 18`, while `package.json` declares `engines.node >= 22.12.0` and
+`.npmrc` sets `engine-strict=true` — that combination makes `npm install` fail
+outright with `EBADENGINE`. Now `node-version-file: '.nvmrc'`, so CI reads the
+same version the project is developed against and cannot drift again. (Node 18
+has also been end-of-life since April 2025.)
+
+**Still open, deliberately.** `build.win.sign` is still `null`, so Windows
+releases remain unsigned while `electron-updater` auto-updates from them.
+Code signing needs a certificate and a secret store; it is a real gap and is
+recorded here rather than quietly dropped.
+
+**Also noted, out of scope here:** there is no CI workflow that *runs the tests*
+— 391 assertions across 9 suites, and a release is cut with no gate at all.
+Headless Electron on a Linux runner needs `xvfb` and is its own piece of work.
 
 ---
 

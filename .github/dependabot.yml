@@ -1,0 +1,29 @@
+version: 2
+
+updates:
+  # The release workflow pins every action to a full commit SHA (see the comment
+  # in release.yml). Pinning is only safe if something keeps the pins moving —
+  # otherwise a security fix in an action is never picked up, and the pin turns
+  # from a supply-chain control into a permanently-vulnerable dependency.
+  #
+  # Dependabot understands the `# vX.Y.Z` comments next to each SHA and rewrites
+  # both the SHA and the comment together.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      # One PR for the routine churn, so genuinely interesting upgrades
+      # (electron, electron-builder, marked, mermaid) are not buried in it.
+      dev-minor-and-patch:
+        dependency-type: "development"
+        update-types:
+          - "minor"
+          - "patch"
