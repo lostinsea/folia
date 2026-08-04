@@ -1001,6 +1001,176 @@ async function run(win) {
     JSON.stringify({ beforeFail, afterFail }),
   );
   await exec(`window.mermaid.run = window.__savedRun3; true`);
+
+  // ==========================================================================
+  // PERF-07 - a theme toggle must not block on diagrams the user cannot see
+  //
+  // The old code re-themed every diagram in one synchronous batch (431.6ms on
+  // 20 diagrams, all of it before the first repaint). It now renders the
+  // on-screen ones, resolves, and catches the rest up during idle time.
+  //
+  // These assertions are about *correctness of the split*, not speed: the
+  // visible ones must be right when the toggle resolves, and every one of them
+  // must be right once whenMermaidSettled() resolves. A timing assertion would
+  // be flaky on shared CI; a wrong-colour diagram never is.
+  // ==========================================================================
+  const perfDoc =
+    "# PerfSeven\n\n" +
+    Array.from({ length: 14 }, (_, i) =>
+      `## Section ${i}\n\n` +
+      "```mermaid\ngraph TD\n" +
+      `  P${i}A[Perf ${i} A] --> P${i}B[Perf ${i} B]\n` +
+      "```\n\n" +
+      "filler\n\n".repeat(12),
+    ).join("");
+  const jsPerf = JSON.stringify(path.join(dir, "perf07.md"));
+  fs.writeFileSync(JSON.parse(jsPerf), perfDoc, "utf8");
+
+  // Start from a known light state and the top of the document.
+  await exec(`
+    (async () => {
+      if (document.body.classList.contains('dark-mode')) {
+        document.getElementById('darkModeToggle').click();
+      }
+      await window.renderMarkdown(window.fs.readFileSync(${jsPerf}, 'utf8'), 'full');
+      document.querySelector('.content-wrapper').scrollTop = 0;
+      return null;
+    })()
+  `);
+  await waitFor(exec, "the PERF-07 fixture to finish drawing", DIAGRAMS_READY);
+  await exec(`whenMermaidSettled(); null`);
+
+  // Per-block fill luminance: dark theme means a dark node box.
+  const FILLS = `
+    (() => {
+      const lum = (c) => {
+        const m = String(c).match(/[\\d.]+/g);
+        if (!m || m.length < 3) return null;
+        if (m.length > 3 && Number(m[3]) === 0) return null;
+        const v = m.slice(0, 3).map(Number).map(x => {
+          x = x / 255;
+          return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4);
+        });
+        return 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
+      };
+      const wrapper = document.querySelector('.content-wrapper');
+      const out = [];
+      document.querySelectorAll('#viewer .mermaid').forEach((b, i) => {
+        const shape = b.querySelector('g.node rect, g.node path, g.node polygon');
+        const r = b.getBoundingClientRect();
+        out.push({
+          i: i,
+          onScreen: r.bottom > 0 && r.top < window.innerHeight,
+          drawn: !!b.querySelector('svg'),
+          lum: shape ? lum(getComputedStyle(shape).fill) : null
+        });
+      });
+      return { blocks: out.length, scrollTop: wrapper.scrollTop, items: out };
+    })()
+  `;
+
+  const perfBefore = await exec(FILLS);
+  check(
+    "PERF-07 fixture has enough off-screen diagrams for the split to matter",
+    perfBefore.blocks >= 10 &&
+      perfBefore.items.filter((x) => x.onScreen).length < perfBefore.blocks &&
+      perfBefore.items.every((x) => x.drawn),
+    JSON.stringify({
+      blocks: perfBefore.blocks,
+      onScreen: perfBefore.items.filter((x) => x.onScreen).length,
+      undrawn: perfBefore.items.filter((x) => !x.drawn).length,
+    }),
+  );
+
+  // Toggle to dark and inspect the moment updateMermaidTheme() resolves.
+  const atResolve = await exec(`
+    (async () => {
+      document.body.classList.add('dark-mode');
+      await updateMermaidTheme(true);
+      return (${FILLS});
+    })()
+  `);
+  const visAtResolve = atResolve.items.filter((x) => x.onScreen);
+  check(
+    "PERF-07 on-screen diagrams are already re-themed when the toggle resolves",
+    visAtResolve.length > 0 && visAtResolve.every((x) => x.lum !== null && x.lum < 0.3),
+    JSON.stringify(visAtResolve),
+  );
+
+  await exec(`whenMermaidSettled()`);
+  const afterSettle = await exec(FILLS);
+  check(
+    "PERF-07 every diagram is re-themed once whenMermaidSettled() resolves",
+    afterSettle.items.length === perfBefore.blocks &&
+      afterSettle.items.every((x) => x.drawn && x.lum !== null && x.lum < 0.3),
+    JSON.stringify(afterSettle.items.filter((x) => !(x.lum !== null && x.lum < 0.3))),
+  );
+
+  // A second toggle while the catch-up chain is mid-flight must abandon it.
+  // Without the generation check the stale chain would keep painting dark
+  // diagrams into a light document.
+  await exec(`
+    (async () => {
+      document.body.classList.add('dark-mode');
+      updateMermaidTheme(true);
+      document.body.classList.remove('dark-mode');
+      await updateMermaidTheme(false);
+      return null;
+    })()
+  `);
+  await exec(`whenMermaidSettled()`);
+  await sleep(1500); // let any abandoned chunk chain do its worst
+  const afterSupersede = await exec(FILLS);
+  check(
+    "PERF-07 a superseded catch-up pass leaves no wrong-theme diagram behind",
+    afterSupersede.items.length === perfBefore.blocks &&
+      afterSupersede.items.every((x) => x.drawn && x.lum !== null && x.lum > 0.6),
+    JSON.stringify(
+      afterSupersede.items.filter((x) => !(x.lum !== null && x.lum > 0.6)),
+    ),
+  );
+
+  // And the cache must agree with what is on screen, or the next render of the
+  // same document would repaint the abandoned theme from cache.
+  const cacheOk = await exec(`
+    (() => {
+      const svgs = [...mermaidSvgCache.values()];
+      return {
+        entries: svgs.length,
+        darkish: svgs.filter(s => /#1f2020|#0b0b0b|rgb\\(31, ?32, ?32\\)/i.test(s)).length
+      };
+    })()
+  `);
+  check(
+    "PERF-07 the SVG cache holds no diagrams from the abandoned dark pass",
+    cacheOk.entries > 0 && cacheOk.darkish === 0,
+    JSON.stringify(cacheOk),
+  );
+
+  // The end-to-end supersede case above is guarded twice over: scheduleMermaid-
+  // CatchUp() cancels the pending idle callback, which hides whether the
+  // generation token works at all. The token covers the window the cancel
+  // cannot - a chunk already queued on the mermaid mutex, whose .then() would
+  // otherwise re-arm the abandoned chain and clobber the live one's handle.
+  // That window is timing-dependent end to end, so it is tested directly.
+  const staleRun = await exec(`
+    (async () => {
+      const nodes = [...document.querySelectorAll('#viewer .mermaid')];
+      const before = nodes.map(n => n.innerHTML);
+      // Hand the scheduler a generation that has already been superseded.
+      scheduleMermaidCatchUp(mermaidRunSeq - 1, nodes.slice());
+      await new Promise(r => setTimeout(r, 1500));
+      return {
+        count: nodes.length,
+        changed: nodes.filter((n, i) => n.innerHTML !== before[i]).length
+      };
+    })()
+  `);
+  check(
+    "PERF-07 a catch-up pass from a superseded generation renders nothing",
+    staleRun.count > 0 && staleRun.changed === 0,
+    JSON.stringify(staleRun),
+  );
 }
 
 app.whenReady().then(async () => {

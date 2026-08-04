@@ -353,6 +353,41 @@ function createWindow() {
     icon: path.join(__dirname, "markdown_viewer_icon.png"),
   });
 
+  // The main window runs with nodeIntegration: true, so a navigation away from
+  // index.html hands `require` to whatever loads next. Nothing in the app ever
+  // navigates the top frame - index.html is loaded once by loadFile below,
+  // which does not fire will-navigate - so every event reaching this handler
+  // is one we did not initiate.
+  //
+  // Reachable without this: <form action="https://…"> (DOMPurify allows form
+  // and action by default), <map><area href>, <meta http-equiv="refresh">,
+  // window.open, and location assignment from inside an @@@html frame. The
+  // renderer's click handler covers only the link-shaped ones. (SEC-11)
+  //
+  // Attached before loadFile, matching registerPopup(): loadFile does not fire
+  // will-navigate so the order cannot matter today, but "guard, then load" is
+  // the order that stays correct if that ever changes.
+  const denyMainNavigation = (event, url) => {
+    event.preventDefault();
+    console.warn(`Blocked main-window navigation to: ${url}`);
+  };
+  mainWindow.webContents.on("will-navigate", denyMainNavigation);
+  mainWindow.webContents.on("will-redirect", denyMainNavigation);
+  // Subframes are the @@@html sandbox iframes. They are loaded from srcdoc,
+  // which does not fire this event, so anything that does is the frame trying
+  // to relocate itself - to a remote page it could then beacon from, or to a
+  // local file it could read. The frames have no allow-same-origin and so are
+  // already origin-opaque; this closes the exfiltration half.
+  mainWindow.webContents.on("will-frame-navigate", (event) => {
+    if (event.isMainFrame) return; // handled by will-navigate above
+    event.preventDefault();
+    console.warn(`Blocked main-window subframe navigation to: ${event.url}`);
+  });
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    console.warn(`Blocked window.open from the main window to: ${url}`);
+    return { action: "deny" };
+  });
+
   mainWindow.loadFile("index.html");
 
   // Hide the menu bar

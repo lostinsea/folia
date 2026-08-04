@@ -7,10 +7,10 @@
 | PERF-01 | **[FIXED]** `main.js` eagerly loads heavy optional modules on startup | `require("html-to-docx")` = **370.1ms**; `require("electron-updater")` = **174.7ms**; **544.8ms** total main-thread startup blocking before the window loads | Low | High |
 | PERF-02 | **[FIXED]** Search rewrites the entire rendered DOM on every keystroke | On a **2.0MB / 2001-heading** doc, `highlightSearchTerm()` took **316.0ms** JS time for a common term (3591 matches) | Medium | High |
 | PERF-03 | **[FIXED]** Mermaid is eagerly loaded at startup even for plain markdown | Shipped `libs/vendor/mermaid.min.js` is **3259.3KB**; measured against the real shipped build, launches that open no diagram went from **473ms to 348ms** (about **125ms** saved) | Medium | High |
-| PERF-04 | Any doc containing Mermaid is forced down the full render path for small text edits | On a **225KB / 20-diagram** doc, a 1-line edit still ran `renderMarkdownFull()` for **93.9ms** even though `mermaid.run()` was **not called** | Medium | High |
-| PERF-05 | Code-heavy updates still re-highlight and re-wrap all code blocks | On a **1.46MB / 200-code-block** doc, a small edit still spent **48.5ms** in Prism highlighting + **9.9ms** adding copy buttons | Medium | High |
-| PERF-06 | TOC + collapsible-section rebuild runs on every render | On a **2.0MB / 2001-heading** doc, `buildTableOfContents()` + `makeHeadersCollapsible()` cost **27.1ms** on full render and about **30ms** on changed renders | Medium | Medium |
-| PERF-07 | Mermaid theme changes synchronously re-render every diagram | Toggling theme on a **20-diagram** doc spent **423.7ms** in `mermaid.run()` and **431.6ms** total in `updateMermaidTheme()` | Medium | Medium |
+| PERF-04 | **[FIXED]** Any doc containing Mermaid is forced down the full render path for small text edits | On a **225KB / 20-diagram** doc, a 1-line edit still ran `renderMarkdownFull()` for **93.9ms** even though `mermaid.run()` was **not called** | Medium | High |
+| PERF-05 | **[FIXED]** Code-heavy updates still re-highlight and re-wrap all code blocks | On a **1.46MB / 200-code-block** doc, a small edit still spent **48.5ms** in Prism highlighting + **9.9ms** adding copy buttons | Medium | High |
+| PERF-06 | **[FIXED]** TOC + collapsible-section rebuild runs on every render | On a **2.0MB / 2001-heading** doc, `buildTableOfContents()` + `makeHeadersCollapsible()` cost **27.1ms** on full render and about **30ms** on changed renders | Medium | Medium |
+| PERF-07 | **[FIXED]** Mermaid theme changes synchronously re-render every diagram | Toggling theme on a **20-diagram** doc spent **423.7ms** in `mermaid.run()` and **431.6ms** total in `updateMermaidTheme()`; visible-first rendering cut the blocking toggle to **~85ms** | Medium | Medium |
 
 ## Measurement methodology
 
@@ -306,6 +306,47 @@ app.whenReady().then(async () => {
   - `updateMermaidTheme()`: **431.6ms**
 - **Specific proposed alternative:** rerender visible diagrams first, defer offscreen ones with `requestIdleCallback`, or keep the theme toggle responsive and progressively refresh SVGs afterward.
 - **Estimated gain:** removes a **~0.4s hitch** on theme changes in diagram-heavy docs.
+
+### Status: FIXED — `renderer.js:1495-1660`
+
+`applyMermaidTheme()` now splits `.mermaid` nodes into on-screen (plus one
+viewport of margin) and the rest. The on-screen batch renders inline and the
+toggle resolves; the remainder is caught up in chunks of 4 under
+`requestIdleCallback`, re-sorted by visibility at every chunk so that scrolling
+during the catch-up promotes whatever the user just brought into view.
+
+Off-screen nodes are deliberately left showing their **old SVG** until their
+chunk runs. The previous code restored `data-mermaid-src` into every node up
+front, which would now mean the whole document showing raw diagram source for
+the duration of the pass — correct, but far uglier than a stale colour.
+
+**Measured on the same 20-diagram document, same session, after warm-up:**
+
+| | blocking toggle | full settle |
+|---|---|---|
+| Old (single batch) | 398.8ms / 402.7ms | same |
+| New (visible-first) | **84.0ms / 86.5ms** | 422.0ms / 449.6ms |
+
+So the user-visible hitch drops **~4.7×** and the total work is unchanged — the
+tail simply moved into idle time. The idle deadline is 100ms rather than the
+250ms first tried, which shortened the tail from ~1.4s to ~0.45s and so shortened
+the window in which scrolling could reveal an un-retimed diagram.
+
+**New correctness hazard this introduces, and how it is handled.** Work now spans
+several queued jobs, so a superseded update *can* exist — which the previous
+comment in this file explicitly said could never happen. `mermaidRunSeq` is the
+generation token: a chunk whose seq is stale renders nothing and writes nothing
+to `mermaidSvgCache`. Note that `scheduleMermaidCatchUp()` also cancels the
+pending idle callback, which **masks** the token end to end; the token covers the
+window the cancel cannot — a chunk already queued on the mermaid mutex, whose
+`.then()` would otherwise re-arm the abandoned chain and clobber the live one's
+handle.
+
+**Coverage:** 5 assertions in `test-mermaid-render.js`. Revert-proof: removing
+the generation guards makes "a catch-up pass from a superseded generation
+renders nothing" fail with `{"count":14,"changed":4}`. The end-to-end supersede
+assertion alone does **not** fail — it is protected by the cancel — which is why
+the guard is also tested directly.
 
 ## Measured and found already fast
 

@@ -1023,12 +1023,232 @@ async function run(win) {
     JSON.stringify(recent),
   );
 
-  // Nothing above should have produced an uncaught renderer error.
+  // <iframe> is in ADD_TAGS (for @@@html) and `src` is allowed by DOMPurify by
+  // default, so `<iframe src="https://…">` in plain markdown would otherwise
+  // fetch and run a remote page with no click at all. The app's own iframes are
+  // srcdoc-only, so `src` is stripped in the sanitizer hook.
+  await render(
+    '# Nav\n\n<iframe src="https://probe.invalid/frame"></iframe>\n',
+    "full",
+    1200,
+  );
+  const frameState = await exec(`
+    (() => {
+      const f = document.querySelector('#viewer iframe');
+      return {
+        // Control: the iframe element itself must still be there, otherwise
+        // this passes because the render failed rather than because src went.
+        present: !!f,
+        src: f ? f.getAttribute('src') : 'NO-IFRAME',
+        sandbox: f ? f.getAttribute('sandbox') : null
+      };
+    })()
+  `);
+  check(
+    "SEC-11 a remote <iframe src> is stripped, the sandboxed element survives",
+    frameState.present === true &&
+      frameState.src === null &&
+      frameState.sandbox === "allow-scripts",
+    JSON.stringify(frameState),
+  );
+
+  // An @@@html frame relocating itself is the one path that exercises the
+  // will-frame-navigate branch. Without a test here, inverting the isMainFrame
+  // early-return - or deleting the listener - passes the whole suite.
+  //
+  // Two things this must get right, both learned the hard way:
+  //  * webContents.getURL() reports only the TOP frame, so asserting on it is
+  //    vacuous - a sandboxed frame navigating *itself* leaves it untouched.
+  //    The frame tree has to be inspected directly.
+  //  * the target must be REMOTE. A file: target proves nothing, because
+  //    Chromium refuses to let a sandboxed, origin-opaque frame reach a local
+  //    resource on its own - the test then passes with the guard deleted.
+  //    Measured with the guard removed: subframeUrls became
+  //    ["https://probe.invalid/frame-probe"], i.e. the frame really does
+  //    relocate, and DNS failure does not prevent the URL from committing.
+  const frameProbeUrl = "https://probe.invalid/frame-probe";
+  await exec(`
+    window.__navProbeSeen = false;
+    window.addEventListener('message', (e) => {
+      if (e.data && e.data.__navProbe) window.__navProbeSeen = true;
+    });
+    null;
+  `);
+  const urlBeforeFrame = win.webContents.getURL();
+  await render(
+    "# Nav\n\n@@@html\n" +
+      "<script>parent.postMessage({__navProbe:1},'*');" +
+      `location.href=${JSON.stringify(frameProbeUrl)};</script>\n` +
+      "@@@\n",
+    "full",
+    2500,
+  );
+  const subframeUrls = win.webContents.mainFrame.frames.map((f) => f.url);
+  const frameNav = await exec(`
+    ({ present: !!document.querySelector('#viewer iframe'),
+       ran: window.__navProbeSeen === true })
+  `);
+  check(
+    "SEC-11 an @@@html frame cannot navigate itself away from its srcdoc",
+    frameNav.present === true &&
+      frameNav.ran === true &&
+      subframeUrls.length > 0 &&
+      subframeUrls.every((u) => !u.includes("frame-probe")) &&
+      win.webContents.getURL() === urlBeforeFrame,
+    JSON.stringify({ frameNav, subframeUrls, urlBeforeFrame }),
+  );
+
+  // Read this before the navigation probes below: if a navigation guard fails,
+  // the document that holds __e2eErrors is replaced and the check would report
+  // the wrong thing.
   const errs = await exec(`window.__e2eErrors`);
+
+  // ==========================================================================
+  // SEC-11 - navigating the Node-privileged main window
+  //
+  // Two independent controls, tested separately:
+  //   (a) DOMPurify must not emit <form action> / formaction, so the markup
+  //       that expresses a one-click navigation never exists;
+  //   (b) main.js must deny will-navigate / will-redirect / window.open, so a
+  //       navigation the sanitizer cannot see (location assignment, meta
+  //       refresh, an @@@html frame) still goes nowhere.
+  // ==========================================================================
+  await render(
+    "# Nav\n\n" +
+      '<form action="https://probe.invalid/pwn" method="get">' +
+      "<button>SubmitProbe</button></form>\n\n" +
+      '<button formaction="https://probe.invalid/fa">FormActionProbe</button>\n',
+    "full",
+    1200,
+  );
+  const formState = await exec(`
+    (() => {
+      const v = document.getElementById('viewer');
+      const btns = Array.from(v.querySelectorAll('button'));
+      return {
+        forms: v.querySelectorAll('form').length,
+        actionAttrs: v.querySelectorAll('[action]').length,
+        // Note: DOMPurify strips formaction unaided, so this clause locks in
+        // current sanitizer behaviour rather than testing FORBID_ATTR. The
+        // load-bearing clause is the form count; that one fails without
+        // FORBID_TAGS (measured).
+        formActionAttrs: v.querySelectorAll('[formaction]').length,
+        // Control: DOMPurify unwraps a forbidden tag and keeps its children, so
+        // the button surviving proves the payload reached the sanitizer and was
+        // specifically stripped - not that the whole render silently failed.
+        submitBtn: btns.some(b => b.textContent === 'SubmitProbe'),
+        faBtn: btns.some(b => b.textContent === 'FormActionProbe')
+      };
+    })()
+  `);
+  check(
+    "SEC-11 <form action> and formaction are stripped, their content is not",
+    formState.forms === 0 &&
+      formState.actionAttrs === 0 &&
+      formState.formActionAttrs === 0 &&
+      formState.submitBtn === true &&
+      formState.faBtn === true,
+    JSON.stringify(formState),
+  );
+
+  // <map><area href> survives DOMPurify: an image map is a hyperlink that is
+  // not an <a>. The renderer's click handler now matches it, so it obeys the
+  // same external/local policy as every other link instead of falling through
+  // to Chromium's default follow.
+  await render(
+    '# Nav\n\n<img src="x.png" usemap="#m" alt="m">\n' +
+      '<map name="m"><area shape="rect" coords="0,0,20,20" ' +
+      'href="https://probe.invalid/area" alt="AreaProbe"></map>\n',
+    "full",
+    1000,
+  );
+  const areaState = await exec(`
+    (() => {
+      const a = document.querySelector('#viewer area');
+      return a ? { present: true, href: a.getAttribute('href') } : { present: false };
+    })()
+  `);
+  // Stub the external opener *inside the renderer* - test-render-security.js
+  // runs in the main process, and patching its own require('electron') would
+  // leave the renderer's copy untouched and the assertion vacuous.
+  await exec(`
+    window.__externalUrl = null;
+    window.__savedOpenExternal = require('electron').shell.openExternal;
+    require('electron').shell.openExternal = (u) => {
+      window.__externalUrl = u;
+      return Promise.resolve();
+    };
+    null;
+  `);
+  const urlBeforeArea = win.webContents.getURL();
+  await exec(`document.querySelector('#viewer area').click(); null`);
+  await sleep(700);
+  const urlAfterArea = win.webContents.getURL();
+  const externalUrl = await exec(`window.__externalUrl`);
+  await exec(`
+    require('electron').shell.openExternal = window.__savedOpenExternal;
+    delete window.__savedOpenExternal;
+    null;
+  `);
+  check(
+    "SEC-11 an <area href> is routed through the link policy, not Chromium",
+    areaState.present === true &&
+      areaState.href === "https://probe.invalid/area" &&
+      externalUrl === "https://probe.invalid/area" &&
+      urlAfterArea === urlBeforeArea,
+    JSON.stringify({ areaState, externalUrl, urlBeforeArea, urlAfterArea }),
+  );
+
+  // <meta http-equiv="refresh"> is the other markup-only route. DOMPurify drops
+  // <meta>; assert it, so a future ADD_TAGS change cannot quietly re-enable it.
+  await render(
+    '# Nav\n\n<meta http-equiv="refresh" content="0;url=https://probe.invalid/mr">\n',
+    "full",
+    600,
+  );
+  check(
+    "SEC-11 <meta http-equiv=refresh> does not survive sanitization",
+    (await exec(`document.getElementById('viewer').querySelectorAll('meta').length`)) === 0,
+  );
+
+  // window.open must be denied by setWindowOpenHandler. Electron returns null
+  // for a denied open, so this is observable from the renderer itself.
+  check(
+    "SEC-11 window.open from the main window is denied",
+    (await exec(`window.open('https://probe.invalid/wo') === null`)) === true,
+  );
+
+  // The load-bearing one: an actual navigation attempt. A local file is used
+  // rather than a remote URL so the result cannot be confused with a network
+  // failure - if the guard were absent this page would commit successfully and
+  // getURL() would change. Placed last because that failure destroys the
+  // harness's own document.
+  const navProbe = path.join(dir, "nav-probe.html");
+  fs.writeFileSync(navProbe, "<html><body>navigated</body></html>", "utf8");
+  const urlBefore = win.webContents.getURL();
+  await exec(
+    `window.location.href = ${JSON.stringify("file:///" + navProbe.replace(/\\/g, "/"))}; null`,
+  );
+  await sleep(900);
+  const urlAfter = win.webContents.getURL();
+  check(
+    "SEC-11 main-window navigation away from index.html is blocked",
+    urlAfter === urlBefore && /index\.html$/.test(urlAfter),
+    `before=${urlBefore} after=${urlAfter}`,
+  );
+
+  // Nothing above should have produced an uncaught renderer error. `errs` was
+  // snapshotted before the navigation probes because a failed guard destroys
+  // the document that holds it; this second read catches anything the probes
+  // themselves raised, and is monotonic so it cannot regress the first check.
+  const errsAfter = await exec(`window.__e2eErrors`);
   check(
     "no uncaught renderer errors",
-    Array.isArray(errs) && errs.length === 0,
-    JSON.stringify(errs),
+    Array.isArray(errs) &&
+      errs.length === 0 &&
+      Array.isArray(errsAfter) &&
+      errsAfter.length === 0,
+    JSON.stringify({ errs, errsAfter }),
   );
 }
 

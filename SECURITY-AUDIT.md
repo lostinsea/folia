@@ -45,7 +45,7 @@ document. Everything marked FIXED below is covered by a regression test — in
 | SEC-07 | **FIXED** | Mermaid popup: SVG passes through `stripActiveSvgContent()`, which now decodes numeric character references before stripping so `javascript&#58;` cannot survive the filter. The CSP below is the primary control. |
 | SEC-15 | **FIXED** | Table popup: table data embedded via a new `toJsonLiteral()` (`JSON.stringify` + `\u003c`/`\u003e`/U+2028/U+2029 escaping). `JSON.stringify` alone does not escape `<`, so a cell containing `</script>` terminated the generated script element. |
 | SEC-09 | **FIXED for the four popup windows**; open for the main window | Every generated popup document now carries a per-document nonce CSP: `default-src 'none'; script-src 'nonce-…'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`. All inline `on*=` handlers were converted to `addEventListener` to satisfy it. |
-| SEC-11 | **FIXED for the four popup windows**; open for the main window | `registerPopup()` denies `will-navigate`, `will-redirect`, `will-frame-navigate` and `setWindowOpenHandler` on every popup, and `<meta>` is stripped from mermaid SVG. See below — the CSP alone did **not** cover this. |
+| SEC-11 | **FIXED** (popups and main window) | `registerPopup()` denies `will-navigate`, `will-redirect`, `will-frame-navigate` and `setWindowOpenHandler` on every popup, and `<meta>` is stripped from mermaid SVG. The main window now installs the same four guards, `<form>` is in `FORBID_TAGS`, `<area href>` is routed through the link policy, and `<iframe src>` is stripped in the sanitizer hook. See below — the CSP alone did **not** cover this. |
 | SEC-08 | **FIXED for the four popup windows**; open for the main window | Popups run `nodeIntegration: false, contextIsolation: true` behind `popup-preload.js`, which exposes only fixed channels — and only the single API that popup kind needs, selected by a `--popup-kind=` process argument, so script in one popup cannot drive another's privileged path. |
 | SEC-10 | **FIXED** earlier | Runtime libraries vendored locally; no CDN load. |
 | SEC-13 | **FIXED** | Notes tooltip and All-Notes panel rebuilt with `createElement` + `textContent` instead of `innerHTML`. Two further sinks the audit missed were found in the same pass — one of them (`data-note-color` into a `style` attribute) genuinely exploitable. Colour values are now normalized at source and four `[data-note-id="…"]` selectors use `CSS.escape`. See the SEC-13 entry. |
@@ -455,6 +455,72 @@ win.webContents.on('will-navigate', (e, url) => {
 win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 ```
 and add `'form'`, `'action'`, `'formaction'` to DOMPurify's `FORBID_TAGS`/`FORBID_ATTR`.
+
+### Status: FIXED (main window) — `main.js:356-386`, `renderer.js:122-152`, `renderer.js:194-207`, `renderer.js:1886`
+
+Two independent layers, because neither is sufficient alone. The sanitizer
+cannot see a navigation the DOM never expressed (`window.open`, a meta refresh,
+a frame relocating itself); the navigation guard cannot distinguish a wanted
+navigation from an unwanted one if the app ever grows a legitimate one.
+
+**Layer 1 — sanitizer (`renderer.js`).**
+
+* `FORBID_TAGS: ['form']`. This is the load-bearing line. Measured: with it
+  removed, `<form action="https://…"><button>x</button></form>` comes out of the
+  pipeline intact (`{"forms":1,"actionAttrs":1}`).
+* `FORBID_ATTR: ['action', 'formaction']` is **forward-defence, not a live
+  control**, and the honest accounting matters: `action` only exists on `<form>`
+  and goes with the tag; `formaction` is already stripped from `<button>` and
+  `<input>` by DOMPurify unaided. Both independently confirmed by the two
+  reviewers. The lines are kept so that a future edit adding `'form'` to
+  `ADD_TAGS` cannot quietly reopen this.
+* `<iframe src>` is removed in the `afterSanitizeAttributes` hook. **This was not
+  in the original finding and was found while fixing it:** `iframe` is in
+  `ADD_TAGS` (for `@@@html`) and `src` is a DOMPurify default-allowed attribute,
+  so `<iframe src="https://attacker/">` in ordinary markdown fetched and ran a
+  remote page inside the main window *with no click at all* — a silent
+  IP/User-Agent beacon on every document open, at minimum. The app's own iframes
+  are `srcdoc`-only, so `src` never comes from us.
+* `<map><area href>` survives sanitization and is a hyperlink that is not an
+  `<a>`. The renderer's click handler now matches `'a, area'`, so an image map
+  obeys the same external-link and SEC-12 local-file policy as everything else
+  instead of falling through to Chromium's default follow.
+
+**Layer 2 — main process (`main.js`).** `will-navigate`, `will-redirect`,
+`will-frame-navigate` (subframes only) and `setWindowOpenHandler`, attached
+*before* `loadFile` to match `registerPopup()`. `loadFile` does not fire
+`will-navigate`, so nothing legitimate is affected: the app never navigates the
+top frame, `@@@html` frames load from `srcdoc` (which does not fire
+`will-frame-navigate`), `#hash` links are `preventDefault`ed by the renderer,
+and `history.pushState`/`replaceState` are same-document.
+
+**Deliberate collateral:** a subframe can no longer navigate itself at all, so a
+remote `<iframe src>` would be blocked even if it survived the sanitizer.
+
+**Revert-proof.** Each control was removed in turn and the suite re-run:
+
+| Removed | Observed |
+|---|---|
+| `FORBID_TAGS: ['form']` | `<form>` and its `action` survive: `{"forms":1,"actionAttrs":1}` |
+| `will-navigate` guard | window commits the probe document; `getURL()` changes to it |
+| `removeAttribute('src')` on iframes | `src="https://probe.invalid/frame"` present in the DOM |
+| `closest('a, area')` → `closest('a')` | `<area>` click reaches neither `openExternal` nor the local-file policy |
+| `will-frame-navigate` guard | the `@@@html` frame relocates: `subframeUrls === ["https://probe.invalid/frame-probe"]` |
+
+**Two test-design traps found while writing those proofs**, both of which
+produced a green but meaningless assertion:
+
+1. `webContents.getURL()` reports only the **top** frame. A sandboxed frame
+   navigating *itself* leaves it untouched, so the first version of the subframe
+   test passed with the guard deleted. It now reads
+   `webContents.mainFrame.frames` directly.
+2. The subframe probe target must be **remote**. Chromium refuses to let a
+   sandboxed, origin-opaque frame reach a `file:` URL on its own, so a local
+   target also passed with the guard deleted.
+
+**Coverage:** 7 assertions in `test-render-security.js`, each with a control
+assertion proving the payload reached the sanitizer/handler rather than the
+render having silently failed.
 
 ---
 
@@ -935,7 +1001,7 @@ Recorded so a reader knows where the audit's boundaries are.
 1. **SEC-26 / SEC-02 / SEC-03 / SEC-04** — make DOMPurify the last step before DOM insertion, and escape the three post-sanitization interpolation sites. Highest value per line changed; kills three zero-click RCEs.
 2. **SEC-01** — remove `@@@html`, or add `sandbox="allow-scripts"` (no `allow-same-origin`).
 3. **SEC-05 / SEC-06 / SEC-07** — escape the popup interpolations and flip those three windows to `nodeIntegration: false`.
-4. **SEC-11 / SEC-09** — add `will-navigate` + `setWindowOpenHandler` guards and a CSP.
+4. **SEC-11 / SEC-09** — add `will-navigate` + `setWindowOpenHandler` guards and a CSP. **SEC-11 done (popups and main window); SEC-09 done for popups, main-window CSP still open.**
 5. **SEC-10 / SEC-16** — move marked/mermaid/DOMPurify to local files and bump versions.
 6. **SEC-12 / SEC-13 / SEC-14 / SEC-15** — the remaining injection and one-click-execution fixes. **Done.**
 7. **SEC-08** — the `contextIsolation: true` + preload refactor. Largest effort; do it last, but note that until it lands, every other fix is a single missed escape away from RCE. Path validation on the IPC handlers must land together with this.
