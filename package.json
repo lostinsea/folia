@@ -128,7 +128,7 @@
         }
       ],
       "icon": "logo.ico",
-      "sign": null,
+      "signtoolOptions": null,
       "fileAssociations": [
         {
           "ext": "md",

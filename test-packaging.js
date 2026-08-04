@@ -202,6 +202,71 @@ function main() {
     check(`fonts/${f} is in build.files`, isPackaged(files, "fonts/" + f));
   }
 
+  // Shipping the right file list is useless if electron-builder refuses the
+  // configuration outright. The 24 -> 26 upgrade removed `win.sign` (signing
+  // moved under `win.signtoolOptions`), which made EVERY packaged build fail
+  // at the schema-validation step - invisible to the whole test suite, because
+  // tests run from the working tree and never invoke the packager. The release
+  // workflow would have been the first thing to find out.
+  //
+  // electron-builder ships its own JSON schema, and each platform section
+  // declares `additionalProperties: false`, so an unknown key is exactly the
+  // failure mode above. Validating key names against that schema costs
+  // milliseconds and needs no packaging run.
+  const schemaPath = path.join(
+    ROOT,
+    "node_modules",
+    "app-builder-lib",
+    "scheme.json",
+  );
+  if (!fs.existsSync(schemaPath)) {
+    check("electron-builder schema is available to validate against", false,
+      "node_modules/app-builder-lib/scheme.json not found");
+  } else {
+    const schema = JSON.parse(fs.readFileSync(schemaPath, "utf8"));
+    const sections = {
+      win: "WindowsConfiguration",
+      nsis: "NsisOptions",
+      portable: "PortableOptions",
+      linux: "LinuxConfiguration",
+      mac: "MacConfiguration",
+      dmg: "DmgOptions",
+      appImage: "AppImageOptions",
+      deb: "DebOptions",
+    };
+    // Control: if the schema ever stops exposing the definition this suite
+    // relies on, say so instead of silently checking nothing.
+    check(
+      "the schema exposes the platform definitions this check needs",
+      Object.values(sections).every(
+        (d) => !pkg.build[Object.keys(sections).find((k) => sections[k] === d)] ||
+          (schema.definitions &&
+            schema.definitions[d] &&
+            schema.definitions[d].properties),
+      ),
+    );
+    for (const [key, defName] of Object.entries(sections)) {
+      if (!pkg.build[key]) continue;
+      const def = schema.definitions && schema.definitions[defName];
+      if (!def || !def.properties) continue;
+      const unknown = Object.keys(pkg.build[key]).filter(
+        (k) => !(k in def.properties),
+      );
+      check(
+        `build.${key} has no keys electron-builder rejects`,
+        unknown.length === 0,
+        unknown.length ? `unknown: ${unknown.join(", ")}` : "",
+      );
+    }
+    const rootProps = schema.properties || {};
+    const unknownRoot = Object.keys(pkg.build).filter((k) => !(k in rootProps));
+    check(
+      "build root has no keys electron-builder rejects",
+      unknownRoot.length === 0,
+      unknownRoot.length ? `unknown: ${unknownRoot.join(", ")}` : "",
+    );
+  }
+
   console.log(`\n=== ${pass} passed, ${fail} failed ===\n`);
   process.exit(fail === 0 ? 0 : 1);
 }
