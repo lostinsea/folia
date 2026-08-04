@@ -2775,6 +2775,51 @@ function configureAutoUpdater(autoUpdater) {
 // Return current app version to renderer
 ipcMain.handle("get-version", () => app.getVersion());
 
+// SEC-09 — translation runs here, not in the renderer.
+//
+// This was the renderer's ONLY outbound request, and the sole reason its CSP
+// had to name a remote host in connect-src. Performing it in the main process
+// lets the renderer's policy be `connect-src 'none'`: no fetch, XHR, WebSocket,
+// EventSource or sendBeacon destination at all, so injected script has no
+// egress channel of that shape left to reach for.
+//
+// Honesty about what this does and does not buy, so nobody over-reads it: the
+// main window still runs with nodeIntegration (SEC-08), and script running
+// there can `require('https')` and ignore CSP entirely. So this is
+// defence-in-depth and a prerequisite for SEC-08 — not containment on its own.
+// It is worth doing regardless because it costs one IPC hop and permanently
+// removes a remote-origin exception from the policy.
+const TRANSLATE_LANG_RE = /^[a-z]{2,3}(-[A-Za-z]{2,4})?$/;
+const TRANSLATE_MAX_CHARS = 20000;
+
+ipcMain.handle("translate-text", async (event, payload) => {
+  const text = payload && typeof payload.text === "string" ? payload.text : "";
+  const targetLang =
+    payload && typeof payload.targetLang === "string" ? payload.targetLang : "";
+  // The language code goes straight into the URL, so it is validated against a
+  // shape rather than escaped - anything that is not a language tag is a bug or
+  // an injection attempt, and there is no legitimate third case.
+  if (!TRANSLATE_LANG_RE.test(targetLang)) {
+    throw new Error(`Unsupported target language: ${String(targetLang).slice(0, 20)}`);
+  }
+  if (!text.trim()) return text;
+  if (text.length > TRANSLATE_MAX_CHARS) {
+    throw new Error(`Translation payload too large: ${text.length} chars`);
+  }
+
+  const url =
+    "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto" +
+    `&tl=${encodeURIComponent(targetLang)}&dt=t&q=${encodeURIComponent(text)}`;
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Translation API error: ${response.status}`);
+  const data = await response.json();
+  const segments = data && data[0];
+  // The API has returned something unexpected; the caller's contract is to keep
+  // the original text rather than surface a partial translation.
+  if (!segments || !Array.isArray(segments)) return text;
+  return segments.map((s) => (s && s[0]) || "").join("");
+});
+
 // Return app root path so renderer can construct paths like README.md
 ipcMain.handle("get-app-path", () => app.getAppPath());
 

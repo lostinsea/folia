@@ -53,6 +53,7 @@ test-*.js
 !test-startup-perf.js
 !test-search.js
 !test-render-patch.js
+!test-translate-network.js
 
 # Written by the popup and mermaid suites so a redirected run is still
 # inspectable - Electron drops buffered stdout on app.exit().

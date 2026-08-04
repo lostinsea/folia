@@ -1390,19 +1390,42 @@ async function run(win) {
     JSON.stringify(await exec(`window.__csp`)),
   );
 
-  // Control for the directive above. The request will still fail in CI - there
-  // is no network - so the assertion is specifically that CSP did not refuse
-  // it, which is what would break the translation feature.
+  // The translation endpoint used to be the one remote host connect-src had to
+  // name. It is now fetched in the main process (SEC-09), so the renderer must
+  // NOT be able to reach it either - the exception is gone, not merely unused.
   await exec(`
     fetch('https://translate.googleapis.com/translate_a/single?client=gtx')
       .then(() => {}, () => {});
     null;
   `);
-  await sleep(600);
   check(
-    "SEC-09 the translation endpoint is not refused by connect-src",
-    (await cspHits("translate.googleapis.com", "connect-src")) === false,
+    "SEC-09 even the translation endpoint is refused (connect-src 'none')",
+    (await waitForCsp("translate.googleapis.com", "connect-src")) === true,
     JSON.stringify(await exec(`window.__csp`)),
+  );
+
+  // ...and the feature it used to serve still has a route, in the main process.
+  // Without this the assertion above could be satisfied by simply deleting
+  // translation, which is not the same fix at all. The language validation is
+  // exercised rather than the network, which is not available here: a bad tag
+  // must be refused before any request is built, and a good one must get past
+  // validation and fail on the network instead.
+  const badLang = await exec(`
+    require('electron').ipcRenderer.invoke('translate-text',
+      { text: 'hello', targetLang: '../../evil' })
+      .then(() => 'resolved', (e) => String(e && e.message))
+  `);
+  const goodLang = await exec(`
+    require('electron').ipcRenderer.invoke('translate-text',
+      { text: 'hello', targetLang: 'fr' })
+      .then(() => 'resolved', (e) => String(e && e.message))
+  `);
+  check(
+    "SEC-09 translation moved to the main process, and validates its language tag",
+    /Unsupported target language/.test(badLang) &&
+      !/Unsupported target language/.test(goodLang) &&
+      !/No handler registered/.test(goodLang),
+    JSON.stringify({ badLang, goodLang }),
   );
 
   // <base> rewrites the resolution of every relative URL already in the

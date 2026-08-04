@@ -416,7 +416,7 @@ injected a candidate policy at runtime and reported what stopped working:
 | no `'unsafe-eval'` | Measured: mermaid 11 and Prism render without it. |
 | `style-src 'self' 'unsafe-inline'` | Inline `style` attributes are an allowed sanitizer output (SEC-21) and the theme system writes inline styles. |
 | `img-src 'self' file: data: blob: https:` | `https:` kept **deliberately** — remote images in markdown are a real feature. Cleartext `http:` excluded. The read-receipt exposure is recorded here rather than traded away. |
-| `connect-src 'self' https://translate.googleapis.com` | The translate feature is the only outbound call the app makes. |
+| `connect-src 'none'` | Originally `'self' https://translate.googleapis.com`, because the translate feature was the only outbound call the app made. It has since been moved into the main process (below), so the renderer now has **no** network destination of any kind. |
 | `default-src 'none'` + no `frame-src` | `frame-src` falls back to `'none'`, which still permits `about:srcdoc` frames (measured) while blocking every remote and local-file frame. |
 | `object-src 'none'`, `base-uri 'none'`, `form-action 'none'` | Complements the `FORBID_TAGS: ['form']` and navigation guards of SEC-11. |
 
@@ -459,6 +459,53 @@ the *policy*, not the sanitizer. Revert-proven: disabling the meta fails 7 of 9
 (the 2 controls correctly stay green); deleting the `will-frame-navigate`
 listener fails the "armed and denies" assertion; deleting the `isMainFrame`
 early return fails the "defers to will-navigate" assertion.
+
+### Follow-up — `connect-src` reduced to `'none'` *(raised in review; the two reviewers disagreed)*
+
+One reviewer would not accept SEC-09 as "fixed" while `connect-src` still named
+a remote host, `img-src` still allowed `https:` and `'unsafe-inline'` was still
+present — its argument being that a working exfiltration path remains in a
+`nodeIntegration` renderer. The other reviewed the same directives, verified the
+`worker-src` / `manifest-src` / `child-src` fallbacks, and raised no blocking
+objection. **Both were partly right, and the disagreement is recorded rather
+than quietly resolved in favour of one of them:**
+
+- The suggested change was worth making and has been made. `googleTranslate()`
+  was the renderer's *only* network call, so moving it into the main process
+  behind `ipcMain.handle("translate-text")` cost one IPC hop and let the
+  renderer's policy become `connect-src 'none'` — no fetch, XHR, WebSocket,
+  EventSource or `sendBeacon` destination at all.
+- But its stated *benefit* does not hold yet, and saying so matters more than
+  the change itself: the main window still runs with `nodeIntegration: true`
+  (SEC-08), so script executing there can `require('https')` and ignore CSP
+  entirely. **In that renderer, CSP is defence-in-depth, not containment.** The
+  reviewer's conclusion — "therefore SEC-09 is not fixed" — would be right if
+  CSP were being sold as containment. It is not; the limitation is stated
+  above. The real remaining work is SEC-08.
+- `img-src https:` is unchanged and is a **deliberate** trade (remote images in
+  markdown are a real feature). It leaves a GET-shaped, URL-length-limited
+  egress path. That is recorded here, not traded away.
+
+The language tag is validated against a shape (`/^[a-z]{2,3}(-[A-Za-z]{2,4})?$/`)
+before it is interpolated into the URL, and the payload is length-capped —
+otherwise moving the request to the main process would just relocate the
+injection surface to a more privileged place.
+
+**Tests.** Two assertions replace the old "the translation endpoint is *not*
+refused" control, which had become exactly backwards:
+
+1. The renderer must now be refused even for `translate.googleapis.com`.
+   Revert-proven (R38): restoring the old `connect-src` fails it.
+2. Translation must still *work* — otherwise assertion 1 could be satisfied by
+   deleting the feature, which is not the same fix. Revert-proven (R39):
+   removing the IPC handler fails it with `No handler registered`.
+
+Assertion 2 is hermetic (it exercises language validation and handler presence,
+not the network). The part that cannot be tested hermetically has its own
+opt-in, network-dependent test — `npm run test:translate` — kept out of
+`npm test` on purpose, because a suite that fails when someone is offline
+teaches people to ignore failures. Verified end to end besides: `hello world` →
+`Selam Dünya` in the real UI, screenshot inspected.
 
 ---
 

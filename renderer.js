@@ -3527,13 +3527,11 @@ document.addEventListener('wheel', (e) => {
 
 async function googleTranslate(text, targetLang) {
   if (!text || !text.trim()) return text;
-  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`;
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`Translation API error: ${response.status}`);
-  const data = await response.json();
-  const segments = data[0];
-  if (!segments || !Array.isArray(segments)) return text; // API returned unexpected format
-  return segments.map(s => (s && s[0]) || '').join('');
+  // SEC-09: performed in the main process. The renderer's CSP is
+  // `connect-src 'none'` - it has no network egress of its own by design - so
+  // this is an IPC hop rather than a fetch. Errors still reject, which is what
+  // batchGoogleTranslate's per-piece fallback relies on.
+  return await ipcRenderer.invoke('translate-text', { text, targetLang });
 }
 
 // Parallel batch translator — sends up to CONCURRENCY requests at once.
