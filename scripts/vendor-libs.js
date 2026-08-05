@@ -31,10 +31,14 @@ const LIBS = [
   ["dompurify", "dist/purify.min.js", "purify.min.js"],
 ];
 
-// styles.css declares @font-face rules pointing at fonts/FiraCode-*.ttf, but
-// that directory only existed in the vscode-extension subtree, so the rules
-// silently failed and the app fell back to the Google Fonts CDN.
-const FONT_SRC = path.join(ROOT, "vscode-extension", "media", "fonts");
+// styles.css declares @font-face rules pointing at fonts/FiraCode-*.ttf.
+// fonts/ is a BUILD OUTPUT (gitignored, see .gitignore), so the TTFs need a
+// tracked source; assets/fonts/ is it. They used to live in the bundled
+// vscode-extension subtree, which was dropped from this fork - had they not
+// been relocated first, a clean clone would have vendored no TTFs, the
+// @font-face rules would have failed silently, and code blocks would have
+// dropped to a generic monospace with nothing reporting why.
+const FONT_SRC = path.join(ROOT, "assets", "fonts");
 const FONT_OUT = path.join(ROOT, "fonts");
 
 // OmniWare's hand-drawn look depends on two Google fonts, which it pulled with
@@ -78,11 +82,48 @@ function main() {
     copy(path.join(pkgDir, file), path.join(OUT, dest), pkg);
   }
 
-  if (fs.existsSync(FONT_SRC)) {
-    console.log("Vendoring Fira Code ...");
-    for (const f of fs.readdirSync(FONT_SRC).filter((n) => /\.ttf$/i.test(n))) {
-      copy(path.join(FONT_SRC, f), path.join(FONT_OUT, f), "font");
+  // Not optional and not silently skippable: styles.css names each TTF
+  // explicitly, and a missing file is invisible at runtime (the @font-face
+  // rule just never matches). So read the filenames the stylesheet actually
+  // asks for and require every one of them - if a weight is added to the CSS
+  // without adding the file, vendoring fails here instead of degrading to a
+  // generic monospace in front of the user.
+  console.log("Vendoring Fira Code ...");
+  const cssText = fs.readFileSync(path.join(ROOT, "styles.css"), "utf8");
+  const wanted = [
+    ...new Set(
+      [
+        ...cssText.matchAll(
+          /url\(\s*['"]?fonts\/([^'")?#]+\.ttf)(?:[?#][^'")]*)?['"]?\s*\)/gi,
+        ),
+      ].map((m) => m[1]),
+    ),
+  ];
+  if (wanted.length === 0) {
+    throw new Error(
+      "vendor-libs: styles.css references no fonts/*.ttf - the @font-face " +
+        "rules were removed or this regex stopped matching them",
+    );
+  }
+  // Vendoring must be AUTHORITATIVE, not merely additive. Copying the wanted
+  // files while leaving unknown ones behind means fonts/ is the union of every
+  // version of this script that has ever run on the machine. That is not
+  // hypothetical: FiraCode-Retina.ttf is referenced by nothing and used to be
+  // copied here by the previous "copy every *.ttf" implementation, and
+  // build.files ships `fonts/**/*` wholesale - so on any existing checkout it
+  // would keep shipping ~285 KB of dead bytes for as long as nobody ran
+  // `git clean`. test-packaging.js enumerates fonts/ FROM DISK, so it would
+  // have gone on happily asserting the stale file was packaged correctly.
+  if (fs.existsSync(FONT_OUT)) {
+    for (const f of fs.readdirSync(FONT_OUT).filter((n) => /\.ttf$/i.test(n))) {
+      if (!wanted.includes(f)) {
+        fs.unlinkSync(path.join(FONT_OUT, f));
+        console.log(`  removed stale fonts/${f}`);
+      }
     }
+  }
+  for (const f of wanted) {
+    copy(path.join(FONT_SRC, f), path.join(FONT_OUT, f), "font");
   }
 
   console.log("Vendoring OmniWare's hand-drawn fonts ...");

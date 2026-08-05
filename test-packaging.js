@@ -194,6 +194,19 @@ function main() {
 
   // Explicit regression guards for the two files this suite was written for.
   check("popup-preload.js is in build.files", isPackaged(files, "popup-preload.js"));
+  // fonts/ is a BUILD OUTPUT (gitignored) produced by scripts/vendor-libs.js
+  // from the tracked assets/fonts/. Asserting only on fonts/ would therefore
+  // keep passing on a machine that has stale build output while the SOURCE has
+  // been deleted from the repo - and the first sign of trouble would be a
+  // postinstall failure on someone else's clean clone, or nothing at all in an
+  // environment that installs with scripts disabled. So assert the source too.
+  const fontSrcDir = path.join(ROOT, "assets", "fonts");
+  check(
+    "assets/fonts is present and populated (tracked source for font vendoring)",
+    fs.existsSync(fontSrcDir) &&
+      fs.readdirSync(fontSrcDir).some((f) => /\.ttf$/i.test(f)),
+    fs.existsSync(fontSrcDir) ? fs.readdirSync(fontSrcDir).join(",") : "absent",
+  );
   const fontFiles = fs.existsSync(path.join(ROOT, "fonts"))
     ? fs.readdirSync(path.join(ROOT, "fonts")).filter((f) => /\.ttf$/i.test(f))
     : [];

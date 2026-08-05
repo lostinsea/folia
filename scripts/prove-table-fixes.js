@@ -441,6 +441,28 @@ const REVERTS = [
     },
     expect: [/measured on its own, not handed a cached cap/],
   },
+  {
+    // Added after the vscode-extension sub-project was dropped, which forced
+    // the FiraCode TTFs to be relocated to the tracked assets/fonts/. The two
+    // reviewers DISAGREED about whether this belongs in a *table* harness at
+    // all. It does, and the reason is measured rather than argued: moving
+    // fonts/*.ttf aside does not merely fail the font assertions, it breaks
+    // FOUR geometric ones - breakout stops triggering (breakout=false) and the
+    // prose column blows out to 93.7 characters, far outside the 45-80 measure
+    // this redesign exists to hold. measureTextColumnCap() sizes a column by
+    // rendering 66 zeros in the cell's RESOLVED font, so font availability is a
+    // direct input to every table width in this suite. Without this entry the
+    // guard could later be refactored into vacuity unnoticed.
+    id: "R79",
+    what: "point a declared @font-face at a TTF that was never vendored (the app silently falls back and every table width is measured in the wrong font)",
+    file: CSS,
+    from: "  src: url('fonts/FiraCode-Regular.ttf') format('truetype');",
+    to: "  src: url('fonts/FiraCode-Regular-NEVER-VENDORED.ttf') format('truetype');",
+    expect: [
+      /every Fira Code weight the stylesheet declares is really loaded/,
+      /exists in the vendored/,
+    ],
+  },
 ];
 
 const only = process.argv.slice(2);

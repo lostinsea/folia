@@ -230,6 +230,53 @@ async function run(win) {
   const sentinel = startErrorSentinel(win, { label: "tables" });
   const exec = (c) => win.webContents.executeJavaScript(c, true);
 
+  // A geometric suite must never GUESS when a resize has landed.
+  //
+  // `win.setBounds()` is asynchronous with respect to the renderer: the OS
+  // resizes the frame, the compositor re-lays-out, and only then does
+  // window.innerWidth report the new value. A fixed sleep is a bet on machine
+  // load, and it lost - during a 32-revert harness run (32 back-to-back
+  // Electron launches) the narrow-window section measured windowWidth=1988
+  // after asking for 1000. That surfaced as R72 failing on its VACUITY GUARD
+  // instead of its own assertion, i.e. the guard doing exactly its job; had the
+  // guard not been there, a measurement taken at the wrong window size would
+  // have been recorded as a real result.
+  //
+  // So: set the bounds, then wait for the RENDERER to agree - poll until
+  // innerWidth has actually moved and then held still. A no-op resize is
+  // detected up front, because "wait for it to change" would otherwise never
+  // be satisfied.
+  async function resizeWindow(bounds) {
+    const cur = win.getBounds();
+    const same = ["x", "y", "width", "height"].every(
+      (k) => bounds[k] === undefined || bounds[k] === cur[k],
+    );
+    if (same) {
+      await sleep(150);
+      return;
+    }
+    const read = () =>
+      exec("window.innerWidth + 'x' + window.innerHeight").then(String);
+    const before = await read();
+    win.setBounds(bounds);
+    let last = before;
+    let stable = 0;
+    for (let i = 0; i < 80; i++) {
+      await sleep(25);
+      const now = await read();
+      stable = now !== before && now === last ? stable + 1 : 0;
+      last = now;
+      if (stable >= 3) return;
+    }
+    console.log(
+      "WARNING: window never settled at " +
+        JSON.stringify(bounds) +
+        " (inner size still " +
+        last +
+        "); downstream vacuity guards should catch this",
+    );
+  }
+
   // Every assertion in this suite is geometric - how much room a table has to
   // widen into - and main.js persists window bounds on every resize, move and
   // close (main.js:485-488). Sections below deliberately shrink the window, so
@@ -238,8 +285,7 @@ async function run(win) {
   // than on behaviour. This was not theoretical: it silently changed the result
   // of the unbreakable-token and context-menu assertions between runs.
   win.unmaximize();
-  win.setBounds({ x: 40, y: 40, width: 2000, height: 1100 });
-  await sleep(700);
+  await resizeWindow({ x: 40, y: 40, width: 2000, height: 1100 });
 
   await exec("localStorage.clear(); null");
   await exec(`renderMarkdown(${JSON.stringify(DOC)}, "full")`);
@@ -248,6 +294,111 @@ async function run(win) {
   const m = JSON.parse(await exec(MEASURE));
   const [mixed, uniform, wide, unbreakable, huge] = m.tables;
   check("all seven sample tables rendered", m.tables.length === 7, m.tables.length);
+
+  // --- 0. The app's own typeface is really loaded -------------------------
+  // 'Fira Code Local' is not decorative and this is not a cosmetic assertion.
+  // styles.css uses it for the whole UI (194, 271, 511, 536) and for every code
+  // block, and THIS SUITE MEASURES IN IT: measureTextColumnCap() sizes a prose
+  // column by rendering 66 zeros in the real cell's resolved font. A silent
+  // fallback to Segoe UI would move every geometric number below while every
+  // assertion still reported PASS.
+  //
+  // It can fail silently for an entirely ordinary reason: the TTFs live in the
+  // gitignored fonts/ BUILD OUTPUT, copied there by scripts/vendor-libs.js from
+  // the tracked assets/fonts/. If that copy ever stops happening the @font-face
+  // rules simply never match and the app quietly drops to a fallback. Nothing
+  // else in the suite would notice.
+  //
+  // document.fonts.check() ALONE IS VACUOUS - it answers "can this spec be
+  // rendered", and fallback always can, so it returns true for a family nobody
+  // defined. So this instead (a) loads each weight the stylesheet declares,
+  // (b) requires a real FontFace registered as 'loaded' for each, and
+  // (c) requires the glyphs to measure differently from a deliberately absent
+  // family, which is the part that cannot be satisfied by fallback.
+  const cssText = fs.readFileSync(path.join(__dirname, "styles.css"), "utf8");
+  // Pin the exact {weight, file} pairs, not just "some weights". Deriving the
+  // expectation from the stylesheet keeps it self-maintaining, but a loose
+  // derivation can SHRINK SILENTLY: extracting only /font-weight:\s*(\d+)/ and
+  // then .filter(Boolean) would quietly drop a face that switched to `bold`,
+  // `normal` or a variable range like `400 700`, and the suite would go on
+  // reporting PASS while covering one fewer weight. So parse the weight
+  // permissively, normalise the keywords, and require one weight per face.
+  const faceBlocks = [...cssText.matchAll(/@font-face\s*{[^}]*}/gi)].filter(
+    (b) => /FiraCode-[^'")]+\.ttf/i.test(b[0]),
+  );
+  const WEIGHT_KEYWORDS = { normal: "400", bold: "700" };
+  const declaredFaces = faceBlocks.map((b) => {
+    const raw = (b[0].match(/font-weight:\s*([^;}]+)/i) || [])[1];
+    const first = raw ? String(raw).trim().split(/\s+/)[0].toLowerCase() : "";
+    return {
+      file: (b[0].match(/FiraCode-[^'")]+\.ttf/i) || [])[0],
+      weight: WEIGHT_KEYWORDS[first] || first,
+    };
+  });
+  const declaredWeights = [...new Set(declaredFaces.map((f) => f.weight))];
+  check(
+    "styles.css declares Fira Code faces for this assertion to verify",
+    faceBlocks.length > 0,
+    `${faceBlocks.length} face(s)`,
+  );
+  // Guards the derivation itself: if the weight parse ever returns nothing for
+  // a face, that face silently stops being covered by the assertion below.
+  check(
+    "every declared Fira Code face yielded a usable weight and file",
+    declaredFaces.length === faceBlocks.length &&
+      declaredFaces.every((f) => /^\d+$/.test(f.weight) && f.file),
+    JSON.stringify(declaredFaces),
+  );
+  // The files must also actually be vendored - styles.css can name a face whose
+  // TTF was never copied into the gitignored fonts/ build output.
+  const missingFiles = declaredFaces
+    .map((f) => f.file)
+    .filter((f) => f && !fs.existsSync(path.join(__dirname, "fonts", f)));
+  check(
+    "every Fira Code file styles.css names exists in the vendored fonts/ output",
+    missingFiles.length === 0,
+    JSON.stringify(missingFiles),
+  );
+
+  const fira = JSON.parse(
+    await exec(`(async () => {
+      const weights = ${JSON.stringify(declaredWeights)};
+      for (const w of weights) {
+        try { await document.fonts.load(w + ' 16px "Fira Code Local"'); } catch (e) {}
+      }
+      const norm = (s) => String(s).replace(/^['"]|['"]$/g, '');
+      const faces = [...document.fonts].filter((f) => norm(f.family) === 'Fira Code Local');
+      const ctx = document.createElement('canvas').getContext('2d');
+      const sample = 'MMMiiill 0O1lI wwwmmm';
+      const widthOf = (fam) => {
+        ctx.font = '40px "' + fam + '", monospace';
+        return ctx.measureText(sample).width;
+      };
+      const absent = widthOf('Mdv Deliberately Absent Family');
+      return JSON.stringify({
+        loaded: faces.filter((f) => f.status === 'loaded').map((f) => String(f.weight)),
+        distinct: Math.abs(widthOf('Fira Code Local') - absent) > 1,
+        uiFamily: getComputedStyle(document.body).fontFamily,
+      });
+    })()`),
+  );
+  const missingWeights = declaredWeights.filter((w) => !fira.loaded.includes(w));
+  check(
+    "every Fira Code weight the stylesheet declares is really loaded",
+    missingWeights.length === 0,
+    `missing ${JSON.stringify(missingWeights)} of ${JSON.stringify(declaredWeights)}; loaded=${JSON.stringify(fira.loaded)}`,
+  );
+  // The non-vacuous half: fallback can satisfy .check(), it cannot satisfy this.
+  check(
+    "Fira Code glyphs measure differently from an undefined family, so the face is in use",
+    fira.distinct === true,
+    JSON.stringify(fira),
+  );
+  check(
+    "the app UI actually asks for Fira Code Local first",
+    /^['"]?Fira Code Local/.test(fira.uiFamily),
+    fira.uiFamily,
+  );
 
   // --- 1. Column widths follow content -----------------------------------
   check(
@@ -468,8 +619,7 @@ async function run(win) {
   // set out to remove. This is also the only path that exercises wrap-anyway,
   // so without it that rule would ship unproven.
   const originalBounds = win.getBounds();
-  win.setBounds({ ...originalBounds, width: 1000 });
-  await sleep(700);
+  await resizeWindow({ ...originalBounds, width: 1000 });
   await exec(`applyTableBreakout(); null;`);
   await sleep(300);
   const narrow = JSON.parse(
@@ -496,8 +646,7 @@ async function run(win) {
       });
     })()`),
   );
-  win.setBounds(originalBounds);
-  await sleep(700);
+  await resizeWindow(originalBounds);
   await exec(`applyTableBreakout(); null;`);
   await sleep(300);
   check(
@@ -520,8 +669,7 @@ async function run(win) {
   // pass entirely (breakout cannot work there), so unless the reset clears it,
   // the class is stranded and short columns keep wrapping in a pane that has
   // room for them. Driven through the real edit toggle.
-  win.setBounds({ ...originalBounds, width: 1000 });
-  await sleep(700);
+  await resizeWindow({ ...originalBounds, width: 1000 });
   await exec(`applyTableBreakout(); null;`);
   await sleep(200);
   const strandedWrap = JSON.parse(
@@ -537,8 +685,7 @@ async function run(win) {
       return JSON.stringify({ before, inSplit, after });
     })()`),
   );
-  win.setBounds(originalBounds);
-  await sleep(700);
+  await resizeWindow(originalBounds);
   await exec(`applyTableBreakout(); null;`);
   await sleep(300);
   check(
@@ -967,8 +1114,7 @@ async function run(win) {
     applyTableBreakout();
     return true;
   })()`);
-  win.setBounds({ ...staleBounds, width: 900 });
-  await sleep(700);
+  await resizeWindow({ ...staleBounds, width: 900 });
   await exec(`applyTableBreakout(); null;`);
   await sleep(200);
   const staleShrink = JSON.parse(
@@ -1027,8 +1173,7 @@ async function run(win) {
     applyTableBreakout();
     return true;
   })()`);
-  win.setBounds(staleBounds);
-  await sleep(700);
+  await resizeWindow(staleBounds);
   await exec(`applyTableBreakout(); null;`);
   await sleep(200);
   const staleGrow = JSON.parse(

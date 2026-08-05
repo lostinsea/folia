@@ -2,7 +2,7 @@
 // failure mode it claims to. A visual assertion that cannot fail is worse than
 // no assertion, because it reads as coverage. Run with: npm run test:visual
 const { app, BrowserWindow } = require("electron");
-const { inspectVisual } = require("./test-visual-utils");
+const { inspectVisual, captureScreenshot } = require("./test-visual-utils");
 
 const PAGE =
   "data:text/html;charset=utf-8," +
@@ -99,6 +99,42 @@ app.whenReady().then(async () => {
       "the summary counts only sound elements",
       v.count === 7 && v.soundCount === 2,
       JSON.stringify({ count: v.count, soundCount: v.soundCount }),
+    );
+
+    // captureScreenshot() must never leave the PREVIOUS run's image behind when
+    // this run failed to capture. That is not a hypothetical tidiness rule: a
+    // real UnknownVizError was swallowed, a months-old PNG stayed at the
+    // destination, and it was indistinguishable from a fresh capture - which in
+    // a project where reviewing screenshots is a primary verification step is a
+    // confident wrong answer rather than a missing one. Proven here with a
+    // destroyed window, the one failure mode that cannot succeed on retry.
+    const fs = require("fs");
+    const path = require("path");
+    const stalePath = path.join(
+      __dirname,
+      "screenshots",
+      "selfcheck-stale-artifact.png",
+    );
+    fs.mkdirSync(path.dirname(stalePath), { recursive: true });
+    fs.writeFileSync(stalePath, Buffer.from("not a real png, but it is a file"));
+    const staleBefore = fs.existsSync(stalePath);
+    const dead = new BrowserWindow({ show: false });
+    dead.destroy();
+    const shot = await captureScreenshot(dead, "selfcheck-stale-artifact");
+    expect(
+      "the stale-artifact case really started with a file on disk",
+      staleBefore === true,
+      String(staleBefore),
+    );
+    expect(
+      "a failed capture returns null instead of throwing",
+      shot === null,
+      String(shot),
+    );
+    expect(
+      "a failed capture deletes the stale artifact rather than leaving it to be misread",
+      fs.existsSync(stalePath) === false,
+      "file still present at " + stalePath,
     );
   } catch (e) {
     expect("selfcheck ran without throwing", false, String(e && e.stack));

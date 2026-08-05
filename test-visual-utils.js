@@ -281,25 +281,73 @@ async function inspectVisual(win, selector, options) {
 
 const SHOT_DIR = path.join(__dirname, "screenshots");
 
+// Tunable because UnknownVizError is a load-sensitive transient: if CI starts
+// flaking, raise these rather than concluding capture is permanently broken.
+const CAPTURE_RETRIES = 4;
+const CAPTURE_RETRY_DELAY_MS = 250;
+
 /**
  * Capture a screenshot as a debugging artifact.
  *
  * Never compared against a baseline - see the module comment. Failures are
  * swallowed deliberately: a harness must not fail because a screenshot could
  * not be written.
+ *
+ * But a swallowed failure must not leave the PREVIOUS run's image sitting at
+ * the destination. That was observed live: `capturePage()` threw
+ * `UnknownVizError` for one popup, the harness carried on, and a months-old
+ * PNG stayed on disk looking exactly like a fresh one. Reviewing screenshots
+ * is a primary verification step here, so a stale artifact is worse than no
+ * artifact - it is a confident wrong answer. Two changes:
+ *   - retry, because UnknownVizError is transient (it is the compositor not
+ *     having produced a frame yet, not a permanent condition);
+ *   - if every attempt fails, DELETE the destination so the gap is visible.
  */
 async function captureScreenshot(win, name) {
+  let safe = "unnamed";
+  let file = null;
+  let lastErr = null;
+
   try {
-    fs.mkdirSync(SHOT_DIR, { recursive: true });
-    const img = await win.webContents.capturePage();
-    const safe = String(name).replace(/[^a-z0-9._-]+/gi, "-");
-    const file = path.join(SHOT_DIR, safe + ".png");
-    fs.writeFileSync(file, img.toPNG());
-    return file;
+    // Inside the try because this function's contract is that it NEVER throws -
+    // a harness must not fail because a screenshot could not be written - and a
+    // hostile or non-string `name` would otherwise throw before the loop.
+    safe = String(name).replace(/[^a-z0-9._-]+/gi, "-");
+    file = path.join(SHOT_DIR, safe + ".png");
+
+    for (let attempt = 0; attempt < CAPTURE_RETRIES; attempt++) {
+      try {
+        if (win.isDestroyed && win.isDestroyed()) {
+          lastErr = new Error("window already destroyed");
+          break;
+        }
+        fs.mkdirSync(SHOT_DIR, { recursive: true });
+        const img = await win.webContents.capturePage();
+        // A capture can succeed and still be empty if no frame was produced.
+        if (img.isEmpty()) throw new Error("captured an empty frame");
+        fs.writeFileSync(file, img.toPNG());
+        return file;
+      } catch (e) {
+        lastErr = e;
+        await new Promise((r) => setTimeout(r, CAPTURE_RETRY_DELAY_MS));
+      }
+    }
+
+    if (file && fs.existsSync(file)) fs.unlinkSync(file);
   } catch (e) {
-    console.log("could not capture screenshot " + name + ": " + e.message);
-    return null;
+    lastErr = lastErr || e;
   }
+
+  console.log(
+    "could not capture screenshot " +
+      safe +
+      ": " +
+      (lastErr && lastErr.message) +
+      " (removed any stale " +
+      safe +
+      ".png so it cannot be mistaken for this run)",
+  );
+  return null;
 }
 
 // ---------------------------------------------------------------------------

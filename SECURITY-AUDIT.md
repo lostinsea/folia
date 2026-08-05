@@ -2,7 +2,7 @@
 
 **Target:** `C:\repos\github\md-viwer` — branch `fix/tab-state-sync` @ `3972921`
 **Date:** 2026-07-30
-**Scope:** Electron desktop app (`main.js`, `renderer.js`, `index.html`, `custom-*.js`, `omniwire/`, helper modules, build/release config). The bundled `vscode-extension/` sub-project was not audited in depth (separate artifact, separate threat model) — see Coverage.
+**Scope:** Electron desktop app (`main.js`, `renderer.js`, `index.html`, `custom-*.js`, `omniwire/`, helper modules, build/release config). The bundled `vscode-extension/` sub-project was not audited in depth (separate artifact, separate threat model) and has since been **deleted from the fork** — see Coverage.
 **Threat model:** `.md` / `.mmd` / `.ow` file content is **fully attacker-controlled** (downloaded, cloned from untrusted repos, or written by AI agents). The main window runs with `nodeIntegration: true` and `contextIsolation: false`, so **any HTML injection in the renderer is immediately arbitrary code execution with the user's full OS privileges.**
 
 ## Executive summary
@@ -599,10 +599,10 @@ against the temp directory — and are built with `url.pathToFileURL()` rather t
 string concatenation, which breaks on install paths containing a space or `#`.
 `popupCsp()`'s existing `font-src file: data:` already permits them.
 
-**Accepted gap:** the VS Code extension copies (`vscode-extension/media/omniwire/*`)
-still use the remote `@import`. That surface's CSP explicitly allows
-`fonts.googleapis.com`/`gstatic.com`, so it *works*; the offline/privacy nicety is
-deliberately out of scope here.
+**Former gap, now closed by removal:** the VS Code extension carried its own
+copies (`vscode-extension/media/omniwire/*`) that still used the remote `@import`.
+That sub-project has since been dropped from the fork entirely, so the surface no
+longer exists.
 
 **Test.** One assertion in `test-popup-security.js` — and the *first version of it
 was vacuous*, which is recorded because it is an easy trap:
@@ -715,7 +715,7 @@ The versions requested from the CDN are also **older than what is installed loca
 
 There is also a functional-availability consequence worth noting: with no network, `DOMPurify`, `marked` and `mermaid` are all `undefined` and rendering throws.
 
-**Fix.** Load all three from `node_modules/` or `libs/` like Prism already is. Remove the Google Fonts `<link>`s (`index.html:13-24`) or bundle the font — the fork already ships FiraCode TTFs under `vscode-extension/media/fonts/`.
+**Fix.** Load all three from `node_modules/` or `libs/` like Prism already is. Remove the Google Fonts `<link>`s (`index.html:13-24`) or bundle the font — the fork **now ships** FiraCode TTFs (`assets/fonts/` → `fonts/` via `scripts/vendor-libs.js`, which is on `postinstall`). At audit time they existed only inside the `vscode-extension/` source subtree and did not ship at all; that subtree has since been deleted, the five referenced weights were relocated to the tracked `assets/fonts/`, and the unreferenced `FiraCode-Retina.ttf` was dropped rather than moved.
 
 ---
 
@@ -1459,7 +1459,7 @@ Recorded so a reader knows where the audit's boundaries are.
 
 **No telemetry or analytics.** No `fetch`, `XMLHttpRequest`, `axios`, or `http.request` to any endpoint in first-party code. The only outbound network activity is the CDN/font loads in `index.html` (SEC-10) and `electron-updater`'s GitHub Releases check (`main.js:2444-2467`), which is gated on `app.isPackaged`.
 
-**Not audited in depth.** The `vscode-extension/` sub-project (~10 TypeScript source files plus a bundled webview under `vscode-extension/media/`) is a separate deliverable with a different threat model (VS Code webviews are sandboxed and CSP-enforced by the host). It is not part of the Electron app's `build.files` list and does not ship in the desktop artifact. I note that `vscode-extension/media/webview/mermaid-config.js` and `omniware-config.js` are copies of the vulnerable root files, so **SEC-04 and the mermaid handling likely reproduce there** — it warrants its own pass before that extension is published.
+**Removed from scope by deletion.** The `vscode-extension/` sub-project (~10 TypeScript source files plus a bundled webview under `vscode-extension/media/`) was a separate deliverable with a different threat model, was never part of the Electron app's `build.files` list, and never shipped in the desktop artifact. This audit flagged that `vscode-extension/media/webview/mermaid-config.js` and `omniware-config.js` were copies of the vulnerable root files, so **SEC-04 and the mermaid handling likely reproduced there**, and that it warranted its own pass before publication. That pass is now moot: the whole sub-project has been dropped from the fork, taking the duplicated copies with it. The one thing it uniquely owned — the FiraCode TTFs consumed by `styles.css` — was relocated to the tracked `assets/fonts/` first.
 
 ---
 
