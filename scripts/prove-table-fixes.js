@@ -536,6 +536,20 @@ const REVERTS = [
     to: ".markdown-body ol {\n  padding-left: 5ch;\n}",
     expect: [/every ordered list's gutter is wide enough for its widest marker/],
   },
+  {
+    // Not a bug being reverted but a DECISION being defended: upstream's
+    // 6089305 sets this to false (CommonMark/GitHub reflow). The user was
+    // shown both renderings and chose to render as typed, so a future merge
+    // that quietly takes the upstream value has to fail a named assertion
+    // rather than silently changing how every document looks.
+    id: "R85",
+    suite: "test:patch",
+    what: "take upstream's CommonMark soft-break behaviour, reflowing hard-wrapped prose into one paragraph",
+    file: RENDERER,
+    from: "  breaks: true,",
+    to: "  breaks: false,",
+    expect: [/a soft break in the source renders as a line break/],
+  },
 ];
 
 const only = process.argv.slice(2);

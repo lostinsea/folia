@@ -563,6 +563,51 @@ async function run(win) {
   );
 
   // ---------------------------------------------------------------------
+  // 3e. A soft break in the source stays a line break on screen.
+  //
+  //     This pins a DELIBERATE DIVERGENCE from upstream, not an accident.
+  //     Upstream's 6089305 flips marked's `breaks` to false, which is what
+  //     CommonMark and GitHub do: consecutive source lines reflow into one
+  //     paragraph. That half of the commit is deliberately not taken.
+  //
+  //     The reason is this fork's actual use: the documents opened here are
+  //     written by AI agents and are hard-wrapped, and a reader who wrote three
+  //     lines expects three lines. Measured on a sample of hard-wrapped prose,
+  //     an address block and a wrapped list item, `breaks: false` produced 1
+  //     <br> against 6, and collapsed the address onto a single line. The user
+  //     was shown both renderings and chose to render as typed.
+  //
+  //     Asserted on the rendered DOM rather than on the options object, so it
+  //     still holds if the option is ever renamed or moved: what is being
+  //     defended is the output, not the setting.
+  // ---------------------------------------------------------------------
+  await render(exec, "line one\nline two\n\npara two\n", "full");
+  const breaks = JSON.parse(
+    await exec(`
+      (() => {
+        const ps = [...document.querySelectorAll('#viewer p')];
+        return JSON.stringify({
+          brs: document.querySelectorAll('#viewer p br').length,
+          paras: ps.length,
+          text: ps.map(p => p.textContent),
+        });
+      })()
+    `),
+  );
+  // Vacuity guard: a sample that lost its second line, or that split into two
+  // paragraphs, would satisfy the <br> count for the wrong reason.
+  check(
+    "the soft-break sample really is one paragraph holding both lines",
+    breaks.paras === 2 && breaks.text[0].includes("line one") && breaks.text[0].includes("line two"),
+    JSON.stringify(breaks),
+  );
+  check(
+    "a soft break in the source renders as a line break, not a reflowed paragraph",
+    breaks.brs === 1,
+    JSON.stringify(breaks),
+  );
+
+  // ---------------------------------------------------------------------
   // 4. patchViewerDOM actually preserves unchanged blocks.
   //    Without flattenCollapsibleSections() this measured 1 preserved node out
   //    of 1263 on the equivalent document, and topLevelKept was 1.
