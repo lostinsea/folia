@@ -711,6 +711,39 @@ body.dark-mode .nav-btn:hover:not(:disabled) {
   padding-left: 2em;
 }
 
+/* Ordered lists need a wider gutter than bullets. The marker box for
+   `list-style-position: outside` is laid out to the LEFT of the content edge,
+   inside this padding, so the padding has to be at least as wide as the widest
+   marker or the marker overflows the list box. Measured in the app's own font
+   (13px Fira Code): "1." is 16px and "10." is 24px, both inside the 26px that
+   2em buys - so the two-digit clipping upstream fixed in b0e991b does not
+   reproduce here - but "100." is 32px and overflows by 6px. In split view that
+   put three-digit markers hard against the pane edge, visibly out of line with
+   the two-digit ones above them.
+
+   The unit is `ch`, not `em`, because the quantity being expressed is a COUNT
+   OF CHARACTERS, and `ch` is the advance of "0" in the resolved font - which
+   is what a decimal marker is made of. `em` only approximates it, by way of
+   the font's particular digit-to-size ratio, so an `em` value has to be
+   re-verified against every font or font-size change while a `ch` value does
+   not. Same reasoning as TABLE_TEXT_COLUMN_CHARS in renderer.js, which rejects
+   a fixed pixel reading measure for the same reason.
+
+   Bullets deliberately keep the narrower 2em: a wide gutter for a single dot
+   reads as disconnected, and widening it would re-indent every unordered list
+   in every document to fix a problem those lists do not have.
+
+   6ch, not 5ch, because a marker occupies one character MORE than its own
+   text. Measured rather than assumed - by flipping a list to
+   `list-style-position: inside` and reading how far the text shifted - the
+   marker's real advance came back at exactly canvas-width + 1ch on every list:
+   24px for "2.", 40px for "101.", 48px for "9999.". The generated marker is
+   "N." plus a separating space, so a gutter sized to the bare glyphs still
+   clipped the widest one. 6ch = four digits, the point, and the space. */
+.markdown-body ol {
+  padding-left: 6ch;
+}
+
 .markdown-body li {
   margin: 0.5em 0;
   color: var(--text-primary);

@@ -456,6 +456,113 @@ async function run(win) {
   );
 
   // ---------------------------------------------------------------------
+  // 3d. An ordered list's left gutter has to be at least as wide as its widest
+  //     marker. `list-style-position: outside` lays the marker box out inside
+  //     that padding, so anything wider spills out of the list box - in split
+  //     view three-digit markers ended up hard against the pane edge, visibly
+  //     out of line with the two-digit ones above them.
+  //
+  //     Upstream fixed this for TWO digits (b0e991b). That case does not
+  //     reproduce here, so this is not a cherry-pick: measured in the app's own
+  //     13px Fira Code, "10." occupies 24px and fits the 26px that 2em buys,
+  //     while "100." occupies 40px and does not.
+  //
+  //     The marker is measured, not computed from a digit count and a canvas.
+  //     A canvas measurement of the marker TEXT understates the marker BOX by
+  //     exactly one character - the generated marker is "N." plus a separating
+  //     space - and sizing the gutter to the bare glyphs left "9999." clipped
+  //     even though the arithmetic said it fit. Flipping the list to
+  //     `list-style-position: inside` puts the marker into the inline flow, so
+  //     the distance the text shifts IS the marker's real advance, whatever the
+  //     UA's suffix happens to be. Nothing about the font, the digit count or
+  //     the suffix is assumed - which also removes any need to reconstruct the
+  //     marker string from start/value attributes.
+  // ---------------------------------------------------------------------
+  const LIST_DOC =
+    "# Lists\n\n- bullet alpha\n- bullet beta\n\n" +
+    "1. item one\n2. item two\n\nA paragraph, so the next list is a separate list.\n\n" +
+    "98. item ninety eight\n99. item ninety nine\n100. item one hundred\n101. item one hundred one\n\n" +
+    "Another paragraph.\n\n" +
+    "9998. item four digits\n9999. item four digits\n";
+  await render(exec, LIST_DOC, "full");
+  const gutter = JSON.parse(
+    await exec(`
+      (() => {
+        // First line box only. If an item ever wraps, the bounding rect's left
+        // is the content edge from the second line and would report no shift.
+        const firstLineLeft = (li) => {
+          const r = document.createRange();
+          r.selectNodeContents(li);
+          const rects = r.getClientRects();
+          return rects.length ? rects[0].left : r.getBoundingClientRect().left;
+        };
+        const measure = (list) => {
+          const items = [...list.querySelectorAll(':scope > li')];
+          const before = items.map(firstLineLeft);
+          list.style.listStylePosition = 'inside';
+          const after = items.map(firstLineLeft);
+          list.style.listStylePosition = '';
+          return {
+            // Every item, not just the last: "widest marker" has to mean what
+            // it says even if a value= reset ever makes the tail narrower.
+            widestMarker: Math.max(...after.map((x, i) => x - before[i])),
+            padding: parseFloat(getComputedStyle(list).paddingLeft),
+          };
+        };
+        const ul = document.querySelector('#viewer ul');
+        return JSON.stringify({
+          lists: [...document.querySelectorAll('#viewer ol')].map(measure),
+          ulPadding: parseFloat(getComputedStyle(ul).paddingLeft),
+          ulFontSize: parseFloat(getComputedStyle(ul).fontSize),
+        });
+      })()
+    `),
+  );
+  const widest = Math.max(...gutter.lists.map((l) => l.widestMarker));
+  // Vacuity guard, written against the two reverts it exists to keep honest
+  // rather than against a marker string. R82 restores the 2em bullet gutter and
+  // R83 restores the 3em upstream uses; if the sample ever stopped containing a
+  // marker wider than both, both reverts would silently pass and the assertion
+  // below would hold for any padding at all.
+  check(
+    "the ordered-list sample really has a marker too wide for both the bullet gutter and 3em",
+    widest > 3 * gutter.ulFontSize,
+    JSON.stringify({ widest, lists: gutter.lists }),
+  );
+  check(
+    "every ordered list's gutter is wide enough for its widest marker",
+    gutter.lists.every((l) => l.padding >= l.widestMarker),
+    JSON.stringify(gutter),
+  );
+  // Records a deliberate decision rather than an accident: bullets keep the
+  // narrower gutter, because a wide one reads as disconnected from a single dot
+  // and widening it would re-indent every unordered list to fix a problem those
+  // lists do not have.
+  check(
+    "bullet lists keep the narrower gutter",
+    Math.abs(gutter.ulPadding - 2 * gutter.ulFontSize) < 0.5,
+    JSON.stringify(gutter),
+  );
+  // Screenshots as artifacts, not baselines. The numbers above prove the gutter
+  // is wide enough; only a human (or an agent reading the image) can say the
+  // result still LOOKS like a list. Split view is captured because that is
+  // where the overflow was actually visible - markers hard against the pane
+  // edge, out of line with the ones above them.
+  for (const splitView of [false, true]) {
+    await exec(`
+      (() => {
+        document.querySelector('.content-wrapper').classList.toggle('split-view', ${splitView});
+        return true;
+      })()
+    `);
+    await sleep(200);
+    await captureScreenshot(win, `patch-lists-${splitView ? "split" : "normal"}`);
+  }
+  await exec(
+    `(() => { document.querySelector('.content-wrapper').classList.remove('split-view'); return true; })()`,
+  );
+
+  // ---------------------------------------------------------------------
   // 4. patchViewerDOM actually preserves unchanged blocks.
   //    Without flattenCollapsibleSections() this measured 1 preserved node out
   //    of 1263 on the equivalent document, and topLevelKept was 1.

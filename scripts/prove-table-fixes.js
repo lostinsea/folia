@@ -498,6 +498,44 @@ const REVERTS = [
     to: "        1 +",
     expect: [/reading position survives a tab switch in split view while zoomed/],
   },
+  {
+    id: "R82",
+    suite: "test:patch",
+    what: "give ordered lists the same gutter as bullets again (a wide numeric marker is wider than 2em, so it spills out of the list box)",
+    file: CSS,
+    from: ".markdown-body ol {\n  padding-left: 6ch;\n}",
+    to: ".markdown-body ol {\n  padding-left: 2em;\n}",
+    expect: [/every ordered list's gutter is wide enough for its widest marker/],
+  },
+  {
+    // Distinct from R82: this one keeps a WIDER-than-bullet gutter and only
+    // takes away the last digit of headroom, which is exactly the regression a
+    // three-digit-ceiling value like the `3em` upstream uses would reintroduce.
+    // Without the four-digit case in the sample this revert stays green.
+    id: "R83",
+    suite: "test:patch",
+    what: "express the ordered-list gutter as a font-size multiple with a three-digit ceiling (the `3em` upstream uses) instead of a character count",
+    file: CSS,
+    from: ".markdown-body ol {\n  padding-left: 6ch;\n}",
+    to: ".markdown-body ol {\n  padding-left: 3em;\n}",
+    expect: [/every ordered list's gutter is wide enough for its widest marker/],
+  },
+  {
+    // The narrowest of the three, and the one that caught a real mistake: 5ch
+    // is exactly the width of the "9999." GLYPHS, so a gutter sized from a
+    // canvas measurement of the marker text looked correct and still clipped,
+    // because the marker box also carries a separating space. Only the
+    // four-digit list fails here - "101." fits 5ch exactly - so if this ever
+    // reports failures on the shorter lists it is catching R82's defect
+    // instead, and the difference is the point.
+    id: "R84",
+    suite: "test:patch",
+    what: "size the ordered-list gutter to the marker's glyphs only, ignoring the separating space the marker box also occupies",
+    file: CSS,
+    from: ".markdown-body ol {\n  padding-left: 6ch;\n}",
+    to: ".markdown-body ol {\n  padding-left: 5ch;\n}",
+    expect: [/every ordered list's gutter is wide enough for its widest marker/],
+  },
 ];
 
 const only = process.argv.slice(2);
