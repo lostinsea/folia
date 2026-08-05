@@ -205,12 +205,29 @@ async function run(win) {
   await sleep(800);
 
   const scroller = `(document.querySelector('.content-wrapper').classList.contains('split-view') ? document.getElementById('viewer') : document.querySelector('.content-wrapper'))`;
+  // An oracle must not reuse the formula it is judging. The implementation's
+  // own offsetWithin() was, until this round, a raw
+  // `rect.top - rect.top + scrollTop`, and so was this test - which is why the
+  // suite could not see that the two terms are in different coordinate spaces
+  // once #viewer carries a `zoom` (scrollTop is in the scroller's pre-zoom
+  // pixels, rects are in viewport pixels). Derived independently here, from the
+  // scroller's own border-box-to-padding-box ratio, so it agrees with the
+  // implementation only if both are right.
+  const offsetIn = (s, el) => `
+    (() => {
+      const s = ${s}, el = ${el};
+      const cs = getComputedStyle(s);
+      const borders = (parseFloat(cs.borderTopWidth) || 0) + (parseFloat(cs.borderBottomWidth) || 0);
+      const local = s.clientHeight + borders;
+      const scale = local ? s.getBoundingClientRect().height / local : 1;
+      return (el.getBoundingClientRect().top - s.getBoundingClientRect().top) / (scale || 1) + s.scrollTop;
+    })()
+  `;
+  const SECTION_25 = `Array.from(document.querySelectorAll('#viewer h2')).find(el => el.textContent.trim() === 'Section 25')`;
   await exec(`
     (() => {
-      const h = Array.from(document.querySelectorAll('#viewer h2'))
-        .find(el => el.textContent.trim() === 'Section 25');
       const s = ${scroller};
-      s.scrollTop = h.getBoundingClientRect().top - s.getBoundingClientRect().top + s.scrollTop;
+      s.scrollTop = ${offsetIn(scroller, SECTION_25)};
       return s.scrollTop;
     })()
   `);
@@ -224,14 +241,7 @@ async function run(win) {
   await sleep(1800);
 
   const after = await exec(`${scroller}.scrollTop`);
-  const anchorTop = await exec(`
-    (() => {
-      const h = Array.from(document.querySelectorAll('#viewer h2'))
-        .find(el => el.textContent.trim() === 'Section 25');
-      const s = ${scroller};
-      return h.getBoundingClientRect().top - s.getBoundingClientRect().top + s.scrollTop;
-    })()
-  `);
+  const anchorTop = await exec(offsetIn(scroller, SECTION_25));
   check(
     "refresh keeps the reader at the same heading",
     Math.abs(after - anchorTop) < 40 && after > 0,
@@ -242,6 +252,13 @@ async function run(win) {
     Math.abs(after - before) > 40,
     `before=${before} after=${after}`,
   );
+  // Deliberately NOT repeated at a second zoom level here. This scenario runs in
+  // normal view, where the scroller is .content-wrapper - OUTSIDE the zoom
+  // renderer.js applies to #viewer - so the scale is 1 at every zoom and a
+  // zoomed pass would assert nothing new. The non-vacuous case is split view,
+  // where the scroller IS the zoomed element; that is scenario 5c2z below, and
+  // it exercises this same captureAnchor/resolveAnchorTop pair because refresh
+  // and tab-switch share them.
 
   // ---- Scenario 5: the "File Updated" prompt ----------------------------
   // Actively-viewed tab: we deliberately do NOT auto-reload (that would yank
@@ -710,6 +727,56 @@ async function run(win) {
     "reading position survives a tab switch in split view",
     Math.abs(splitScroll.restored - splitScroll.parked) < 80,
     JSON.stringify(splitScroll),
+  );
+  await sleep(400);
+
+  // ---- Scenario 5c2z: reading position survives a tab switch in split view
+  // WHILE ZOOMED. 5c2 above proves the right ELEMENT is used; it cannot see a
+  // coordinate-space error, because at 100% zoom the scroller's own pixels and
+  // viewport pixels are the same thing. offsetWithin() converts a viewport-pixel
+  // rect delta into the scroller's space, and in split view the scroller is
+  // #viewer, which is the element renderer.js puts `zoom` on. Without the
+  // conversion the remembered delta is scaled by the zoom factor and the reader
+  // is dropped somewhere else entirely on every tab switch.
+  const zoomScroll = await exec(`
+    (async () => {
+      document.getElementById('toggleEdit').click();
+      await new Promise(r => setTimeout(r, 600));
+      zoomLevel = 200;
+      updateZoom();
+      await new Promise(r => setTimeout(r, 400));
+      const s = window.CustomTabs.__getScroller();
+      // Guard: this only measures anything if the scroller really is the
+      // zoomed element. If a future change moves the scroller back outside the
+      // zoom, the conversion becomes a no-op and this scenario is vacuous.
+      const zoomed = parseFloat(getComputedStyle(s).zoom) || 1;
+      s.scrollTop = 400;
+      await new Promise(r => setTimeout(r, 150));
+      const parked = s.scrollTop;
+
+      window.CustomTabs.switchToTab(${ids.b});
+      await new Promise(r => setTimeout(r, 700));
+      window.CustomTabs.switchToTab(${ids.a});
+      await new Promise(r => setTimeout(r, 900));
+
+      const restored = window.CustomTabs.__getScroller().scrollTop;
+      zoomLevel = 100;
+      updateZoom();
+      await new Promise(r => setTimeout(r, 300));
+      document.getElementById('toggleEdit').click();
+      await new Promise(r => setTimeout(r, 500));
+      return { zoomed, scrollerId: s.id || s.className, parked, restored };
+    })()
+  `);
+  check(
+    "the zoomed split-view scroll test really ran on the zoomed scroller",
+    zoomScroll.zoomed === 2 && zoomScroll.parked > 100,
+    JSON.stringify(zoomScroll),
+  );
+  check(
+    "reading position survives a tab switch in split view while zoomed",
+    Math.abs(zoomScroll.restored - zoomScroll.parked) < 80,
+    JSON.stringify(zoomScroll),
   );
   await sleep(400);
 

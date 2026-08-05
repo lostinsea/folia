@@ -897,6 +897,31 @@ function getViewerScroller() {
   return contentWrapper || viewer;
 }
 
+// Scroll a rendered element into view.
+//
+// Every caller of this used to compute the destination by hand as
+// `targetRect.top - scrollerRect.top + scroller.scrollTop`. That expression
+// mixes two coordinate spaces the moment `#viewer` carries a `zoom` (set by
+// updateZoom()): getBoundingClientRect() reports VIEWPORT pixels whether or not
+// the element sits inside a zoom-scaled subtree, but a scroller's scrollTop is
+// in that scroller's OWN pixels. In normal view the scroller is
+// .content-wrapper, which is OUTSIDE the zoom, so the two spaces coincide and
+// the arithmetic happens to be right. In split view the scroller IS #viewer, so
+// at 200% every term is off by a factor of two against the one it is added to -
+// measured at 2145px past the target, i.e. the heading lands nowhere near the
+// screen. The bug is invisible at 100% because the scale factor is 1.
+//
+// Rather than convert between the spaces (which means guessing how each layout
+// metric reports under `zoom` - an assumption that has been wrong twice in this
+// file already), hand the whole problem to the engine, which owns both spaces.
+// The 20px reading gap above a heading is expressed as `scroll-padding-top` on
+// the scrollers in styles.css so it, too, is resolved in the right space.
+// Upstream fixed the same class of bug the same way in 80646de.
+function scrollElementIntoView(el, block = 'start') {
+  if (!el) return;
+  el.scrollIntoView({ behavior: 'smooth', block, inline: 'nearest' });
+}
+
 // Current file tracking
 let currentFilePath = null;
 
@@ -2155,17 +2180,7 @@ viewer.addEventListener('click', (e) => {
       }
 
       if (targetElement) {
-        // Whichever element actually scrolls - .content-wrapper normally,
-        // #viewer in split view. See getViewerScroller().
-        const scroller = getViewerScroller();
-        const contentRect = scroller.getBoundingClientRect();
-        const targetRect = targetElement.getBoundingClientRect();
-        const scrollOffset = targetRect.top - contentRect.top + scroller.scrollTop - 20; // 20px padding from top
-
-        scroller.scrollTo({
-          top: scrollOffset,
-          behavior: 'smooth'
-        });
+        scrollElementIntoView(targetElement, 'start');
       } else {
         showNotification(i18n('notif.sectionNotFound') + targetId, 3000);
       }
@@ -3330,17 +3345,7 @@ function buildTableOfContents() {
         // Auto-expand any collapsed sections containing this header
         expandToHeader(header.id);
 
-        // Calculate the scroll position relative to whichever element scrolls
-        const scroller = getViewerScroller();
-        const contentRect = scroller.getBoundingClientRect();
-        const headerRect = targetHeader.getBoundingClientRect();
-        const scrollOffset = headerRect.top - contentRect.top + scroller.scrollTop - 20; // 20px padding from top
-
-        // Scroll to the header
-        scroller.scrollTo({
-          top: scrollOffset,
-          behavior: 'smooth'
-        });
+        scrollElementIntoView(targetHeader, 'start');
 
         // Update active state
         document.querySelectorAll('.index-item').forEach(i => i.classList.remove('active'));
@@ -3578,11 +3583,7 @@ function updateNotesList() {
       // so a `"` in it would otherwise break out of the attribute selector.
       const target = viewer.querySelector(`[data-note-id="${CSS.escape(noteId)}"]`);
       if (!target) return;
-      const noteRect = target.getBoundingClientRect();
-      const scroller = getViewerScroller();
-      const wrapperRect = scroller.getBoundingClientRect();
-      const scrollTarget = scroller.scrollTop + noteRect.top - wrapperRect.top - (wrapperRect.height / 2);
-      scroller.scrollTo({ top: scrollTarget, behavior: 'smooth' });
+      scrollElementIntoView(target, 'center');
 
       // Highlight with pulse animation
       target.classList.add('note-highlight');
@@ -6966,11 +6967,7 @@ findNoteBtn.addEventListener('click', () => {
   closeFindNoteDialog();
 
   // Scroll the note into view
-  const noteRect = noteEl.getBoundingClientRect();
-  const scroller = getViewerScroller();
-  const wrapperRect = scroller.getBoundingClientRect();
-  const scrollTarget = scroller.scrollTop + noteRect.top - wrapperRect.top - (wrapperRect.height / 2);
-  scroller.scrollTo({ top: scrollTarget, behavior: 'smooth' });
+  scrollElementIntoView(noteEl, 'center');
 
   // Highlight the note with pulse animation
   noteEl.classList.remove('note-highlight');

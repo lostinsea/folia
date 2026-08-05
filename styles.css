@@ -437,6 +437,12 @@ body.dark-mode .nav-btn:hover:not(:disabled) {
   width: 100%;
   overflow-y: auto;
   overflow-x: hidden;
+  /* The reading gap left above a heading scrolled to by the table of contents,
+     an in-document anchor link, or the search. Expressed here rather than
+     subtracted from a hand-computed scrollTop so the engine resolves it in this
+     scroller's own coordinate space - see scrollElementIntoView() in
+     renderer.js for why that distinction is load-bearing under `zoom`. */
+  scroll-padding-top: 20px;
 }
 
 /* Split-view mode */
@@ -454,6 +460,9 @@ body.dark-mode .nav-btn:hover:not(:disabled) {
   max-width: none;
   width: 50%;
   border-left: 1px solid var(--border-color);
+  /* Same reading gap as .content-wrapper, repeated because in split view THIS
+     is the scroll container and scroll-padding only applies to the scroller. */
+  scroll-padding-top: 20px;
   /* In split view #viewer is a flex item stretched to the row's height, and
      .content-wrapper is `overflow: hidden`, so #viewer has to be its own
      scroller or the bottom of the document is unreachable while editing.

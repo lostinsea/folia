@@ -133,7 +133,7 @@ const TOP_BLOCKS = `
 `;
 
 async function run(win) {
-  const { startErrorSentinel, proveSentinelAlive } = require("./test-visual-utils");
+  const { startErrorSentinel, proveSentinelAlive, captureScreenshot } = require("./test-visual-utils");
   const sentinel = startErrorSentinel(win, { label: "patch" });
   const exec = (c) => win.webContents.executeJavaScript(c, true);
 
@@ -277,17 +277,19 @@ async function run(win) {
 
   // The scroll target is only reachable if the document actually overflows;
   // otherwise both legs would trivially read 0 and prove nothing.
-  const scrollTo = async (splitView) => {
+  const scrollTo = async (splitView, zoom) => {
     await exec(`
       (() => {
         const cw = document.querySelector('.content-wrapper');
         cw.classList.toggle('split-view', ${splitView ? "true" : "false"});
+        zoomLevel = ${zoom};
+        updateZoom();
         cw.scrollTop = 0;
         document.getElementById('viewer').scrollTop = 0;
         return true;
       })()
     `);
-    await sleep(120);
+    await sleep(180);
     const before = await exec(`
       (() => {
         const s = getViewerScroller();
@@ -341,28 +343,117 @@ async function run(win) {
     return { before: JSON.parse(before), after: JSON.parse(after) };
   };
 
+  // Zoom is the axis this used to be blind to. `zoom` is applied to #viewer
+  // (renderer.js:1157), and the two scroll targets sit on opposite sides of it:
+  // in normal view the scroller is .content-wrapper, OUTSIDE the zoomed
+  // subtree, so scrollTop and getBoundingClientRect() are in the same units; in
+  // split view the scroller IS #viewer, so scrollTop is in the subtree's own
+  // pixels while getBoundingClientRect() stays in viewport pixels. Mixing those
+  // in one expression is the exact coordinate-space error the table work hit
+  // twice, and upstream fixed the same class of bug in its own TOC handler
+  // (80646de). Covering only 100% zoom cannot see it, because the two spaces
+  // coincide at 1.0.
   for (const splitView of [false, true]) {
-    const label = splitView ? "split view" : "normal view";
-    const { before, after } = await scrollTo(splitView);
-    check(
-      `the document really overflows in ${label}, so the scroll assertion can fail`,
-      before.overflows === true,
-      JSON.stringify(before),
-    );
-    check(
-      `clicking a table-of-contents entry scrolls the page in ${label}`,
-      after.top > 100,
-      `scroller=${before.scroller} scrollTop=${after.top}`,
-    );
-    // What the reader cares about is the heading arriving near the top, not
-    // that some number moved.
-    check(
-      `the chosen heading ends up near the top of the view in ${label}`,
-      Math.abs(after.headingOffset) < 60,
-      `headingOffset=${after.headingOffset} scroller=${before.scroller}`,
-    );
+    for (const zoom of [100, 200]) {
+      const label = `${splitView ? "split view" : "normal view"} at ${zoom}%`;
+      const { before, after } = await scrollTo(splitView, zoom);
+      check(
+        `the document really overflows in ${label}, so the scroll assertion can fail`,
+        before.overflows === true,
+        JSON.stringify(before),
+      );
+      check(
+        `clicking a table-of-contents entry scrolls the page in ${label}`,
+        after.top > 100,
+        `scroller=${before.scroller} scrollTop=${after.top}`,
+      );
+      // What the reader cares about is the heading arriving near the top, not
+      // that some number moved. The tolerance is expressed in VIEWPORT pixels
+      // and scales with zoom, because the handler's own 20px top padding is
+      // laid out inside the zoomed subtree and so is 40 viewport px at 200%.
+      const tolerance = 40 + 20 * (zoom / 100);
+      check(
+        `the chosen heading ends up near the top of the view in ${label}`,
+        Math.abs(after.headingOffset) < tolerance,
+        `headingOffset=${after.headingOffset} tolerance=${tolerance} scroller=${before.scroller}`,
+      );
+      await captureScreenshot(
+        win,
+        `toc-nav-${splitView ? "split" : "normal"}-${zoom}`,
+      );
+    }
   }
-  await exec(`document.querySelector('.content-wrapper').classList.remove('split-view'); true`);
+  await exec(
+    `zoomLevel = 100; updateZoom(); document.querySelector('.content-wrapper').classList.remove('split-view'); true`,
+  );
+
+  // ---------------------------------------------------------------------
+  // 3c. Clicking an entry in the All Notes panel brings the note into view.
+  //     This path had NO coverage at all - only the SEC-13 escaping test
+  //     touched the panel, and it asserts the click does not throw, not that
+  //     it goes anywhere. It shares scrollElementIntoView() with the TOC but
+  //     asks for `center` rather than `start`, and it used to subtract
+  //     `scrollerRect.height / 2` by hand on top of the same mixed-space sum,
+  //     so it carried the zoom defect twice over.
+  // ---------------------------------------------------------------------
+  const NOTE_DOC =
+    "# Notes\n\n" +
+    "filler paragraph.\n\n".repeat(60) +
+    '<span class="noted-text" data-note-id="1" data-note-title="t" data-note-content="c">the noted phrase</span>\n\n' +
+    "filler paragraph.\n\n".repeat(60);
+  await render(exec, NOTE_DOC, "full");
+
+  for (const splitView of [false, true]) {
+    for (const zoom of [100, 200]) {
+      const label = `${splitView ? "split view" : "normal view"} at ${zoom}%`;
+      await exec(`
+        (() => {
+          const cw = document.querySelector('.content-wrapper');
+          cw.classList.toggle('split-view', ${splitView ? "true" : "false"});
+          zoomLevel = ${zoom};
+          updateZoom();
+          cw.scrollTop = 0;
+          document.getElementById('viewer').scrollTop = 0;
+          updateNotesList();
+          const item = document.querySelector('#notesList .notes-item');
+          if (item) item.click();
+          return true;
+        })()
+      `);
+      await sleep(900);
+      const note = JSON.parse(
+        await exec(`
+          (() => {
+            const s = getViewerScroller();
+            const el = document.querySelector('#viewer [data-note-id="1"]');
+            const sr = s.getBoundingClientRect();
+            const er = el.getBoundingClientRect();
+            return JSON.stringify({
+              // Both in viewport pixels, so this comparison needs no
+              // conversion regardless of where the zoom sits.
+              offsetFromCentre: Math.round(er.top + er.height / 2 - (sr.top + sr.height / 2)),
+              scrollable: s.scrollHeight > s.clientHeight + 1,
+              scrolled: Math.round(s.scrollTop),
+            });
+          })()
+        `),
+      );
+      check(
+        `the note really starts off screen in ${label}, so centring can fail`,
+        note.scrollable === true && note.scrolled > 100,
+        JSON.stringify(note),
+      );
+      // Generous but far tighter than the ~2000px a mis-scaled scroll produces.
+      check(
+        `clicking an All Notes entry centres the note in ${label}`,
+        Math.abs(note.offsetFromCentre) < 120,
+        JSON.stringify(note),
+      );
+    }
+  }
+  await exec(
+    `zoomLevel = 100; updateZoom(); document.querySelector('.content-wrapper').classList.remove('split-view'); true`,
+  );
 
   // ---------------------------------------------------------------------
   // 4. patchViewerDOM actually preserves unchanged blocks.

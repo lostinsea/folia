@@ -333,25 +333,17 @@ const REVERTS = [
   {
     id: "R74",
     suite: "test:patch",
-    what: "hard-code contentWrapper as the scroll target for table-of-contents navigation (a silent no-op in split view)",
+    what: "hard-code contentWrapper as the scroll target for in-view navigation (a silent no-op in split view, where contentWrapper is overflow:hidden)",
     file: RENDERER,
-    from:
-      "        const scroller = getViewerScroller();\n" +
-      "        const contentRect = scroller.getBoundingClientRect();\n" +
-      "        const headerRect = targetHeader.getBoundingClientRect();\n" +
-      "        const scrollOffset = headerRect.top - contentRect.top + scroller.scrollTop - 20; // 20px padding from top\n" +
-      "\n" +
-      "        // Scroll to the header\n" +
-      "        scroller.scrollTo({",
+    from: "  el.scrollIntoView({ behavior: 'smooth', block, inline: 'nearest' });",
     to:
-      "        const contentRect = contentWrapper.getBoundingClientRect();\n" +
-      "        const headerRect = targetHeader.getBoundingClientRect();\n" +
-      "        const scrollOffset = headerRect.top - contentRect.top + contentWrapper.scrollTop - 20; // 20px padding from top\n" +
-      "\n" +
-      "        // Scroll to the header\n" +
-      "        contentWrapper.scrollTo({",
-    // Only the split-view leg may fail: .content-wrapper genuinely is the
-    // scroller in normal view, so the normal-view leg must stay green or the
+      "  const scroller = contentWrapper;\n" +
+      "  const r = scroller.getBoundingClientRect();\n" +
+      "  const t = el.getBoundingClientRect();\n" +
+      "  const off = block === 'center' ? r.height / 2 : 20;\n" +
+      "  scroller.scrollTo({ top: t.top - r.top + scroller.scrollTop - off, behavior: 'smooth' });",
+    // Only the split-view legs may fail: .content-wrapper genuinely is the
+    // scroller in normal view, so the normal-view legs must stay green or the
     // assertion is measuring something other than the defect.
     expect: [
       /clicking a table-of-contents entry scrolls the page in split view/,
@@ -462,6 +454,49 @@ const REVERTS = [
       /every Fira Code weight the stylesheet declares is really loaded/,
       /exists in the vendored/,
     ],
+  },
+  {
+    // R74 and R80 break the SAME line for different reasons, and the difference
+    // is the whole point. R74 restores a scroller that is simply wrong in split
+    // view - it fails at every zoom. R80 restores the scroller-correct hand
+    // arithmetic that shipped in this fork for months and passes perfectly at
+    // 100%: it adds a VIEWPORT-pixel rect delta to a scrollTop expressed in the
+    // zoomed subtree's OWN pixels. Those two spaces coincide at zoom 1, so the
+    // defect is invisible until the matrix includes a second zoom level - which
+    // is exactly why it survived until now. Measured overshoot: 2145px.
+    id: "R80",
+    suite: "test:patch",
+    what: "compute the scroll destination by hand again (correct scroller, but a viewport-pixel rect delta added to a scrollTop in the zoomed subtree's own pixels)",
+    file: RENDERER,
+    from: "  el.scrollIntoView({ behavior: 'smooth', block, inline: 'nearest' });",
+    to:
+      "  const scroller = getViewerScroller();\n" +
+      "  const r = scroller.getBoundingClientRect();\n" +
+      "  const t = el.getBoundingClientRect();\n" +
+      "  const off = block === 'center' ? r.height / 2 : 20;\n" +
+      "  scroller.scrollTo({ top: t.top - r.top + scroller.scrollTop - off, behavior: 'smooth' });",
+    // Deliberately narrow: only the zoomed split-view leg may fail. If the
+    // 100% legs fail too, the assertion is catching the scroller choice (R74's
+    // job) rather than the coordinate-space error this entry exists to pin.
+    expect: [
+      /the chosen heading ends up near the top of the view in split view at 200%/,
+      /clicking an All Notes entry centres the note in split view at 200%/,
+    ],
+  },
+  {
+    // The sibling of R80, in the other file. custom-tabs.js remembers the
+    // reading position as "heading + pixel delta", and that delta is computed
+    // by the same rect-minus-rect-plus-scrollTop shape. Symmetric capture and
+    // restore hide it whenever nothing reflows above the anchor, so only the
+    // zoomed split-view scenario can see it - which is why this entry exists
+    // rather than trusting the 100% scenario that was already there.
+    id: "R81",
+    suite: "test:tabs",
+    what: "drop the viewport-to-scroller conversion from offsetWithin() (the remembered reading position is scaled by the zoom factor in split view)",
+    file: TABS,
+    from: "        scrollerScale(scroller) +",
+    to: "        1 +",
+    expect: [/reading position survives a tab switch in split view while zoomed/],
   },
 ];
 

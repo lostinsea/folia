@@ -173,10 +173,38 @@
 
   const HEADING_SELECTOR = "h1, h2, h3, h4, h5, h6";
 
+  // Returns `element`'s top in the SCROLLER'S OWN coordinate space, i.e. the
+  // same space as `scroller.scrollTop`, so the two can be added and compared.
+  //
+  // The division is not decoration. getBoundingClientRect() reports VIEWPORT
+  // pixels even for an element inside (or carrying) a CSS `zoom`, while
+  // scrollTop, clientHeight and scrollHeight are all in the scroller's own
+  // pre-zoom pixels. In normal view the scroller is .content-wrapper, which is
+  // outside the zoom renderer.js applies to #viewer, so the two spaces coincide
+  // and the ratio is 1. In split view the scroller IS #viewer, so at 200% every
+  // rect delta is twice the scrollTop it was being added to - measured directly,
+  // not inferred: moving scrollTop by 300 moved the rect delta by 600.
+  //
+  // The ratio is derived from the scroller itself rather than read off
+  // `getComputedStyle(...).zoom`, so it needs no assumption about which metrics
+  // report in which space and keeps working if the scale ever arrives by some
+  // other route. Borders are added back because rect.height is a border-box
+  // measurement while clientHeight is padding-box.
+  function scrollerScale(scroller) {
+    const cs = getComputedStyle(scroller);
+    const borders =
+      (parseFloat(cs.borderTopWidth) || 0) + (parseFloat(cs.borderBottomWidth) || 0);
+    const local = scroller.clientHeight + borders;
+    if (!local) return 1;
+    const scale = scroller.getBoundingClientRect().height / local;
+    return scale > 0 ? scale : 1;
+  }
+
   function offsetWithin(scroller, element) {
     return (
-      element.getBoundingClientRect().top -
-      scroller.getBoundingClientRect().top +
+      (element.getBoundingClientRect().top -
+        scroller.getBoundingClientRect().top) /
+        scrollerScale(scroller) +
       scroller.scrollTop
     );
   }
