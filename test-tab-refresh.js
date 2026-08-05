@@ -641,7 +641,148 @@ async function run(win) {
   `);
   await sleep(800);
 
-  // ---- Scenario 5d: non-markdown file types survive a disk re-read -------
+  // ---- Scenario 5c2: reading position survives a tab switch in REAL split
+  // view. Every other edit-mode scenario here only flips `window.isEditMode`,
+  // which never applies the `split-view` class and so never exercises the CSS
+  // that decides which element actually scrolls. That gap hid a real defect:
+  // when #viewer stopped being a scroller, getScroller() still returned it, so
+  // save and restore both operated on a node whose scrollTop is permanently 0
+  // and the position was silently lost on every switch while editing.
+  // Write to disk first, then reload: setting tab.content alone would leave the
+  // cached document disagreeing with the file and trip the file-updated prompt,
+  // whose native dialog blocks executeJavaScript forever.
+  write(fileA, longDoc("SPLIT"));
+  await exec(`window.CustomTabs.switchToTab(${ids.a}); null;`);
+  await sleep(500);
+  await exec(`window.ipcRenderer.send('reload-file', { filePath: ${jsA} }); null;`);
+  await sleep(1500);
+  await exec(`window.dismissFileUpdateNotification && window.dismissFileUpdateNotification(); null;`);
+  await sleep(300);
+
+  const splitScroll = await exec(`
+    (async () => {
+      await new Promise(r => setTimeout(r, 200));
+      document.getElementById('toggleEdit').click();
+      await new Promise(r => setTimeout(r, 600));
+      const wrapper = document.querySelector('.content-wrapper');
+      const inSplit = wrapper.classList.contains('split-view');
+      const s = window.CustomTabs.__getScroller
+        ? window.CustomTabs.__getScroller()
+        : document.getElementById('viewer');
+      // Prove the chosen element is the one that genuinely scrolls, rather
+      // than asserting against whatever the implementation happens to pick.
+      const oy = getComputedStyle(s).overflowY;
+      const canScroll = s.scrollHeight > s.clientHeight + 1;
+      s.scrollTop = 400;
+      await new Promise(r => setTimeout(r, 100));
+      const parked = s.scrollTop;
+
+      window.CustomTabs.switchToTab(${ids.b});
+      await new Promise(r => setTimeout(r, 700));
+      window.CustomTabs.switchToTab(${ids.a});
+      await new Promise(r => setTimeout(r, 900));
+
+      const s2 = window.CustomTabs.__getScroller
+        ? window.CustomTabs.__getScroller()
+        : document.getElementById('viewer');
+      const restored = s2.scrollTop;
+      document.getElementById('toggleEdit').click();
+      await new Promise(r => setTimeout(r, 500));
+      return {
+        inSplit,
+        scrollerId: s.id || s.className,
+        overflowY: oy,
+        canScroll,
+        parked,
+        restored,
+      };
+    })()
+  `);
+  check(
+    "the split-view scroll test really entered split view on a scrollable pane",
+    splitScroll.inSplit === true &&
+      /^(auto|scroll)$/.test(splitScroll.overflowY) &&
+      splitScroll.canScroll === true &&
+      splitScroll.parked > 100,
+    JSON.stringify(splitScroll),
+  );
+  check(
+    "reading position survives a tab switch in split view",
+    Math.abs(splitScroll.restored - splitScroll.parked) < 80,
+    JSON.stringify(splitScroll),
+  );
+  await sleep(400);
+
+  // ---- Scenario 5c3: undo keeps the reading position in REAL split view.
+  // historyUndo/historyRedo save and restore contentWrapper.scrollTop
+  // unconditionally, in BOTH the edit-mode and view-mode branches, and in
+  // split view .content-wrapper is `overflow: hidden` so its scrollTop is
+  // permanently 0. A reviewer predicted from that reading that the preview
+  // would snap to the top on every undo while editing. It does not: the
+  // measured result is parked=900, restored=900 on a document that genuinely
+  // shrank by 60 paragraphs ABOVE the reading position. The position survives
+  // because `undoRedoRendering` suppresses the only scrollTop reset in the
+  // render path and patchViewerDOM keeps the surrounding nodes, so nothing
+  // moves it in the first place. The contentWrapper save/restore is therefore
+  // dead code in split view rather than a defect - and this scenario exists so
+  // that if anyone ever removes the undoRedoRendering guard, the symptom the
+  // reviewer described shows up as a failure instead of a bug report.
+  const undoScroll = await exec(`
+    (async () => {
+      document.getElementById('toggleEdit').click();
+      await new Promise(r => setTimeout(r, 700));
+      const inSplit = document
+        .querySelector('.content-wrapper')
+        .classList.contains('split-view');
+      // The rendered document must actually CHANGE across the undo, or the
+      // scenario proves nothing: assigning markdownEditor.value does not
+      // render, so pushing a state and undoing it would re-render the very
+      // same document and the scroll offset would trivially survive.
+      // So: render the LONG version, park the reader deep inside it, then undo
+      // back to the short one. That removes content above the reading position
+      // and is the case most likely to move the scroll offset.
+      const shortDoc = markdownEditor.value;
+      const longDoc = 'inserted paragraph.\\n\\n'.repeat(60) + shortDoc;
+      historyPush(shortDoc);
+      markdownEditor.value = longDoc;
+      await renderMarkdown(longDoc);
+      await new Promise(r => setTimeout(r, 400));
+
+      const s = getViewerScroller();
+      const canScroll = s.scrollHeight > s.clientHeight + 1;
+      s.scrollTop = 900;
+      await new Promise(r => setTimeout(r, 120));
+      const parked = s.scrollTop;
+
+      historyUndo();
+      await new Promise(r => setTimeout(r, 1400));
+
+      const restored = getViewerScroller().scrollTop;
+      document.getElementById('toggleEdit').click();
+      await new Promise(r => setTimeout(r, 500));
+      return {
+        inSplit,
+        canScroll,
+        parked,
+        restored,
+        scroller: s.id || s.className,
+      };
+    })()
+  `);
+  check(
+    "the undo scroll test really entered split view on a scrollable pane",
+    undoScroll.inSplit === true &&
+      undoScroll.canScroll === true &&
+      undoScroll.parked > 100,
+    JSON.stringify(undoScroll),
+  );
+  check(
+    "undo keeps the reading position in split view",
+    Math.abs(undoScroll.restored - undoScroll.parked) < 80,
+    JSON.stringify(undoScroll),
+  );
+  await sleep(400);
+
   write(fileM, "graph TD;\n  A-->B;\n");
   const mermaidTab = await exec(`
     (() => {

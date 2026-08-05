@@ -23,15 +23,30 @@
   // Shared Helpers
   // ============================================
 
-  // Which element scrolls depends on the mode:
-  //   normal view -> .content-wrapper (overflow-y: auto)
-  //   split/edit  -> #viewer (.content-wrapper becomes overflow: hidden)
+  // Which element scrolls is a CSS fact, not something to infer from a class
+  // name. It was inferred here, and the table-breakout work changed #viewer's
+  // overflow - which silently pointed save/restore at an element whose
+  // scrollTop is always 0, losing every tab's reading position in split view.
+  // This asks the engine instead, so the pairing cannot drift out of sync with
+  // the stylesheet again.
+  //
+  // Delegates to renderer.js's getViewerScroller() when it is present so there
+  // is one definition, but keeps its own copy as a fallback: this is an overlay
+  // file that must not hard-depend on renderer internals.
+  //
+  // Deliberately tests only the computed overflow, never scrollHeight: during
+  // a restore the new document may not be laid out yet, so a
+  // "is it scrolled right now" test would report the wrong element precisely
+  // when the answer matters most.
   function getScroller() {
+    if (typeof getViewerScroller === "function") return getViewerScroller();
     const wrapper = document.querySelector(".content-wrapper");
-    if (wrapper && wrapper.classList.contains("split-view")) {
-      return document.getElementById("viewer") || wrapper;
-    }
-    return wrapper || document.getElementById("viewer");
+    const viewerEl = document.getElementById("viewer");
+    const scrollable = (el) =>
+      el && /^(auto|scroll)$/.test(getComputedStyle(el).overflowY);
+    if (scrollable(viewerEl)) return viewerEl;
+    if (scrollable(wrapper)) return wrapper;
+    return wrapper || viewerEl;
   }
 
   // A <textarea> normalises CRLF/CR to LF on assignment (HTML spec: the API
@@ -1081,6 +1096,10 @@
   window.CustomTabs = {
     createTab,
     switchToTab,
+    // Exposed so the regression suite can assert that scroll save/restore
+    // targets the element the engine actually scrolls, rather than re-deriving
+    // that guess in the test and proving nothing.
+    __getScroller: getScroller,
     closeTab,
     updateTabContent,
     renderTabs,

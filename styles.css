@@ -454,6 +454,15 @@ body.dark-mode .nav-btn:hover:not(:disabled) {
   max-width: none;
   width: 50%;
   border-left: 1px solid var(--border-color);
+  /* In split view #viewer is a flex item stretched to the row's height, and
+     .content-wrapper is `overflow: hidden`, so #viewer has to be its own
+     scroller or the bottom of the document is unreachable while editing.
+     Outside split view it deliberately is not - see the #viewer rule. The
+     side effect of scrolling here is that overflow-x computes to `auto` and
+     clips, which is why applyTableBreakout() does not widen tables in split
+     view: the reading column is not in effect here anyway (max-width: none
+     above), so tables already get the full pane. */
+  overflow-y: auto;
 }
 
 /* Editor Panel */
@@ -564,7 +573,14 @@ body.dark-mode .nav-btn:hover:not(:disabled) {
   margin: 0 auto;
   padding: 40px 20px;
   line-height: 1.8;
-  overflow-y: auto;
+  /* Deliberately `visible`, not `auto`. This used to say `overflow-y: auto`,
+     which had no effect on scrolling - #viewer has no constrained height, so
+     it never scrolls itself; .content-wrapper is the scroller. But because CSS
+     computes the *other* axis to `auto` whenever one axis is non-visible, that
+     declaration silently turned overflow-x into `auto` and clipped anything
+     painting outside the 900px reading column - which is exactly what a
+     breakout table does. .content-wrapper still owns overflow. */
+  overflow: visible;
   position: relative;
   min-height: 100%;
 }
@@ -695,10 +711,32 @@ body.dark-mode .nav-btn:hover:not(:disabled) {
   color: var(--primary-color);
 }
 
+/* Column widths follow content, not an equal split.
+   `table-layout: fixed` divided the available width equally between columns
+   regardless of what was in them. Measured on a 4-column table whose last
+   column held 93% of the text: every column got exactly 25%, giving the
+   description column 1.21px per character against 71.67px per character for
+   its neighbour - a 59x density gap - and 236px-tall rows with three nearly
+   empty cells beside a wall of wrapped text.
+   With `auto` the same table gives that column 724px and the row height drops
+   to 95px (total table height 876px -> 572px). Tables whose columns really are
+   uniform are unaffected: a 3-column sample measured 286/286/286 before and
+   287/286/287 after.
+
+   The cells below use `overflow-wrap: break-word` and deliberately NOT
+   `word-break: break-word`. The distinction only matters under `auto`, and it
+   is the difference between working and unusable: `word-break` offers a break
+   opportunity inside every word, which lowers a column's min-content width to a
+   single character, so `auto` collapsed the short columns and rendered their
+   headers vertically - "Fl/ag", "E/n/v", "Own/er". Column widths looked
+   excellent in the measurements while the result was unreadable; it was caught
+   by looking at a screenshot. `overflow-wrap: break-word` keeps min-content at
+   the longest word, so short columns stay at least word-wide, while an
+   unbreakable token is still broken as a last resort rather than overflowing. */
 .markdown-body table {
   width: 100%;
   min-width: 100%;
-  table-layout: fixed;
+  table-layout: auto;
   border-collapse: collapse;
   margin: 1em 0;
   background: var(--bg-secondary);
@@ -714,14 +752,12 @@ body.dark-mode .nav-btn:hover:not(:disabled) {
   text-align: left;
   font-weight: 600;
   border-bottom: 2px solid var(--border-color);
-  word-break: break-word;
   overflow-wrap: break-word;
 }
 
 .markdown-body td {
   padding: 12px;
   border-bottom: 1px solid var(--border-color);
-  word-break: break-word;
   overflow-wrap: break-word;
 }
 
@@ -1456,6 +1492,20 @@ html {
   /* Ensure backgrounds are printed */
   body {
     background: white;
+  }
+
+  /* Table breakout is a screen affordance: its width is measured from the
+     window, and it is centred by shifting itself half its own width to the
+     left. On paper the sheet is the only budget and #viewer is already full
+     width, so leaving it in place pushes wide tables off the page (and out of
+     PDF export, which goes through these same styles). Neutralised here rather
+     than unset in JS so it holds for print-preview too, which never runs a
+     re-render. */
+  .markdown-body .table-container.table-breakout {
+    width: 100% !important;
+    max-width: 100% !important;
+    margin-left: 0 !important;
+    transform: none !important;
   }
 }
 
@@ -3003,9 +3053,32 @@ body.corporate-mode .markdown-body::after {
 
 .markdown-body table.compact-table {
   font-size: 11px;
+  /* `white-space: nowrap` deliberately removed from the whole table. It forced
+     any table with more than 5 columns to its max-content width, so a
+     6-column table carrying one long explanation became as wide as that
+     explanation's longest sentence and scrolled horizontally - the same "one
+     column dominates" problem this work set out to solve, in a different
+     disguise. Wrapping is decided per column instead, by .nowrap-col below.
+     What remains here is what the class is actually for: a smaller font and
+     tighter padding. `table-layout` and `min-width` are NOT repeated here:
+     they are already `auto` / `100%` on `.markdown-body table` above, and
+     restating them only creates two places to keep in step. */
+}
+
+/* A column whose longest cell is short is holding values, not sentences.
+   Keeping those on one line is what stops `some-value-0-10` breaking after the
+   hyphen while a neighbouring prose column wraps normally. */
+.markdown-body table th.nowrap-col,
+.markdown-body table td.nowrap-col {
   white-space: nowrap;
-  table-layout: auto;
-  min-width: 100%;
+}
+
+/* Last resort. If even the full window cannot hold the table at its preferred
+   width, wrapping the short columns is less bad than handing back a horizontal
+   scrollbar - which is the thing this whole redesign exists to remove. */
+.markdown-body table.wrap-anyway th.nowrap-col,
+.markdown-body table.wrap-anyway td.nowrap-col {
+  white-space: normal;
 }
 
 /* ============================================
@@ -3015,6 +3088,30 @@ body.corporate-mode .markdown-body::after {
 .markdown-body .table-container {
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
+}
+
+/* A table wide enough that it would otherwise be clipped inside the 900px
+   reading column is allowed to use the space beside it, centred on the column.
+   The width is measured in JS (applyTableBreakout) and arrives as an inline
+   custom property; see the comment there for why this is not `100vw`.
+   `translateX(-50%)` centres the element on its own width relative to the
+   reading column's midpoint, which is also the viewer's midpoint. */
+.markdown-body .table-container.table-breakout {
+  /* Clamped, not used raw. A container inside a collapsed section cannot be
+     measured, so its breakout width is deliberately preserved rather than
+     dropped - which means it can go stale if the window is resized while the
+     section is closed. --mv-breakout-budget is written on #viewer on every
+     recompute (it needs no container to measure) and inherits down, so a stale
+     width can never paint outside the window even before JS gets a chance to
+     recompute it. The 100% fallback is what applies in split view, where the
+     property is removed: there the container's own containing block is the
+     whole budget. Held in one custom property so width and max-width cannot
+     drift apart. */
+  --mv-breakout-applied: min(var(--table-breakout-width), var(--mv-breakout-budget, 100%));
+  width: var(--mv-breakout-applied);
+  max-width: var(--mv-breakout-applied);
+  margin-left: 50%;
+  transform: translateX(-50%);
 }
 
 /* ============================================
@@ -3056,8 +3153,16 @@ body.corporate-mode .markdown-body::after {
 }
 
 .collapsible-section {
-  overflow: hidden;
-  transition: max-height 0.2s ease;
+  /* `overflow: hidden` used to live here alongside `transition: max-height`,
+     but collapsing is a plain `display: none` toggle (see .collapsed below and
+     custom-collapse.js) and nothing in the app ever assigns max-height, so the
+     transition never ran and the clip was doing nothing intentional.
+     It was, however, clipping any child that paints outside the reading column
+     - notably a breakout table, which is centred with translateX(-50%) and so
+     extends past both edges. `display: flow-root` keeps the one side effect
+     that was load-bearing (an independent block formatting context, so floats
+     are contained and margins do not collapse through) without clipping. */
+  display: flow-root;
 }
 
 .collapsible-section.collapsed {

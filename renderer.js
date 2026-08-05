@@ -878,6 +878,25 @@ const contentWrapper = document.querySelector('.content-wrapper');
 const loadingScreen = document.getElementById('loadingScreen');
 const darkModeToggle = document.getElementById('darkModeToggle');
 
+// Which element actually scrolls is a CSS fact, not something to assume.
+// .content-wrapper owns the scrollbar in normal view, but in split view it is
+// `overflow: hidden` and #viewer scrolls its own half - so every
+// `contentWrapper.scrollTo(...)` is a no-op while the editor is open, and
+// clicking a table-of-contents entry appears to do nothing at all.
+//
+// Deliberately tests only the computed overflow, never scrollHeight: the
+// document may not be laid out yet at the moment of the call, and a
+// "is it scrolled right now" test would then report the wrong element exactly
+// when the answer matters most. custom-tabs.js delegates to this so the two
+// cannot drift apart.
+function getViewerScroller() {
+  const scrollable = (el) =>
+    el && /^(auto|scroll)$/.test(getComputedStyle(el).overflowY);
+  if (scrollable(viewer)) return viewer;
+  if (scrollable(contentWrapper)) return contentWrapper;
+  return contentWrapper || viewer;
+}
+
 // Current file tracking
 let currentFilePath = null;
 
@@ -1137,6 +1156,10 @@ function updateZoom() {
   zoomLevel = Math.min(ZOOM_CONFIG.max, Math.max(ZOOM_CONFIG.min, zoomLevel));
   viewer.style.zoom = `${zoomLevel / 100}`;
   zoomResetBtn.textContent = `${zoomLevel}%`;
+  // Zooming changes how much of the window a table can occupy, and does not
+  // fire `resize`. Without this a table widened at 100% keeps that width in
+  // zoomed pixels and runs off the window at 400%.
+  applyTableBreakout();
 }
 
 // ============================================
@@ -2132,13 +2155,14 @@ viewer.addEventListener('click', (e) => {
       }
 
       if (targetElement) {
-        // Calculate the scroll position relative to contentWrapper
-        const contentRect = contentWrapper.getBoundingClientRect();
+        // Whichever element actually scrolls - .content-wrapper normally,
+        // #viewer in split view. See getViewerScroller().
+        const scroller = getViewerScroller();
+        const contentRect = scroller.getBoundingClientRect();
         const targetRect = targetElement.getBoundingClientRect();
-        const scrollOffset = targetRect.top - contentRect.top + contentWrapper.scrollTop - 20; // 20px padding from top
+        const scrollOffset = targetRect.top - contentRect.top + scroller.scrollTop - 20; // 20px padding from top
 
-        // Scroll the content wrapper to the target
-        contentWrapper.scrollTo({
+        scroller.scrollTo({
           top: scrollOffset,
           behavior: 'smooth'
         });
@@ -2701,6 +2725,10 @@ toggleEditBtn.addEventListener('click', async () => {
     }
     // Enter edit mode
     contentWrapper.classList.add('split-view');
+    // Entering edit mode halves the viewer's width, so any widened table is now
+    // sized against space it no longer has. `resize` does not fire for a layout
+    // change inside the window, so the recalculation is explicit here.
+    applyTableBreakout();
     markdownEditor.value = originalMarkdown;
     hasUnsavedChanges = false;
     updateUnsavedIndicator();
@@ -2709,6 +2737,9 @@ toggleEditBtn.addEventListener('click', async () => {
   } else {
     // Exit edit mode
     contentWrapper.classList.remove('split-view');
+    // Leaving edit mode gives the width back; tables widened against the narrow
+    // split-view viewer must grow to match.
+    applyTableBreakout();
     toggleEditBtn.style.background = '';
     toggleEditBtn.style.color = '';
     clearTimeout(previewDebounceTimer);
@@ -3299,13 +3330,14 @@ function buildTableOfContents() {
         // Auto-expand any collapsed sections containing this header
         expandToHeader(header.id);
 
-        // Calculate the scroll position relative to contentWrapper
-        const contentRect = contentWrapper.getBoundingClientRect();
+        // Calculate the scroll position relative to whichever element scrolls
+        const scroller = getViewerScroller();
+        const contentRect = scroller.getBoundingClientRect();
         const headerRect = targetHeader.getBoundingClientRect();
-        const scrollOffset = headerRect.top - contentRect.top + contentWrapper.scrollTop - 20; // 20px padding from top
+        const scrollOffset = headerRect.top - contentRect.top + scroller.scrollTop - 20; // 20px padding from top
 
-        // Scroll the content wrapper to the header
-        contentWrapper.scrollTo({
+        // Scroll to the header
+        scroller.scrollTo({
           top: scrollOffset,
           behavior: 'smooth'
         });
@@ -3412,6 +3444,11 @@ viewer.addEventListener('click', (e) => {
   const isCollapsed = header.classList.toggle('collapsed');
   wrapper.classList.toggle('collapsed', isCollapsed);
   collapsedHeaders.set(_collapseKey(header.id), isCollapsed);
+  // A table that was hidden when the window was last measured kept its old
+  // breakout width (it could not be measured while display:none). Now that it
+  // is on screen again it can be, and must be: without this, collapse at one
+  // window size then expand at another paints the table off both edges.
+  applyTableBreakout(); // heading toggle changes what can be measured
 });
 
 // Auto-expand collapsed sections when navigating via TOC
@@ -3420,11 +3457,14 @@ function expandToHeader(headerId) {
   const target = document.getElementById(headerId);
   if (!target) return;
 
+  let expandedAny = false;
+
   // Expand any collapsed ancestor sections that contain this header
   let el = target.parentElement;
   while (el && el !== viewer) {
     if (el.classList.contains('collapsible-section') && el.classList.contains('collapsed')) {
       el.classList.remove('collapsed');
+      expandedAny = true;
       const parentHeaderId = el.dataset.forHeader;
       if (parentHeaderId) {
         const parentHeader = document.getElementById(parentHeaderId);
@@ -3434,6 +3474,10 @@ function expandToHeader(headerId) {
     }
     el = el.parentElement;
   }
+
+  // Tables revealed by this expansion have not been measured since they were
+  // hidden; the window may have changed size in between.
+  if (expandedAny) applyTableBreakout();
 }
 
 // Index panel toggle
@@ -3535,9 +3579,10 @@ function updateNotesList() {
       const target = viewer.querySelector(`[data-note-id="${CSS.escape(noteId)}"]`);
       if (!target) return;
       const noteRect = target.getBoundingClientRect();
-      const wrapperRect = contentWrapper.getBoundingClientRect();
-      const scrollTarget = contentWrapper.scrollTop + noteRect.top - wrapperRect.top - (wrapperRect.height / 2);
-      contentWrapper.scrollTo({ top: scrollTarget, behavior: 'smooth' });
+      const scroller = getViewerScroller();
+      const wrapperRect = scroller.getBoundingClientRect();
+      const scrollTarget = scroller.scrollTop + noteRect.top - wrapperRect.top - (wrapperRect.height / 2);
+      scroller.scrollTo({ top: scrollTarget, behavior: 'smooth' });
 
       // Highlight with pulse animation
       target.classList.add('note-highlight');
@@ -4272,6 +4317,12 @@ function renderLightFormat(content, generation) {
   initImageZoom();
   buildTableOfContents();
   makeHeadersCollapsible();
+  // Deliberately AFTER makeHeadersCollapsible(): it wraps sections and applies
+  // the restored `collapsed` state, so running before it measured every table
+  // in a document the reader had collapsed, only for them to be hidden a
+  // moment later. Measuring after also measures the layout the reader actually
+  // gets rather than the transient flat one.
+  applyTableBreakout();
   updateShowNotesToggleVisibility();
   updateNotesList();
   highlightNewElements();
@@ -4623,6 +4674,11 @@ async function renderMarkdownFull(content, generation) {
     // Make headers collapsible
     makeHeadersCollapsible();
 
+    // Deliberately AFTER makeHeadersCollapsible(): see the note at the other
+    // call site. Measuring after collapse state is applied avoids measuring
+    // tables that are about to be hidden.
+    applyTableBreakout();
+
     // Scroll to top (skip during undo/redo to preserve position)
     if (!undoRedoRendering) viewer.parentElement.scrollTop = 0;
 
@@ -4754,6 +4810,183 @@ function initSliders() {
   });
 }
 
+// Space left either side of a table that has been widened beyond the reading
+// column, so it never runs flush against the window edge.
+const TABLE_BREAKOUT_GUTTER = 24;
+
+// A table can almost always be squeezed into the reading column: `auto` layout
+// will keep shrinking columns until the text wraps, rather than overflow. So
+// "does it fit?" is the wrong question - the cramped-but-technically-fitting
+// table IS the case the user reported. The question asked instead is "how wide
+// does it want to be, within reason?": the sum of each column's max-content
+// width, with each column capped at a comfortable reading measure so that one
+// long prose column cannot drag the whole table across the screen.
+//
+// The cap is typographic, so it is stated in characters and resolved to pixels
+// against the table's own rendered font (see measureTextColumnCap). A fixed
+// pixel cap was wrong in three ways that a distance cannot express: a compact
+// table sets a smaller cell font, so the same 520px meant ~79 characters there
+// and ~62 in a normal table; every rect measured here is inside a `zoom`-scaled
+// subtree, so a constant silently tightened to ~34 characters at 200% zoom; and
+// any future font-size preference would move the text without moving the cap.
+// 66 is the classic optimum inside the 45-75 character measure.
+const TABLE_TEXT_COLUMN_CHARS = 66;
+
+// Only used if the probe cannot be measured (a table with no cells, or a font
+// that has not loaded). Equivalent to the old fixed cap.
+const TABLE_TEXT_COLUMN_CAP_FALLBACK = 520;
+
+// Wrapping is right for prose and wrong for identifiers. The old blanket
+// `white-space: nowrap` on wide tables got the second half right and the first
+// half badly wrong; removing it outright reversed the mistake, wrapping
+// `some-value-0-10` onto two lines. The distinction is per COLUMN, not per
+// table, so it is made here: a column whose longest cell is short is holding
+// values, not sentences, and should keep them on one line.
+const TABLE_SHORT_COLUMN_CHARS = 25;
+
+function markShortColumns(table) {
+  const rows = Array.from(table.rows);
+  if (!rows.length) return;
+  const columnCount = Math.max(...rows.map((r) => r.cells.length));
+  for (let col = 0; col < columnCount; col++) {
+    let longest = 0;
+    for (const row of rows) {
+      const cell = row.cells[col];
+      if (cell) longest = Math.max(longest, cell.textContent.trim().length);
+    }
+    if (longest > TABLE_SHORT_COLUMN_CHARS) continue;
+    for (const row of rows) {
+      if (row.cells[col]) row.cells[col].classList.add('nowrap-col');
+    }
+  }
+}
+
+// Resolves TABLE_TEXT_COLUMN_CHARS into the pixel width of a column that holds
+// exactly that many characters, including the cell's own padding and borders -
+// because the column widths it will be compared against include them too.
+//
+// Measured with a probe rather than computed from getComputedStyle. Every rect
+// read in this file is taken inside #viewer, which is scaled with CSS `zoom`,
+// and computed lengths under `zoom` are reported inconsistently between the
+// written value and the used one. A probe cannot be wrong about it: it is a
+// real cell, laid out by the same engine, in the same scaled subtree, matching
+// the same CSS rules (hence cloning the real cell and copying the table's
+// className - `.compact-table` changes the cell font), and it is measured with
+// the same getBoundingClientRect as the columns it bounds.
+//
+// `memo` is a per-CALL cache, created fresh by each applyTableBreakout() run
+// and thrown away when it returns. A document of N tables typically uses one or
+// two distinct (className, cell tag) shapes, so this turns N probe layouts into
+// ~2 without any invalidation problem. It is deliberately NOT promoted to a
+// cross-call cache: the CSS `min()` budget clamp catches a stale width that is
+// too WIDE, but nothing catches one that is too NARROW, and a too-narrow cap
+// renders as a cramped table - which is precisely the bug this whole redesign
+// exists to remove. A correct persistent key would have to include the
+// resolved font, the zoom factor, the container width and the table's content;
+// getting any one of those wrong reintroduces the original defect silently.
+function measureTextColumnCap(container, table, templateCell, memo) {
+  if (!templateCell) return TABLE_TEXT_COLUMN_CAP_FALLBACK;
+
+  // The key must describe everything the probe is sensitive to, and the probe
+  // is sensitive to more than the table's class: it is inserted INTO the
+  // container, so it inherits that subtree's typography, and it is a
+  // cloneNode(false) of the real cell, so it carries the cell's own classes and
+  // inline style. `class` and `style` both survive sanitisation
+  // (see ALLOWED_ATTR), so a document can legitimately contain
+  // `<div style="font-size:80%">` around one table and not another, or a
+  // `<th class="...">` that changes the font - two tables that share a
+  // className but must NOT share a cap. Keying on the class alone let the first
+  // seed a cap the second reused, which is the cramped-column bug wearing a
+  // different hat.
+  //
+  // So key on the RESOLVED font instead. It is what actually determines how
+  // wide N characters are, it collapses class, inherited style and cell style
+  // into one honest value, and reading it costs a style resolution rather than
+  // the forced layout a probe costs.
+  //
+  // The cap is a COLUMN width, not a text width, so the cell's horizontal
+  // padding and borders are in it too - and those are selected by the table's
+  // class (`.compact-table` tightens padding) as much as by the cell's. Both go
+  // in the key rather than relying on the happy accident that the one class
+  // which changes padding also changes font size.
+  //
+  // Zoom is deliberately absent: the memo is created and discarded inside a
+  // single applyTableBreakout() call, during which zoom cannot change, so its
+  // lifetime already scopes it. (Zoom, container width and cell content are
+  // among the things a PERSISTENT cache would additionally have to key on -
+  // which is a good part of why there is not one. See above.)
+  const cs = getComputedStyle(templateCell);
+  const key = [
+    table.className,
+    templateCell.tagName,
+    cs.fontSize,
+    cs.fontFamily,
+    cs.fontWeight,
+    cs.fontStyle,
+    cs.fontStretch,
+    cs.letterSpacing,
+    cs.wordSpacing,
+    cs.paddingLeft,
+    cs.paddingRight,
+    cs.borderLeftWidth,
+    cs.borderRightWidth,
+  ].join('|');
+  if (memo && memo.has(key)) return memo.get(key);
+
+  const probeTable = document.createElement('table');
+  probeTable.className = table.className;
+  // Taken out of flow and hidden so inserting it cannot disturb the layout of
+  // the table actually being measured.
+  probeTable.style.cssText =
+    'position:absolute;top:0;left:0;visibility:hidden;pointer-events:none;' +
+    'width:max-content;min-width:0;table-layout:auto;margin:0;';
+
+  const probeRow = probeTable.insertRow();
+  // cloneNode(false) keeps the tag (th vs td differ in font-weight) and any
+  // classes that affect metrics, without carrying the original text in.
+  const probeCell = templateCell.cloneNode(false);
+  probeCell.style.whiteSpace = 'pre';
+  probeCell.textContent = '0'.repeat(TABLE_TEXT_COLUMN_CHARS);
+  probeRow.appendChild(probeCell);
+  container.appendChild(probeTable);
+
+  const cap = probeCell.getBoundingClientRect().width;
+  probeTable.remove();
+
+  const resolved = cap > 0 ? cap : TABLE_TEXT_COLUMN_CAP_FALLBACK;
+  if (memo) memo.set(key, resolved);
+  return resolved;
+}
+
+// Measures what the table would like, not what it has been given. Setting
+// `width: max-content` and reading back forces a synchronous layout per table,
+// which is why this is called once per table inside the batched read pass and
+// never in a loop that also writes.
+function preferredTableWidth(container, memo) {
+  const table = container.querySelector('table');
+  const row = table && table.querySelector('tr');
+  if (!row || !row.cells.length) return 0;
+  const cap = measureTextColumnCap(container, table, row.cells[0], memo);
+  const previous = table.style.width;
+  table.style.width = 'max-content';
+  // Measure the table itself rather than summing cells: the sum omits borders
+  // and border-spacing, which underestimated the requirement and left a
+  // residual horizontal scrollbar on a 16-column table that would otherwise
+  // have fitted exactly.
+  const full = table.getBoundingClientRect().width;
+  let excess = 0;
+  for (const cell of row.cells) {
+    // Under `width: max-content` a cell's box is its whole column's preferred
+    // width, so the header row alone describes the entire table. Only the part
+    // of a column beyond a comfortable reading measure is given back - a prose
+    // column is not made more readable by more width, but a column of
+    // identifiers still gets exactly what it needs.
+    excess += Math.max(0, cell.getBoundingClientRect().width - cap);
+  }
+  table.style.width = previous;
+  return full - excess;
+}
+
 // Add maximize buttons to tables for popup view
 function addTableMaximizeButtons() {
   const tables = viewer.querySelectorAll('.markdown-body table, #viewer table');
@@ -4776,6 +5009,7 @@ function addTableMaximizeButtons() {
         table.classList.add('compact-table');
       }
     }
+    markShortColumns(table);
 
     // Create container and button
     const container = document.createElement('div');
@@ -4808,6 +5042,150 @@ function addTableMaximizeButtons() {
     container.appendChild(maxBtn);
   });
 }
+
+// Let a table that genuinely does not fit use the space beside the reading
+// column, instead of forcing a horizontal scrollbar inside a 900px well.
+//
+// Deliberately NOT applied to every table. Measured on a 2396px viewport,
+// widening unconditionally gave a 3-column table of 8-character values three
+// 786px columns, and stretched a description column to 2100px - roughly 150
+// characters per line, which is worse to read than the problem it set out to
+// solve. The fixed reading column is the right default for prose-shaped
+// tables; only tables that would otherwise be clipped are widened, and only as
+// far as they actually need.
+//
+// The available width is measured and written as an inline custom property
+// rather than expressed as `100vw` in the stylesheet: `100vw` includes the
+// vertical scrollbar (so it overflows the page by its width) and ignores
+// split-view, where the viewer shares the window with the editor panel.
+function applyTableBreakout() {
+  const containers = viewer.querySelectorAll('.table-container');
+  if (!containers.length) return;
+
+  const wrapper = document.querySelector('.content-wrapper');
+  const editorPane = document.getElementById('editorPanel');
+  // In split view #viewer is `width: 50%; max-width: none` and is its own
+  // scroller. The 900px reading column that breakout exists to escape is not
+  // in effect there - tables already get the whole pane - and an element cannot
+  // paint outside its own scroll container anyway, so a breakout would simply
+  // be clipped. Any breakout carried in from the wide layout is cleared below
+  // and this returns before applying a new one.
+  const splitView = !!wrapper && wrapper.classList.contains('split-view');
+
+  const paneWidth = editorPane ? editorPane.offsetWidth : 0;
+  // Two coordinate spaces meet here, and conflating them is the whole hazard.
+  // #viewer is scaled with CSS `zoom` (100-400%, see updateZoom):
+  //   - getBoundingClientRect is in VIEWPORT pixels everywhere, inside the
+  //     scaled subtree or outside it, so wrapper widths and table widths are
+  //     directly comparable;
+  //   - a length WRITTEN onto a descendant of #viewer is in the subtree's own
+  //     pixels, and is multiplied by the zoom factor when it is painted.
+  // So the budget is compared in viewport pixels and divided by the zoom factor
+  // only at the moment it is written. Dividing earlier - which is what this used
+  // to do - made `wanted > available` compare a viewport measurement against a
+  // subtree one: at 140% zoom every widened table was handed the whole budget
+  // instead of the width it asked for, and the surplus went to the one column
+  // able to absorb it, stretching an explanation column to 120 characters.
+  // That is precisely what the reading measure exists to prevent.
+  const zoomFactor = parseFloat(getComputedStyle(viewer).zoom) || 1;
+  const available = wrapper ? wrapper.clientWidth - paneWidth - TABLE_BREAKOUT_GUTTER * 2 : 0;
+
+  // Published as an inherited custom property BEFORE the visibility bail-out
+  // below, because the case it exists for is exactly the one that bails: every
+  // container hidden inside a collapsed section while the window is resized.
+  // (Note the EARLIER `!containers.length` return does skip this. That one is
+  // sound: with no containers at all there is no stored width to clamp, and the
+  // paths that can create one - renderTableInDOM, and every render - call this
+  // again afterwards.)
+  // The stylesheet clamps each breakout to this, so a width that has gone stale
+  // is capped at the current budget the instant its section is expanded,
+  // without waiting for JS. Removed in split view so the stylesheet's 100%
+  // fallback (the container's own containing block) takes over.
+  if (splitView) {
+    viewer.style.removeProperty('--mv-breakout-budget');
+  } else {
+    viewer.style.setProperty('--mv-breakout-budget', available / zoomFactor + 'px');
+  }
+
+  // Read pass. A container inside a collapsed section (display: none) has zero
+  // width and cannot be measured; clearing it would drop a breakout that could
+  // not be recomputed until it was visible again, so expanding the section
+  // would reveal a table squeezed back into the reading column. Hidden
+  // containers are therefore left exactly as they are.
+  const visible = [];
+  containers.forEach((c) => {
+    if (c.clientWidth > 0) visible.push(c);
+  });
+  if (!visible.length) return;
+
+  // Write pass: reset. A container that is already widened measures as "fits" -
+  // precisely because it was widened - so without this an established breakout
+  // could neither be dropped when it is no longer wanted nor resized when the
+  // budget changes.
+  visible.forEach((c) => {
+    c.classList.remove('table-breakout');
+    c.style.removeProperty('--table-breakout-width');
+    // Cleared here rather than only being re-toggled at the end, because the
+    // apply pass is skipped entirely in split view. Left behind, it would make
+    // short columns wrap in a pane that has room for them.
+    const t = c.querySelector('table');
+    if (t) t.classList.remove('wrap-anyway');
+  });
+  if (splitView) return;
+
+  // Read pass. preferredTableWidth writes then reads per table, so this is not
+  // a single reflow for the batch; it is still worth keeping the measurement
+  // separate from the application so that widening one table cannot change what
+  // the next one measures.
+  const capMemo = new Map();
+  const measured = visible.map((container) => {
+    // Everything below is in viewport pixels, to match `available`.
+    // getBoundingClientRect gives that directly; scrollWidth and clientWidth do
+    // not, so the overflow is expressed as a unit-free RATIO of the two and
+    // applied to the measured rect. That needs no knowledge of how layout
+    // metrics are reported inside a zoomed subtree, which is the detail that
+    // has been wrong twice.
+    const rect = container.getBoundingClientRect().width;
+    const overflow = container.clientWidth > 0 ? container.scrollWidth / container.clientWidth : 1;
+    return {
+      container,
+      // Two reasons to widen, and both matter. Overflow is the hard case:
+      // content that cannot shrink any further (an unbreakable token) and is
+      // genuinely clipped. preferredTableWidth is the soft case: a table that
+      // fits only because every column has been squeezed, which is the
+      // complaint this work exists to answer.
+      wanted: Math.max(rect * overflow, preferredTableWidth(container, capMemo)),
+      given: rect,
+    };
+  });
+
+  // Write pass: apply.
+  measured.forEach(({ container, wanted, given }) => {
+    // Even the whole window may not be enough. Letting the short columns wrap
+    // is the lesser evil: a table nobody can read without scrolling sideways is
+    // exactly what this replaced.
+    const table = container.querySelector('table');
+    if (table) table.classList.toggle('wrap-anyway', wanted > available);
+    if (wanted > given + 1 && available > given) {
+      container.style.setProperty(
+        '--table-breakout-width',
+        // Converted here, and only here: this is the one value that crosses out
+        // of viewport pixels and into the zoomed subtree's own.
+        Math.min(wanted, available) / zoomFactor + 'px'
+      );
+      container.classList.add('table-breakout');
+    }
+  });
+}
+
+// The widened width is derived from the space actually available, so it goes
+// stale whenever that space changes. Resizing fires `resize`; entering or
+// leaving split view does not, so that path calls applyTableBreakout directly.
+let tableBreakoutResizeTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(tableBreakoutResizeTimer);
+  tableBreakoutResizeTimer = setTimeout(applyTableBreakout, 120);
+});
 
 // Wrap standalone images with a zoom button (skips slider images)
 function initImageZoom() {
@@ -6589,9 +6967,10 @@ findNoteBtn.addEventListener('click', () => {
 
   // Scroll the note into view
   const noteRect = noteEl.getBoundingClientRect();
-  const wrapperRect = contentWrapper.getBoundingClientRect();
-  const scrollTarget = contentWrapper.scrollTop + noteRect.top - wrapperRect.top - (wrapperRect.height / 2);
-  contentWrapper.scrollTo({ top: scrollTarget, behavior: 'smooth' });
+  const scroller = getViewerScroller();
+  const wrapperRect = scroller.getBoundingClientRect();
+  const scrollTarget = scroller.scrollTop + noteRect.top - wrapperRect.top - (wrapperRect.height / 2);
+  scroller.scrollTo({ top: scrollTarget, behavior: 'smooth' });
 
   // Highlight the note with pulse animation
   noteEl.classList.remove('note-highlight');
@@ -7869,6 +8248,7 @@ function renderTableInDOM(mdTable, mode, replaceTarget) {
   if (firstRow && firstRow.querySelectorAll('th, td').length > 5) {
     tableEl.classList.add('compact-table');
   }
+  markShortColumns(tableEl);
 
   const container = document.createElement('div');
   container.className = 'table-container';
@@ -7898,6 +8278,12 @@ function renderTableInDOM(mdTable, mode, replaceTarget) {
       viewer.appendChild(container);
     }
   }
+
+  // This path builds a table outside the render pipeline, so nothing else will
+  // size it. Without this a table inserted or edited from the context menu is
+  // the only kind that still gets a horizontal scrollbar inside the reading
+  // column.
+  applyTableBreakout(); // context-menu insert/edit builds its own container
 }
 
 // ============================================

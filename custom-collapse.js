@@ -35,11 +35,22 @@
         `.collapsible-section[data-for-header="${CSS.escape(header.id)}"]`,
       );
       if (section) section.classList.add("collapsed");
-      // Persist state in the upstream Map so re-renders restore it correctly
-      if (typeof collapsedHeaders !== "undefined") {
-        collapsedHeaders.set(header.id, true);
+      // Persist state in the upstream Map so re-renders restore it correctly.
+      // The key MUST go through _collapseKey(): the Map is shared by every open
+      // document and renderer.js only ever reads it under that prefixed key, so
+      // a raw header.id is written into a key space nothing reads - Collapse All
+      // would silently unwind on the next re-render.
+      if (
+        typeof collapsedHeaders !== "undefined" &&
+        typeof _collapseKey === "function"
+      ) {
+        collapsedHeaders.set(_collapseKey(header.id), true);
       }
     });
+
+    // Tables inside a section that is now hidden cannot be measured, and tables
+    // elsewhere may gain room as the page shortens. See applyTableBreakout.
+    if (typeof applyTableBreakout === "function") applyTableBreakout();
   }
 
   function expandAll() {
@@ -53,10 +64,18 @@
         `.collapsible-section[data-for-header="${CSS.escape(header.id)}"]`,
       );
       if (section) section.classList.remove("collapsed");
-      if (typeof collapsedHeaders !== "undefined") {
-        collapsedHeaders.set(header.id, false);
+      if (
+        typeof collapsedHeaders !== "undefined" &&
+        typeof _collapseKey === "function"
+      ) {
+        collapsedHeaders.set(_collapseKey(header.id), false);
       }
     });
+
+    // Every table revealed here was last measured before it was hidden, and the
+    // window may have been resized in between. Without this, collapse at one
+    // size then expand at another leaves a table painted off both edges.
+    if (typeof applyTableBreakout === "function") applyTableBreakout();
   }
 
   // ── Inject View menu items ────────────────────────────────────────────────

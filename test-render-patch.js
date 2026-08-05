@@ -186,6 +186,70 @@ async function run(win) {
   check("the rendered wrappers show the same collapsed state as the map", domState === JSON.stringify(["zero=0", "alpha=1", "beta=0", "gamma=1"]), domState);
 
   // ---------------------------------------------------------------------
+  // 2b. Collapse All / Expand All write into the SAME key space.
+  //     custom-collapse.js keyed the shared collapsedHeaders Map by the raw
+  //     header id while renderer.js only ever reads it through _collapseKey()
+  //     (which prefixes the current file path). The writes therefore landed in
+  //     a key space nothing reads, so Collapse All silently unwound on the next
+  //     re-render - and would have leaked across documents had anything read
+  //     them. Driven through the real menu item, not the internal function.
+  //     H2 headings: Collapse All deliberately skips H1 (the document title).
+  // ---------------------------------------------------------------------
+  const DOC_H2 = "# Title\n\n## Alpha\n\na\n\n## Beta\n\nb\n\n## Gamma\n\nc\n";
+  await render(exec, DOC_H2, "full");
+  const collapsedAll = await exec(`
+    (() => {
+      const btn = document.getElementById('collapseAllBtn');
+      if (!btn) return 'missing-button';
+      btn.click();
+      return JSON.stringify({
+        map: ['alpha','beta','gamma'].map(id => !!collapsedHeaders.get(_collapseKey(id))),
+        raw: ['alpha','beta','gamma'].map(id => collapsedHeaders.has(id)),
+      });
+    })()
+  `);
+  check(
+    "Collapse All records state under the same key the renderer reads",
+    collapsedAll === JSON.stringify({ map: [true, true, true], raw: [false, false, false] }),
+    collapsedAll,
+  );
+
+  // The bug is only visible after a re-render: the DOM classes are set either
+  // way, so asserting on them alone would pass with the defect present.
+  await render(exec, DOC_H2, "full");
+  const survived = await exec(`
+    JSON.stringify(['alpha','beta','gamma'].map(id => {
+      const w = viewer.querySelector('.collapsible-section[data-for-header="' + id + '"]');
+      return w ? (w.classList.contains('collapsed') ? 1 : 0) : 'missing';
+    }))
+  `);
+  check(
+    "Collapse All survives a re-render instead of silently unwinding",
+    survived === JSON.stringify([1, 1, 1]),
+    survived,
+  );
+
+  await exec(`
+    (() => {
+      const btn = document.getElementById('expandAllBtn');
+      if (btn) btn.click();
+      return true;
+    })()
+  `);
+  await render(exec, DOC_H2, "full");
+  const expanded = await exec(`
+    JSON.stringify(['alpha','beta','gamma'].map(id => {
+      const w = viewer.querySelector('.collapsible-section[data-for-header="' + id + '"]');
+      return w ? (w.classList.contains('collapsed') ? 1 : 0) : 'missing';
+    }))
+  `);
+  check(
+    "Expand All likewise survives a re-render",
+    expanded === JSON.stringify([0, 0, 0]),
+    expanded,
+  );
+
+  // ---------------------------------------------------------------------
   // 3. Slug collisions and non-Latin headings.
   //    \w is ASCII-only; using it here would slug a Cyrillic heading to the
   //    empty string, send it to the fallback, and re-create the shifting bug
@@ -197,6 +261,108 @@ async function run(win) {
   check("repeated heading text produces distinct ids", idList2[0] === "notes" && idList2[1] === "notes-1", ids2);
   check("a non-Latin heading keeps a meaningful slug", idList2[2] === "привет-мир" && idList2[3] === "другой-раздел", ids2);
   check("every heading has a unique id", new Set(idList2).size === idList2.length, ids2);
+
+  // ---------------------------------------------------------------------
+  // 3b. Table-of-contents navigation scrolls whichever element actually
+  //     scrolls. .content-wrapper owns the scrollbar in normal view but is
+  //     `overflow: hidden` in split view, where #viewer scrolls its own half -
+  //     so a hard-coded contentWrapper.scrollTo() is a silent no-op while the
+  //     editor is open and clicking a TOC entry appears to do nothing. There
+  //     was no TOC coverage at all before this.
+  // ---------------------------------------------------------------------
+  const TOC_DOC =
+    "# Top\n\n" +
+    Array.from({ length: 12 }, (_, i) => `## Section ${i}\n\n` + "filler paragraph.\n\n".repeat(12)).join("");
+  await render(exec, TOC_DOC, "full");
+
+  // The scroll target is only reachable if the document actually overflows;
+  // otherwise both legs would trivially read 0 and prove nothing.
+  const scrollTo = async (splitView) => {
+    await exec(`
+      (() => {
+        const cw = document.querySelector('.content-wrapper');
+        cw.classList.toggle('split-view', ${splitView ? "true" : "false"});
+        cw.scrollTop = 0;
+        document.getElementById('viewer').scrollTop = 0;
+        return true;
+      })()
+    `);
+    await sleep(120);
+    const before = await exec(`
+      (() => {
+        const s = getViewerScroller();
+        return JSON.stringify({
+          scroller: s.id || s.className,
+          overflows: s.scrollHeight > s.clientHeight + 1,
+        });
+      })()
+    `);
+    await exec(`
+      (() => {
+        const item = [...document.querySelectorAll('.index-item')]
+          .find((i) => i.dataset.headerId === 'section-9');
+        if (!item) return 'missing';
+        item.click();
+        return true;
+      })()
+    `);
+    // scrollTo uses behavior:'smooth', so the position is not final on return.
+    // A fixed sleep is a coin toss on a slow machine, but a naive
+    // "two consecutive equal samples" poll is worse: the animation may not have
+    // STARTED yet, so the first two samples are both the pre-scroll position
+    // and the poll exits having measured nothing. Require several consecutive
+    // stable samples and a minimum elapsed time, so neither the start of the
+    // animation nor a flat stretch of its easing tail can be mistaken for the
+    // end of it.
+    const STABLE_SAMPLES = 4;
+    const MIN_ELAPSED_MS = 300;
+    const started = Date.now();
+    let last = null;
+    let stable = 0;
+    for (let i = 0; i < 60; i++) {
+      await sleep(50);
+      const now = await exec(`Math.round(getViewerScroller().scrollTop)`);
+      stable = now === last ? stable + 1 : 0;
+      last = now;
+      if (stable >= STABLE_SAMPLES && Date.now() - started >= MIN_ELAPSED_MS) break;
+    }
+    const after = await exec(`
+      (() => {
+        const s = getViewerScroller();
+        const h = document.getElementById('section-9');
+        const hr = h.getBoundingClientRect();
+        const sr = s.getBoundingClientRect();
+        return JSON.stringify({
+          top: Math.round(s.scrollTop),
+          headingOffset: Math.round(hr.top - sr.top),
+        });
+      })()
+    `);
+    return { before: JSON.parse(before), after: JSON.parse(after) };
+  };
+
+  for (const splitView of [false, true]) {
+    const label = splitView ? "split view" : "normal view";
+    const { before, after } = await scrollTo(splitView);
+    check(
+      `the document really overflows in ${label}, so the scroll assertion can fail`,
+      before.overflows === true,
+      JSON.stringify(before),
+    );
+    check(
+      `clicking a table-of-contents entry scrolls the page in ${label}`,
+      after.top > 100,
+      `scroller=${before.scroller} scrollTop=${after.top}`,
+    );
+    // What the reader cares about is the heading arriving near the top, not
+    // that some number moved.
+    check(
+      `the chosen heading ends up near the top of the view in ${label}`,
+      Math.abs(after.headingOffset) < 60,
+      `headingOffset=${after.headingOffset} scroller=${before.scroller}`,
+    );
+  }
+  await exec(`document.querySelector('.content-wrapper').classList.remove('split-view'); true`);
 
   // ---------------------------------------------------------------------
   // 4. patchViewerDOM actually preserves unchanged blocks.
