@@ -774,6 +774,189 @@ const REVERTS = [
     to: "'confirm.unsavedExit': 'You have unsaved changes. Exit edit mode anyway?'",
     expect: [/the exit warning states that the changes will be discarded/],
   },
+  // --- Upstream 03b5423, evaluated and partly taken (item 6f) --------------
+  {
+    // Measured before porting: with suppressErrors:false, a document holding
+    // one valid and one unparseable diagram left the VALID diagram with no
+    // .mermaid-container and no pop-out button, because the throw jumped past
+    // the maximize-button loop that runs after the batch.
+    id: "R103",
+    suite: "test:mermaid",
+    what: "let one invalid diagram abort the whole render batch again",
+    file: RENDERER,
+    from: "          await mermaid.run({ nodes: toRender, suppressErrors: true });",
+    to: "          await mermaid.run({ nodes: toRender, suppressErrors: false });",
+    expect: [/keeps its pop-out button when a sibling fails/],
+    // If mermaid.run happens to throw BEFORE the good diagram is drawn, the good
+    // one has no SVG, the fix assertion short-circuits, and R103 would report
+    // PROVEN having demonstrated nothing about pop-out buttons.
+    mustPass: [/13a fixture really does mix one rendered diagram with one failure/],
+  },
+  {
+    // The theme path's catch falls back to a FULL re-render, so the same throw
+    // makes every dark/light toggle re-render the document.
+    id: "R104",
+    suite: "test:mermaid",
+    what: "let one invalid diagram abort the re-theme batch again",
+    file: RENDERER,
+    from:
+      "    // theme toggle for as long as the bad diagram is in the document.\n" +
+      "    await mermaid.run({ nodes: toRender, suppressErrors: true });",
+    to:
+      "    // theme toggle for as long as the bad diagram is in the document.\n" +
+      "    await mermaid.run({ nodes: toRender, suppressErrors: false });",
+    expect: [
+      /does not re-render the whole document just because a diagram is invalid/,
+    ],
+    mustPass: [
+      // R104 only fails because the catch's fallback re-render actually fires,
+      // and that fallback is guarded on the document store being non-empty -
+      // which 13d supplies by assigning `window.originalMarkdown`. If that seed
+      // ever stopped reaching the renderer's own binding, the fallback would not
+      // fire, `fullRenders` would stay 0, and R104 would go VACUOUS with the
+      // defect fully present. These two assertions fail loudly in that case.
+      /13d's render observable is still the synchronous first statement/,
+      /window\.originalMarkdown really writes through to the renderer's own binding/,
+    ],
+  },
+  {
+    // error.message quotes the diagram SOURCE back, so an innerHTML assignment
+    // here is a document-controlled HTML sink in the privileged renderer.
+    id: "R105",
+    suite: "test:mermaid",
+    what: "write the mermaid error message back into innerHTML",
+    file: RENDERER,
+    from: "        el.replaceChildren(buildMermaidErrorBanner(error));",
+    to:
+      "        el.innerHTML = '<div style=\"color:red\"><strong>Mermaid Rendering Error:</strong><br>' +\n" +
+      "          error.message + '</div>';",
+    expect: [/renders a hostile message as text, not as markup/],
+    mustPass: [/13b2 the forced throw really reached the error banner/],
+  },
+  {
+    // Same sink, different call site. R105's anchor names the variable `error`
+    // and this one names it `err`, so neither can match the other's line.
+    id: "R105b",
+    suite: "test:mermaid",
+    what: "write the single-diagram error message back into innerHTML",
+    file: RENDERER,
+    from: "    mermaidEl.replaceChildren(buildMermaidErrorBanner(err));",
+    to:
+      "    mermaidEl.innerHTML = '<div style=\"color:red\"><strong>Mermaid Rendering Error:</strong><br>' +\n" +
+      "      err.message + '</div>';",
+    // Both legs, and this is the point of the split: R110 can only pin the
+    // FLAG (13e, direct entry), while this revert pins the SINK on BOTH the
+    // direct entry and the real dialog path. Listing 13e2 here is what makes
+    // "13e2 covers the product path" a proven claim rather than a comment.
+    expect: [
+      /single-diagram error path renders a hostile message as text/,
+      /dialog insert error path renders a hostile message as text/,
+    ],
+    // Distinguishes this proof from R110's, which breaks the same assertion for
+    // a different reason (no message at all rather than an injected one).
+    mustPass: [
+      /13e the invalid diagram really reached the single-diagram error path/,
+      /13e2 the real dialog path reached the single-diagram error banner/,
+      // 13e2's two preconditions. Both are ordinary suite assertions already,
+      // but listing them here makes them fail as COLLATERAL during a proof run
+      // rather than only in a normal run: if the scenario ever starts with a
+      // file open (so its invalidateTranslationCache() kicks off real work) or
+      // stops marking the document dirty, this revert's proof is measuring a
+      // scenario that no longer does what its name claims.
+      /13e2 runs with no file open, so its translation-cache invalidation is inert/,
+      /a dialog insert marks the document unsaved even when the diagram fails/,
+    ],
+  },
+  {
+    // The dialog is pre-filled with the DOCUMENT's own diagram source on Edit,
+    // so mermaid.render()'s rejection quotes document text back into this
+    // element. Pre-existing sink, found in review of this change, fixed with it.
+    id: "R109",
+    suite: "test:mermaid",
+    what: "write the dialog validation error back into innerHTML",
+    file: RENDERER,
+    from: "      mermaidTemplatePreviewEl.replaceChildren(buildMermaidPreviewError(err, fallback));",
+    to: "      mermaidTemplatePreviewEl.innerHTML = '<span class=\"mermaid-preview-error\">' + (err && err.message ? err.message : fallback) + '</span>';",
+    expect: [/dialog preview renders a hostile message as text/],
+    mustPass: [/13f the dialog validation path really rejected and reported/],
+  },
+  {
+    // Rule 5: the DECISION to keep suppressErrors:false at the one-diagram call
+    // site is only recorded if flipping it breaks something named. The first
+    // version of this entry expected the RE-ATTACH to break, on the strength of
+    // the comment that was in the code. It came back WRONG-GUARD: reattached
+    // stayed true. What actually breaks is the diagnosis - the user gets a
+    // silent block instead of a banner naming what is wrong with the diagram
+    // they just typed. Comment corrected, expectation repointed at what was
+    // measured rather than at what was assumed.
+    id: "R110",
+    suite: "test:mermaid",
+    what: "suppress errors at the single-diagram site too (the catch then never reports the failure)",
+    file: RENDERER,
+    from: "      await mermaid.run({ nodes: [mermaidEl], suppressErrors: false });",
+    to: "      await mermaid.run({ nodes: [mermaidEl], suppressErrors: true });",
+    expect: [/13e the invalid diagram really reached the single-diagram error path/],
+    mustPass: [
+      // 13e2 must NOT fail here, and that is a measured property rather than an
+      // omission. It patches `mermaid.run` wholesale to throw, so the option
+      // this revert flips is never consulted on that leg - the throw is the
+      // test double's, not mermaid's. 13e2 therefore pins the SINK on the real
+      // dialog path (R105b proves it there) while 13e is the only leg that can
+      // pin the FLAG. Listing it here makes that split explicit, so a future
+      // edit that accidentally makes 13e2 flag-sensitive shows up as a
+      // COLLATERAL verdict instead of quietly widening what R110 claims.
+      /13e2 the real dialog path reached the single-diagram error banner/,
+    ],
+  },
+  {
+    // Rule 5 again, for the hunk of 03b5423 that was REJECTED. Upstream's rule
+    // is a stated mermaid 10.6.1 workaround; on 11.16.0 it is a hard-coded grey
+    // with !important that beats themeVariables.actorLineColor. Every "are the
+    // lifelines drawn" assertion passes with it applied - which is exactly why
+    // the theme-tracking assertion had to exist before this could be pinned.
+    id: "R108",
+    suite: "test:mermaid",
+    what: "take upstream's actor-lifeline !important override (rejected: freezes the theme colour)",
+    file: CSS,
+    // Anchored to the marker comment that RECORDS the rejection, not to an
+    // unrelated section header. The comment is the artifact being defended, the
+    // same way R106/R107's are: delete it and SETUP-FAILED is the right answer.
+    from: "   REJECTION IS PINNED: test-mermaid-render.js scenario 13c, revert R108. */",
+    to:
+      "   REJECTION IS PINNED: test-mermaid-render.js scenario 13c, revert R108. */\n" +
+      ".mermaid line[id^=\"actor\"] {\n" +
+      "  stroke: #888 !important;\n" +
+      "  stroke-width: 1.5px !important;\n" +
+      "}\n" +
+      "body.dark-mode .mermaid line[id^=\"actor\"] {\n" +
+      "  stroke: #777 !important;\n" +
+      "}",
+    expect: [/lifeline colour still follows the mermaid theme/],
+    mustPass: [/the sequence fixture produced actor lifelines to measure/],
+  },
+  {
+    // Promoting the viewport rasterizes the SVG once and stretches that bitmap.
+    id: "R106",
+    suite: "test:popups",
+    what: "promote the mermaid pop-out viewport to its own composited layer again",
+    file: MAIN,
+    from: "            /* No will-change here, deliberately. Promoting the viewport to its",
+    to: "            will-change: transform;\n            /* No will-change here, deliberately. Promoting the viewport to its",
+    expect: [/mermaid pop-out renders crisply at 600%/],
+    mustPass: [/sharpness: the mermaid pop-out opened/],
+  },
+  {
+    // Beyond upstream: the image pop-out is not raster-only, because
+    // safeImageSrc() admits data:image/svg+xml and .svg paths.
+    id: "R107",
+    suite: "test:popups",
+    what: "promote the image pop-out viewport to its own composited layer again",
+    file: MAIN,
+    from: "      /* will-change is deliberately absent here too - see the mermaid popup for",
+    to: "      will-change: transform;\n      /* will-change is deliberately absent here too - see the mermaid popup for",
+    expect: [/image pop-out renders vector content crisply at 600%/],
+    mustPass: [/sharpness: the image pop-out opened/],
+  },
 ];
 
 const only = process.argv.slice(2);
@@ -881,12 +1064,23 @@ for (const r of chosen) {
   }
   const fails = failedNames(out);
   const missing = r.expect.filter((re) => !fails.some((f) => re.test(f)));
+  // A revert can "prove" itself by coincidence: if the setup assertion that
+  // makes the real assertion meaningful ALSO fails, the expected name still
+  // appears in the failure list while nothing has actually been demonstrated.
+  // mustPass names the assertions that have to survive the revert for its
+  // proof to mean what it claims.
+  const collateral = (r.mustPass || []).filter((re) => fails.some((f) => re.test(f)));
   if (fails.length === 0) {
     console.log(`${r.id}  VACUOUS       suite stayed green with the fix removed  (${r.what})`);
     bad += 1;
   } else if (missing.length) {
     console.log(
       `${r.id}  WRONG-GUARD   failed, but not on the expected assertions. missing=${missing} got=${JSON.stringify(fails.slice(0, 4))}`,
+    );
+    bad += 1;
+  } else if (collateral.length) {
+    console.log(
+      `${r.id}  COLLATERAL    the expected assertion failed, but so did its own setup, so it proves nothing. broke=${collateral}`,
     );
     bad += 1;
   } else {

@@ -1102,6 +1102,239 @@ async function run() {
     JSON.stringify({ dirB, stillThere: dirB && fs.existsSync(dirB) }),
   );
 
+  // -------------------------------------------------------------------------
+  // Pop-out render QUALITY (not security, but this is the popup harness and
+  // these are popup-only surfaces).
+  //
+  // Upstream 03b5423 drops `will-change: transform` from the zoom viewport,
+  // reporting that it makes the SVG rasterize once and then stretch as a
+  // bitmap. Confirmed here by capturing the window at 600% zoom and looking at
+  // the pixels: a crisp vector render is bimodal (near-black glyph, near-white
+  // paper) while an upscaled bitmap ramps across many mid-tones.
+  //
+  // The measurement is on the RENDERED FRAME, not on the CSS property, and the
+  // old value is re-applied in-place as the probe's own vacuity guard: if
+  // forcing promotion does not move the metric, the metric is measuring
+  // nothing and every assertion here is worthless.
+  // -------------------------------------------------------------------------
+  const SHARP_SVG =
+    "<svg xmlns='http://www.w3.org/2000/svg' width='400' height='120' viewBox='0 0 400 120'>" +
+    "<rect x='10' y='10' width='380' height='100' fill='#ffffff' stroke='#333333' stroke-width='2'/>" +
+    "<text x='30' y='55' font-family='sans-serif' font-size='18' fill='#111111'>Sharpness probe WWWmmm</text>" +
+    "<text x='30' y='88' font-family='sans-serif' font-size='12' fill='#111111'>small text 0123456789 ijl</text>" +
+    "</svg>";
+
+  // Fraction of pixels sitting between "clearly ink" and "clearly paper".
+  // Sharp edges cross that band in ~1 pixel; a stretched bitmap smears it.
+  //
+  // Clearance between the controls overlay's right edge and the first sampled
+  // column. The overlay has a soft shadow and rounded corners that bleed a few
+  // device pixels past its bounding rect, so sampling flush against it would
+  // count chrome as diagram. 24 device px covers the shadow at DPR 1-2.
+  const OVERLAY_GUTTER_PX = 24;
+  // The discrimination is statistical, so the sample has to be wide enough for
+  // the ratio to mean anything. Derived, not guessed: the sampled band is
+  // 0.47 * height tall (y0=0.08H, y1=0.55H), so at the smallest window this
+  // suite opens (900 device px tall => ~423 rows) a 128-column sample yields
+  // ~54000 pixels, comfortably above the >10000 floor the fraction needs to be
+  // stable. If the overlay ever grows enough to squeeze the sample below this,
+  // that is a named failure rather than a quietly meaningless number.
+  const MIN_SAMPLING_WIDTH_PX = 128;
+  async function softEdgeFraction(win) {
+    // capturePage() intermittently rejects with UnknownVizError under load -
+    // observed during a revert run, where it surfaced as the whole suite
+    // throwing instead of the assertion under test failing. Retry rather than
+    // let a compositor hiccup masquerade as a result.
+    //
+    // It can also return the PREVIOUS frame when the window is not the
+    // foreground window, which is worse: two captures come back byte-identical
+    // and an A/B reads as "no difference". Ask for a fresh frame explicitly and
+    // let the caller verify liveness.
+    let img = null;
+    let lastErr = null;
+    for (let attempt = 0; attempt < 4 && !img; attempt++) {
+      try {
+        if (!win.isDestroyed()) {
+          win.showInactive();
+          win.moveTop();
+        }
+        await win.webContents.executeJavaScript(
+          "new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))",
+          true,
+        );
+        const candidate = await win.capturePage();
+        if (candidate && candidate.getSize().width > 0) img = candidate;
+      } catch (e) {
+        lastErr = e;
+      }
+      if (!img) await sleep(500);
+    }
+    if (!img) {
+      return {
+        soft: 0,
+        total: 0,
+        fraction: 0,
+        samplingWidth: 0,
+        overlayFraction: 0,
+        captureFailed: String(lastErr),
+      };
+    }
+    // The sampling window used to start at a hard-coded 30% of the width, on the
+    // assumption that the controls overlay ends before it. That assumption is
+    // invisible in the numbers: if the overlay ever grew past it, its crisp
+    // DOM-drawn text would be counted as "shipped" sharpness and could hide a
+    // real bitmap-stretch regression. Derive it from the overlay instead.
+    let overlayRight = 0;
+    try {
+      overlayRight = await win.webContents.executeJavaScript(
+        `(() => {
+           const dpr = window.devicePixelRatio || 1;
+           let r = 0;
+           document.querySelectorAll('.ui-overlay, .controls').forEach(el => {
+             const b = el.getBoundingClientRect();
+             if (b.width > 0 && b.height > 0) r = Math.max(r, b.right * dpr);
+           });
+           return r;
+         })()`,
+        true,
+      );
+    } catch {
+      overlayRight = 0;
+    }
+    const { width, height } = img.getSize();
+    const buf = img.toBitmap(); // BGRA
+    // No upper clamp: clamping would silently sample contaminated pixels if the
+    // overlay ever grew past it, which is the exact failure the derivation was
+    // added to prevent. Because x0 is always >= overlayRight + gutter, overlay
+    // pixels cannot enter the sample by construction - so what actually needs
+    // defending is that ENOUGH pixels are left to measure, which is why
+    // `samplingWidth` is returned and asserted rather than a ratio.
+    const x0 = Math.max(
+      Math.floor(width * 0.3),
+      Math.ceil(overlayRight) + OVERLAY_GUTTER_PX,
+    );
+    const x1 = Math.floor(width * 0.95);
+    const y0 = Math.floor(height * 0.08);
+    const y1 = Math.floor(height * 0.55);
+    let soft = 0;
+    let total = 0;
+    for (let y = y0; y < y1; y++) {
+      for (let x = x0; x < x1; x++) {
+        const i = (y * width + x) * 4;
+        const lum = 0.114 * buf[i] + 0.587 * buf[i + 1] + 0.299 * buf[i + 2];
+        total++;
+        if (lum > 40 && lum < 215) soft++;
+      }
+    }
+    return {
+      soft,
+      total,
+      fraction: total ? soft / total : 0,
+      samplingWidth: Math.max(0, x1 - x0),
+      overlayFraction: width ? overlayRight / width : 0,
+    };
+  }
+
+  async function measureViewport(popup, artifactName) {
+    const ev = (c) => popup.webContents.executeJavaScript(c, true);
+    await ev(
+      "state.scale = 6; state.pointX = -300; state.pointY = -150; updateTransform(); null",
+    );
+    await sleep(1000);
+    const shipped = await softEdgeFraction(popup);
+    const shippedWillChange = await ev(
+      "getComputedStyle(document.getElementById('viewport')).willChange",
+    );
+    // Capture here, not at the end: the promoted leg below deliberately puts
+    // the window back into the BROKEN state, so an artifact taken afterwards
+    // would show a blurry frame and read as a failure of the shipped code.
+    const shot = await captureScreenshot(popup, artifactName);
+    if (shot) console.log("zoom artifact (shipped state): " + shot);
+    // Put the old value back and repeat the whole gesture. The order matters
+    // and a first attempt at this got it wrong: promoting an ALREADY-zoomed
+    // layer changes nothing, because it is already rasterized at that scale.
+    // The defect only appears when the layer is promoted while small and the
+    // zoom then stretches that raster - which is exactly what a user does.
+    await ev("state.scale = 1; state.pointX = 0; state.pointY = 0; updateTransform(); null");
+    await sleep(400);
+    await ev(
+      "document.getElementById('viewport').style.willChange = 'transform';" +
+        " void document.getElementById('viewport').offsetHeight; null",
+    );
+    await sleep(600);
+    await ev(
+      "state.scale = 6; state.pointX = -300; state.pointY = -150; updateTransform(); null",
+    );
+    await sleep(1000);
+    const promoted = await softEdgeFraction(popup);
+    return { shipped, promoted, shippedWillChange };
+  }
+
+  await closeAll();
+  const sharpMermaid = await openPopup("open-mermaid-popup", {
+    svgContent: SHARP_SVG,
+    isDarkMode: false,
+  });
+  check("sharpness: the mermaid pop-out opened", !!sharpMermaid, "no window");
+  if (sharpMermaid) {
+    const m = await measureViewport(sharpMermaid, "popup-mermaid-zoom-sharp");
+    // The sampling window starts past the controls overlay, so overlay pixels
+    // cannot enter the sample by construction. What that construction can still
+    // do is squeeze the sample down to nothing - and a fraction computed over a
+    // handful of columns is noise that would read as either verdict. Pin the
+    // derived minimum rather than a ratio: this is the load-bearing guard, and
+    // overlayFraction is reported alongside only as a diagnostic.
+    check(
+      "the sharpness sample is wide enough for the fraction to mean anything",
+      m.shipped.samplingWidth >= MIN_SAMPLING_WIDTH_PX &&
+        m.promoted.samplingWidth >= MIN_SAMPLING_WIDTH_PX,
+      JSON.stringify({
+        shipped: m.shipped.samplingWidth,
+        promoted: m.promoted.samplingWidth,
+        required: MIN_SAMPLING_WIDTH_PX,
+        overlayFraction: m.shipped.overlayFraction,
+      }),
+    );
+    check(
+      "sharpness probe discriminates: promoting the mermaid viewport blurs it",
+      m.promoted.fraction > m.shipped.fraction * 1.3 && m.shipped.total > 10000,
+      JSON.stringify(m),
+    );
+    check(
+      "the mermaid pop-out renders crisply at 600%, not as a stretched bitmap",
+      m.shippedWillChange === "auto" &&
+        m.shipped.fraction < m.promoted.fraction * 0.8,
+      JSON.stringify(m),
+    );
+  }
+
+  await closeAll();
+  const sharpImage = await openPopup("open-image-popup", {
+    src:
+      "data:image/svg+xml;base64," +
+      Buffer.from(SHARP_SVG, "utf8").toString("base64"),
+    alt: "vector probe",
+    isDarkMode: false,
+  });
+  check("sharpness: the image pop-out opened", !!sharpImage, "no window");
+  if (sharpImage) {
+    const m = await measureViewport(sharpImage, "popup-image-zoom-sharp");
+    check(
+      "sharpness probe discriminates: promoting the image viewport blurs it",
+      m.promoted.fraction > m.shipped.fraction * 1.3 && m.shipped.total > 10000,
+      JSON.stringify(m),
+    );
+    // Beyond upstream, which only touched the diagram viewports: the image
+    // pop-out is not raster-only, so it needs the same treatment.
+    check(
+      "the image pop-out renders vector content crisply at 600%",
+      m.shippedWillChange === "auto" &&
+        m.shipped.fraction < m.promoted.fraction * 0.8,
+      JSON.stringify(m),
+    );
+  }
+  await closeAll();
+
   // Every popup this suite opened was watched for console errors and for
   // errors that only ever appear on screen. The count assertion is what keeps
   // it honest: if openPopup ever stops attaching a watcher, an empty hit list

@@ -1522,7 +1522,12 @@ ipcMain.on("open-mermaid-popup", (event, data) => {
             cursor: grabbing;
         }
         #viewport {
-            will-change: transform;
+            /* No will-change here, deliberately. Promoting the viewport to its
+               own composited layer makes Chromium rasterize the SVG ONCE and
+               then scale that bitmap: measured at 600% zoom, glyph edges went
+               from crisp vector outlines to a visibly soft upscale. Without the
+               hint the transform is still composited, it just re-rasterizes at
+               the new scale, which is the whole point of a vector pop-out. */
         }
     </style>
 </head>
@@ -1991,7 +1996,10 @@ ipcMain.on("open-image-popup", (event, data) => {
     }
     #canvas:active { cursor: grabbing; }
     #viewport {
-      will-change: transform;
+      /* will-change is deliberately absent here too - see the mermaid popup for
+         the measurement. This viewport is NOT raster-only: safeImageSrc() admits
+         data:image/svg+xml and .svg paths, so it carries vector content that
+         blurs in exactly the same way. */
       transform-origin: 0 0;
     }
     #viewport img {

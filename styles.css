@@ -856,6 +856,15 @@ body.dark-mode .nav-btn:hover:not(:disabled) {
   border: 1px solid var(--border-color);
 }
 
+/* Sequence-diagram actor lifelines are deliberately NOT styled here.
+   Upstream 03b5423 adds `.mermaid line[id^="actor"] { stroke: #888 !important }`
+   as a stated workaround for a mermaid 10.6.1 bug where .attr("class","actor-line")
+   was OVERWRITTEN by .attr("class","200"). On 11.16.0 the class is APPENDED, not
+   overwritten, so `.actor-line` matches and mermaid's own themeVariables.actorLineColor
+   applies - measured at #404040, against the #888 the override would force.
+   Taking that hunk would therefore fight the theme, corporate mode included.
+   REJECTION IS PINNED: test-mermaid-render.js scenario 13c, revert R108. */
+
 /* Welcome screen */
 .welcome {
   text-align: center;

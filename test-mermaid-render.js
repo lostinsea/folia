@@ -52,6 +52,33 @@ const fileRace2 = path.join(dir, "race2.md");
 const jsRace2 = JSON.stringify(fileRace2);
 const DOC_RACE2 = "# Race2\n\n```mermaid\ngraph LR\n  RaceTwo1 --> RaceTwo2\n```\n";
 
+// One good diagram followed by one unparseable one, in that order. The order is
+// the whole point: it puts a diagram that DID render before the failure, so the
+// post-render passes can be asked whether they still ran for it.
+const fileMixed = path.join(dir, "mixed.md");
+const jsMixed = JSON.stringify(fileMixed);
+const DOC_MIXED =
+  "# Mixed\n\n" +
+  "```mermaid\ngraph LR\n  MixedGood1[Good one] --> MixedGood2[Good two]\n```\n\n" +
+  "```mermaid\nnotADiagramTypeAtAll\n  x --> y\n```\n";
+
+// The same failure, but with markup in the diagram source. mermaid's
+// "no diagram type detected" message quotes the source text back, so this
+// measures whether document content can reach an innerHTML sink through the
+// error path.
+const fileInject = path.join(dir, "inject.md");
+const jsInject = JSON.stringify(fileInject);
+const DOC_INJECT =
+  "# Inject\n\n" +
+  '```mermaid\nnotADiagramTypeAtAll <i id="mermaid-inject-probe">probe</i>\n```\n';
+
+// A sequence diagram on its own, for the actor-lifeline measurement.
+const fileSeq = path.join(dir, "sequence.md");
+const jsSeq = JSON.stringify(fileSeq);
+const DOC_SEQ =
+  "# Sequence\n\n" +
+  "```mermaid\nsequenceDiagram\n  Alice->>Bob: first\n  Bob-->>Alice: second\n  Alice->>Bob: third\n```\n";
+
 const DOC = `# Diagrams
 
 A flowchart:
@@ -150,6 +177,9 @@ async function run(win) {
   fs.writeFileSync(fileLong, DOC_LONG, "utf8");
   fs.writeFileSync(fileRace, DOC_RACE, "utf8");
   fs.writeFileSync(fileRace2, DOC_RACE2, "utf8");
+  fs.writeFileSync(fileMixed, DOC_MIXED, "utf8");
+  fs.writeFileSync(fileInject, DOC_INJECT, "utf8");
+  fs.writeFileSync(fileSeq, DOC_SEQ, "utf8");
 
   await exec(`
     localStorage.clear();
@@ -1184,6 +1214,737 @@ async function run(win) {
     JSON.stringify(staleRun),
   );
 
+  // --- 13. Upstream 03b5423: batch resilience, error sink, lifelines --------
+  // Three independent claims from that commit, measured against THIS fork
+  // before any of it is ported. The fork is on mermaid 11.16.0 while the commit
+  // was written against 10.6.1, so redundancy is a real possibility and is
+  // checked rather than assumed.
+
+  // (a) One unparseable diagram must not cost a VALID diagram its pop-out
+  //     button. The maximize-button loop runs after mermaid.run(), so a throw
+  //     there skips it for every diagram in the document, not just the bad one.
+  await sentinel.mute("13a: document deliberately contains an invalid diagram");
+  let mixed;
+  try {
+    await exec(`
+      (async () => {
+        await window.renderMarkdown(window.fs.readFileSync(${jsMixed}, 'utf8'), 'full');
+        return null;
+      })()
+    `).catch(() => {});
+    // No DIAGRAMS_READY wait: by construction one block never produces an SVG.
+    await exec(`whenMermaidSettled(); null`).catch(() => {});
+    await sleep(1200);
+    mixed = await exec(`
+      (() => {
+        const blocks = [...document.querySelectorAll('#viewer .mermaid')];
+        return {
+          blocks: blocks.length,
+          items: blocks.map(b => ({
+            good: /MixedGood/.test(b.textContent) || /MixedGood/.test(b.innerHTML),
+            hasSvg: !!b.querySelector('svg'),
+            inContainer: !!b.closest('.mermaid-container'),
+            hasMaxBtn: !!(b.closest('.mermaid-container') &&
+                          b.closest('.mermaid-container').querySelector('.mermaid-maximize-btn'))
+          }))
+        };
+      })()
+    `);
+    // Clear the deliberate failure off the screen INSIDE the mute. The error
+    // graphic lives in the DOM until the next render, so unmuting first would
+    // hand the sentinel a genuine finding it was never opened for.
+    await exec(`
+      (async () => {
+        await window.renderMarkdown(window.fs.readFileSync(${jsPlain}, 'utf8'), 'full');
+        return null;
+      })()
+    `).catch(() => {});
+    await sleep(400);
+  } finally {
+    await sentinel.unmute();
+  }
+  const goodBlocks = (mixed.items || []).filter((x) => x.good && x.hasSvg);
+  check(
+    "13a fixture really does mix one rendered diagram with one failure",
+    mixed.blocks === 2 && goodBlocks.length === 1,
+    JSON.stringify(mixed),
+  );
+  check(
+    "a diagram that rendered keeps its pop-out button when a sibling fails",
+    goodBlocks.length === 1 && goodBlocks[0].inContainer && goodBlocks[0].hasMaxBtn,
+    JSON.stringify(mixed),
+  );
+
+  // (b) The failure path writes error.message into innerHTML, and mermaid's
+  //     "no diagram type detected" message quotes the diagram SOURCE back. That
+  //     makes document content an HTML sink in the Node-privileged renderer.
+  await sentinel.mute("13b: document deliberately contains an invalid diagram");
+  let inject;
+  try {
+    await exec(`
+      (async () => {
+        await window.renderMarkdown(window.fs.readFileSync(${jsInject}, 'utf8'), 'full');
+        return null;
+      })()
+    `).catch(() => {});
+    await exec(`whenMermaidSettled(); null`).catch(() => {});
+    await sleep(1200);
+    inject = await exec(`
+      (() => {
+        const probe = document.getElementById('mermaid-inject-probe');
+        const blocks = [...document.querySelectorAll('#viewer .mermaid')];
+        return {
+          injected: !!probe,
+          // The literal source must still be VISIBLE to the reader as text -
+          // escaping it must not silently delete the diagnostic.
+          textShown: blocks.some(b => b.textContent.includes('mermaid-inject-probe')),
+          reported: blocks.some(b => /error/i.test(b.textContent))
+        };
+      })()
+    `);
+    await exec(`
+      (async () => {
+        await window.renderMarkdown(window.fs.readFileSync(${jsPlain}, 'utf8'), 'full');
+        return null;
+      })()
+    `).catch(() => {});
+    await sleep(400);
+  } finally {
+    await sentinel.unmute();
+  }
+  check(
+    "a failed diagram cannot inject markup from its own source into the page",
+    inject.injected === false,
+    JSON.stringify(inject),
+  );
+  check(
+    "a failed diagram still reports the failure to the reader",
+    inject.reported === true,
+    JSON.stringify(inject),
+  );
+
+  // (b2) The natural failure above never reaches renderer.js's own error banner,
+  //      because mermaid draws an error SVG for the block and the banner only
+  //      fills blocks that have none. That makes the banner's sink easy to leave
+  //      untested and easy to reintroduce, so it is driven directly: force
+  //      mermaid.run to throw a message carrying markup - exactly the shape
+  //      mermaid produces when it quotes a diagram's source back - and check
+  //      what the banner does with it.
+  await sentinel.mute("13b2: mermaid.run forced to throw");
+  let banner;
+  try {
+    banner = await exec(`
+      (async () => {
+        const realRun = mermaid.run;
+        window.__realMermaidRun = realRun;
+        mermaid.run = async () => {
+          throw new Error('boom <i id="mermaid-banner-probe">injected</i> boom');
+        };
+        try {
+          await window.renderMarkdown(window.fs.readFileSync(${jsRace}, 'utf8'), 'full');
+        } catch (e) {
+        } finally {
+          mermaid.run = realRun;
+          delete window.__realMermaidRun;
+        }
+        await new Promise(r => setTimeout(r, 600));
+        const blocks = [...document.querySelectorAll('#viewer .mermaid')];
+        return {
+          blocks: blocks.length,
+          injected: !!document.getElementById('mermaid-banner-probe'),
+          // The reader must still see the diagnostic, markup and all, as text.
+          textShown: blocks.some(b => b.textContent.includes('mermaid-banner-probe')),
+          labelled: blocks.some(b => /Mermaid Rendering Error/.test(b.textContent))
+        };
+      })()
+    `);
+    await exec(`
+      (async () => {
+        // Belt and braces for the monkey-patch above: the in-page try/finally
+        // only runs if the IIFE itself starts. If exec() rejects before that,
+        // mermaid.run would stay patched for every later scenario.
+        if (window.__realMermaidRun) { mermaid.run = window.__realMermaidRun; delete window.__realMermaidRun; }
+        await window.renderMarkdown(window.fs.readFileSync(${jsPlain}, 'utf8'), 'full');
+        return null;
+      })()
+    `).catch(() => {});
+    await sleep(400);
+  } finally {
+    await sentinel.unmute();
+  }
+  check(
+    "13b2 the forced throw really reached the error banner",
+    banner.blocks > 0 && banner.labelled === true,
+    JSON.stringify(banner),
+  );
+  check(
+    "the error banner renders a hostile message as text, not as markup",
+    banner.injected === false && banner.textShown === true,
+    JSON.stringify(banner),
+  );
+
+  // (d) The theme path has the same batch shape, and a worse failure: its catch
+  //     falls back to a FULL document re-render. With suppressErrors:false, one
+  //     invalid diagram therefore makes every dark/light toggle re-render the
+  //     whole document for as long as that diagram is in the file.
+  await sentinel.mute("13d: document deliberately contains an invalid diagram");
+  let themed;
+  try {
+    await exec(`
+      (async () => {
+        if (document.body.classList.contains('dark-mode')) {
+          document.body.classList.remove('dark-mode');
+        }
+        const src = window.fs.readFileSync(${jsMixed}, 'utf8');
+        await window.renderMarkdown(src, 'full');
+        // The fallback re-render is guarded by originalMarkdown, and calling
+        // renderMarkdown() directly never sets it. Without this line the
+        // guard is falsy, the fallback cannot fire, and the assertion below
+        // passes with the defect present - measured, it did exactly that.
+        window.originalMarkdown = src;
+        return null;
+      })()
+    `).catch(() => {});
+    await exec(`whenMermaidSettled(); null`).catch(() => {});
+    await sleep(800);
+    themed = await exec(`
+      (async () => {
+        const lum = (c) => {
+          const m = String(c).match(/[\\d.]+/g);
+          if (!m || m.length < 3) return null;
+          const v = m.slice(0, 3).map(Number).map(x => {
+            x = x / 255;
+            return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4);
+          });
+          return 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
+        };
+        // renderGeneration is the observable, NOT a patched window.renderMarkdown:
+        // renderMarkdown() does ++renderGeneration as its first statement, so the
+        // delta is exact and synchronous. A patched window.renderMarkdown was
+        // tried first and counted 0 even with the defect present, so it is not
+        // trustworthy here.
+        //
+        // The fixture above must also seed originalMarkdown - see the comment
+        // there. Both facts were established by instrumenting the real path
+        // (console.warn fired, mermaid.run threw) rather than by reading code.
+        const genBefore = renderGeneration;
+        document.body.classList.add('dark-mode');
+        await updateMermaidTheme(true);
+        await whenMermaidSettled();
+        await new Promise(r => setTimeout(r, 300));
+        const fullRenders = renderGeneration - genBefore;
+        // The observable is only exact while the increment really is the first
+        // statement. If a refactor moves anything in front of it - especially
+        // anything awaited - this scenario silently becomes a race that always
+        // reads 0 and therefore always passes.
+        const observableIsSynchronous =
+          /^[^{]*\\{\\s*(\\/\\/[^\\n]*\\n\\s*)*(const|let|var)\\s+\\w+\\s*=\\s*\\+\\+renderGeneration/.test(
+            String(window.renderMarkdown)
+          );
+        const good = [...document.querySelectorAll('#viewer .mermaid')]
+          .find(b => /MixedGood/.test(b.innerHTML));
+        const shape = good && good.querySelector('g.node rect, g.node path, g.node polygon');
+        return {
+          fullRenders,
+          observableIsSynchronous,
+          goodFound: !!good,
+          goodLum: shape ? lum(getComputedStyle(shape).fill) : null
+        };
+      })()
+    `);
+    await exec(`
+      (async () => {
+        document.body.classList.remove('dark-mode');
+        await window.renderMarkdown(window.fs.readFileSync(${jsPlain}, 'utf8'), 'full');
+        return null;
+      })()
+    `).catch(() => {});
+    await sleep(400);
+  } finally {
+    await sentinel.unmute();
+  }
+  check(
+    "13d's render observable is still the synchronous first statement",
+    themed.observableIsSynchronous === true,
+    JSON.stringify(themed),
+  );
+  check(
+    "a theme toggle does not re-render the whole document just because a diagram is invalid",
+    themed.fullRenders === 0,
+    JSON.stringify(themed),
+  );
+  check(
+    "a valid diagram is still re-themed when an invalid sibling is present",
+    themed.goodFound === true && themed.goodLum !== null && themed.goodLum < 0.3,
+    JSON.stringify(themed),
+  );
+
+  // (c) Sequence-diagram actor lifelines. Upstream carries an id-based
+  //     !important override as a stated workaround for a mermaid 10.6.1 bug
+  //     (.attr("class","actor-line") overwritten by .attr("class","200")).
+  //     Whether that bug still exists on 11.16.0 decides whether the override
+  //     is a fix or an unnecessary hard-coded colour fighting the theme.
+  await exec(`
+    (async () => {
+      await window.renderMarkdown(window.fs.readFileSync(${jsSeq}, 'utf8'), 'full');
+      return null;
+    })()
+  `);
+  await waitFor(exec, "the sequence fixture to draw", DIAGRAMS_READY);
+  await exec(`whenMermaidSettled(); null`);
+  const lifelines = await exec(`
+    (() => {
+      const svg = document.querySelector('#viewer .mermaid svg');
+      if (!svg) return { svg: false };
+      const byId = [...svg.querySelectorAll('line[id^="actor"]')];
+      const byClass = [...svg.querySelectorAll('line.actor-line')];
+      const geom = byId.map(l => {
+        const cs = getComputedStyle(l);
+        const r = l.getBoundingClientRect();
+        return {
+          cls: l.getAttribute('class'),
+          stroke: cs.stroke,
+          strokeWidth: cs.strokeWidth,
+          opacity: cs.opacity,
+          height: Math.round(r.height)
+        };
+      });
+      // ORACLE, and it is deliberately NOT ours: mermaid injects its own
+      // <style> into the SVG carrying the theme's actorLineColor. Comparing the
+      // COMPUTED stroke against mermaid's own DECLARED stroke is what makes the
+      // rejection of upstream's rule observable - a hard-coded
+      // "stroke: #888 !important" wins the cascade and the two stop agreeing,
+      // while every "is it drawn at all" assertion carries on passing.
+      const styleText = [...svg.querySelectorAll('style')].map(s => s.textContent).join('\\n');
+      const m = /\\.actor-line\\s*\\{[^}]*?stroke\\s*:\\s*([^;}]+)/.exec(styleText);
+      const declaredRaw = m ? m[1].trim() : null;
+      let declared = null;
+      if (declaredRaw) {
+        const probe = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        probe.style.stroke = declaredRaw;
+        svg.appendChild(probe);
+        declared = getComputedStyle(probe).stroke;
+        probe.remove();
+      }
+      return { svg: true, byId: byId.length, byClass: byClass.length, geom, declaredRaw, declared };
+    })()
+  `);
+  check(
+    "the sequence fixture produced actor lifelines to measure",
+    lifelines.svg === true && lifelines.byId >= 2,
+    JSON.stringify(lifelines),
+  );
+  check(
+    "mermaid 11 sets the actor-line class correctly (10.6.1 workaround not needed)",
+    lifelines.byClass === lifelines.byId && lifelines.byId >= 2,
+    JSON.stringify(lifelines),
+  );
+  check(
+    "actor lifelines are actually drawn: visible stroke and real height",
+    (lifelines.geom || []).length >= 2 &&
+      lifelines.geom.every(
+        (g) =>
+          g.height > 10 &&
+          g.opacity !== "0" &&
+          g.stroke !== "none" &&
+          parseFloat(g.strokeWidth) > 0,
+      ),
+    JSON.stringify(lifelines),
+  );
+  // This is the assertion that PINS THE REJECTION. The three above it are all
+  // satisfied by upstream's rule too - it paints the lifelines a perfectly
+  // visible grey - so on their own they record no decision at all. What the
+  // rejection actually claims is that the lifeline colour must keep tracking
+  // themeVariables.actorLineColor instead of being frozen to #888/#777, and
+  // that is only observable by comparing against what mermaid itself declared.
+  check(
+    "lifeline colour still follows the mermaid theme, not a hard-coded override",
+    !!lifelines.declared &&
+      (lifelines.geom || []).length >= 2 &&
+      lifelines.geom.every((g) => g.stroke === lifelines.declared),
+    JSON.stringify(lifelines),
+  );
+
+  // (e) The THIRD mermaid.run call site: renderMermaidInDOM(), which draws the
+  //     one diagram typed into the insert/edit dialog. It keeps
+  //     suppressErrors:false deliberately, and until now nothing measured that
+  //     decision or the sink in its catch. Both are covered here, because they
+  //     are the same event: the throw is what runs the catch, and the catch is
+  //     what both re-attaches the element and writes the banner.
+  await sentinel.mute("13e: single-diagram insert path given an invalid diagram");
+  let inDom;
+  try {
+    inDom = await exec(`
+      (async () => {
+        await window.renderMarkdown(window.fs.readFileSync(${jsPlain}, 'utf8'), 'full');
+        await window.renderMermaidInDOM(
+          'notADiagramTypeAtAll <b id="mermaid-indom-probe">probe</b>',
+          'insert',
+          null
+        );
+        await new Promise(r => setTimeout(r, 400));
+        const container = document.querySelector('#viewer .mermaid-container');
+        const el = container ? container.querySelector('.mermaid') : null;
+        return {
+          container: !!container,
+          // The catch re-attaches the node mermaid detaches on failure. If the
+          // throw were suppressed the catch would never run and this would be
+          // an empty container with no diagram to edit or delete.
+          reattached: !!el && el.isConnected && el.parentElement === container,
+          injected: !!document.getElementById('mermaid-indom-probe'),
+          labelled: !!el && /Mermaid Rendering Error/.test(el.textContent),
+          textShown: !!el && el.textContent.includes('mermaid-indom-probe')
+        };
+      })()
+    `);
+    await exec(`
+      (async () => {
+        await window.renderMarkdown(window.fs.readFileSync(${jsPlain}, 'utf8'), 'full');
+        return null;
+      })()
+    `).catch(() => {});
+    await sleep(400);
+  } finally {
+    await sentinel.unmute();
+  }
+  check(
+    // Split from the banner assertion deliberately: the container is created
+    // before the try/catch, so it stays true under every revert. Keeping the two
+    // halves separate means R110's failure log names which one flipped instead
+    // of requiring the JSON payload to be read.
+    "13e the invalid diagram really reached the single-diagram render path",
+    inDom.container === true,
+    JSON.stringify(inDom),
+  );
+  check(
+    "13e the invalid diagram really reached the single-diagram error path",
+    inDom.labelled === true,
+    JSON.stringify(inDom),
+  );
+  check(
+    // NOT pinned by a revert, deliberately: neutralising the re-attach fails
+    // nothing on mermaid 11 (R110b was tried and came back VACUOUS), because
+    // mermaid 11 no longer detaches the node. Kept as a plain invariant so a
+    // future engine that starts detaching again is caught here.
+    "a failed single diagram stays attached so it can still be edited or deleted",
+    inDom.reattached === true,
+    JSON.stringify(inDom),
+  );
+  check(
+    "the single-diagram error path renders a hostile message as text, not markup",
+    inDom.injected === false && inDom.textShown === true,
+    JSON.stringify(inDom),
+  );
+
+  // (e2) 13e drives renderMermaidInDOM() DIRECTLY, which is the only way to
+  //      reach it with parse-invalid source - the real dialog validates with
+  //      mermaid.render() first and returns early. Both reviewers pointed out
+  //      that this leaves the PRODUCT path unmeasured, and they were right: the
+  //      reachable failure there is "render() succeeds, run() then throws"
+  //      (post-parse layout faults, an engine upgrade changing behaviour between
+  //      the two calls, the mutex losing a race). This scenario drives the real
+  //      button path end-to-end with exactly that shape: VALID source, so
+  //      validation passes and the dialog closes, and mermaid.run patched to
+  //      throw a message carrying markup. It is what R110 is pinned to.
+  await sentinel.mute("13e2: dialog insert with mermaid.run forced to throw");
+  let dialogRun;
+  try {
+    dialogRun = await exec(`
+      (async () => {
+        const plain = window.fs.readFileSync(${jsPlain}, 'utf8');
+        await window.renderMarkdown(plain, 'full');
+        const ta = document.getElementById('mermaidTemplateCode');
+        const overlay = document.getElementById('mermaidTemplateOverlay');
+        if (!ta || !overlay) return { wired: false };
+        // renderMarkdown() does NOT set originalMarkdown - it only draws. So
+        // without this seed the insert below edits whatever the PREVIOUS
+        // scenario left in the store (13d assigns DOC_MIXED), and this scenario
+        // would be quietly mutating a document that is not the one on screen.
+        // Both reviewers caught that independently.
+        const beforeMd = window.originalMarkdown;
+        const beforeEditor = window.markdownEditor ? window.markdownEditor.value : null;
+        // historyPush() clears the redo stack as well as appending, so nothing
+        // short of a full snapshot puts the undo/redo state back.
+        const beforeHistory = window.historySnapshot();
+        window.originalMarkdown = plain;
+        // hasUnsavedChanges is a module-scope 'let' with NO window binding (the
+        // getter/setter pair exists for originalMarkdown and currentFilePath but
+        // not for this one), so assigning window.hasUnsavedChanges would silently
+        // write to a junk property and restore nothing. setUnsavedState() is the
+        // real setter the renderer exposes. The flag is not readable either, so
+        // capture its ONE observable - the indicator the renderer paints from it
+        // - and restore to THAT, rather than to a hard false. Forcing false on
+        // the way out would silently launder a dirty document clean for every
+        // scenario that runs after this one.
+        window.updateUnsavedIndicator();
+        const beforeDirty =
+          document.getElementById('unsavedIndicator').style.display === 'inline';
+        window.setUnsavedState(false);
+        const containersBefore =
+          document.querySelectorAll('#viewer .mermaid-container').length;
+        // Open the dialog FOR REAL. Asserting "the dialog is now closed" without
+        // this is vacuous - it was never open, so deleting the close call on the
+        // success path would still leave the assertion green.
+        // Signature is (code, mode) - NOT (mode, code). Passing them the wrong
+        // way round sets the code to the string 'insert' and the mode to null,
+        // which still "opens" the dialog and would have made the assertion
+        // below pass while measuring the wrong thing entirely.
+        window.openMermaidTemplateDialog(null, 'insert');
+        const dialogOpened = overlay.classList.contains('visible');
+        // VALID source: mermaid.render() must accept it, so the dialog gets
+        // past validation and actually reaches renderMermaidInDOM().
+        ta.value = 'graph TD\\n  A[Start] --> B[End]';
+        const realRun = mermaid.run;
+        window.__realMermaidRun = realRun;
+        mermaid.run = async () => {
+          throw new Error('layout <i id="mermaid-dialog-probe">injected</i> fault');
+        };
+        let validationRejected = false;
+        try {
+          await window.insertMermaidFromDialog();
+          const pv = document.getElementById('mermaidTemplatePreview');
+          validationRejected = !!(pv && pv.querySelector('.mermaid-preview-error'));
+          // Wait on the mermaid mutex rather than a fixed sleep: this flow goes
+          // through queueMermaidWork(), so under contention with an earlier
+          // scenario's cleanup the banner can land after a 400ms nap - and then
+          // it lands OUTSIDE the mute and is recorded as a real error.
+          if (window.whenMermaidSettled) await window.whenMermaidSettled();
+          await new Promise(r => setTimeout(r, 300));
+        } finally {
+          mermaid.run = realRun;
+          delete window.__realMermaidRun;
+        }
+        const containers = document.querySelectorAll('#viewer .mermaid-container');
+        const container = containers[containers.length - 1] || null;
+        const el = container ? container.querySelector('.mermaid') : null;
+        // Read the dirty flag through its only observable: the indicator the
+        // renderer paints from it. The view-mode insert branch does not call
+        // updateUnsavedIndicator() itself, so drive it here.
+        window.updateUnsavedIndicator();
+        const dirtyAfter =
+          document.getElementById('unsavedIndicator').style.display === 'inline';
+        const out = {
+          wired: true,
+          dialogOpened,
+          // Vacuity guards. If validation had rejected, the dialog would have
+          // returned early and renderMermaidInDOM would never have been called -
+          // the scenario would then be measuring 13f a second time. And if the
+          // container count did not grow, the banner we are about to inspect is
+          // a leftover from an earlier scenario rather than this one's.
+          validationRejected,
+          dialogClosed: !overlay.classList.contains('visible'),
+          containerAdded:
+            document.querySelectorAll('#viewer .mermaid-container').length ===
+            containersBefore + 1,
+          // The insert really has to have edited the store, or the "real product
+          // path" claim is false.
+          storeGrew:
+            typeof window.originalMarkdown === 'string' &&
+            window.originalMarkdown.length > plain.length &&
+            window.originalMarkdown.indexOf(
+              String.fromCharCode(96, 96, 96) + 'mermaid'
+            ) >= 0,
+          dirtyAfter,
+          // The insert calls invalidateTranslationCache(), which nulls the
+          // translation cache and - ONLY if currentFilePath is also set - kicks
+          // off a background translation this scenario never restores or awaits.
+          // The two reviewers split on how much that matters, so measure the
+          // precondition instead of arguing it: with no file path there is no
+          // background work to leak, and the assertion below says so out loud
+          // the day a future scenario starts opening a real file here.
+          noFilePath: !window.currentFilePath,
+          container: !!container,
+          reattached: !!el && el.isConnected && el.parentElement === container,
+          labelled: !!el && /Mermaid Rendering Error/.test(el.textContent),
+          injected: !!document.getElementById('mermaid-dialog-probe'),
+          textShown: !!el && el.textContent.includes('mermaid-dialog-probe')
+        };
+        // Full restore, not a partial one: the insert mutates the store, the
+        // dirty flag, the undo/redo stacks and the editor mirror.
+        window.originalMarkdown = beforeMd;
+        window.historyRestore(beforeHistory);
+        window.setUnsavedState(beforeDirty);
+        if (window.markdownEditor && beforeEditor !== null) {
+          window.markdownEditor.value = beforeEditor;
+        }
+        ta.value = '';
+        // The dialog's preview pane still holds this scenario's error banner.
+        // Leaving it there means 13f, which asserts on that same pane, could be
+        // reading OUR banner instead of its own and would stay green even if the
+        // dialog stopped rendering one at all.
+        const pvEl = document.getElementById('mermaidTemplatePreview');
+        if (pvEl) pvEl.replaceChildren();
+        return out;
+      })()
+    `);
+    await exec(`
+      (async () => {
+        if (window.__realMermaidRun) { mermaid.run = window.__realMermaidRun; delete window.__realMermaidRun; }
+        await window.renderMarkdown(window.fs.readFileSync(${jsPlain}, 'utf8'), 'full');
+        return null;
+      })()
+    `).catch(() => {});
+    await sleep(400);
+  } finally {
+    await sentinel.unmute();
+  }
+  check(
+    "13e2 the real dialog path reached the single-diagram error banner",
+    dialogRun.wired === true &&
+      dialogRun.dialogOpened === true &&
+      dialogRun.validationRejected === false &&
+      dialogRun.dialogClosed === true &&
+      dialogRun.containerAdded === true &&
+      dialogRun.storeGrew === true &&
+      dialogRun.container === true &&
+      dialogRun.labelled === true,
+    JSON.stringify(dialogRun),
+  );
+  check(
+    // The real insert must mark the document dirty - it edited the store. This
+    // is also the only readable observable for a flag that has no window
+    // binding, so it doubles as proof that the cleanup below can restore it.
+    "a dialog insert marks the document unsaved even when the diagram fails",
+    dialogRun.dirtyAfter === true,
+    JSON.stringify(dialogRun),
+  );
+  check(
+    // See noFilePath above: this pins the precondition that makes the
+    // un-restored invalidateTranslationCache() side effect harmless here.
+    "13e2 runs with no file open, so its translation-cache invalidation is inert",
+    dialogRun.noFilePath === true,
+    JSON.stringify(dialogRun),
+  );
+  check(
+    "the dialog insert error path renders a hostile message as text, not markup",
+    dialogRun.injected === false && dialogRun.textShown === true,
+    JSON.stringify(dialogRun),
+  );
+  // 13d and 13e2 both seed the document store through `window.originalMarkdown`,
+  // and R104 only proves anything because that seed reaches the module-scope
+  // binding the renderer itself reads. Both reviewers independently doubted it
+  // did - a top-level `let` in a classic script is NOT a window property - and
+  // both missed the getter/setter pair at renderer.js:9515 that bridges it.
+  // Rather than settle that by reading the code, pin the bridge: if the
+  // defineProperty is ever removed, several scenarios and R104 go vacuous, and
+  // this is the assertion that says so instead of them silently passing.
+  const bridge = await exec(`
+    (() => {
+      const before = window.originalMarkdown;
+      const probe = 'BRIDGE_PROBE_' + Date.now();
+      window.originalMarkdown = probe;
+      // getActiveMarkdown() reads the module-scope binding, not window.
+      const seen = window.getActiveMarkdown ? window.getActiveMarkdown() : null;
+      window.originalMarkdown = before;
+      return {
+        seen: seen === probe,
+        restored: window.originalMarkdown === before,
+        // STRUCTURAL pin, alongside the semantic one above. The two reviewers
+        // split on whether the semantic probe alone is enough: one held that
+        // renderer.js:1899's bare 'originalMarkdown' guard is the SAME lexical
+        // binding getActiveMarkdown() reads, so breaking the bridge fails both
+        // together and the probe already covers it - which is correct. The other
+        // constructed a two-step refactor that defeats it anyway: delete the
+        // defineProperty AND change getActiveMarkdown() to read
+        // window.originalMarkdown, and the semantic probe stays green while the
+        // bare-binding guard is dead. Asserting the accessor still EXISTS costs
+        // nothing and closes that, because a plain assignment leaves a data
+        // property with no setter.
+        bridged:
+          typeof Object.getOwnPropertyDescriptor(window, 'originalMarkdown')
+            .set === 'function',
+        // PRECONDITION. getActiveMarkdown() returns translatedMarkdown instead
+        // whenever a translation is on screen (renderer.js:1363), so with one
+        // showing this probe would report a broken bridge that is in fact fine.
+        // isShowingTranslation has no window binding either; its observable is
+        // the class updateToolsMenuState() paints (renderer.js:1276). Nothing in
+        // this suite translates, so this should always be true - it is here so
+        // that a future scenario leaving a translation up fails with the reason
+        // attached instead of as a mystery bridge failure.
+        noTranslationShowing:
+          !document.getElementById('toolsBtn').classList.contains('translated')
+      };
+    })()
+  `);
+  check(
+    "window.originalMarkdown really writes through to the renderer's own binding",
+    bridge.seen === true &&
+      bridge.restored === true &&
+      bridge.bridged === true &&
+      bridge.noTranslationShowing === true,
+    JSON.stringify(bridge),
+  );
+
+  // (f) The dialog's own validate-before-insert preview. Same sink class again:
+  //     on Edit the dialog is pre-filled with the DOCUMENT's diagram source, and
+  //     mermaid.render() quotes that source back when it rejects.
+  await sentinel.mute("13f: dialog validation given an invalid diagram");
+  let preview;
+  try {
+    preview = await exec(`
+      (async () => {
+        const ta = document.getElementById('mermaidTemplateCode');
+        const pv = document.getElementById('mermaidTemplatePreview');
+        if (!ta || !pv) return { wired: false };
+        ta.value = 'notADiagramTypeAtAll <b id="mermaid-preview-probe">probe</b>';
+        await window.insertMermaidFromDialog();
+        await new Promise(r => setTimeout(r, 300));
+        const out = {
+          wired: true,
+          injected: !!document.getElementById('mermaid-preview-probe'),
+          shown: /notADiagramTypeAtAll/.test(pv.textContent),
+          nonEmpty: pv.textContent.trim().length > 0,
+          // The banner is a specific artifact, not just "some text": assert the
+          // class the stylesheet targets and the warning prefix, so a future
+          // refactor that drops the styled span (leaving a bare unreadable
+          // stack trace in the preview) fails here rather than passing on
+          // textContent alone.
+          errorClass: !!pv.querySelector('.mermaid-preview-error'),
+          prefixed: /^\\u26a0\\s/.test(
+            (pv.querySelector('.mermaid-preview-error') || {}).textContent || ''
+          ),
+          childKinds: Array.from(pv.childNodes).map(
+            n => n.nodeType === 1 ? n.tagName + '.' + n.className : 'text'
+          )
+        };
+        // Clear the deliberate failure INSIDE the mute. mermaid.render() leaves
+        // its own error graphic parked in the body when it rejects, and both it
+        // and the preview banner outlive this scenario otherwise - the sentinel
+        // would then attribute them to whatever ran next.
+        pv.replaceChildren();
+        ta.value = '';
+        document
+          .querySelectorAll('[id^="dmermaid-validate"], [id^="mermaid-validate"]')
+          .forEach(n => n.remove());
+        return out;
+      })()
+    `);
+    await exec(`
+      (async () => {
+        await window.renderMarkdown(window.fs.readFileSync(${jsPlain}, 'utf8'), 'full');
+        return null;
+      })()
+    `).catch(() => {});
+    await sleep(400);
+  } finally {
+    await sentinel.unmute();
+  }
+  check(
+    "13f the dialog validation path really rejected and reported",
+    preview.wired === true && preview.nonEmpty === true,
+    JSON.stringify(preview),
+  );
+  check(
+    "the dialog preview renders a hostile message as text, not markup",
+    preview.injected === false && preview.shown === true,
+    JSON.stringify(preview),
+  );
+  check(
+    "the dialog preview error is the styled warning span, not a bare string",
+    preview.errorClass === true && preview.prefixed === true,
+    JSON.stringify(preview),
+  );
+
   // Everything above ran with the sentinel watching. This is the assertion the
   // end-of-run screenshot could never make: nothing visibly broke at any point
   // during the suite, not merely at the moments we happened to look.
@@ -1205,19 +1966,79 @@ async function run(win) {
     JSON.stringify(sentinelReport.hits),
   );
   // A mute is the sentinel's only blind spot, so its extent is asserted too.
-  // Exactly one *test-opened* window (proveSentinelAlive opens its own, which is
-  // subtracted by reason rather than by loosening this to a >= count), and it
-  // must have actually caught the failure it was opened for - otherwise the
-  // deliberate-failure scenario stopped failing and the section above went
-  // vacuous without saying so.
+  // Only *test-opened* mutes are counted (proveSentinelAlive opens its own,
+  // subtracted by reason rather than by loosening this to a >= count), and each
+  // must have actually caught the failure it was opened for - otherwise a
+  // deliberate-failure scenario stopped failing and went vacuous without saying
+  // so.
   const testMutes = sentinelReport.mutes.filter(
     (m) => m.reason !== LIVENESS_MUTE_REASON,
   );
+  // Keyed by reason, not by position, and each entry names a SIGNATURE the
+  // suppressed set must contain. `suppressed.length > 0` was measurably weaker:
+  // ANY transient message during a 1200-1600ms mute window satisfies it, so a
+  // scenario whose deliberate failure quietly stopped failing - a future mermaid
+  // that accepts `notADiagramTypeAtAll`, say - would go vacuous while this
+  // assertion carried on passing. That is the exact failure mode this assertion
+  // exists to catch, so it has to look at what was caught, not how much.
+  //
+  // The signatures are the PHRASES THE SENTINEL ACTUALLY EMITS (see the closed
+  // `phrases` list and the `mermaid-error-graphic` push in test-visual-utils),
+  // not loose topic words. A first attempt used /mermaid|diagram|syntax|parse/i
+  // and both reviewers called it decorative, correctly: a future mermaid that
+  // logs any benign `console.error('Mermaid: rendered diagram X')` would satisfy
+  // it even though nothing failed, which is precisely the regression this is
+  // supposed to detect.
+  //
+  // Matched against `kind + " " + detail`, NOT `detail || kind`: the
+  // mermaid-error-graphic entry carries its identity in the KIND and a bare
+  // "top x1" in the detail, so a detail-first fallback can never see it. That
+  // matters if mermaid ever stops writing text into the body and only paints
+  // the icon - the icon would then be the only evidence left.
+  //
+  // 13f carries signature `null` deliberately: its failure lives in a CLOSED
+  // dialog, so there is usually nothing on screen for the sentinel to see and
+  // whether it catches mermaid's transient temp element depends on where the
+  // poll lands. Its presence is still required.
+  const MERMAID_FAILURE_SIGNATURE =
+    /Syntax error in text|No diagram type detected|Mermaid Rendering Error|mermaid-error-graphic/;
+  const MUTE_SIGNATURES = [
+    ["stale draw failure", /stale-draw/, /stale draw failed/],
+    ["13a", /^13a:/, MERMAID_FAILURE_SIGNATURE],
+    ["13b", /^13b:/, MERMAID_FAILURE_SIGNATURE],
+    // Forced throws: the banner is the only artifact, and it carries the
+    // scenario's own token, so these can be pinned harder than the parse cases.
+    ["13b2", /^13b2:/, /Mermaid Rendering Error|boom/],
+    ["13d", /^13d:/, MERMAID_FAILURE_SIGNATURE],
+    ["13e", /^13e:/, MERMAID_FAILURE_SIGNATURE],
+    ["13e2", /^13e2:/, /Mermaid Rendering Error|layout|fault/],
+    ["13f", /^13f:/, null],
+  ];
+  const muteAudit = MUTE_SIGNATURES.map(([name, reasonRe, sigRe]) => {
+    const m = testMutes.find((x) => reasonRe.test(x.reason));
+    const text = (s) => String(s.kind || "") + " " + String(s.detail || "");
+    const matched = m
+      ? m.suppressed.filter((s) => sigRe === null || sigRe.test(text(s))).length
+      : 0;
+    return {
+      name,
+      found: !!m,
+      suppressed: m ? m.suppressed.length : 0,
+      matched,
+      ok: !!m && (sigRe === null || matched > 0),
+    };
+  });
   check(
-    "the sentinel was muted exactly once, for the deliberate failure",
-    testMutes.length === 1 &&
-      testMutes[0].suppressed.some((s) => /stale draw failed/.test(s.detail)),
-    JSON.stringify(sentinelReport.mutes),
+    "every deliberate-failure mute caught the failure it was opened for",
+    testMutes.length === MUTE_SIGNATURES.length &&
+      muteAudit.every((a) => a.ok),
+    JSON.stringify({
+      audit: muteAudit,
+      all: sentinelReport.mutes.map((m) => ({
+        reason: m.reason,
+        suppressed: m.suppressed.map((s) => s.kind + ": " + String(s.detail).slice(0, 80)),
+      })),
+    }),
   );
 }
 

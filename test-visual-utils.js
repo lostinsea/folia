@@ -32,6 +32,39 @@ const fs = require("fs");
 const path = require("path");
 
 // ---------------------------------------------------------------------------
+// Survive a closed stdout.
+//
+// Every suite reports through console.log. If the reader on the other end of
+// the pipe goes away first - `| head`, `| Select-Object -First 20`, a killed
+// pager, a CI step that stops consuming - the next write raises EPIPE. In a
+// plain Node script that is a stack trace; under Electron the main process
+// turns an uncaught exception into a MODAL DIALOG that blocks the run until a
+// human clicks OK, which is exactly the opposite of what a test harness should
+// do on a machine with no one watching. Observed for real:
+//   Error: EPIPE: broken pipe, write ... at check (test-table-display.js:41)
+//
+// Losing output nobody is reading is harmless; hanging the suite is not. So
+// swallow EPIPE specifically and let every other stream error surface. This is
+// installed here rather than in each suite because all eight require this
+// module, and it must be armed before the first assertion prints.
+//
+// A/B PROVEN, not assumed. An Electron script printing a line every 30ms into a
+// pipe whose reader exits after the first chunk:
+//   without this guard - the run HANGS indefinitely behind a window titled
+//                        "Error" (observed as electron pid 25684) and has to be
+//                        killed; stderr never even flushes.
+//   with this guard    - runs to completion, no dialog, no stray process.
+// Note that plain `node` does NOT reproduce it: Console defaults to
+// ignoreErrors:true, so a bare Node script survives a closed stdout on its own.
+// It is specifically Electron's uncaught-exception dialog that turns this into
+// a hang, which is why the isolated Node reproduction was misleading at first.
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on("error", (err) => {
+    if (!err || err.code !== "EPIPE") throw err;
+  });
+}
+
+// ---------------------------------------------------------------------------
 // The in-page probe.
 //
 // This is a real function so it stays lintable and syntax-highlighted; it is

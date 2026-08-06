@@ -1737,6 +1737,60 @@ let mermaidWorkQueue = Promise.resolve();
 let mermaidRunSeq = 0;
 let mermaidNodeIdSeq = 0;
 
+// Build the "this diagram failed" banner from DOM nodes rather than an HTML
+// string. The message is NOT trusted input: mermaid quotes the diagram source
+// back in some of its errors ("No diagram type detected ... for text: <src>"),
+// and that source comes straight out of the document being viewed. An innerHTML
+// assignment here would therefore be a document-controlled HTML sink inside the
+// Node-privileged renderer - the same sink class as SEC-13/14, which were fixed
+// the same way. Styles are applied through the CSSOM, so the rendering is
+// byte-for-byte what the old inline style attribute produced.
+// Accepts the exception itself, not err.message: mermaid rejects with plain
+// strings and bare objects in places, and reading .message off those yields
+// undefined, which used to render the literal text "undefined" and now would
+// render a banner with no message at all. Either way the reader loses the
+// diagnosis, so normalise here and always return something they can act on.
+// The empty cases are deliberate: `new Error('')` stringifies to the useless
+// word "Error" and `{ message: '' }` to "[object Object]", both non-empty and
+// both worse than saying nothing useful was reported.
+function mermaidErrorText(err, fallback) {
+  const generic = fallback || 'Unknown diagram error';
+  const nonEmpty = (v) => typeof v === 'string' && v.trim() !== '';
+  if (err && nonEmpty(err.message)) return err.message;
+  if (nonEmpty(err)) return err;
+  if (err && typeof err !== 'object') {
+    const s = String(err);
+    if (nonEmpty(s)) return s;
+  }
+  return generic;
+}
+
+function buildMermaidErrorBanner(err) {
+  const box = document.createElement('div');
+  box.style.color = 'red';
+  box.style.padding = '20px';
+  box.style.background = '#ffe6e6';
+  box.style.border = '1px solid #ff0000';
+  box.style.borderRadius = '4px';
+  const label = document.createElement('strong');
+  label.textContent = 'Mermaid Rendering Error:';
+  box.appendChild(label);
+  box.appendChild(document.createElement('br'));
+  box.appendChild(document.createTextNode(mermaidErrorText(err)));
+  return box;
+}
+
+// Same sink class as the banner above, in the insert/edit diagram dialog. The
+// dialog is pre-filled with the document's own diagram source on Edit, and
+// mermaid.render() quotes that source back in its rejection, so the message is
+// document-controlled here too.
+function buildMermaidPreviewError(err, fallback) {
+  const span = document.createElement('span');
+  span.className = 'mermaid-preview-error';
+  span.textContent = '\u26a0 ' + mermaidErrorText(err, fallback);
+  return span;
+}
+
 function queueMermaidWork(fn) {
   const run = () => fn();
   // Both handlers are wired so a rejected job cannot stall every later one.
@@ -1822,7 +1876,11 @@ async function renderMermaidBatch(nodes, seq) {
   if (toRender.length === 0) return 0;
 
   try {
-    await mermaid.run({ nodes: toRender, suppressErrors: false });
+    // suppressErrors: true - one unparseable diagram must not abort the whole
+    // re-theme batch. Without it the throw skips the cache-write loop below AND
+    // drops into the catch, which triggers a FULL document re-render on every
+    // theme toggle for as long as the bad diagram is in the document.
+    await mermaid.run({ nodes: toRender, suppressErrors: true });
     // A newer toggle may have landed while mermaid was working; its SVGs are
     // the wrong colour now, so they must not enter the cache.
     if (seq !== mermaidRunSeq) return toRender.length;
@@ -1832,6 +1890,11 @@ async function renderMermaidBatch(nodes, seq) {
       }
     });
   } catch (e) {
+    // Now a cold path, not the common recovery it used to be: parse failures no
+    // longer reach here (mermaid draws its own inline error graphic instead),
+    // which is what 13d measures. Keep it - it still catches a module-load
+    // fault or the DOM being torn down mid-run, where a full re-render really
+    // is the only way back to a consistent screen.
     console.warn('Mermaid theme update failed, falling back to full re-render:', e);
     if (seq === mermaidRunSeq && originalMarkdown) renderMarkdown(getActiveMarkdown());
   }
@@ -4801,7 +4864,12 @@ async function renderMarkdownFull(content, generation) {
         if (generation !== renderGeneration) { hideLoadingScreenFor(generation); return; }
         // Shares the mermaid mutex with theme updates - see queueMermaidWork.
         await queueMermaidWork(async () => {
-          await mermaid.run({ nodes: toRender, suppressErrors: false });
+          // suppressErrors: true - mermaid draws its own inline error graphic
+          // for the bad diagram instead of throwing. Measured on this fork: with
+          // it false, a document holding one valid and one invalid diagram left
+          // the VALID diagram with no .mermaid-container and no pop-out button,
+          // because the throw skipped the maximize-button loop further down.
+          await mermaid.run({ nodes: toRender, suppressErrors: true });
           // Store newly rendered SVGs in cache
           toRender.forEach(el => {
             if (el.querySelector('svg')) {
@@ -4851,9 +4919,7 @@ async function renderMarkdownFull(content, generation) {
     const mermaidElements = viewer.querySelectorAll('.mermaid');
     mermaidElements.forEach(el => {
       if (!el.querySelector('svg')) {
-        el.innerHTML = `<div style="color: red; padding: 20px; background: #ffe6e6; border: 1px solid #ff0000; border-radius: 4px;">
-          <strong>Mermaid Rendering Error:</strong><br>${error.message}
-        </div>`;
+        el.replaceChildren(buildMermaidErrorBanner(error));
       }
     });
   }
@@ -8463,19 +8529,37 @@ async function renderMermaidInDOM(code, mode, replaceTarget) {
     await ensureMermaid();
     // Shares the mermaid mutex with theme updates - see queueMermaidWork.
     await queueMermaidWork(async () => {
+      // suppressErrors stays FALSE here, deliberately, and this is the one call
+      // site upstream's 03b5423 also left alone. This path draws exactly ONE
+      // diagram: there is no batch for the throw to abort, and the throw is the
+      // only thing that produces a banner naming what is wrong with it.
+      // Measured (R110): flipping this to true leaves the block silent - no
+      // "Mermaid Rendering Error", no message - because the catch never runs.
+      // Reachability note: the insert/edit DIALOG validates with mermaid.render
+      // first and returns early on failure, so in that flow this catch only
+      // fires when render() succeeds and run() then fails. 13e2 drives exactly
+      // that shape through the real dialog and pins this catch's SINK (R105b);
+      // it cannot pin this FLAG, because it replaces mermaid.run wholesale and
+      // the option is then never consulted. 13e reaches the flag directly with
+      // outright invalid source, as any future non-dialog caller would.
       await mermaid.run({ nodes: [mermaidEl], suppressErrors: false });
       if (mermaidEl.querySelector('svg')) {
         mermaidSvgCache.set(code, mermaidEl.innerHTML);
       }
     });
   } catch (err) {
-    // Mermaid may detach the element from DOM on error — re-attach so delete still works
+    // Inherited from upstream, where mermaid 10 detached the element on failure.
+    // MEASURED INERT on 11.16.0 for PARSE-TIME failures specifically (R110b was
+    // written to neutralise this branch and came back VACUOUS, so it was dropped
+    // rather than kept as a permanently-vacuous entry). Post-parse failures -
+    // layout faults, unresolved references - are NOT covered by that
+    // measurement, which is the reason this stays rather than being deleted as
+    // dead code: if any of those does detach, removing it would make the diagram
+    // silently disappear from the document and break Edit/Delete.
     if (!mermaidEl.isConnected) {
       container.insertBefore(mermaidEl, maxBtn);
     }
-    mermaidEl.innerHTML = `<div style="color:red;padding:20px;background:#ffe6e6;border:1px solid #ff0000;border-radius:4px;">
-      <strong>Mermaid Rendering Error:</strong><br>${err.message}
-    </div>`;
+    mermaidEl.replaceChildren(buildMermaidErrorBanner(err));
   }
 }
 
@@ -8737,7 +8821,8 @@ async function insertMermaidFromDialog() {
     await mermaid.render('mermaid-validate-' + Date.now(), code);
   } catch (err) {
     if (mermaidTemplatePreviewEl) {
-      mermaidTemplatePreviewEl.innerHTML = `<span class="mermaid-preview-error">⚠ ${err.message || 'Invalid diagram syntax — fix errors before inserting'}</span>`;
+      const fallback = 'Invalid diagram syntax \u2014 fix errors before inserting';
+      mermaidTemplatePreviewEl.replaceChildren(buildMermaidPreviewError(err, fallback));
     }
     return;
   }

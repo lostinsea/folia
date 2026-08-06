@@ -258,39 +258,96 @@ async function run(win) {
   //     A dropped request then costs 500ms rather than the whole section.
   // Neither can turn a real failure green: if the window still never settles
   // the warning is printed and the vacuity guards below fail as before.
+  // "Has the resize actually landed?" is decided WITHOUT any chrome constant.
+  //
+  // This was a hard-coded 40px outer-vs-inner overhead, then a measured-and-
+  // cached one. Both were wrong in kind, not just in value: any cached constant
+  // can be sampled during the unmaximize transition and poisoned, and both
+  // poisoning directions are silent. Measured with a deliberate re-maximize, the
+  // first sample read outer=2000 against inner=4288 (delta -2288); the one-shot
+  // version cached Math.max(0, -2288) + 8 = 8, which sets the target inner width
+  // to 1992 on a window whose real inner width tops out at 1988, so no resize
+  // could ever count as arrived. A stability+plausibility guard fixed that case
+  // but not the class: a wrong-but-stable delta that still falls inside the
+  // plausible range would be cached just as happily.
+  //
+  // So use the signal Electron already provides exactly. MEASURED on this box:
+  //     settled 1200 window : inner 1188, contentBounds 1188, bounds 1200
+  //     maximized           : inner 2752, contentBounds 2752, bounds 2766
+  //     25ms into a resize  : inner 1188, contentBounds 1988, bounds 2000
+  // getContentBounds() reports the content size the window is MOVING TO and
+  // innerWidth reports what the page has actually laid out at, so they are equal
+  // exactly when the page has caught up, at any DPR, theme or scrollbar width.
+  // getBounds() is the unreliable one - it reported the requested 2000 while the
+  // page was still at 1188 - so it is used only to confirm the window accepted
+  // the request at all (a setBounds swallowed by a maximized window leaves it at
+  // the old value, which is how an ignored resize is told apart from a slow one).
+  const contentWidth = () => win.getContentBounds().width;
+
   async function resizeWindow(bounds) {
+    const read = () =>
+      exec("window.innerWidth + 'x' + window.innerHeight").then(String);
+    const innerWidth = (s) => parseInt(String(s).split("x")[0], 10) || 0;
+    // "Arrived" = the page's own width agrees with the window's content width.
+    // Compared with a 1px tolerance rather than strictly: at fractional DPR
+    // (1.25, 1.5) the main process and the renderer can round the same CSS
+    // rectangle differently and sit 1px apart forever.
+    const arrived = (s) => Math.abs(contentWidth() - innerWidth(s)) <= 1;
+    // Separately, confirm the window ACCEPTED the request. A setBounds swallowed
+    // by a maximized window leaves getBounds at its old value, and without this
+    // an ignored resize would look identical to a settled one - the page and the
+    // content bounds would agree perfectly, just at the wrong size.
+    const accepted = () =>
+      bounds.width === undefined || win.getBounds().width === bounds.width;
+
     const cur = win.getBounds();
     const same = ["x", "y", "width", "height"].every(
       (k) => bounds[k] === undefined || bounds[k] === cur[k],
     );
-    if (same) {
+    // The early-out used to trust getBounds() alone. It reports the size that
+    // was REQUESTED, which under full-suite load can be true while the page is
+    // still laid out at the previous size - measured: getBounds said 2000 while
+    // window.innerWidth was still 988, and the section went on to record six
+    // geometric failures that named tables rather than the window. Confirm
+    // against the page before believing it.
+    if (same && arrived(await read())) {
       await sleep(150);
       return;
     }
-    const read = () =>
-      exec("window.innerWidth + 'x' + window.innerHeight").then(String);
     const before = await read();
     if (win.isMaximized()) win.unmaximize();
     win.setBounds(bounds);
     let last = before;
     let stable = 0;
-    for (let i = 0; i < 160; i++) {
+    for (let i = 0; i < 240; i++) {
       await sleep(25);
       const now = await read();
-      stable = now !== before && now === last ? stable + 1 : 0;
+      // Both halves are needed and neither is sufficient. getContentBounds()
+      // reports what the main process last heard from the OS, so it can already
+      // read the new size while the renderer is still laying out; requiring the
+      // page's own reading to stop moving as well is what makes this a settled
+      // condition rather than a snapshot of one side of the handover.
+      stable = accepted() && arrived(now) && now === last ? stable + 1 : 0;
       last = now;
       if (stable >= 3) return;
-      if (i > 0 && i % 20 === 0 && last === before) {
+      if (i > 0 && i % 20 === 0 && !(accepted() && arrived(last))) {
         if (win.isMaximized()) win.unmaximize();
         win.setBounds(bounds);
       }
     }
-    console.log(
-      "WARNING: window never settled at " +
-        JSON.stringify(bounds) +
-        " (inner size still " +
-        last +
-        "); downstream vacuity guards should catch this",
+    // Fail loud and name the cause. Letting this through means every geometric
+    // assertion below is measured against the wrong window, and the failures it
+    // produces point at the tables instead of at the resize that never happened.
+    check(
+      "the window reached the size this section measures at",
+      false,
+      JSON.stringify({
+        requested: bounds,
+        innerSize: last,
+        contentWidth: contentWidth(),
+        outerWidth: win.getBounds().width,
+        accepted: accepted(),
+      }),
     );
   }
 
