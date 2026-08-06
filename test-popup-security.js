@@ -1,7 +1,7 @@
 // Security regression tests for the popup windows opened by the main process.
 // Run with: npm run test:popups
 //
-// The image, OmniWare and mermaid popups are built by string-concatenating
+// The image and mermaid popups are built by string-concatenating
 // markdown-derived values into a fresh HTML document which the main process
 // then loads. Unlike the viewer's innerHTML sinks, these are parsed as full
 // documents, so an injected <script> executes directly - and the windows were
@@ -255,115 +255,27 @@ async function run() {
   await closeAll();
 
   // ==========================================================================
-  // SEC-06 - OmniWare popup: </script> terminates the script element, so the
-  // template-literal escaping does not contain the value
+  // ==========================================================================
+  // REMOVAL PIN - the OmniWare wireframe feature was removed from the fork.
+  //
+  // SEC-06 and its SEC-08/CSP/font legs used to live here. They are replaced
+  // rather than deleted: what matters now is that the IPC channel is really
+  // gone, not merely unused. main.js registers popup handlers with
+  // ipcMain.on, so a leftover registration would still open a Node-hosting
+  // BrowserWindow for anything that can reach the renderer's ipcRenderer.
+  // An unhandled ipcMain channel is silently ignored, so the observable is
+  // that no window appears.
   // ==========================================================================
   popup = await openPopup(
     "open-omniware-popup",
-    {
-      dslCode:
-        "@note\n  </scr" + "ipt><scr" + "ipt>window.__pwned='omniware'</scr" + "ipt>",
-      isDarkMode: false,
-    },
-    2200,
+    { dslCode: "@note\n  hello", isDarkMode: false },
+    1500,
   );
   check(
-    "SEC-06 omniware popup opens for a hostile DSL",
-    popup !== null,
-    "no popup window appeared",
+    "REMOVED open-omniware-popup no longer opens any window",
+    popup === null,
+    "a popup window appeared for a channel that should no longer be handled",
   );
-  if (popup) {
-    check(
-      "SEC-06 DSL cannot terminate the popup's script element",
-      (await pwned(popup)) === null,
-      "window.__pwned was set from an OmniWare DSL block",
-    );
-    const prefs = prefsOf(popup);
-    check(
-      "SEC-08 omniware popup does not run with Node integration",
-      prefs.nodeIntegration === false && prefs.contextIsolation === true,
-      JSON.stringify(prefs),
-    );
-  }
-  await closeAll();
-
-  // Feature: the DSL must survive verbatim, including the characters the old
-  // template-literal escaping existed to protect.
-  const trickyDsl = "@note\n  Backtick ` and ${dollar} and \\backslash\\ and <angle>";
-  popup = await openPopup(
-    "open-omniware-popup",
-    { dslCode: trickyDsl, isDarkMode: false },
-    2200,
-  );
-  if (popup) {
-    const dsl = await popupEval(
-      popup,
-      "(typeof dsl === 'string' ? dsl : (window.__omniwareDsl || null))",
-    );
-    check(
-      "FEATURE omniware popup receives the DSL verbatim, special characters intact",
-      dsl === trickyDsl,
-      JSON.stringify({ got: dsl, want: trickyDsl }),
-    );
-
-    // The hand-drawn fonts are the entire point of OmniWare's look. They were
-    // pulled from fonts.googleapis.com by an @import inside its stylesheet,
-    // which no popup CSP permits, so every wireframe rendered in the generic
-    // `cursive` fallback while the only symptom was a console message.
-    //
-    // document.fonts.check() is NOT usable here, and this comment exists
-    // because a first attempt used it and was proven vacuous by reverting the
-    // fix: check() answers "can this font spec be rendered", and a spec naming
-    // a family nobody defined is still renderable via fallback, so it returns
-    // true for a font that does not exist. Two things are asserted instead:
-    //   1. a FontFace for the family is actually registered and loaded, and
-    //   2. the glyphs measurably differ from the fallback - the only evidence
-    //      that the vendored woff2 is what is being drawn with.
-    const fonts = await popupEval(
-      popup,
-      `(async () => {
-         const families = ['Architects Daughter', 'Patrick Hand'];
-         // Force the fetch: @font-face files are lazy, and a family that has no
-         // rule at all simply resolves with nothing registered.
-         for (const f of families) { try { await document.fonts.load('40px "' + f + '"'); } catch (e) {} }
-         await document.fonts.ready;
-
-         const loaded = {};
-         for (const f of families) {
-           loaded[f] = [...document.fonts].some(ff => ff.family.replace(/["']/g, '') === f && ff.status === 'loaded');
-         }
-
-         // Same text, same fallback, only the first family differs. If the
-         // vendored face is really in use the widths cannot match.
-         const ctx = document.createElement('canvas').getContext('2d');
-         const sample = 'Wireframe handwriting 12345';
-         const widthOf = (fam) => { ctx.font = '40px "' + fam + '", monospace'; return ctx.measureText(sample).width; };
-         const base = widthOf('Mdv Deliberately Absent Family');
-         const distinct = {};
-         for (const f of families) distinct[f] = Math.abs(widthOf(f) - base) > 1;
-
-         return {
-           loaded,
-           distinct,
-           remoteImports: [...document.styleSheets].some(s => {
-             try { return [...s.cssRules].some(r => String(r.cssText).includes('fonts.googleapis.com')); }
-             catch (e) { return false; }
-           })
-         };
-       })()`,
-    );
-    check(
-      "FEATURE omniware's hand-drawn fonts load locally, with no remote import",
-      fonts &&
-        fonts.loaded["Architects Daughter"] === true &&
-        fonts.loaded["Patrick Hand"] === true &&
-        fonts.distinct["Architects Daughter"] === true &&
-        fonts.distinct["Patrick Hand"] === true &&
-        fonts.remoteImports === false,
-      JSON.stringify(fonts),
-    );
-    await captureScreenshot(popup, "omniware-fonts");
-  }
   await closeAll();
 
   // ==========================================================================
@@ -434,7 +346,6 @@ async function run() {
   // ==========================================================================
   const CSP_CASES = [
     ["mermaid", "open-mermaid-popup", { svgContent: "<svg xmlns='http://www.w3.org/2000/svg'></svg>", isDarkMode: false }],
-    ["omniware", "open-omniware-popup", { dslCode: "screen Test {}", isDarkMode: false }],
     ["image", "open-image-popup", { src: "img/a.png", alt: "a", isDarkMode: false }],
     ["table", "open-table-popup", { tableData: { data: [{ a: "1" }], columns: [{ title: "A", field: "a" }] }, isDarkMode: false }],
   ];
@@ -476,7 +387,6 @@ async function run() {
            // is parsed, precisely so injected script cannot read and reuse it.
            nonceReadable: tags.some(t => typeof t.nonce === 'string' && t.nonce.length > 0),
            ran: ${JSON.stringify(label)} === 'mermaid'  ? (typeof window.resetView === 'function' && !!(document.getElementById('viewport') || {}).style.transform)
-              : ${JSON.stringify(label)} === 'omniware' ? document.getElementById('render-target').childElementCount > 0
               : ${JSON.stringify(label)} === 'image'    ? typeof window.resetView === 'function'
               : document.getElementById('data-table').childElementCount > 0,
            body: document.body.innerHTML.length,
@@ -495,7 +405,7 @@ async function run() {
     // Every refusal below is logged to the popup's console, so the watcher has
     // to be muted here or the run fails on its own probes. Muted per popup and
     // only for this block: a CSP refusal anywhere else in this suite is a real
-    // finding - that is how the OmniWare font regression was caught.
+    // finding - that is how a font regression was caught before now.
     await sentinelOf(popup).mute(`CSP ${label} popup: deliberate injection probe`);
     const injected = await popupEval(
       popup,
@@ -669,7 +579,6 @@ async function run() {
   // ==========================================================================
   const BRIDGE_CASES = [
     ["mermaid", "open-mermaid-popup", { svgContent: "<svg xmlns='http://www.w3.org/2000/svg'></svg>", isDarkMode: false }, ["exportMermaidPdf"]],
-    ["omniware", "open-omniware-popup", { dslCode: "screen T {}", isDarkMode: false }, ["exportOmniwarePdf"]],
     ["image", "open-image-popup", { src: "img/a.png", alt: "a", isDarkMode: false }, ["saveImage"]],
   ];
   for (const [label, channel, payload, expected] of BRIDGE_CASES) {

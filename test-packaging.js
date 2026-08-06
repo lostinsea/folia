@@ -371,6 +371,47 @@ function main() {
     }
   }
 
+  // The README states the Electron version in several places. Nothing tied
+  // those numbers to package.json, and they DID rot: the badge and the macOS
+  // fix table said 37, the tech-stack list still said 27, and the description
+  // of post-upstream-merge.sh claimed it re-pins to ^37 while the script
+  // actually pins ^43. A reader following that text would conclude the fork
+  // ships a runtime three majors older than it does, with the security
+  // advisories that implies.
+  //
+  // Only claims about what THIS FORK ships are checked. The README also says
+  // "Upstream Electron 27 triggers a macOS WindowServer bug", which is a
+  // correct historical statement about the PARENT project and must stay 27 -
+  // so this deliberately matches specific claim shapes rather than every
+  // "Electron <number>" in the file.
+  {
+    const declared =
+      (pkg.devDependencies && pkg.devDependencies.electron) || "";
+    const wantMajor = (declared.match(/(\d+)/) || [])[1];
+    const readme = read("README.md");
+    const claims = [
+      ["shields.io badge", /badge\/Electron-(\d+)/],
+      ["macOS fix table row", /\|\s*\*\*Electron (\d+)\*\*\s*\|/],
+      ["re-pin description", /re-pins Electron to `\^(\d+)`/],
+      ["tech-stack list", /-\s*\*\*Electron (\d+)[.\d]*\*\*\s*-/],
+    ];
+    check(
+      "package.json declares an Electron version to check the README against",
+      Boolean(wantMajor),
+      declared,
+    );
+    for (const [where, re] of claims) {
+      const m = readme.match(re);
+      check(
+        `README ${where} states the Electron major this fork actually ships`,
+        Boolean(m) && m[1] === wantMajor,
+        m
+          ? `README says ${m[1]}, package.json declares ${declared}`
+          : `no match for ${re} - claim removed or reworded, so it is no longer checked`,
+      );
+    }
+  }
+
   console.log(`\n=== ${pass} passed, ${fail} failed ===\n`);
   process.exit(fail === 0 ? 0 : 1);
 }

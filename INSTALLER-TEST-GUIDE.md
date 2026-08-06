@@ -75,7 +75,6 @@ Test each file type:
 - [ ] All UI elements render properly
 - [ ] Can open markdown files via File menu
 - [ ] Mermaid diagrams render correctly
-- [ ] OmniWare wireframes render correctly
 - [ ] PDF export works
 - [ ] Search functionality works
 - [ ] Recent files are tracked

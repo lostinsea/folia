@@ -81,7 +81,6 @@ When installed, the following file types will open with Omnicore Markdown Viewer
 - `.md` - Markdown documents
 - `.mmd` - Mermaid diagrams
 - `.mermaid` - Mermaid diagrams
-- `.ow` - OmniWare wireframe files
 
 Users can right-click these files and choose "Open with Omnicore Markdown Viewer".
 

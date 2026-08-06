@@ -46,8 +46,6 @@
     "url": "https://github.com/lostinsea/markdown-viewer.git"
   },
   "devDependencies": {
-    "@fontsource/architects-daughter": "^5.3.0",
-    "@fontsource/patrick-hand": "^5.3.0",
     "ajv": "^8.20.0",
     "electron": "^43.2.0",
     "electron-builder": "^26.15.3",
@@ -89,8 +87,6 @@
       "omnicore-letterhead-logo.png",
       "libs/**/*",
       "fonts/**/*",
-      "omniwire/**/*",
-      "omniware-config.js",
       "utils.js",
       "mermaid-config.js",
       "context-menu-utils.js",
@@ -152,13 +148,6 @@
           "description": "Mermaid Diagram File",
           "icon": "file-icon.ico",
           "role": "Viewer"
-        },
-        {
-          "ext": "ow",
-          "name": "OmniWare Wireframe",
-          "description": "OmniWare Wireframe File",
-          "icon": "file-icon.ico",
-          "role": "Viewer"
         }
       ],
       "artifactName": "Omnicore.Markdown.Viewer.${version}.${ext}"
@@ -185,12 +174,6 @@
           "ext": "mermaid",
           "name": "Mermaid Diagram",
           "description": "Mermaid Diagram File",
-          "role": "Viewer"
-        },
-        {
-          "ext": "ow",
-          "name": "OmniWare Wireframe",
-          "description": "OmniWare Wireframe File",
           "role": "Viewer"
         }
       ]
@@ -223,13 +206,6 @@
           "name": "Mermaid Diagram",
           "description": "Mermaid Diagram File",
           "mimeType": "text/x-mermaid",
-          "icon": "file-icon.png"
-        },
-        {
-          "ext": "ow",
-          "name": "OmniWare Wireframe",
-          "description": "OmniWare Wireframe File",
-          "mimeType": "text/x-omniware",
           "icon": "file-icon.png"
         }
       ]

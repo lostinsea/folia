@@ -7,7 +7,7 @@
 
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
-![Electron](https://img.shields.io/badge/Electron-37.0-blue)
+![Electron](https://img.shields.io/badge/Electron-43.2-blue)
 
 ---
 
@@ -52,7 +52,7 @@ usage even when the app is idle and not focused.  This fork ships the following 
 
 | Fix | Detail |
 |-----|--------|
-| **Electron 37** | Upgrades the bundled runtime to fix the `_cornerMask` API misuse ([electron#48376](https://github.com/electron/electron/pull/48376)) |
+| **Electron 43** | Upgrades the bundled runtime to fix the `_cornerMask` API misuse ([electron#48376](https://github.com/electron/electron/pull/48376)) |
 | `backgroundThrottling: true` | Lets Electron reduce JS timer activity when the window is not visible |
 | Window-visibility IPC | Main process notifies the renderer on minimise / hide / restore so it can pause work proactively |
 | **Throttled `mousemove`** | Global mouse events are dropped when the window is unfocused and throttled to 80 ms intervals otherwise |
@@ -125,7 +125,7 @@ After pulling upstream changes run:
 ```
 
 The script validates **20 check-points** across `index.html`, `main.js`, `renderer.js`,
-and `package.json`, reports anything missing with a fix hint, and re-pins Electron to `^37`.
+and `package.json`, reports anything missing with a fix hint, and re-pins Electron to `^43`.
 
 See [`CUSTOMIZATIONS.md`](CUSTOMIZATIONS.md) for the full technical reference.
 
@@ -141,7 +141,6 @@ See [`CUSTOMIZATIONS.md`](CUSTOMIZATIONS.md) for the full technical reference.
 ### Core Rendering
 - **Full HTML Support** - Render HTML tags within markdown with DOMPurify sanitization
 - **Mermaid Diagrams** - Beautiful diagram rendering with interactive popup viewer featuring pan/zoom controls
-- **OmniWare Wireframes** - Built-in wireframe diagram support
 - **PrismJS Syntax Highlighting** - Code blocks with Solarized Light theme (offline support for 11+ languages)
 - **Interactive Tables** - Tabulator.js integration with sorting, filtering, pagination, and CSV/JSON export
 
@@ -446,7 +445,7 @@ The slider auto-plays every 5 seconds, pauses on hover, and each slide can be op
 
 ## Technology Stack
 
-- **Electron 27.0** - Cross-platform desktop framework
+- **Electron 43.2** - Cross-platform desktop framework
 - **Marked** - Fast markdown parser with full GFM support
 - **Mermaid** - Diagram rendering engine (flowcharts, sequence diagrams, etc.)
 - **Tabulator.js 6.2.5** - Interactive table library with advanced features

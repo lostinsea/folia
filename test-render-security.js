@@ -6,7 +6,7 @@
 // of them execute. Every attack test is paired with a feature test, because the
 // remedy - making DOMPurify the last step in the pipeline instead of the third
 // of nine - is exactly the kind of change that can silently stop mermaid,
-// sliders, OmniWare or @@@html blocks from rendering at all.
+// sliders or @@@html blocks from rendering at all.
 //
 // Payloads set window.__pwned rather than spawning a process. The property that
 // matters is whether attacker-authored script runs in the Node-privileged
@@ -148,15 +148,20 @@ async function run(win) {
   );
 
   // ==========================================================================
-  // SEC-04 - OmniWare renderer output injected raw after DOMPurify
+  // SEC-04 - removed OmniWare renderer injected its output raw after DOMPurify
+  //
+  // The feature is gone. This is kept as a REMOVAL PIN rather than deleted:
+  // the fence is now an ordinary unknown language, so marked must escape it.
+  // If anything ever re-introduces a raw-HTML renderer keyed on a code fence,
+  // this fails before it ships.
   // ==========================================================================
   const omniwarePayload =
     "# Doc\n\n```omniware\n@nav\n  <img src=x onerror=window.__pwned='omniware'> | Home\n```\n";
 
   check(
-    "SEC-04 OmniWare DSL payload does not execute",
+    "SEC-04 removed-feature fence payload does not execute",
     (await render(omniwarePayload, "full")) === null,
-    "window.__pwned was set from an OmniWare nav label",
+    "window.__pwned was set from a removed-feature code fence",
   );
 
   // ==========================================================================
@@ -320,23 +325,28 @@ async function run(win) {
     JSON.stringify(slider),
   );
 
-  // OmniWare still renders real markup.
-  await render("# Doc\n\n```omniware\n@nav\n  Brand | Home | About\n```\n", "full");
+  // REMOVAL PIN: the OmniWare wireframe renderer was removed from the fork.
+  // Its fence must now degrade to an inert, escaped code block - no wireframe
+  // container, and the angle brackets rendered as text rather than markup.
+  await render("# Doc\n\n```omniware\n@nav\n  <b>Brand</b> | Home\n```\n", "full");
   const omni = await exec(`
     (() => {
-      const el = document.querySelector('.omniware-rendered');
-      if (!el) return { present: false };
+      const viewer = document.getElementById('viewer');
+      const code = viewer.querySelector('pre code');
       return {
-        present: true,
-        hasNav: !!el.querySelector('.ow-nav-logo, .ow-nav-item'),
-        text: el.textContent.replace(/\\s+/g, ' ').trim().slice(0, 80),
-        dsl: el.getAttribute('data-omniware-dsl')
+        container: !!viewer.querySelector('.omniware-rendered, .omniware-container'),
+        codeBlock: !!code,
+        boldInjected: !!viewer.querySelector('pre code b'),
+        text: code ? code.textContent.replace(/\\s+/g, ' ').trim().slice(0, 60) : null
       };
     })()
   `);
   check(
-    "FEATURE OmniWare block still renders its wireframe markup",
-    omni.present && omni.hasNav && omni.text.includes("Home"),
+    "REMOVED OmniWare fence renders as inert escaped code, not a wireframe",
+    omni.container === false &&
+      omni.codeBlock === true &&
+      omni.boldInjected === false &&
+      omni.text.includes("<b>Brand</b>"),
     JSON.stringify(omni),
   );
 
@@ -448,9 +458,9 @@ async function run(win) {
     "light-format path executed the slider payload",
   );
   check(
-    "SEC-26 OmniWare payload is blocked on the light-format path too",
+    "SEC-26 removed-feature fence is blocked on the light-format path too",
     (await render(omniwarePayload, "light-format")) === null,
-    "light-format path executed the OmniWare payload",
+    "light-format path executed the removed-feature fence payload",
   );
 
   // ==========================================================================

@@ -9,8 +9,6 @@ const html2canvas = require('html2canvas');
 // Helper modules
 const { removeBOM, getFileName, getDirectory, escapeRegex, formatBytes } = require('./utils');
 const { getMermaidConfig } = require('./mermaid-config');
-const OmniWare = require('./omniwire/omniware');
-const { getOmniWareDarkCSS } = require('./omniware-config');
 const { positionContextMenu, hideContextMenu: hideContextMenuHelper } = require('./context-menu-utils');
 const { parseEmojis } = require('./emoji-parser');
 
@@ -1254,8 +1252,6 @@ darkModeToggle.addEventListener('click', (e) => {
   // Do not re-guard this call: the recording is the whole mechanism.
   updateMermaidTheme(isDarkMode);
 
-  // Update OmniWare dark mode
-  updateOmniWareDarkMode(isDarkMode);
 });
 
 // Translation — background preemptive system
@@ -1981,26 +1977,6 @@ async function applyMermaidTheme(isDark) {
   scheduleMermaidCatchUp(seq, deferred);
 }
 
-/**
- * Update OmniWare wireframe dark mode styling
- * @param {boolean} isDark - Whether dark mode is enabled
- */
-function updateOmniWareDarkMode(isDark) {
-  const existingStyle = document.getElementById('omniware-dark-styles');
-  if (isDark) {
-    const css = getOmniWareDarkCSS(true);
-    if (existingStyle) {
-      existingStyle.textContent = css;
-    } else {
-      const style = document.createElement('style');
-      style.id = 'omniware-dark-styles';
-      style.textContent = css;
-      document.head.appendChild(style);
-    }
-  } else if (existingStyle) {
-    existingStyle.remove();
-  }
-}
 
 // Load dark mode on startup
 loadDarkModePreference();
@@ -2573,7 +2549,7 @@ exportWordBtn.addEventListener('click', async () => {
     const viewerClone = viewer.cloneNode(true);
 
     // Remove maximize buttons from tables and mermaid diagrams
-    viewerClone.querySelectorAll('.mermaid-maximize-btn, .table-maximize-btn, .code-copy-btn, .omniware-maximize-btn').forEach(el => el.remove());
+    viewerClone.querySelectorAll('.mermaid-maximize-btn, .table-maximize-btn, .code-copy-btn').forEach(el => el.remove());
 
     // Convert mermaid diagrams to PNG images for Word compatibility
     const mermaidContainers = viewer.querySelectorAll('.mermaid-container');
@@ -3372,13 +3348,12 @@ function highlightSearchTerm(searchTerm) {
     NodeFilter.SHOW_TEXT,
     {
       acceptNode: function(node) {
-        // Skip script, style, svg, mermaid, omniware, and already highlighted nodes
+        // Skip script, style, svg, mermaid, and already highlighted nodes
         if (node.parentNode.tagName === 'SCRIPT' ||
             node.parentNode.tagName === 'STYLE' ||
             node.parentNode.tagName === 'SVG' ||
             node.parentNode.closest('.mermaid') ||
             node.parentNode.closest('svg') ||
-            node.parentNode.closest('.omniware-rendered') ||
             node.parentNode.classList?.contains('search-highlight')) {
           return NodeFilter.FILTER_REJECT;
         }
@@ -4302,12 +4277,11 @@ const mermaidSvgCache = new Map(); // Cache: mermaid source → rendered SVG inn
 function detectRenderMode(oldContent, newContent) {
   if (!oldContent) return 'full';
 
-  // Check if mermaid/omniware/slider blocks changed
+  // Check if mermaid/slider blocks changed
   const hasMermaid = /```mermaid/i.test(newContent) || /```mermaid/i.test(oldContent);
-  const hasOmniware = /```omniware/i.test(newContent) || /```omniware/i.test(oldContent);
   const hasSlider = /<!--\s*slider/i.test(newContent) || /<!--\s*slider/i.test(oldContent);
 
-  if (!hasMermaid && !hasOmniware && !hasSlider) {
+  if (!hasMermaid && !hasSlider) {
     // Only text/format changes — check if images changed
     const imgRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
     const oldImgs = [...oldContent.matchAll(imgRegex)].map(m => m[2]).join(',');
@@ -4332,13 +4306,12 @@ function _blockHash(str) {
 // Wrappers that post-processing puts *around* a hashed block. The hash lives on
 // the inner element, so a wrapper that is not listed here is invisible to the
 // diff and its whole subtree gets replaced on every render even when unchanged.
-// This list started as just code/table and quietly missed omniware and zoomable
+// This list started as just code/table and quietly missed zoomable
 // images: an unrelated edit elsewhere in the document was measured replacing an
 // untouched top-level image wrapper.
 const _BLOCK_WRAPPER_CLASSES = [
   'code-block-container',
   'table-container',
-  'omniware-container',
   'img-zoom-container',
   'mermaid-container',
 ];
@@ -4558,7 +4531,7 @@ function resyncSearchAfterRender() {
 
 // ---- End incremental DOM patching ----
 
-// Light-format render: skip mermaid/omniware/prism, patch only changed DOM nodes
+// Light-format render: skip mermaid/prism, patch only changed DOM nodes
 function renderLightFormat(content, generation) {
   if (generation !== renderGeneration) return;
 
@@ -4708,16 +4681,6 @@ async function renderMarkdownFull(content, generation) {
     return placeholder;
   });
 
-    // Extract omniware blocks and replace with placeholders
-    const omniwareBlocks = [];
-    let omniwareIndex = 0;
-    content = content.replace(/```omniware[\r\n]+([\s\S]*?)```/g, (match, code) => {
-      const placeholder = `OMNIWARE_PLACEHOLDER_${omniwareIndex}`;
-      omniwareBlocks.push({ placeholder, code: code.trim() });
-      omniwareIndex++;
-      return placeholder;
-    });
-
     // Extract @@@html blocks and replace with placeholders (bypasses DOMPurify)
     const rawHtmlBlocks = [];
     let rawHtmlIndex = 0;
@@ -4765,21 +4728,6 @@ async function renderMarkdownFull(content, generation) {
     const mermaidDiv = `<pre class="mermaid" data-mermaid-src="${escapedSrc}">${escapedSrc}</pre>`;
     html = html.replace(placeholder, mermaidDiv);
   });
-
-    // Replace placeholders with rendered omniware wireframes
-    omniwareBlocks.forEach(({ placeholder, code }) => {
-      try {
-        const renderedHtml = OmniWare.toHTML(code);
-        const escapedDsl = escapeHtml(code);
-        const omniwareDiv = `<div class="omniware-rendered" data-omniware-dsl="${escapedDsl}">${renderedHtml}</div>`;
-        html = html.replace(placeholder, omniwareDiv);
-      } catch (err) {
-        const errorDiv = `<div style="color: red; padding: 20px; background: #ffe6e6; border: 1px solid #ff0000; border-radius: 4px;">
-          <strong>OmniWare Rendering Error:</strong><br>${escapeHtml(err.message)}
-        </div>`;
-        html = html.replace(placeholder, errorDiv);
-      }
-    });
 
     // Replace @@@html placeholders with iframes. The sandbox attribute is what
     // makes this safe to offer at all - it is also re-applied by a DOMPurify
@@ -4923,46 +4871,6 @@ async function renderMarkdownFull(content, generation) {
       }
     });
   }
-
-    // Post-process OmniWare wireframes
-    const omniwareElements = viewer.querySelectorAll('.omniware-rendered');
-    if (omniwareElements.length > 0) {
-      // Ensure OmniWare styles are injected
-      if (!document.getElementById('omniware-styles')) {
-        const tempDiv = document.createElement('div');
-        OmniWare.render('', tempDiv);
-      }
-
-      // Apply dark mode if active
-      const isDarkMode = document.body.classList.contains('dark-mode');
-      updateOmniWareDarkMode(isDarkMode);
-
-      // Wrap each in container and add maximize button
-      omniwareElements.forEach((el) => {
-        const container = document.createElement('div');
-        container.className = 'omniware-container';
-        el.parentNode.insertBefore(container, el);
-        container.appendChild(el);
-
-        const maxBtn = document.createElement('button');
-        maxBtn.className = 'omniware-maximize-btn';
-        maxBtn.title = 'Open wireframe in new window';
-        maxBtn.innerHTML = `
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"></path>
-          </svg>
-        `;
-
-        maxBtn.addEventListener('click', () => {
-          const dslCode = el.getAttribute('data-omniware-dsl')
-            .replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
-          const isDark = document.body.classList.contains('dark-mode');
-          ipcRenderer.send('open-omniware-popup', { dslCode, isDarkMode: isDark, isCorporateMode: corporateMode });
-        });
-
-        container.appendChild(maxBtn);
-      });
-    }
 
     // Add maximize buttons to tables
     addTableMaximizeButtons();

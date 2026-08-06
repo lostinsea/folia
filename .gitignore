@@ -85,6 +85,11 @@ libs/vendor/
 
 # Claude Code documentation (local only)
 CLAUDE.md
+# Agent working directories. Taken from upstream 7e48d9f; the other two paths
+# in that commit are NOT taken - `tests-electronics/` belongs to upstream's
+# tscircuit work, and `ss/` is upstream's screenshot directory, whereas this
+# fork writes test artifacts to `screenshots/` (already ignored above).
+.claude/
 
 # Windows null device files
 nul

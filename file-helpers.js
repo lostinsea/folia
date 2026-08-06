@@ -11,7 +11,6 @@ const path = require('path');
 const SUPPORTED_EXTENSIONS = {
   markdown: ['.md', '.markdown', '.mdown', '.mkd', '.mkdn'],
   mermaid: ['.mmd', '.mermaid'],
-  omniware: ['.ow']
 };
 
 /**
@@ -25,25 +24,14 @@ function isMermaidFile(filePath) {
 }
 
 /**
- * Check if file is an OmniWare wireframe file
- * @param {string} filePath - Path to the file
- * @returns {boolean}
- */
-function isOmniWareFile(filePath) {
-  const ext = path.extname(filePath).toLowerCase();
-  return SUPPORTED_EXTENSIONS.omniware.includes(ext);
-}
-
-/**
- * Check if file is a Markdown file (or viewable format: mermaid, omniware)
+ * Check if file is a Markdown file (or viewable format: mermaid)
  * @param {string} filePath - Path to the file
  * @returns {boolean}
  */
 function isMarkdownFile(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   return SUPPORTED_EXTENSIONS.markdown.includes(ext) ||
-         SUPPORTED_EXTENSIONS.mermaid.includes(ext) ||
-         SUPPORTED_EXTENSIONS.omniware.includes(ext);
+         SUPPORTED_EXTENSIONS.mermaid.includes(ext);
 }
 
 /**
@@ -61,23 +49,6 @@ function wrapMermaidContent(content, filePath) {
     }
     // Wrap in mermaid code block
     return '```mermaid\n' + content + '\n```';
-  }
-  return content;
-}
-
-/**
- * Wrap content in omniware code block if it's an OmniWare file
- * @param {string} content - File content
- * @param {string} filePath - Path to the file
- * @returns {string} Wrapped or original content
- */
-function wrapOmniWareContent(content, filePath) {
-  if (isOmniWareFile(filePath)) {
-    const trimmed = content.trim();
-    if (trimmed.startsWith('```omniware') || trimmed.startsWith('~~~omniware')) {
-      return content; // Already wrapped
-    }
-    return '```omniware\n' + content + '\n```';
   }
   return content;
 }
@@ -109,8 +80,6 @@ function readMarkdownFile(filePath, callback) {
     data = removeBOM(data);
     // Wrap mermaid files
     data = wrapMermaidContent(data, filePath);
-    // Wrap omniware files
-    data = wrapOmniWareContent(data, filePath);
     callback(null, data);
   });
 }
@@ -130,10 +99,8 @@ function sendIPCResult(webContents, channel, success, data = {}) {
 module.exports = {
   SUPPORTED_EXTENSIONS,
   isMermaidFile,
-  isOmniWareFile,
   isMarkdownFile,
   wrapMermaidContent,
-  wrapOmniWareContent,
   removeBOM,
   readMarkdownFile,
   sendIPCResult

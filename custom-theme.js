@@ -7,7 +7,7 @@
  * Load after renderer.js in index.html.
  *
  * Strategy: keep the original #darkModeToggle hidden but intact so its click
- * handler (which re-renders Mermaid diagrams, updates OmniWare, etc.) is still
+ * handler (which re-renders Mermaid diagrams, etc.) is still
  * called when we need to actually change the theme.  We only trigger it when
  * the desired state differs from the current state.
  */
@@ -28,7 +28,7 @@
 
     localStorage.setItem(PREF_KEY, mode);
 
-    // Delegate to the original toggle so Mermaid / OmniWare side-effects run
+    // Delegate to the original toggle so Mermaid side-effects run
     if (wantDark !== isDark) {
       const toggle = document.getElementById("darkModeToggle");
       if (toggle) toggle.click();

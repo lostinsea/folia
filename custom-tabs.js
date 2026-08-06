@@ -117,7 +117,6 @@
     }
     let result = fileHelpers.removeBOM(content);
     result = fileHelpers.wrapMermaidContent(result, filePath);
-    result = fileHelpers.wrapOmniWareContent(result, filePath);
     return result;
   }
 

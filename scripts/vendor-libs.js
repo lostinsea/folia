@@ -41,24 +41,6 @@ const LIBS = [
 const FONT_SRC = path.join(ROOT, "assets", "fonts");
 const FONT_OUT = path.join(ROOT, "fonts");
 
-// OmniWare's hand-drawn look depends on two Google fonts, which it pulled with
-// an `@import url('https://fonts.googleapis.com/...')` inside its embedded
-// stylesheet. In the desktop app that import is refused by the popup CSP
-// (style-src 'unsafe-inline' only), so every OmniWare diagram silently fell
-// back to generic `cursive` - the feature looked broken and nothing said why.
-//
-// Relaxing the CSP to allow fonts.googleapis.com would have fixed the symptom
-// while reintroducing exactly what SEC-16 removed: a remote fetch on render,
-// which also leaks the reader's IP and fails offline. Vendoring is the same
-// answer that was already applied to marked/mermaid/DOMPurify and Fira Code.
-//
-// woff2 only: every renderer this app runs in is Chromium, and the .woff
-// fallback would double the shipped bytes for no one.
-const WEB_FONTS = [
-  ["@fontsource/architects-daughter", "architects-daughter-latin-400-normal.woff2"],
-  ["@fontsource/patrick-hand", "patrick-hand-latin-400-normal.woff2"],
-];
-
 function copy(from, to, label) {
   if (!fs.existsSync(from)) {
     throw new Error(`vendor-libs: missing ${label} at ${from}`);
@@ -115,7 +97,7 @@ function main() {
   // `git clean`. test-packaging.js enumerates fonts/ FROM DISK, so it would
   // have gone on happily asserting the stale file was packaged correctly.
   if (fs.existsSync(FONT_OUT)) {
-    for (const f of fs.readdirSync(FONT_OUT).filter((n) => /\.ttf$/i.test(n))) {
+    for (const f of fs.readdirSync(FONT_OUT).filter((n) => /\.(ttf|woff2?)$/i.test(n))) {
       if (!wanted.includes(f)) {
         fs.unlinkSync(path.join(FONT_OUT, f));
         console.log(`  removed stale fonts/${f}`);
@@ -124,16 +106,6 @@ function main() {
   }
   for (const f of wanted) {
     copy(path.join(FONT_SRC, f), path.join(FONT_OUT, f), "font");
-  }
-
-  console.log("Vendoring OmniWare's hand-drawn fonts ...");
-  for (const [pkg, file] of WEB_FONTS) {
-    const pkgDir = path.join(ROOT, "node_modules", pkg);
-    const meta = JSON.parse(
-      fs.readFileSync(path.join(pkgDir, "package.json"), "utf8"),
-    );
-    versions[pkg] = meta.version;
-    copy(path.join(pkgDir, "files", file), path.join(FONT_OUT, file), pkg);
   }
 
   // Recorded so the shipped versions are auditable without unminifying.

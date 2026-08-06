@@ -10,7 +10,7 @@ const crypto = require("crypto");
 // ============================================
 // POPUP DOCUMENT ESCAPING
 //
-// The image, OmniWare, mermaid and table popups are built by concatenating
+// The image, mermaid and table popups are built by concatenating
 // markdown-derived values into a fresh HTML document that is then loaded into a
 // real window. That document is parsed as a full document, so an injected
 // <script> executes - these helpers are what stops markdown from reaching it
@@ -138,38 +138,6 @@ function popupCsp(nonce, extraImgSrc) {
     // already stops them embedding anything themselves.
     "object-src 'none'",
   ].join("; ");
-}
-
-// Local @font-face rules for OmniWare's two hand-drawn fonts.
-//
-// OmniWare's embedded stylesheet used to `@import` these from
-// fonts.googleapis.com. The popup CSP allows no remote stylesheet, so the
-// import was refused and every wireframe rendered in generic `cursive` - a
-// visibly broken feature that produced only a console message nobody was
-// watching. The fonts are vendored by scripts/vendor-libs.js; see the comment
-// there for why vendoring rather than allowing the domain.
-//
-// These popups are written to a temp directory, so the URL has to be absolute.
-// pathToFileURL, not string concatenation: an installation path containing a
-// space or a '#' silently produces a URL that resolves to nothing.
-function omniwareFontFaceCss() {
-  const url = (file) =>
-    require("url").pathToFileURL(path.join(__dirname, "fonts", file)).href;
-  return `
-@font-face {
-  font-family: 'Architects Daughter';
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-  src: url('${url("architects-daughter-latin-400-normal.woff2")}') format('woff2');
-}
-@font-face {
-  font-family: 'Patrick Hand';
-  font-style: normal;
-  font-weight: 400;
-  font-display: swap;
-  src: url('${url("patrick-hand-latin-400-normal.woff2")}') format('woff2');
-}`;
 }
 
 // Defence in depth for the mermaid popup, which has to interpolate real SVG
@@ -765,7 +733,6 @@ function openFileDialog() {
           extensions: ["md", "markdown", "mdown", "mkd", "mkdn"],
         },
         { name: "Mermaid Files", extensions: ["mmd", "mermaid"] },
-        { name: "OmniWare Files", extensions: ["ow"] },
         { name: "All Files", extensions: ["*"] },
       ],
     })
@@ -1802,147 +1769,6 @@ ipcMain.on("open-mermaid-popup", (event, data) => {
 
   popupWindow.on("closed", () => {
     ipcMain.removeListener("mermaid-export-pdf", mermaidPdfHandler);
-  });
-});
-
-// Handle OmniWare wireframe popup request
-ipcMain.on("open-omniware-popup", (event, data) => {
-  const { dslCode, isDarkMode, isCorporateMode } = data;
-
-  const popupWindow = new BrowserWindow({
-    width: 1200,
-    height: 900,
-    backgroundColor: isDarkMode ? "#1a1a1a" : "#f8f6f1",
-    autoHideMenuBar: true,
-    webPreferences: popupWebPreferences("omniware"),
-    title: "OmniWare Wireframe",
-    icon: path.join(__dirname, "markdown_viewer_icon.png"),
-  });
-
-  registerPopup(popupWindow, "omniware");
-
-  popupWindow.setMenu(null);
-
-  // Read the OmniWare library
-  const omniwareJsPath = path.join(__dirname, "omniwire", "omniware.js");
-  const omniwareJs = fs.readFileSync(omniwareJsPath, "utf8");
-
-  // Dark mode CSS overrides
-  const { getOmniWareDarkCSS } = require("./omniware-config");
-  const darkCSS = isDarkMode
-    ? `<style>${getOmniWareDarkCSS(true)}</style>`
-    : "";
-
-  // JSON-encoded, with `<` escaped, so the value cannot terminate the script
-  // element it lives in. The previous escaping protected the JavaScript
-  // template literal but not the surrounding <script> (SEC-06).
-  const dslLiteral = toScriptLiteral(dslCode);
-
-  const nonce = makeNonce();
-  const htmlContent = `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta http-equiv="Content-Security-Policy" content="${popupCsp(nonce)}">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>OmniWare Wireframe</title>
-    <style>${omniwareFontFaceCss()}</style>
-    <style>
-        body, html {
-            margin: 0;
-            padding: 20px;
-            background-color: ${isDarkMode ? "#2d2d2d" : "#f0ede6"};
-            min-height: 100vh;
-        }
-        .toolbar {
-            position: fixed;
-            top: 10px;
-            right: 10px;
-            z-index: 1000;
-            display: flex;
-            gap: 8px;
-        }
-        .toolbar button {
-            padding: 6px 14px;
-            border: 1px solid ${isDarkMode ? "#555" : "#ccc"};
-            background: ${isDarkMode ? "#333" : "#fff"};
-            color: ${isDarkMode ? "#e0e0e0" : "#333"};
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 13px;
-        }
-        .toolbar button:hover {
-            background: ${isDarkMode ? "#444" : "#eee"};
-        }
-    </style>
-    ${darkCSS}
-</head>
-<body>
-    <div class="toolbar">
-        <button id="exportPdfBtn">Export PDF</button>
-    </div>
-    <div id="render-target"></div>
-
-    <script nonce="${nonce}">${omniwareJs}</script>
-    <script nonce="${nonce}">
-        const dsl = ${dslLiteral};
-        OmniWare.render(dsl, document.getElementById('render-target'));
-
-        // Listener rather than an inline onclick: the CSP on this document
-        // permits only nonce-carrying script.
-        document.getElementById('exportPdfBtn').addEventListener('click', () => {
-            popupBridge.exportOmniwarePdf();
-        });
-
-        document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') window.close();
-        });
-    </script>
-</body>
-</html>`;
-
-  const tmpDoc = writePopupDocument("omniware", htmlContent);
-  popupWindow.loadFile(tmpDoc.file);
-
-  // Handle PDF export from popup
-  const omniwarePdfHandler = async (event) => {
-    // Only handle events coming from this specific popup window
-    if (BrowserWindow.fromWebContents(event.sender) !== popupWindow) return;
-    try {
-      const saveResult = await dialog.showSaveDialog(popupWindow, {
-        title: "Export Wireframe as PDF",
-        defaultPath: "wireframe.pdf",
-        filters: [{ name: "PDF Files", extensions: ["pdf"] }],
-      });
-      if (!saveResult.canceled && saveResult.filePath) {
-        const printOptions = isCorporateMode
-          ? {
-              landscape: false,
-              printBackground: true,
-              pageSize: "A4",
-              displayHeaderFooter: true,
-              ...buildCorporateTemplates("wireframe.pdf"),
-              margins: { top: 1.2, bottom: 1.0, left: 0.8, right: 0.8 },
-            }
-          : {
-              landscape: false,
-              printBackground: true,
-              margins: { top: 0.4, bottom: 0.4, left: 0.4, right: 0.4 },
-            };
-        const pdfData = await popupWindow.webContents.printToPDF(printOptions);
-        fs.writeFileSync(saveResult.filePath, pdfData);
-        openFileAfterExport(saveResult.filePath);
-      }
-    } catch (err) {
-      console.error("OmniWare PDF export error:", err);
-    }
-  };
-  ipcMain.on("omniware-export-pdf", omniwarePdfHandler);
-
-  // Clean up temp file and listener on close
-  popupWindow.on("closed", () => {
-    ipcMain.removeListener("omniware-export-pdf", omniwarePdfHandler);
-    removePopupDocument(tmpDoc);
   });
 });
 

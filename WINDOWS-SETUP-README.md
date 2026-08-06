@@ -87,7 +87,6 @@ After installation, these file types open with your app:
 - `.md` → Markdown files
 - `.mmd` → Mermaid diagram files
 - `.mermaid` → Mermaid diagram files
-- `.ow` → OmniWare wireframe files
 
 Users can right-click any of these files and see "Open with Omnicore Markdown Viewer"
 

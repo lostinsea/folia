@@ -1,5 +1,21 @@
 # Security Audit — Omnicore Markdown Viewer (fork)
 
+> **Amendment (OmniWare removal).** The OmniWare wireframe feature (`omniwire/`,
+> `omniware-config.js`, the `.ow` file association, the `open-omniware-popup`
+> window and the ` ```omniware ` fence) has since been **removed from the fork**.
+> Findings scoped to it — notably **SEC-04** (renderer output injected raw after
+> DOMPurify) and **SEC-06** (`</script>` terminating the popup's script element)
+> — are therefore **historical**: the code they describe no longer exists, and
+> the attack surface is gone rather than mitigated.
+>
+> Their controls were **not** simply deleted from the suites. Each was converted
+> into a *removal pin* so a re-introduction cannot silently restore the hole:
+> `test-render-security.js` asserts the fence now renders as inert escaped code
+> on both render paths, and `test-popup-security.js` asserts the
+> `open-omniware-popup` channel opens no window at all. Read every OmniWare
+> reference below as a record of what was fixed before removal, not as a
+> description of the current attack surface.
+
 **Target:** `C:\repos\github\md-viwer` — branch `fix/tab-state-sync` @ `3972921`
 **Date:** 2026-07-30
 **Scope:** Electron desktop app (`main.js`, `renderer.js`, `index.html`, `custom-*.js`, `omniwire/`, helper modules, build/release config). The bundled `vscode-extension/` sub-project was not audited in depth (separate artifact, separate threat model) and has since been **deleted from the fork** — see Coverage.

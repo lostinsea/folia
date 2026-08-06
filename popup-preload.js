@@ -1,4 +1,4 @@
-// Preload for the image, OmniWare and mermaid popup windows.
+// Preload for the image and mermaid popup windows.
 //
 // Those windows used to run with nodeIntegration, which meant that any HTML
 // injection in the documents the main process builds for them was immediate
@@ -26,13 +26,6 @@ const API = {
         onResult(result),
       );
       ipcRenderer.send("mermaid-export-pdf");
-    },
-  },
-
-  omniware: {
-    // Same, but this document consumes no result channel.
-    exportOmniwarePdf() {
-      ipcRenderer.send("omniware-export-pdf");
     },
   },
 
