@@ -1267,54 +1267,88 @@ ipcMain.on("export-word-corporate", async (event, data) => {
 });
 
 // Handle markdown file save request from renderer
+// Writes to the same file are serialized. Two saves dispatched close together
+// (Ctrl+S twice, or Save then Ctrl+S) otherwise run as concurrent
+// open-truncate-write sequences against one path, and which one lands last is
+// decided by the OS - measured leaving the OLDER content on disk while the
+// renderer had correctly adopted the newer one. Chaining per path makes the
+// last write issued the last write applied, which is the only ordering a user
+// can reason about.
+const saveQueues = new Map();
+
+function queueSave(filePath, run) {
+  const prior = saveQueues.get(filePath) || Promise.resolve();
+  const next = prior.then(run, run);
+  saveQueues.set(filePath, next);
+  next.finally(() => {
+    if (saveQueues.get(filePath) === next) saveQueues.delete(filePath);
+  });
+  return next;
+}
+
 ipcMain.on("save-markdown-file", (event, data) => {
   try {
-    const { filePath, content } = data;
+    const { filePath, content, requestId } = data;
+    // Writes are asynchronous and several can be in flight at once, so every
+    // reply - including the failures - has to carry enough identity for the
+    // renderer to match it to the request that produced it. Without this the
+    // renderer cannot tell which document was written, and a save for a
+    // background tab gets applied to whatever the user is looking at now.
 
     if (!filePath) {
       mainWindow.webContents.send("save-markdown-result", {
         success: false,
         error: "No file path provided",
+        path: filePath || null,
+        requestId: requestId,
       });
       return;
     }
 
     // Write file to disk
-    fs.writeFile(filePath, content, "utf8", (err) => {
-      if (err) {
-        console.error("Error saving file:", err);
-        mainWindow.webContents.send("save-markdown-result", {
-          success: false,
-          error: err.message,
-        });
-      } else {
-        console.log("File saved successfully:", filePath);
+    queueSave(filePath, () => new Promise((done) => {
+      fs.writeFile(filePath, content, "utf8", (err) => {
+        if (err) {
+          console.error("Error saving file:", err);
+          mainWindow.webContents.send("save-markdown-result", {
+            success: false,
+            error: err.message,
+            path: filePath,
+            requestId: requestId,
+          });
+        } else {
+          console.log("File saved successfully:", filePath);
 
-        // Update lastModifiedTime to prevent false "external change" detection
-        if (watchedFilePath === filePath) {
-          try {
-            const stats = fs.statSync(filePath);
-            lastModifiedTime = stats.mtimeMs;
-            console.log(
-              "Updated lastModifiedTime after save:",
-              lastModifiedTime,
-            );
-          } catch (statErr) {
-            console.error("Error updating file stats after save:", statErr);
+          // Update lastModifiedTime to prevent false "external change" detection
+          if (watchedFilePath === filePath) {
+            try {
+              const stats = fs.statSync(filePath);
+              lastModifiedTime = stats.mtimeMs;
+              console.log(
+                "Updated lastModifiedTime after save:",
+                lastModifiedTime,
+              );
+            } catch (statErr) {
+              console.error("Error updating file stats after save:", statErr);
+            }
           }
-        }
 
-        mainWindow.webContents.send("save-markdown-result", {
-          success: true,
-          path: filePath,
-        });
-      }
-    });
+          mainWindow.webContents.send("save-markdown-result", {
+            success: true,
+            path: filePath,
+            requestId: requestId,
+          });
+        }
+        done();
+      });
+    }));
   } catch (error) {
     console.error("Error in save handler:", error);
     mainWindow.webContents.send("save-markdown-result", {
       success: false,
       error: error.message,
+      path: (data && data.filePath) || null,
+      requestId: data && data.requestId,
     });
   }
 });

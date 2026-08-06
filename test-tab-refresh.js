@@ -1150,6 +1150,744 @@ async function run(win) {
     "toast shown with no tabs open",
   );
 
+  // ---- Scenario 6: saving in view mode writes the persisted document -----
+  // A CONTRACT test, not a user journey, and the distinction is deliberate.
+  //
+  // In view mode the textarea is not the source of truth: `originalMarkdown`
+  // is what file-opened, file-reload-result and switchToTab write, and those
+  // paths touch the textarea only when isEditMode is true. historyUndo /
+  // historyRedo likewise update only `originalMarkdown` when isEditMode is
+  // false (renderer.js:961, :988). So in view mode the textarea can hold a
+  // previous tab's content, a previous file's content, or an undone edit.
+  //
+  // No shipping UI on this branch reaches saveMarkdownFile() in view mode -
+  // Ctrl+S is gated on isEditMode and the save button is in the edit-mode-only
+  // header - so this scenario calls it directly and asserts the contract. That
+  // is worth pinning because upstream's ef81474 adds a view-mode save trigger,
+  // and because the wrong behaviour here is silent data loss rather than a
+  // visible error. The undo route is used to create the divergence because it
+  // is the cheapest one that uses only the app's own functions.
+  //
+  // Driven through historyPush / historyUndo / saveMarkdownFile, and checked
+  // against the bytes on disk and the in-memory document - never against the
+  // implementation's own choice of store.
+  // The preceding scenario deliberately closes every tab, so a tab has to be
+  // reopened here - otherwise saveMarkdownFile() takes its no-file-open branch
+  // and raises a blocking alert instead of saving.
+  const tabC = await exec(`
+    (() => {
+      const t = window.CustomTabs.createTab(${jsA}, window.fs.readFileSync(${jsA}, 'utf8'));
+      window.CustomTabs.switchToTab(t.id);
+      return t.id;
+    })()
+  `);
+  await sleep(600);
+  const undoSave = await exec(`
+    (async () => {
+      if (isEditMode) toggleEditBtn.click();
+      await new Promise(r => setTimeout(r, 300));
+      // Make the undo stack local to this scenario. Without it the assertions
+      // below depend on whatever every preceding scenario left on the stack,
+      // which is a global invariant masquerading as a local one.
+      historyClear();
+      window.originalMarkdown = '# Alpha\\n\\nV_ONSCREEN\\n';
+      markdownEditor.value = window.originalMarkdown;
+      historyPush(window.originalMarkdown);
+      // A view-mode edit: both stores move together, as the edit paths do.
+      window.originalMarkdown = '# Alpha\\n\\nV_EDITED\\n';
+      markdownEditor.value = window.originalMarkdown;
+      // Ctrl+Z in view mode moves originalMarkdown back and leaves the
+      // textarea holding V_EDITED. This is the app's own code, not the test's.
+      historyUndo();
+      await new Promise(r => setTimeout(r, 600));
+      return JSON.stringify({
+        editMode: isEditMode,
+        hasPath: !!currentFilePath,
+        onScreen: window.originalMarkdown.includes('V_ONSCREEN'),
+        editorStale: markdownEditor.value.includes('V_EDITED'),
+      });
+    })()
+  `);
+  const undoState = JSON.parse(undoSave);
+  // Vacuity guard: if the two stores had not actually diverged, saving either
+  // one would write the same bytes and the assertion below could not fail.
+  // hasPath is part of the guard because saveMarkdownFile() silently does
+  // nothing useful without a current file.
+  check(
+    "a view-mode undo really does leave the editor holding different content",
+    undoState.editMode === false &&
+      undoState.hasPath === true &&
+      undoState.onScreen === true &&
+      undoState.editorStale === true,
+    undoSave,
+  );
+
+  await exec(`saveMarkdownFile(); null;`);
+  await sleep(900);
+  const onDisk = fs.readFileSync(fileA, "utf8");
+  check(
+    "saving in view mode writes the content on screen, not a stale editor buffer",
+    onDisk.includes("V_ONSCREEN") && !onDisk.includes("V_EDITED"),
+    onDisk,
+  );
+  // The second half of the same defect: the save-result handler used to copy
+  // the stale editor value back over originalMarkdown, so the undo was lost
+  // in memory as well and came back on the next render.
+  const afterSave = await exec(`window.originalMarkdown`);
+  check(
+    "a successful view-mode save does not overwrite the in-memory document",
+    afterSave.includes("V_ONSCREEN") && !afterSave.includes("V_EDITED"),
+    afterSave,
+  );
+
+  // ---- Scenario 7: exiting edit mode discards, and warns that it will ----
+  // Measured bug, three clicks, silent: type in edit mode, click Exit, accept
+  // the confirm, and the app left the editor buffer holding the typing, the
+  // dirty flag true, the preview showing the typed text, and `originalMarkdown`
+  // still on the last saved content. Re-entering edit mode then reset the
+  // textarea from `originalMarkdown` and cleared the dirty flag, so the typing
+  // was destroyed, the app reported "clean", and the preview went on showing
+  // text no store held.
+  //
+  // The user's decision: discard, because there is no way to save from view
+  // mode, and say so in the warning. So the discard must actually happen and
+  // must be complete - including the undo entries the session pushed, or Ctrl+Z
+  // hands the discarded text straight back with no dirty indicator.
+  //
+  // Deliberately checked here: the rollback is SURGICAL. An undo point made
+  // before the edit session must survive it.
+  const discardOut = await exec(`
+    (async () => {
+      const seen = [];
+      const realConfirm = window.confirm;
+      window.confirm = (msg) => { seen.push(String(msg)); return true; };
+      if (isEditMode) toggleEditBtn.click();
+      await new Promise(r => setTimeout(r, 600));
+      historyClear();
+      historyPush('# Alpha\\n\\nS7_OLD_UNDO_POINT\\n');
+      window.originalMarkdown = '# Alpha\\n\\nS7_SAVED\\n';
+      markdownEditor.value = window.originalMarkdown;
+      await renderMarkdown(window.originalMarkdown);
+      toggleEditBtn.click();
+      await new Promise(r => setTimeout(r, 800));
+      markdownEditor.value = '# Alpha\\n\\nS7_EARLY\\n';
+      markdownEditor.dispatchEvent(new Event('input'));
+      await new Promise(r => setTimeout(r, 1400));
+      markdownEditor.value = '# Alpha\\n\\nS7_TYPED\\n';
+      markdownEditor.dispatchEvent(new Event('input'));
+      await new Promise(r => setTimeout(r, 3600));
+      // Use undo and redo INSIDE the session before discarding. Both move
+      // entries between the stacks without going through historyPush, so a
+      // rollback that counts pushes drifts here and eats the pre-session entry.
+      // Without these three calls the buggy and the correct implementation
+      // agree, and the assertion below passes for the wrong reason.
+      historyUndo();
+      await new Promise(r => setTimeout(r, 400));
+      historyUndo();
+      await new Promise(r => setTimeout(r, 400));
+      historyRedo();
+      await new Promise(r => setTimeout(r, 600));
+      const before = {
+        editMode: isEditMode,
+        dirty: hasUnsavedChanges,
+        viewerShowsTyped: viewer.textContent.includes('S7_TYPED'),
+        undoDepth: undoHistory.length,
+      };
+      toggleEditBtn.click();
+      await new Promise(r => setTimeout(r, 1800));
+      const after = {
+        editMode: isEditMode,
+        dirty: hasUnsavedChanges,
+        textareaMatchesStore: markdownEditor.value === window.originalMarkdown,
+        storeIsSaved: window.originalMarkdown.includes('S7_SAVED'),
+        viewerShowsTyped: viewer.textContent.includes('S7_TYPED'),
+        viewerShowsSaved: viewer.textContent.includes('S7_SAVED'),
+      };
+      historyUndo();
+      await new Promise(r => setTimeout(r, 1000));
+      const undone = {
+        resurrected: window.originalMarkdown.includes('S7_TYPED') ||
+          window.originalMarkdown.includes('S7_EARLY'),
+        olderPointReached: window.originalMarkdown.includes('S7_OLD_UNDO_POINT'),
+      };
+      window.confirm = realConfirm;
+      return JSON.stringify({ warned: seen, before: before, after: after, undone: undone });
+    })()
+  `);
+  const discard = JSON.parse(discardOut);
+  // Vacuity guard: an edit-mode session that never diverged would make every
+  // assertion below true for free.
+  check(
+    "the edit-mode session really did diverge from the saved content",
+    discard.before.editMode === true &&
+      discard.before.dirty === true &&
+      discard.before.viewerShowsTyped === true &&
+      discard.before.undoDepth > 1,
+    discardOut,
+  );
+  check(
+    "the exit warning states that the changes will be discarded",
+    discard.warned.length === 1 && /discard/i.test(discard.warned[0]),
+    JSON.stringify(discard.warned),
+  );
+  check(
+    "exiting edit mode discards the unsaved edit from every store",
+    discard.after.editMode === false &&
+      discard.after.dirty === false &&
+      discard.after.textareaMatchesStore === true &&
+      discard.after.storeIsSaved === true,
+    discardOut,
+  );
+  check(
+    "the preview is repainted from the saved content, not left showing the discard",
+    discard.after.viewerShowsSaved === true && discard.after.viewerShowsTyped === false,
+    discardOut,
+  );
+  check(
+    "undo cannot resurrect discarded content, and older undo points survive",
+    discard.undone.resurrected === false && discard.undone.olderPointReached === true,
+    JSON.stringify(discard.undone),
+  );
+  const shotDiscard = await captureScreenshot(win, "tabs-exit-edit-discard");
+  if (shotDiscard) console.log("discard screenshot: " + shotDiscard);
+
+  // ---- Scenario 8: the discard survives a tab round trip ----------------
+  // Both reviewers found this independently, from opposite directions.
+  // switchToTab seeds `window.originalMarkdown` from `tab.content`, and
+  // snapshotActiveTab folds the dirty textarea INTO `tab.content` while edit
+  // mode is on. So editing tab A, visiting tab B and coming back leaves the
+  // session's own unsaved text sitting in `originalMarkdown` - which means a
+  // discard that restores "from originalMarkdown" restores the very edit it
+  // was asked to throw away, and then marks it clean.
+  //
+  // The fix is to restore from a baseline captured when the session began, and
+  // to re-capture that baseline whenever the active document changes while edit
+  // mode stays on, so the discard can never write another tab's text here.
+  //
+  // The final round trip is the part that matters most: the tab record keeps
+  // its own copy, so a discard that fixes only the renderer's globals still
+  // lets the next tab switch replay the discarded text.
+  const s8 = await exec(`
+    (async () => {
+      const seen = [];
+      const realConfirm = window.confirm;
+      window.confirm = (m) => { seen.push(String(m)); return true; };
+      if (isEditMode) toggleEditBtn.click();
+      await new Promise(r => setTimeout(r, 600));
+      const findOrMake = (p) => {
+        const found = window.CustomTabs.getTabs().find(t => t.filePath === p);
+        return found || window.CustomTabs.createTab(p, window.fs.readFileSync(p, 'utf8'));
+      };
+      const tA = findOrMake(${jsA});
+      const tB = findOrMake(${jsB});
+      window.CustomTabs.switchToTab(tA.id);
+      await new Promise(r => setTimeout(r, 800));
+      // Make tab A GENUINELY clean: content === originalContent. Otherwise
+      // snapshotActiveTab's view-mode branch (which only folds originalMarkdown
+      // back into tab.content when the two DIFFER) papers over the replay hole
+      // and this scenario stops testing it.
+      window.CustomTabs.updateTabContent(window.originalMarkdown, false);
+      await new Promise(r => setTimeout(r, 300));
+      toggleEditBtn.click();
+      await new Promise(r => setTimeout(r, 800));
+      markdownEditor.value = '# Alpha\\n\\nS8_TYPED\\n';
+      markdownEditor.dispatchEvent(new Event('input'));
+      await new Promise(r => setTimeout(r, 1200));
+      window.CustomTabs.switchToTab(tB.id);
+      await new Promise(r => setTimeout(r, 900));
+      window.CustomTabs.switchToTab(tA.id);
+      await new Promise(r => setTimeout(r, 900));
+      const contaminated = {
+        editMode: isEditMode,
+        storeHasTyped: window.originalMarkdown.includes('S8_TYPED'),
+      };
+      toggleEditBtn.click();
+      await new Promise(r => setTimeout(r, 2000));
+      const after = {
+        editMode: isEditMode,
+        storeHasTyped: window.originalMarkdown.includes('S8_TYPED'),
+        viewerHasTyped: viewer.textContent.includes('S8_TYPED'),
+      };
+      window.CustomTabs.switchToTab(tB.id);
+      await new Promise(r => setTimeout(r, 900));
+      window.CustomTabs.switchToTab(tA.id);
+      await new Promise(r => setTimeout(r, 1000));
+      const replay = {
+        storeHasTyped: window.originalMarkdown.includes('S8_TYPED'),
+        viewerHasTyped: viewer.textContent.includes('S8_TYPED'),
+      };
+      window.confirm = realConfirm;
+      return JSON.stringify({ warned: seen.length, contaminated: contaminated, after: after, replay: replay });
+    })()
+  `);
+  const tabDiscard = JSON.parse(s8);
+  // Vacuity guard, and it is the whole point of this scenario: if the tab round
+  // trip did NOT push the session's text into the document store, every
+  // assertion below would pass without exercising the bug at all.
+  check(
+    "a tab round trip in edit mode really does put the session's text into the document store",
+    tabDiscard.contaminated.editMode === true &&
+      tabDiscard.contaminated.storeHasTyped === true &&
+      tabDiscard.warned === 1,
+    s8,
+  );
+  check(
+    "discarding after a tab round trip does not restore the discarded text",
+    tabDiscard.after.editMode === false &&
+      tabDiscard.after.storeHasTyped === false &&
+      tabDiscard.after.viewerHasTyped === false,
+    s8,
+  );
+  check(
+    "a later tab switch cannot replay the discarded text from the tab record",
+    tabDiscard.replay.storeHasTyped === false && tabDiscard.replay.viewerHasTyped === false,
+    s8,
+  );
+
+  // ---- Scenario 8b: discarding on a tab the session did not start on -----
+  // The case that makes the switchToTab hook load-bearing. The session begins
+  // on tab A, so only A has a baseline; if the user then types on tab B and
+  // discards there, a lookup for B finds nothing and the discard silently
+  // degrades into "keep the text, mark it clean" - the original bug, on the
+  // other tab. The hook gives B a baseline of its own on arrival.
+  const s8b = await exec(`
+    (async () => {
+      const realConfirm = window.confirm;
+      window.confirm = () => true;
+      if (isEditMode) toggleEditBtn.click();
+      await new Promise(r => setTimeout(r, 600));
+      const tabsNow = window.CustomTabs.getTabs();
+      const tA = tabsNow.find(t => t.filePath === ${jsA});
+      const tB = tabsNow.find(t => t.filePath === ${jsB});
+      window.CustomTabs.switchToTab(tA.id);
+      await new Promise(r => setTimeout(r, 800));
+      toggleEditBtn.click();
+      await new Promise(r => setTimeout(r, 800));
+      markdownEditor.value = '# Alpha\\n\\nS8B_ON_A\\n';
+      markdownEditor.dispatchEvent(new Event('input'));
+      await new Promise(r => setTimeout(r, 1200));
+      window.CustomTabs.switchToTab(tB.id);
+      await new Promise(r => setTimeout(r, 900));
+      const bBefore = window.originalMarkdown;
+      markdownEditor.value = '# Beta\\n\\nS8B_ON_B\\n';
+      markdownEditor.dispatchEvent(new Event('input'));
+      await new Promise(r => setTimeout(r, 1200));
+      const diverged = {
+        editMode: isEditMode,
+        dirty: hasUnsavedChanges,
+        viewerHasB: viewer.textContent.includes('S8B_ON_B'),
+      };
+      toggleEditBtn.click();
+      await new Promise(r => setTimeout(r, 2000));
+      // Capture BEFORE the undo below. Building this object inside the return
+      // statement would evaluate it after historyUndo() had already moved the
+      // document, which reads as a discard failure that never happened.
+      const after = {
+        editMode: isEditMode,
+        storeHasB: window.originalMarkdown.includes('S8B_ON_B'),
+        viewerHasB: viewer.textContent.includes('S8B_ON_B'),
+        restoredToArrival: window.originalMarkdown === bBefore,
+        dirty: hasUnsavedChanges,
+        arrival: bBefore.slice(0, 80),
+        final: window.originalMarkdown.slice(0, 80),
+      };
+      // The hook's real payload on this tab: without a baseline of its own the
+      // discard cannot roll the history back, so one Ctrl+Z hands the
+      // discarded text straight back - the R89 defect, on the other tab.
+      historyUndo();
+      await new Promise(r => setTimeout(r, 1000));
+      const undoAfter = {
+        resurrectedB: window.originalMarkdown.includes('S8B_ON_B'),
+        viewerHasB: viewer.textContent.includes('S8B_ON_B'),
+      };
+      window.confirm = realConfirm;
+      return JSON.stringify({ diverged: diverged, undoAfter: undoAfter, after: after });
+    })()
+  `);
+  const otherTab = JSON.parse(s8b);
+  check(
+    "the edit really diverged on the second tab, so the discard there can fail",
+    otherTab.diverged.editMode === true &&
+      otherTab.diverged.dirty === true &&
+      otherTab.diverged.viewerHasB === true,
+    s8b,
+  );
+  check(
+    "discarding on a tab the session did not start on restores that tab's own content",
+    otherTab.after.editMode === false &&
+      otherTab.after.storeHasB === false &&
+      otherTab.after.viewerHasB === false &&
+      otherTab.after.restoredToArrival === true,
+    s8b,
+  );
+  check(
+    "undo cannot resurrect content discarded on a tab the session did not start on",
+    otherTab.undoAfter.resurrectedB === false && otherTab.undoAfter.viewerHasB === false,
+    JSON.stringify(otherTab.undoAfter),
+  );
+  // The baseline records the dirty flag as well as the document. It is captured
+  // on arrival, and used to be captured BEFORE switchToTab moved the flag to
+  // the arriving tab's value - so it baked in the previous tab's dirty state
+  // and a discard here left an "unsaved" indicator on a document with nothing
+  // unsaved in it. Tab B arrives clean, so the flag must be clean afterwards.
+  check(
+    "discarding on a clean tab does not inherit the previous tab's unsaved state",
+    otherTab.after.dirty === false,
+    s8b,
+  );
+
+  // ---- Scenario 9: Save clicked, then Exit before the write comes back ----
+  // Raised by GPT-5.4 while reviewing the discard. Clicking Save dispatches an
+  // async IPC write and clears nothing; `hasUnsavedChanges` stays true until
+  // `save-markdown-result` arrives. So an Exit in that window used to (a) warn
+  // that changes would be DISCARDED when the user had just asked to save them,
+  // and (b) actually discard them in the renderer while the main process wrote
+  // them to disk - leaving the file and the app holding different documents,
+  // with no indicator that anything had happened.
+  //
+  // The race is made deterministic rather than hoped for: Save and Exit are
+  // issued in one synchronous task, and an IPC reply cannot be delivered before
+  // that task yields.
+  const raceOut = await exec(`
+    (async () => {
+      const seen = [];
+      const realConfirm = window.confirm;
+      window.confirm = (msg) => { seen.push(String(msg)); return true; };
+      if (isEditMode) toggleEditBtn.click();
+      await new Promise(r => setTimeout(r, 800));
+      window.originalMarkdown = '# Beta\\n\\nS9_SAVED\\n';
+      markdownEditor.value = window.originalMarkdown;
+      await renderMarkdown(window.originalMarkdown);
+      toggleEditBtn.click();
+      await new Promise(r => setTimeout(r, 800));
+      markdownEditor.value = '# Beta\\n\\nS9_TYPED\\n';
+      markdownEditor.dispatchEvent(new Event('input'));
+      await new Promise(r => setTimeout(r, 1600));
+      const before = { editMode: isEditMode, dirty: hasUnsavedChanges };
+      // One synchronous task: the save reply cannot land between these two.
+      saveButton.click();
+      toggleEditBtn.click();
+      await new Promise(r => setTimeout(r, 2500));
+      const after = {
+        editMode: isEditMode,
+        dirty: hasUnsavedChanges,
+        storeHasTyped: window.originalMarkdown.includes('S9_TYPED'),
+        viewerHasTyped: viewer.textContent.includes('S9_TYPED'),
+      };
+      // The user's ORIGINAL complaint, in a new disguise: a save that leaves
+      // the tab record on the pre-save document means the next tab switch
+      // repaints the file as it was before the save, from memory.
+      const tabs = window.CustomTabs.getTabs();
+      const other = tabs.find(t => t.filePath !== window.currentFilePath);
+      let replay = null;
+      if (other) {
+        const mine = window.CustomTabs.getActiveTab().id;
+        window.CustomTabs.switchToTab(other.id);
+        await new Promise(r => setTimeout(r, 900));
+        window.CustomTabs.switchToTab(mine);
+        await new Promise(r => setTimeout(r, 1000));
+        replay = {
+          storeHasTyped: window.originalMarkdown.includes('S9_TYPED'),
+          viewerHasTyped: viewer.textContent.includes('S9_TYPED'),
+        };
+      }
+      window.confirm = realConfirm;
+      return JSON.stringify({
+        warned: seen,
+        before: before,
+        path: window.currentFilePath,
+        after: after,
+        replay: replay,
+      });
+    })()
+  `);
+  const race = JSON.parse(raceOut);
+  const diskAfterRace = fs.readFileSync(race.path, "utf8");
+  check(
+    "the save-then-exit race really was set up: dirty edit-mode content and a real write",
+    race.before.editMode === true &&
+      race.before.dirty === true &&
+      diskAfterRace.includes("S9_TYPED"),
+    raceOut + " disk=" + JSON.stringify(diskAfterRace.slice(0, 60)),
+  );
+  check(
+    "exiting during a save does not warn that the changes will be discarded",
+    race.warned.length === 0,
+    JSON.stringify(race.warned),
+  );
+  check(
+    "the document the app shows after a save-then-exit is the document on disk",
+    race.after.storeHasTyped === true &&
+      race.after.viewerHasTyped === true &&
+      race.after.dirty === false,
+    raceOut + " disk=" + JSON.stringify(diskAfterRace.slice(0, 60)),
+  );
+  const shotRace = await captureScreenshot(win, "tabs-save-then-exit");
+  if (shotRace) console.log("save-race screenshot: " + shotRace);
+  check(
+    "a saved document survives a tab round trip instead of reverting to the pre-save text",
+    race.replay !== null &&
+      race.replay.storeHasTyped === true &&
+      race.replay.viewerHasTyped === true,
+    raceOut,
+  );
+
+  // ---- Scenario 9b: typing while the write is in flight ------------------
+  // The save wrote the bytes it was handed, not the bytes that are in the
+  // textarea by the time the reply lands. Re-reading the textarea there marks
+  // the document saved when it is not: `originalMarkdown` starts describing a
+  // file that was never written, the dirty indicator goes out, and the next
+  // exit discards the difference without warning. The disk is the oracle here.
+  const duringOut = await exec(`
+    (async () => {
+      const realConfirm = window.confirm;
+      window.confirm = () => true;
+      if (isEditMode) toggleEditBtn.click();
+      await new Promise(r => setTimeout(r, 800));
+      window.originalMarkdown = '# Beta\\n\\nS9B_BASE\\n';
+      markdownEditor.value = window.originalMarkdown;
+      await renderMarkdown(window.originalMarkdown);
+      toggleEditBtn.click();
+      await new Promise(r => setTimeout(r, 800));
+      markdownEditor.value = '# Beta\\n\\nS9B_SENT\\n';
+      markdownEditor.dispatchEvent(new Event('input'));
+      await new Promise(r => setTimeout(r, 1400));
+      // One synchronous task again: the keystroke lands after the write was
+      // dispatched and before its reply can possibly arrive.
+      saveButton.click();
+      markdownEditor.value = '# Beta\\n\\nS9B_AFTER\\n';
+      markdownEditor.dispatchEvent(new Event('input'));
+      await new Promise(r => setTimeout(r, 2500));
+      const out = {
+        editMode: isEditMode,
+        storeIsSent: window.originalMarkdown.includes('S9B_SENT'),
+        storeIsAfter: window.originalMarkdown.includes('S9B_AFTER'),
+        dirty: hasUnsavedChanges,
+        textarea: markdownEditor.value.includes('S9B_AFTER'),
+        path: window.currentFilePath,
+      };
+      window.confirm = realConfirm;
+      return JSON.stringify(out);
+    })()
+  `);
+  const during = JSON.parse(duringOut);
+  const diskDuring = fs.readFileSync(during.path, "utf8");
+  check(
+    "the type-during-save race really was set up: the write and the buffer diverged",
+    during.editMode === true &&
+      during.textarea === true &&
+      diskDuring.includes("S9B_SENT") &&
+      !diskDuring.includes("S9B_AFTER"),
+    duringOut + " disk=" + JSON.stringify(diskDuring.slice(0, 60)),
+  );
+  check(
+    "after a save the document store holds the bytes that were written, not later keystrokes",
+    during.storeIsSent === true && during.storeIsAfter === false,
+    duringOut + " disk=" + JSON.stringify(diskDuring.slice(0, 60)),
+  );
+  check(
+    "keystrokes made during a save are still reported as unsaved",
+    during.dirty === true,
+    duringOut,
+  );
+
+  // ---- Scenario 9c: the save reply lands while another tab is active -----
+  // Both reviewers found this independently. custom-tabs.js takes over the
+  // save-markdown-result channel and used to swallow replies whose path was
+  // not the active document. A save on tab A followed by a switch to tab B
+  // therefore never reached the renderer: the promise the exit path parks on
+  // was stranded, `originalMarkdown` for A never adopted the write, and coming
+  // back to A and clicking Exit sat on a 5s timeout and then offered to
+  // DISCARD a save that had already succeeded.
+  const bgOut = await exec(`
+    (async () => {
+      const seen = [];
+      const realConfirm = window.confirm;
+      window.confirm = (msg) => { seen.push(String(msg)); return true; };
+      if (isEditMode) toggleEditBtn.click();
+      await new Promise(r => setTimeout(r, 800));
+      // The preceding scenario deliberately leaves a dirty edit session open,
+      // so the cleanup click above raises its own discard confirm. Only the
+      // prompts this scenario provokes are being measured.
+      seen.length = 0;
+      const tabs = window.CustomTabs.getTabs();
+      const mine = window.CustomTabs.getActiveTab();
+      const other = tabs.find(t => t.filePath !== mine.filePath);
+      window.originalMarkdown = '# Beta\\n\\nS9C_BASE\\n';
+      markdownEditor.value = window.originalMarkdown;
+      await renderMarkdown(window.originalMarkdown);
+      window.CustomTabs.updateTabContent(window.originalMarkdown, false);
+      toggleEditBtn.click();
+      await new Promise(r => setTimeout(r, 800));
+      markdownEditor.value = '# Beta\\n\\nS9C_TYPED\\n';
+      markdownEditor.dispatchEvent(new Event('input'));
+      await new Promise(r => setTimeout(r, 1600));
+      // One synchronous task: the reply cannot arrive before we have left.
+      saveButton.click();
+      window.CustomTabs.switchToTab(other.id);
+      await new Promise(r => setTimeout(r, 2500));
+      // The reply for the background document landed while THIS one was on
+      // screen. It must not have been applied to it.
+      const otherStore = {
+        clean: !window.originalMarkdown.includes('S9C_TYPED'),
+        viewerClean: !viewer.textContent.includes('S9C_TYPED'),
+      };
+      window.CustomTabs.switchToTab(mine.id);
+      await new Promise(r => setTimeout(r, 1200));
+      const beforeExit = {
+        dirty: hasUnsavedChanges,
+        tabDirty: window.CustomTabs.getActiveTab().hasUnsavedChanges,
+        activePath: window.currentFilePath,
+        tabContentHasTyped: window.CustomTabs.getActiveTab().content.includes('S9C_TYPED'),
+        tabOriginalHasTyped: String(window.CustomTabs.getActiveTab().originalContent).includes('S9C_TYPED'),
+      };
+      const t0 = Date.now();
+      toggleEditBtn.click();
+      await new Promise(r => setTimeout(r, 2200));
+      const elapsed = Date.now() - t0;
+      window.confirm = realConfirm;
+      return JSON.stringify({
+        warned: seen,
+        elapsed: elapsed,
+        path: mine.filePath,
+        beforeExit: beforeExit,
+        otherStore: otherStore,
+        editMode: isEditMode,
+        storeHasTyped: window.originalMarkdown.includes('S9C_TYPED'),
+        viewerHasTyped: viewer.textContent.includes('S9C_TYPED'),
+      });
+    })()
+  `);
+  const bg = JSON.parse(bgOut);
+  const diskBg = fs.readFileSync(bg.path, "utf8");
+  check(
+    "the background-save case really was set up: the write reached disk from a tab left in the background",
+    diskBg.includes("S9C_TYPED"),
+    bgOut + " disk=" + JSON.stringify(diskBg.slice(0, 60)),
+  );
+  check(
+    "a save whose reply arrived on another tab is not offered for discard on return",
+    bg.warned.length === 0 && bg.editMode === false,
+    bgOut,
+  );
+  check(
+    "returning to a tab saved in the background shows the saved document, not the pre-save text",
+    bg.storeHasTyped === true && bg.viewerHasTyped === true,
+    bgOut + " disk=" + JSON.stringify(diskBg.slice(0, 60)),
+  );
+  check(
+    "a save that completes for a background document is not applied to the document on screen",
+    bg.otherStore.clean === true && bg.otherStore.viewerClean === true,
+    bgOut,
+  );
+  check(
+    "exiting after a completed background save does not stall on the in-flight timeout",
+    bg.elapsed < 4500,
+    JSON.stringify({ elapsed: bg.elapsed }),
+  );
+
+  // ---- Scenario 9d: two writes in flight at once -------------------------
+  // A single pending slot cross-wires them: the first reply adopts the SECOND
+  // request's bytes, so the store claims a document that is not yet on disk.
+  // Ctrl+S twice, or Save then Ctrl+S, reaches this with no exotic timing.
+  const twoOut = await exec(`
+    (async () => {
+      const realConfirm = window.confirm;
+      window.confirm = () => true;
+      if (isEditMode) toggleEditBtn.click();
+      await new Promise(r => setTimeout(r, 800));
+      window.originalMarkdown = '# Beta\\n\\nS9D_BASE\\n';
+      markdownEditor.value = window.originalMarkdown;
+      await renderMarkdown(window.originalMarkdown);
+      toggleEditBtn.click();
+      await new Promise(r => setTimeout(r, 800));
+      markdownEditor.value = '# Beta\\n\\nS9D_FIRST\\n';
+      markdownEditor.dispatchEvent(new Event('input'));
+      await new Promise(r => setTimeout(r, 1400));
+      // Both writes dispatched in one synchronous task, so both are in flight
+      // before either reply can be delivered.
+      saveButton.click();
+      markdownEditor.value = '# Beta\\n\\nS9D_SECOND\\n';
+      saveButton.click();
+      await new Promise(r => setTimeout(r, 2800));
+      const out = {
+        editMode: isEditMode,
+        storeIsSecond: window.originalMarkdown.includes('S9D_SECOND'),
+        storeIsFirst: window.originalMarkdown.includes('S9D_FIRST'),
+        dirty: hasUnsavedChanges,
+        path: window.currentFilePath,
+      };
+      window.confirm = realConfirm;
+      return JSON.stringify(out);
+    })()
+  `);
+  const two = JSON.parse(twoOut);
+  const diskTwo = fs.readFileSync(two.path, "utf8");
+  check(
+    "the two-writes-in-flight case really was set up: the last write won on disk",
+    two.editMode === true && diskTwo.includes("S9D_SECOND"),
+    twoOut + " disk=" + JSON.stringify(diskTwo.slice(0, 60)),
+  );
+  check(
+    "with two writes in flight the document store ends on the bytes that are actually on disk",
+    two.storeIsSecond === true && two.storeIsFirst === false && two.dirty === false,
+    twoOut + " disk=" + JSON.stringify(diskTwo.slice(0, 60)),
+  );
+
+  // ---- Scenario 9e: a reload underneath an open edit session -------------
+  // Both reviewers found this too. The baseline is captured on edit-mode entry;
+  // a reload replaces the document without moving it, so a later discard
+  // restores the PRE-reload text and silently undoes the reload as well - the
+  // user's own original complaint (a refresh reverting a file) reappearing
+  // through the discard path.
+  const reloadOut = await exec(`
+    (async () => {
+      const realConfirm = window.confirm;
+      window.confirm = () => true;
+      if (isEditMode) toggleEditBtn.click();
+      await new Promise(r => setTimeout(r, 800));
+      window.originalMarkdown = '# Beta\\n\\nS9E_STALE\\n';
+      markdownEditor.value = window.originalMarkdown;
+      await renderMarkdown(window.originalMarkdown);
+      toggleEditBtn.click();
+      await new Promise(r => setTimeout(r, 800));
+      // The file on disk still holds whatever the previous scenario wrote, so
+      // reloading brings in content the session never saw.
+      reloadCurrentFile();
+      await new Promise(r => setTimeout(r, 2000));
+      const reloaded = markdownEditor.value;
+      markdownEditor.value = reloaded + '\\nS9E_TYPED\\n';
+      markdownEditor.dispatchEvent(new Event('input'));
+      await new Promise(r => setTimeout(r, 1600));
+      toggleEditBtn.click();
+      await new Promise(r => setTimeout(r, 2000));
+      window.confirm = realConfirm;
+      return JSON.stringify({
+        reloadedWasDifferent: !reloaded.includes('S9E_STALE'),
+        reloaded: reloaded.slice(0, 60),
+        editMode: isEditMode,
+        restoredToReloaded: window.originalMarkdown === reloaded,
+        wentBackToStale: window.originalMarkdown.includes('S9E_STALE'),
+        keptTyping: window.originalMarkdown.includes('S9E_TYPED'),
+        final: window.originalMarkdown.slice(0, 60),
+      });
+    })()
+  `);
+  const reload = JSON.parse(reloadOut);
+  check(
+    "the reload case really was set up: the reload brought in content the session had not seen",
+    reload.reloadedWasDifferent === true,
+    reloadOut,
+  );
+  check(
+    "discarding after a reload restores the reloaded document, not the pre-reload text",
+    reload.editMode === false &&
+      reload.restoredToReloaded === true &&
+      reload.wentBackToStale === false &&
+      reload.keptTyping === false,
+    reloadOut,
+  );
+
   const errors = await exec(`window.__e2eErrors || []`);
   check("no uncaught renderer errors", errors.length === 0, JSON.stringify(errors));
 

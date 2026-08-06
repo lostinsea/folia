@@ -16,6 +16,7 @@ const CSS = path.join(ROOT, "styles.css");
 const RENDERER = path.join(ROOT, "renderer.js");
 const TABS = path.join(ROOT, "custom-tabs.js");
 const COLLAPSE = path.join(ROOT, "custom-collapse.js");
+const MAIN = path.join(ROOT, "main.js");
 
 const REVERTS = [
   {
@@ -122,8 +123,8 @@ const REVERTS = [
     id: "R55",
     what: "do not recalculate when entering split view (table stays sized for the full window)",
     file: RENDERER,
-    from: "    applyTableBreakout();\n    markdownEditor.value = originalMarkdown;",
-    to: "    markdownEditor.value = originalMarkdown;",
+    from: "    applyTableBreakout();\n    // Capture the baseline BEFORE the flag is zeroed",
+    to: "    // Capture the baseline BEFORE the flag is zeroed",
     // Breakout is deliberately stood down in split view (the 900px reading
     // column is not in effect there, and #viewer must be its own scroller so a
     // breakout could only be clipped). Skipping the recalculation therefore
@@ -549,6 +550,229 @@ const REVERTS = [
     from: "  breaks: true,",
     to: "  breaks: false,",
     expect: [/a soft break in the source renders as a line break/],
+  },
+  {
+    id: "R86",
+    suite: "test:tabs",
+    what: "send the textarea on save regardless of mode (in view mode it is stale, so a view-mode edit plus Ctrl+Z plus Ctrl+S writes the undone content to disk)",
+    file: RENDERER,
+    from: "    alert(i18n('alert.noFileOpen'));\n    return;\n  }\n\n  const content = isEditMode ? markdownEditor.value : originalMarkdown;",
+    to: "    alert(i18n('alert.noFileOpen'));\n    return;\n  }\n\n  const content = markdownEditor.value;",
+    expect: [/saving in view mode writes the content on screen/],
+  },
+  {
+    // The other half of the same defect, and separately reachable: even with
+    // the correct bytes on disk, copying the textarea back over
+    // originalMarkdown discards the saved document in memory.
+    id: "R87",
+    suite: "test:tabs",
+    what: "resync originalMarkdown from the textarea after every successful save, including view-mode saves",
+    file: RENDERER,
+    from: "      if (entry) {\n        originalMarkdown = entry.content;\n        invalidateTranslationCache();\n      } else if (isEditMode) {",
+    to: "      if (false) {\n        originalMarkdown = entry.content;\n        invalidateTranslationCache();\n      } else if (true) {",
+    expect: [/a successful view-mode save does not overwrite the in-memory document/],
+  },
+  {
+    // Exiting edit mode used to promise a discard and not perform one, leaving
+    // the typing in the textarea, the dirty flag set and the preview showing
+    // content `originalMarkdown` did not hold. Re-entering then destroyed the
+    // typing and reported "clean".
+    id: "R88",
+    suite: "test:tabs",
+    what: "leave the unsaved editor buffer in place when exiting edit mode instead of discarding it",
+    file: RENDERER,
+    from: "    if (discardOnExit) {",
+    to: "    if (false && discardOnExit) {",
+    expect: [
+      /exiting edit mode discards the unsaved edit from every store/,
+      /the preview is repainted from the saved content/,
+    ],
+  },
+  {
+    // A discard that leaves its own undo entries behind is not a discard: one
+    // Ctrl+Z puts the text back into the document, with no dirty indicator.
+    id: "R89",
+    suite: "test:tabs",
+    what: "keep the discarded edit session's undo entries, so Ctrl+Z resurrects discarded content",
+    file: RENDERER,
+    from: "        historyRestore(baseline.history);",
+    to: "        void baseline.history;",
+    expect: [/undo cannot resurrect discarded content/],
+  },
+  {
+    // The bug BOTH reviewers found independently, kept as a permanent trap.
+    // Rolling the history back by counting pushes looks equivalent to restoring
+    // a snapshot, and is - right up until the session uses undo or redo, which
+    // move entries between the stacks without going through historyPush. Then
+    // the count over-drops and eats an undo point made BEFORE the session.
+    // Scenario 7 only catches this because it undoes twice and redoes once
+    // inside the session; with straight-line typing the two implementations
+    // agree and this revert would pass.
+    id: "R91",
+    suite: "test:tabs",
+    what: "roll the history back by counting the session's pushes instead of restoring the snapshot taken when the session started",
+    file: RENDERER,
+    from: "        historyRestore(baseline.history);",
+    to: "        const sessionPushes = 2;\n        undoHistory.length = Math.max(0, undoHistory.length - sessionPushes);\n        redoHistory = [];",
+    expect: [/undo cannot resurrect discarded content, and older undo points survive/],
+  },
+  {
+    // The document baseline is what makes the discard survive a tab round
+    // trip. Restoring "from originalMarkdown" looks equivalent and is not:
+    // switchToTab seeds that global from tab.content, which by then carries
+    // the session's own unsaved text.
+    id: "R92",
+    suite: "test:tabs",
+    what: "restore the discard from originalMarkdown instead of the baseline captured when the session started",
+    file: RENDERER,
+    from: "        historyRestore(baseline.history);\n        originalMarkdown = baseline.document;\n        hasUnsavedChanges = baseline.dirty;",
+    to: "        historyRestore(baseline.history);\n        hasUnsavedChanges = baseline.dirty;",
+    expect: [/discarding after a tab round trip does not restore the discarded text/],
+  },
+  {
+    // Fixing only the renderer's globals is not enough: the tab record keeps
+    // its own copy and the next switch seeds the globals back from it.
+    id: "R93",
+    suite: "test:tabs",
+    what: "leave the discarded text in the tab record, so the next tab switch replays it",
+    file: RENDERER,
+    from: "      if (activeTab && window.CustomTabs.updateTabContent) {",
+    to: "      if (false && activeTab && window.CustomTabs.updateTabContent) {",
+    expect: [/a later tab switch cannot replay the discarded text from the tab record/],
+  },
+  {
+    // Without the hook only the tab the session STARTED on has a baseline, so
+    // discarding on any other tab degrades to "keep the text, mark it clean".
+    id: "R94",
+    suite: "test:tabs",
+    what: "skip re-baselining when the active document changes while edit mode stays on",
+    file: TABS,
+    from: "    if (window.isEditMode && window.rebaseEditSession) {\n      window.rebaseEditSession();\n    }",
+    to: "    /* baseline not rebased on tab switch */",
+    expect: [/undo cannot resurrect content discarded on a tab the session did not start on/],
+  },
+  {
+    // Raised by GPT-5.4 while reviewing the discard, then measured: Save
+    // dispatches an async write and clears nothing, so an Exit inside that
+    // window warned that the changes would be DISCARDED - right after the user
+    // asked to save them - and then discarded them in the renderer while the
+    // main process wrote them to disk. File and app held different documents.
+    id: "R95",
+    suite: "test:tabs",
+    what: "exit edit mode without waiting for an in-flight save to come back",
+    file: RENDERER,
+    from: "  if (isEditMode) {\n    const inFlight = pendingSaveFor(currentFilePath);",
+    to: "  if (false) {\n    const inFlight = pendingSaveFor(currentFilePath);",
+    expect: [
+      /exiting during a save does not warn that the changes will be discarded/,
+      /the document the app shows after a save-then-exit is the document on disk/,
+    ],
+  },
+  {
+    // The write persisted the bytes it was HANDED. Re-reading the textarea when
+    // the reply lands adopts anything typed since, so `originalMarkdown` starts
+    // describing a document that was never written to disk.
+    id: "R96",
+    suite: "test:tabs",
+    what: "resync the document store from the textarea after a save instead of from the bytes that were written",
+    file: RENDERER,
+    from: "      if (entry) {\n        originalMarkdown = entry.content;",
+    to: "      if (false) {\n        originalMarkdown = entry.content;",
+    expect: [
+      /after a save the document store holds the bytes that were written, not later keystrokes/,
+    ],
+  },
+  {
+    // Declaring the document clean when keystrokes arrived during the write
+    // hides genuinely unsaved bytes, which the next exit then discards without
+    // warning - the dirty flag is what the whole discard path keys off.
+    id: "R97",
+    suite: "test:tabs",
+    what: "declare the document clean after a save even if it was typed into while the write was in flight",
+    file: RENDERER,
+    from: "      hasUnsavedChanges = isEditMode\n        ? markdownEditor.value !== originalMarkdown\n        : false;",
+    to: "      hasUnsavedChanges = false;",
+    expect: [/keystrokes made during a save are still reported as unsaved/],
+  },
+  {
+    // Both reviewers found this independently. custom-tabs.js owns the
+    // save-markdown-result channel and used to drop replies for background
+    // documents, which stranded the promise the exit path waits on.
+    id: "R98",
+    suite: "test:tabs",
+    what: "swallow save results for background documents instead of passing every result to the renderer",
+    file: TABS,
+    from: "      if (!isForCurrent) {\n        console.log(\"[CustomTabs] Save result is for a background tab:\", data.path);\n      }\n      rendererSaveHandlers.forEach((fn) => {",
+    to: "      if (!isForCurrent) return;\n      rendererSaveHandlers.forEach((fn) => {",
+    expect: [
+      /a save whose reply arrived on another tab is not offered for discard on return/,
+    ],
+  },
+  {
+    // The renderer's own half of the same problem: a reply that describes a
+    // background document must not be written into the stores, which describe
+    // the document on screen.
+    id: "R99",
+    suite: "test:tabs",
+    what: "apply every save result to the document currently on screen, whichever document was written",
+    file: RENDERER,
+    from: "  const isForCurrent = !savedPath || savedPath === currentFilePath;",
+    to: "  const isForCurrent = true;",
+    expect: [
+      /a save that completes for a background document is not applied to the document on screen/,
+    ],
+  },
+  {
+    // Opus found this one alone: the baseline records the dirty flag, and
+    // capturing it before switchToTab moves that flag bakes in the PREVIOUS
+    // tab's unsaved state.
+    id: "R100",
+    suite: "test:tabs",
+    what: "capture the arriving tab's edit baseline before its unsaved state has been restored",
+    file: TABS,
+    from: "    if (window.setUnsavedState) {\n      window.setUnsavedState(tab.hasUnsavedChanges);\n    }\n\n    if (window.isEditMode && window.rebaseEditSession) {\n      window.rebaseEditSession();\n    }",
+    to: "    if (window.isEditMode && window.rebaseEditSession) {\n      window.rebaseEditSession();\n    }\n\n    if (window.setUnsavedState) {\n      window.setUnsavedState(tab.hasUnsavedChanges);\n    }",
+    expect: [
+      /discarding on a clean tab does not inherit the previous tab's unsaved state/,
+    ],
+  },
+  {
+    // Both reviewers, again independently: a reload replaces the document
+    // underneath an open session, so a discard afterwards rolls the reload back
+    // as well - the user's original complaint reappearing by another route.
+    id: "R101",
+    suite: "test:tabs",
+    what: "leave the edit-session baseline on the pre-reload document when a file is reloaded mid-session",
+    file: RENDERER,
+    from: "      // The reload replaced the document underneath an open edit session, so\n      // the session's baseline now describes content that is no longer on\n      // disk. Without moving it, exiting with a discard would restore the\n      // PRE-reload text and silently undo the reload as well.\n      captureEditSessionBaseline(true);",
+    to: "      /* baseline not moved on reload */",
+    expect: [
+      /discarding after a reload restores the reloaded document, not the pre-reload text/,
+    ],
+  },
+  {
+    // Found by a test written for a different reason: two concurrent writes to
+    // one path are ordered by the OS, and the older content won.
+    id: "R102",
+    suite: "test:tabs",
+    what: "write concurrent saves to the same file without serialising them",
+    file: MAIN,
+    from: "    queueSave(filePath, () => new Promise((done) => {",
+    to: "    Promise.resolve().then(() => new Promise((done) => {",
+    expect: [
+      /the two-writes-in-flight case really was set up: the last write won on disk/,
+    ],
+  },
+  {
+    // The warning has to name the consequence; "Exit edit mode anyway?" reads
+    // like the changes are kept somewhere.
+    id: "R90",
+    suite: "test:tabs",
+    what: "warn about unsaved changes without saying they will be discarded",
+    file: RENDERER,
+    from: "'confirm.unsavedExit': 'You have unsaved changes. Exiting edit mode will DISCARD them. Exit anyway?'",
+    to: "'confirm.unsavedExit': 'You have unsaved changes. Exit edit mode anyway?'",
+    expect: [/the exit warning states that the changes will be discarded/],
   },
 ];
 

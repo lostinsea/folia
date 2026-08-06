@@ -616,7 +616,7 @@ const UI_STRINGS = {
     'notif.pathCopiedCheck': '✓ Path copied to clipboard',
     'confirm.unsavedOpen': 'You have unsaved changes. Discard changes and open a new file?',
     'confirm.unsavedRefresh': 'You have unsaved changes. Discard changes and refresh from disk?',
-    'confirm.unsavedExit': 'You have unsaved changes. Exit edit mode anyway?',
+    'confirm.unsavedExit': 'You have unsaved changes. Exiting edit mode will DISCARD them. Exit anyway?',
     'confirm.unsavedOpenFile': 'You have unsaved changes. Discard changes and open "${name}"?',
     'confirm.clearRecent': 'Are you sure you want to clear all recent files?',
     'confirm.openExternal': 'This link opens a file with an external application:\n\n${name}\n\nOnly continue if you trust this document. Open it?',
@@ -742,7 +742,7 @@ const UI_STRINGS = {
     'notif.pathCopiedCheck': '✓ Yol panoya kopyalandı',
     'confirm.unsavedOpen': 'Kaydedilmemiş değişiklikler var. Değişiklikleri silip yeni dosya açılsın mı?',
     'confirm.unsavedRefresh': 'Kaydedilmemiş değişiklikler var. Değişiklikleri silip diskten yenilensin mi?',
-    'confirm.unsavedExit': 'Kaydedilmemiş değişiklikler var. Düzenleme modundan çıkılsın mı?',
+    'confirm.unsavedExit': 'Kaydedilmemiş değişiklikler var. Düzenleme modundan çıkmak bu değişiklikleri SİLER. Yine de çıkılsın mı?',
     'confirm.unsavedOpenFile': 'Kaydedilmemiş değişiklikler var. Değişiklikleri silip "${name}" açılsın mı?',
     'confirm.clearRecent': 'Tüm son dosyalar temizlensin mi?',
     'alert.openFirst': 'Lütfen PDF\'e aktarmadan önce bir markdown dosyası açın.',
@@ -938,6 +938,27 @@ function historyPush(content) {
   undoHistory.push(content);
   if (undoHistory.length > MAX_UNDO_HISTORY) undoHistory.shift();
   redoHistory = []; // clear redo on new change
+}
+
+// Snapshot and restore the whole history. Used to roll a discarded edit-mode
+// session back to exactly the history the user had when the session started.
+//
+// Counting pushes and truncating by that count is WRONG, and both reviewers
+// found it independently: historyUndo pops and historyRedo pushes WITHOUT going
+// through historyPush, so after a single mid-session Ctrl+Z the count no longer
+// matches the number of session entries left on the stack and the truncation
+// eats a pre-session entry. Snapshotting is also immune to MAX_UNDO_HISTORY
+// shifting entries off the front mid-session, and it restores the redo stack
+// that the session's own pushes cleared. The copies hold references to strings
+// that already exist, not duplicates of the document text.
+function historySnapshot() {
+  return { undo: undoHistory.slice(), redo: redoHistory.slice() };
+}
+
+function historyRestore(snapshot) {
+  if (!snapshot) return;
+  undoHistory = snapshot.undo.slice();
+  redoHistory = snapshot.redo.slice();
 }
 
 function historyUndo() {
@@ -2720,12 +2741,91 @@ ipcRenderer.on('word-export-result', (event, data) => {
 });
 
 // Toggle edit mode
+//
+// Baseline for discarding an edit-mode session: the document, the history and
+// the dirty flag as they were when the session began. `originalMarkdown` alone
+// is NOT a safe restore target - switchToTab assigns it `tab.content`, which
+// carries the session's own unsaved text, so after a tab round-trip restoring
+// "from originalMarkdown" would restore the very edit being discarded and then
+// mark it clean. Both reviewers found that independently.
+//
+// Keyed BY FILE PATH, because the baseline belongs to the document rather than
+// to the global session. A single global baseline fails the same tab round trip
+// from the other side: re-capturing it on the way back into a tab adopts the
+// contaminated content as the new baseline, which is measurably no fix at all.
+const editSessionBaselines = new Map();
+
+function captureEditSessionBaseline(force) {
+  const key = currentFilePath || '';
+  // Coming back to a document mid-session must NOT overwrite the baseline that
+  // document already has - that baseline is the only surviving copy of its
+  // pre-session content.
+  if (!force && editSessionBaselines.has(key)) return;
+  editSessionBaselines.set(key, {
+    history: historySnapshot(),
+    document: originalMarkdown,
+    dirty: hasUnsavedChanges,
+  });
+}
+// Called by custom-tabs.js when the active document changes while edit mode
+// stays on, so a discard restores THIS tab and never the previous tab's text.
+window.rebaseEditSession = () => captureEditSessionBaseline(false);
+
+// Set while the handler below is parked on an in-flight save. Without it a
+// second click during that wait would run the handler again and flip `isEditMode`
+// twice, landing the user back in edit mode with the exit half-performed.
+let toggleEditPending = false;
+
 toggleEditBtn.addEventListener('click', async () => {
+  if (toggleEditPending) return;
   fileMenu.classList.remove('visible');
+  // Leaving edit mode DISCARDS whatever is unsaved in the editor, and the
+  // warning now says so. It has to actually happen: there is no view-mode save
+  // path (the save button lives in the edit-only panel and Ctrl+S is gated on
+  // isEditMode), so bytes left sitting in the textarea are unreachable - and
+  // they used to contradict the preview, which kept showing the edit while
+  // `originalMarkdown` still held the last saved text. Re-entering edit mode
+  // then reset the textarea from `originalMarkdown` and cleared the dirty flag,
+  // so the typing vanished, the app reported "clean", and the preview went on
+  // displaying content no store held. Measured, three clicks, silent.
+  let discardOnExit = false;
+  // A save dispatched moments ago is still in flight: nothing is cleared until
+  // `save-markdown-result` comes back. Exiting inside that window used to warn
+  // that the changes would be DISCARDED - when the user had just asked to save
+  // them - and then really discard them in the renderer while the main process
+  // wrote them to disk, so the file and the app ended up holding different
+  // documents with no indicator that anything had happened. Measured.
+  //
+  // Waiting for the write to land is enough to make every branch below correct
+  // again, rather than teaching each of them about saves: on success the dirty
+  // flag clears itself and there is nothing to warn about or discard; on
+  // failure (or if the main process never answers) the flag is still set and
+  // the normal confirm runs, now telling the truth.
+  if (isEditMode) {
+    const inFlight = pendingSaveFor(currentFilePath);
+    if (inFlight) {
+      toggleEditPending = true;
+      let timer = null;
+      try {
+        await Promise.race([
+          inFlight,
+          new Promise((r) => {
+            timer = setTimeout(r, 5000);
+          }),
+        ]);
+      } finally {
+        // The loser of the race is not cancelled by Promise.race, so without
+        // this the timer stays live for its full 5s after every save.
+        if (timer) clearTimeout(timer);
+        toggleEditPending = false;
+      }
+    }
+  }
   if (isEditMode && hasUnsavedChanges) {
     if (!confirm(i18n('confirm.unsavedExit'))) {
       return;
     }
+    discardOnExit = true;
   }
 
   isEditMode = !isEditMode;
@@ -2744,6 +2844,10 @@ toggleEditBtn.addEventListener('click', async () => {
     // sized against space it no longer has. `resize` does not fire for a layout
     // change inside the window, so the recalculation is explicit here.
     applyTableBreakout();
+    // Capture the baseline BEFORE the flag is zeroed, so a discard restores the
+    // dirty state the document actually had when the session started rather
+    // than unconditionally declaring it clean.
+    captureEditSessionBaseline(true);
     markdownEditor.value = originalMarkdown;
     hasUnsavedChanges = false;
     updateUnsavedIndicator();
@@ -2758,12 +2862,55 @@ toggleEditBtn.addEventListener('click', async () => {
     toggleEditBtn.style.background = '';
     toggleEditBtn.style.color = '';
     clearTimeout(previewDebounceTimer);
+    // The pending history push is guarded by `if (isEditMode)`, which is
+    // already false here, but a timer left running can still fire inside a
+    // NEXT session started within its 800ms window and plant a bogus first
+    // undo step. Cancel it next to the preview timer it belongs with.
+    clearTimeout(historyDebounceTimer);
 
     // Resume file tracking when exiting edit mode (if it was paused)
     if (!isFileTrackingActive && currentFilePath) {
       ipcRenderer.send('resume-file-watching');
       isFileTrackingActive = true;
     }
+
+    if (discardOnExit) {
+      // Restore the document, the history and the dirty flag to the baseline
+      // captured when the session started, then repaint, so the editor buffer,
+      // the tab record, the dirty indicator and what is on screen all agree.
+      // Restoring the history matters as much as the text: without it one
+      // Ctrl+Z hands the discarded content straight back, with no indicator.
+      // Scroll is preserved for the reason historyUndo preserves it - a full
+      // re-render otherwise throws the reader back to the top of the document.
+      const scrollPos = contentWrapper.scrollTop;
+      const baseline = editSessionBaselines.get(currentFilePath || '');
+      if (baseline) {
+        historyRestore(baseline.history);
+        originalMarkdown = baseline.document;
+        hasUnsavedChanges = baseline.dirty;
+      } else {
+        hasUnsavedChanges = false;
+      }
+      markdownEditor.value = originalMarkdown;
+      updateUnsavedIndicator();
+      // The tab record holds its own copy, and switchToTab seeds
+      // `originalMarkdown` from it. Leaving the discarded text there would let
+      // the next tab switch replay it.
+      const activeTab = window.CustomTabs && window.CustomTabs.getActiveTab
+        ? window.CustomTabs.getActiveTab()
+        : null;
+      if (activeTab && window.CustomTabs.updateTabContent) {
+        window.CustomTabs.updateTabContent(
+          originalMarkdown,
+          activeTab.originalContent !== originalMarkdown,
+        );
+      }
+      await renderMarkdown(originalMarkdown);
+      contentWrapper.scrollTop = scrollPos;
+    }
+    // The session is over either way; nothing may outlive it and be mistaken
+    // for the baseline of a later one.
+    editSessionBaselines.clear();
   }
 });
 
@@ -2859,16 +3006,71 @@ function skipPastCodeBlock(content, insertPos) {
 }
 
 // Save file
+// Save file.
+//
+// In edit mode the textarea is the source of truth. In VIEW mode it is not:
+// `originalMarkdown` is what file-opened, file-reload-result and switchToTab
+// all write, and those paths update the textarea only when isEditMode is true
+// (renderer.js:5361, :5449, custom-tabs.js:559). Around forty view-mode edit
+// paths write `originalMarkdown` too, and historyUndo/historyRedo update only
+// `originalMarkdown` when isEditMode is false. So in view mode the textarea can
+// hold content from a previous tab, a previous file, or an undone edit, and
+// sending it unconditionally would write those bytes over the user's document.
+//
+// SCOPE, deliberately stated: no shipping UI on this branch calls this in view
+// mode - the Ctrl+S handler is gated on isEditMode and the save button lives in
+// the edit-mode-only editor header - so this is a contract fix, not a live user
+// bug. It is worth making anyway because the mismatch is a trap for the next
+// view-mode save trigger (upstream's ef81474 adds exactly one), and because the
+// seven other places in this file that choose between the two stores already
+// use precisely this expression; saveMarkdownFile was the lone deviation.
+//
+// Also out of scope: while a translation is displayed, commitViewModeEdit
+// (:1499) writes edits to `translatedMarkdown` and leaves `originalMarkdown`
+// holding the pre-edit original, so a save in that state persists the document
+// rather than what is on screen. That is pre-existing and separate; this change
+// does not make it worse, since the alternative was arbitrary textarea bytes.
+// In-flight saves, keyed by the request id echoed back by the main process.
+// A single slot is not enough: writes are asynchronous, several can be in
+// flight at once (Ctrl+S twice, or a save on one tab while the user moves to
+// another), and the replies are not guaranteed to describe the document the
+// user is looking at when they land. Each entry remembers the bytes that were
+// actually handed to the main process and the path they were written to, which
+// is the only reliable way to answer "is this document now on disk?".
+const pendingSaves = new Map();
+let nextSaveRequestId = 1;
+// Guards against an out-of-order pair of replies for the SAME document leaving
+// the store describing the older write.
+let lastAdoptedSaveId = 0;
+
+// A promise that settles once every write currently in flight for `path` has
+// been answered, or null when there are none. Callers that must not act on a
+// stale dirty flag - exiting edit mode above all - wait on this first.
+function pendingSaveFor(path) {
+  const waits = [];
+  pendingSaves.forEach((entry) => {
+    if (entry.path === path) waits.push(entry.promise);
+  });
+  return waits.length ? Promise.all(waits) : null;
+}
+
 function saveMarkdownFile() {
   if (!currentFilePath) {
     alert(i18n('alert.noFileOpen'));
     return;
   }
 
-  const content = markdownEditor.value;
+  const content = isEditMode ? markdownEditor.value : originalMarkdown;
+  const requestId = nextSaveRequestId++;
+  const entry = { path: currentFilePath, content: content, resolve: null };
+  entry.promise = new Promise((resolve) => {
+    entry.resolve = resolve;
+  });
+  pendingSaves.set(requestId, entry);
   ipcRenderer.send('save-markdown-file', {
     filePath: currentFilePath,
-    content: content
+    content: content,
+    requestId: requestId
   });
 }
 
@@ -2916,15 +3118,47 @@ document.addEventListener('keydown', (e) => {
 
 // Handle save result
 ipcRenderer.on('save-markdown-result', (event, data) => {
+  const requestId = data && data.requestId;
+  const entry = requestId != null ? pendingSaves.get(requestId) : null;
+  if (entry) pendingSaves.delete(requestId);
+  const savedPath = (data && data.path) || (entry && entry.path) || null;
+  // A reply for a BACKGROUND document must never touch the stores, which
+  // describe the document on screen. The tab layer owns that tab's own cache.
+  const isForCurrent = !savedPath || savedPath === currentFilePath;
+
   if (data.success) {
-    originalMarkdown = markdownEditor.value;
-    invalidateTranslationCache();
-    hasUnsavedChanges = false;
-    updateUnsavedIndicator();
+    if (isForCurrent && requestId > lastAdoptedSaveId) {
+      lastAdoptedSaveId = requestId;
+      // The other half of the same defect as in saveMarkdownFile(): copying the
+      // textarea back over originalMarkdown after a VIEW-mode save discarded
+      // the document that was actually just written, so the undone content
+      // returned on the next render. In view mode originalMarkdown is already
+      // what was saved and needs no resync.
+      //
+      // Prefer the content that was actually handed to the main process over
+      // re-reading the textarea. They differ whenever the user typed while the
+      // write was in flight, and in that case the textarea is NOT what is on
+      // disk - adopting it would leave `originalMarkdown` describing a document
+      // that was never written.
+      if (entry) {
+        originalMarkdown = entry.content;
+        invalidateTranslationCache();
+      } else if (isEditMode) {
+        originalMarkdown = markdownEditor.value;
+        invalidateTranslationCache();
+      }
+      // Typing during the write leaves genuinely unsaved bytes behind;
+      // declaring the document clean would lose them at the next exit without
+      // a warning.
+      hasUnsavedChanges = isEditMode
+        ? markdownEditor.value !== originalMarkdown
+        : false;
+      updateUnsavedIndicator();
+    }
     console.log('File saved successfully');
 
     // Resume file tracking after save
-    if (!isFileTrackingActive) {
+    if (isForCurrent && !isFileTrackingActive) {
       ipcRenderer.send('resume-file-watching');
       isFileTrackingActive = true;
     }
@@ -2932,6 +3166,10 @@ ipcRenderer.on('save-markdown-result', (event, data) => {
     console.error('Save failed:', data.error);
     alert(i18n('alert.saveFailed') + data.error);
   }
+  // Always settle, including for background documents and failures: something
+  // may be parked on this promise, and leaving it pending would hang that
+  // caller until its timeout instead of letting it act on the real outcome.
+  if (entry) entry.resolve(data.success === true);
 });
 
 // Update unsaved indicator
@@ -5345,6 +5583,11 @@ ipcRenderer.on('file-opened', async (event, data) => {
     markdownEditor.value = originalMarkdown;
     hasUnsavedChanges = false;
     updateUnsavedIndicator();
+    // A different document is now open underneath the edit session, so the
+    // session's baseline describes a file the user is no longer editing.
+    // Without moving it, exiting with a discard would write the PREVIOUS
+    // document's text over this one.
+    captureEditSessionBaseline(true);
   }
 
   await renderMarkdown(data.content);
@@ -5433,6 +5676,11 @@ ipcRenderer.on('file-reload-result', async (event, data) => {
       markdownEditor.value = originalMarkdown;
       hasUnsavedChanges = false;
       updateUnsavedIndicator();
+      // The reload replaced the document underneath an open edit session, so
+      // the session's baseline now describes content that is no longer on
+      // disk. Without moving it, exiting with a discard would restore the
+      // PRE-reload text and silently undo the reload as well.
+      captureEditSessionBaseline(true);
     }
 
     // Re-render the markdown

@@ -560,10 +560,25 @@
       window.markdownEditor.value = tab.content;
     }
 
+    // Exiting edit mode discards the session by restoring the document and
+    // history captured when the session began. Switching tabs changes WHICH
+    // document that is, so the baseline has to move with it - otherwise a
+    // discard here would write the previously active tab's text over this one.
+    //
+    // This MUST run after setUnsavedState below has moved the renderer's dirty
+    // flag to this tab's value: the baseline records that flag, and capturing
+    // it first would bake the PREVIOUS tab's dirty state into this tab's
+    // baseline, so a later discard would restore a dirty indicator for a
+    // document with nothing unsaved in it.
+
     // renderer.js tracks unsaved state in a single global. Restore this tab's
     // value so its refresh / exit-edit guards apply to the right document.
     if (window.setUnsavedState) {
       window.setUnsavedState(tab.hasUnsavedChanges);
+    }
+
+    if (window.isEditMode && window.rebaseEditSession) {
+      window.rebaseEditSession();
     }
 
     // Notify main process. Watching is paused while a document has unsaved
@@ -965,17 +980,23 @@
       const isForCurrent =
         !data || !data.path || data.path === window.currentFilePath;
 
-      if (isForCurrent) {
-        rendererSaveHandlers.forEach((fn) => {
-          try {
-            fn(event, data);
-          } catch (error) {
-            console.error("[CustomTabs] Save handler failed:", error);
-          }
-        });
-      } else {
+      // Always delegate. The renderer's handler is itself path-aware now: it
+      // only touches the document stores when the reply describes the document
+      // on screen, and it has to see every reply - including background ones
+      // and failures - to settle the promise that the exit-edit path parks on.
+      // Filtering here used to strand that promise, so an Exit after a
+      // save-then-switch sat on its timeout and then offered to DISCARD a save
+      // that had already succeeded.
+      if (!isForCurrent) {
         console.log("[CustomTabs] Save result is for a background tab:", data.path);
       }
+      rendererSaveHandlers.forEach((fn) => {
+        try {
+          fn(event, data);
+        } catch (error) {
+          console.error("[CustomTabs] Save handler failed:", error);
+        }
+      });
 
       if (!data || !data.success) return;
 

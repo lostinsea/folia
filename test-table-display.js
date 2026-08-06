@@ -246,6 +246,18 @@ async function run(win) {
   // innerWidth has actually moved and then held still. A no-op resize is
   // detected up front, because "wait for it to change" would otherwise never
   // be satisfied.
+  //
+  // Two hardenings after a full-suite run (10 back-to-back Electron launches)
+  // left this section measuring 1988 after asking for 1000, failing five
+  // assertions that passed when the suite ran alone:
+  //   - unmaximize before EVERY resize, not once at the top. Windows silently
+  //     ignores setBounds on a maximized window, so a single unmaximize at the
+  //     start is not enough if anything re-maximizes later - and an ignored
+  //     resize is indistinguishable from a slow one.
+  //   - re-issue setBounds while polling instead of asking once and waiting.
+  //     A dropped request then costs 500ms rather than the whole section.
+  // Neither can turn a real failure green: if the window still never settles
+  // the warning is printed and the vacuity guards below fail as before.
   async function resizeWindow(bounds) {
     const cur = win.getBounds();
     const same = ["x", "y", "width", "height"].every(
@@ -258,15 +270,20 @@ async function run(win) {
     const read = () =>
       exec("window.innerWidth + 'x' + window.innerHeight").then(String);
     const before = await read();
+    if (win.isMaximized()) win.unmaximize();
     win.setBounds(bounds);
     let last = before;
     let stable = 0;
-    for (let i = 0; i < 80; i++) {
+    for (let i = 0; i < 160; i++) {
       await sleep(25);
       const now = await read();
       stable = now !== before && now === last ? stable + 1 : 0;
       last = now;
       if (stable >= 3) return;
+      if (i > 0 && i % 20 === 0 && last === before) {
+        if (win.isMaximized()) win.unmaximize();
+        win.setBounds(bounds);
+      }
     }
     console.log(
       "WARNING: window never settled at " +
