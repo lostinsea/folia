@@ -41,6 +41,10 @@
 }
 
 :root {
+  /* The table-of-contents drawer width. Referenced twice - by the panel and by
+     the space the scroller gives up for it - so it must not be spelled out in
+     two places. */
+  --toc-width: 300px;
   --primary-color: #279EA7;
   --secondary-color: #1F3244;
   --bg-primary: #f5f5f5;
@@ -443,6 +447,12 @@ body.dark-mode .nav-btn:hover:not(:disabled) {
      scroller's own coordinate space - see scrollElementIntoView() in
      renderer.js for why that distinction is load-bearing under `zoom`. */
   scroll-padding-top: 20px;
+  /* Matches .index-panel's slide so the text reflows with the drawer rather
+     than jumping ahead of it. applyTableBreakout() is not driven off this
+     transition - a ResizeObserver watches the scroller instead, because a
+     transition that is interrupted or disabled by prefers-reduced-motion never
+     fires transitionend. */
+  transition: margin-right 0.3s ease;
 }
 
 /* Split-view mode */
@@ -1395,7 +1405,7 @@ html {
   right: 0;
   top: 0;
   bottom: 0;
-  width: 300px;
+  width: var(--toc-width);
   background: var(--bg-secondary);
   border-left: 1px solid var(--border-color);
   display: flex;
@@ -1408,6 +1418,22 @@ html {
 
 .index-panel.visible {
   transform: translateX(0);
+}
+
+/* The panel is an absolutely positioned overlay anchored to .main-content (the
+   nearest positioned ancestor), so at `right: 0` with z-index 50 it paints on
+   top of the scroller's scrollbar. Measured, with the panel open: the 16px
+   gutter is still there and the scroller is unchanged, but elementFromPoint at
+   the gutter returns #indexList - in BOTH normal view (scroller
+   .content-wrapper) and split view (scroller #viewer). The document became
+   unscrollable by mouse for as long as the table of contents was shown.
+
+   Fixed by having the scroller give up exactly the panel's width rather than by
+   restacking, so the scrollbar sits beside the panel instead of under it. The
+   panel does not move with it: it is positioned against .main-content, not
+   against .content-wrapper. */
+.content-wrapper:has(> #indexPanel.visible) {
+  margin-right: var(--toc-width);
 }
 
 .index-header {

@@ -1131,6 +1131,43 @@ const REVERTS = [
     to: "    moveTreeNoClobber(staging, target);",
     expect: [/staging area does not survive/],
   },
+  {
+    // The user's report: with the table of contents open there was no way to
+    // scroll the document. The scroller and its 16px gutter are unchanged -
+    // the absolutely positioned drawer simply PAINTS over the scrollbar, which
+    // only elementFromPoint can see.
+    id: "R125",
+    what: "let the ToC drawer overlay the scroller instead of narrowing it",
+    file: CSS,
+    from: ".content-wrapper:has(> #indexPanel.visible) {\n  margin-right: var(--toc-width);",
+    to: ".content-wrapper:has(> #indexPanel.visible) {\n  margin-right: 0;",
+    expect: [
+      /does not paint over the document scrollbar in normal view/,
+      /does not paint over the document scrollbar in split view/,
+      /scroller ends at or before the ToC panel/,
+      /re-measures breakout tables instead of clipping them under it/,
+    ],
+    mustPass: [
+      /really opened the panel and split view really engaged/,
+      /scrollable, scrollbar-bearing scroller/,
+    ],
+  },
+  {
+    // Narrowing the scroller changes how much space a table has, and a class
+    // toggle fires no `resize`. Without the observer a broken-out table keeps
+    // its full-window width and is silently clipped by .content-wrapper's
+    // overflow-x: hidden the moment the drawer opens.
+    id: "R126",
+    what: "stop re-measuring breakout when the scroller itself changes width",
+    file: RENDERER,
+    from: "if (typeof ResizeObserver === 'function') {\n  const scrollerHost = document.querySelector('.content-wrapper');",
+    to: "if (false) {\n  const scrollerHost = document.querySelector('.content-wrapper');",
+    expect: [/re-measures breakout tables instead of clipping them under it/],
+    mustPass: [
+      /a widened table was on screen to be squeezed by the drawer/,
+      /does not paint over the document scrollbar in normal view/,
+    ],
+  },
 ];
 
 const only = process.argv.slice(2);

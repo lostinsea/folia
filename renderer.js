@@ -5360,6 +5360,32 @@ window.addEventListener('resize', () => {
   tableBreakoutResizeTimer = setTimeout(applyTableBreakout, 120);
 });
 
+// The window is not the only thing that changes the space available to a table.
+// Opening the table of contents now narrows .content-wrapper (see the
+// `:has(> #indexPanel.visible)` rule in styles.css, which stops the drawer
+// painting over the scrollbar), and a class toggle fires no `resize`. Before
+// this, a table that had broken out kept its old inline width and was clipped
+// by .content-wrapper's `overflow-x: hidden` as soon as the drawer opened.
+//
+// Watching the scroller rather than wiring this one toggle covers split view,
+// the notes drawer and anything added later, for the same reason the CSS
+// `min()` budget clamp exists. Guarded on a real width change so the recompute
+// - which only ever changes table widths, never the scroller's - cannot feed
+// itself.
+if (typeof ResizeObserver === 'function') {
+  const scrollerHost = document.querySelector('.content-wrapper');
+  if (scrollerHost) {
+    let lastObservedWidth = null;
+    new ResizeObserver(entries => {
+      const width = entries[0] && entries[0].contentRect.width;
+      if (width == null || width === lastObservedWidth) return;
+      lastObservedWidth = width;
+      clearTimeout(tableBreakoutResizeTimer);
+      tableBreakoutResizeTimer = setTimeout(applyTableBreakout, 120);
+    }).observe(scrollerHost);
+  }
+}
+
 // Wrap standalone images with a zoom button (skips slider images)
 function initImageZoom() {
   const imgs = viewer.querySelectorAll(

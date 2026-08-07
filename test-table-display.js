@@ -1782,7 +1782,160 @@ async function run(win) {
 
   await captureScreenshot(win, "table-display");
 
-  // The widened table has been measured but never looked at. Scroll it into
+  // --- 15. The table of contents must not cover the document scrollbar -----
+  // Reported by the user: with the ToC open there was no way to scroll the
+  // document. Diagnosed by measurement rather than from the CSS - the scroller
+  // does not change and the gutter is still 16px wide, so every width-based
+  // check reads clean. What changes is what is PAINTED there: .index-panel is
+  // `position: absolute; right: 0; z-index: 50`, anchored to .main-content, so
+  // it lands exactly on top of the scrollbar. elementFromPoint is the only
+  // probe that sees it.
+  //
+  // Run in both view modes because the scroller differs (.content-wrapper
+  // normally, #viewer in split view) and the panel covered both.
+  const tocGutter = JSON.parse(
+    await exec(`(async () => {
+      const out = { modes: {} };
+      const wrapper = document.querySelector('.content-wrapper');
+      const panel = document.getElementById('indexPanel');
+
+      async function measure() {
+        // Ask the engine which element actually scrolls rather than inferring
+        // it from the split-view class - the same mistake custom-tabs.js made.
+        let scroller = null;
+        const viewer = document.getElementById('viewer');
+        for (const n of [viewer, wrapper]) {
+          const oy = getComputedStyle(n).overflowY;
+          if ((oy === 'auto' || oy === 'scroll') && n.scrollHeight > n.clientHeight + 1) {
+            scroller = n;
+            break;
+          }
+        }
+        if (!scroller) return { scroller: null };
+        const r = scroller.getBoundingClientRect();
+        const gutter = Math.round(r.width) - scroller.clientWidth;
+        // Mid-height of the gutter, one pixel inside the scroller's right edge.
+        const x = Math.round(r.right - Math.max(gutter, 1) / 2);
+        const y = Math.round(r.top + r.height / 2);
+        const hit = document.elementFromPoint(x, y);
+        return {
+          scroller: scroller.id ? '#' + scroller.id : '.' + scroller.className.split(' ')[0],
+          gutter,
+          scrollable: scroller.scrollHeight > scroller.clientHeight + 1,
+          hitInsidePanel: !!(hit && panel.contains(hit)),
+          hitId: hit ? (hit.id || hit.className || hit.tagName) : null,
+          panelLeft: Math.round(panel.getBoundingClientRect().left),
+          scrollerRight: Math.round(r.right),
+        };
+      }
+
+      // Closed first, as the control: if the gutter is already unreachable with
+      // the panel shut then this is measuring something else entirely.
+      panel.classList.remove('visible');
+      await new Promise(r => setTimeout(r, 450));
+      out.modes.normalClosed = await measure();
+
+      document.getElementById('toggleIndex').click();
+      await new Promise(r => setTimeout(r, 450));
+      out.tocVisible = panel.classList.contains('visible');
+      out.modes.normalOpen = await measure();
+      // A breakout table sized for the full window must not be left hanging
+      // under the drawer once the scroller narrows. .content-wrapper is
+      // overflow-x: hidden, so the failure is silent clipping, not a scrollbar.
+      const widest = [...document.querySelectorAll('#viewer .table-container')]
+        .filter(c => c.classList.contains('table-breakout'))
+        .sort((a, b) => b.getBoundingClientRect().width - a.getBoundingClientRect().width)[0];
+      out.breakoutSampled = !!widest;
+      if (widest) {
+        const tr = widest.getBoundingClientRect();
+        out.breakoutRight = Math.round(tr.right);
+        out.breakoutUnderPanel = tr.right > panel.getBoundingClientRect().left + 1;
+      }
+
+      // Same again in split view, where #viewer owns the scrollbar.
+      document.getElementById('toggleEdit').click();
+      await new Promise(r => setTimeout(r, 600));
+      out.inSplitView = wrapper.classList.contains('split-view');
+      out.modes.splitOpen = await measure();
+
+      document.getElementById('toggleEdit').click();
+      await new Promise(r => setTimeout(r, 600));
+      document.getElementById('closeIndex').click();
+      await new Promise(r => setTimeout(r, 450));
+      out.closedAfter = !panel.classList.contains('visible');
+      return JSON.stringify(out);
+    })()`),
+  );
+  check(
+    "the ToC toggle really opened the panel and split view really engaged",
+    tocGutter.tocVisible === true &&
+      tocGutter.inSplitView === true &&
+      tocGutter.closedAfter === true,
+    JSON.stringify(tocGutter),
+  );
+  // Vacuity guard: with no scrollbar there is nothing for the panel to cover,
+  // and every assertion below would pass against any layout at all.
+  check(
+    "each measured mode really has a scrollable, scrollbar-bearing scroller",
+    ["normalClosed", "normalOpen", "splitOpen"].every(
+      (k) =>
+        tocGutter.modes[k] &&
+        tocGutter.modes[k].scrollable === true &&
+        tocGutter.modes[k].gutter > 0,
+    ),
+    JSON.stringify(tocGutter.modes),
+  );
+  check(
+    "the scrollbar gutter is reachable with the ToC closed (the control)",
+    tocGutter.modes.normalClosed.hitInsidePanel === false,
+    JSON.stringify(tocGutter.modes.normalClosed),
+  );
+  check(
+    "the ToC does not paint over the document scrollbar in normal view",
+    tocGutter.modes.normalOpen.hitInsidePanel === false,
+    JSON.stringify(tocGutter.modes.normalOpen),
+  );
+  check(
+    "the ToC does not paint over the document scrollbar in split view",
+    tocGutter.modes.splitOpen.hitInsidePanel === false,
+    JSON.stringify(tocGutter.modes.splitOpen),
+  );
+  check(
+    "the scroller ends at or before the ToC panel rather than under it",
+    tocGutter.modes.normalOpen.scrollerRight <=
+      tocGutter.modes.normalOpen.panelLeft + 1,
+    JSON.stringify(tocGutter.modes.normalOpen),
+  );
+  check(
+    "a widened table was on screen to be squeezed by the drawer",
+    tocGutter.breakoutSampled === true,
+    JSON.stringify(tocGutter),
+  );
+  check(
+    "opening the ToC re-measures breakout tables instead of clipping them under it",
+    tocGutter.breakoutUnderPanel === false,
+    JSON.stringify(tocGutter),
+  );
+
+  // Measurements say the gutter is reachable; only a picture says the result
+  // reads correctly. Re-opened after the measurement block so the capture is of
+  // the settled layout, not of a pane mid-transition.
+  await win.webContents.executeJavaScript(
+    `(() => {
+      document.getElementById('toggleIndex').click();
+      const t = document.querySelectorAll('.markdown-body .table-container')[2];
+      if (t) t.scrollIntoView({ block: 'center' });
+      return true;
+    })()`,
+    true,
+  );
+  await sleep(700);
+  await captureScreenshot(win, "toc-open-scrollbar");
+  await win.webContents.executeJavaScript(
+    `(() => { document.getElementById('closeIndex').click(); return true; })()`,
+    true,
+  );
+  await sleep(500);
   // view and capture it on its own: breakout uses a transform, which changes
   // the containing block of the absolutely-positioned maximize button, and no
   // measurement covers that.
