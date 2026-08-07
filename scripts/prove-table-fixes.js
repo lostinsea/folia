@@ -1553,6 +1553,60 @@ const REVERTS = [
     to: "MIT - see [`LICENSE`](LICENSE).",
     expect: [/every relative README link points at a file that ships beside it/],
   },
+  {
+    id: "R147",
+    suite: "test:security",
+    what: "resolve relative image sources against document.baseURI again (index.html inside the asar, so a sibling PNG never loads)",
+    file: RENDERER,
+    // Anchored at the CALL, not inside the resolver: this neutralises the
+    // feature wherever the resolver is later refactored to, and cannot rot
+    // when its internals change.
+    from: "      const resolved = resolveDocumentRelativeImageSrc(raw, currentFilePath);",
+    to: "      const resolved = null;",
+    expect: [
+      /document-relative images load: markdown/,
+      /percent-encoded relative images load/,
+      /relative image traversing \.\. resolves/,
+      /authored src is preserved for the note and slider/,
+    ],
+  },
+  {
+    id: "R148",
+    suite: "test:security",
+    what: "stop recording the authored image src (the note and slider features rebuild `![alt](src)` and search the markdown source for it, so they stop matching)",
+    file: RENDERER,
+    from: "        node.setAttribute('data-original-src', raw);",
+    to: "        void raw;",
+    // Deliberately narrow, and that is the point: the images still LOAD under
+    // this revert. Only the source-matching contract breaks, which is the half
+    // a "does the picture appear" test can never see.
+    expect: [/authored src is preserved for the note and slider/],
+  },
+  {
+    id: "R149",
+    suite: "test:security",
+    what: "search the markdown source for `![alt](src)` and nothing else (marked normalises `<a b.png>` into `a%20b.png`, so the source text never contains the rendered src)",
+    file: RENDERER,
+    from: "  for (const pattern of markdownImageCandidates(alt, src)) {",
+    to: "  for (const pattern of [`![${alt}](${src})`]) {",
+    // Both consumers, driven through their real context-menu handlers. This is
+    // what makes "the note and slider features still work" a measured claim
+    // rather than an inference from the fact that the image now loads - R148
+    // already showed those two properties are independent.
+    expect: [
+      /add-to-slider finds an image whose markdown destination marked normalised/,
+      /add-note-to-image finds an image whose markdown destination marked normalised/,
+    ],
+  },
+  {
+    id: "R150",
+    suite: "test:security",
+    what: "resolve a fragment-only image src too, baking the document's own absolute path into the attribute and into every export made from it",
+    file: RENDERER,
+    from: "  if (value.startsWith('#')) return null;",
+    to: "  if (false) return null;",
+    expect: [/fragment-only image src is not resolved/],
+  },
 ];
 
 const only = process.argv.slice(2);

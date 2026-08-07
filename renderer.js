@@ -4,6 +4,7 @@
 const { ipcRenderer, shell, clipboard } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const { pathToFileURL } = require('url');
 const html2canvas = require('html2canvas');
 
 // Helper modules
@@ -183,6 +184,114 @@ function isLocalImagePath(value) {
   // is worth more than supporting a spelling that effectively never appears in
   // markdown.
   return !UNC_SEPARATOR.test(src.replace(/^file:\/\/\//i, ''));
+}
+
+// Anything of the form `scheme:` - data:, http:, https:, file:, blob:, and also
+// a bare Windows drive letter, which really is a valid URL scheme as far as the
+// parser is concerned. Used only to decide "is this src relative", so treating
+// `C:` as a scheme is the right answer here rather than a quirk to work around.
+const HAS_URL_SCHEME = /^[a-z][a-z0-9+.\-]*:/i;
+
+// Resolve a document-relative <img src> against the directory of the file being
+// viewed, returning a file:// URL - or null if the src is not document-relative
+// and must be left exactly as it is.
+//
+// Relative *links* already do this (see the anchor handler, which resolves
+// against path.dirname(currentFilePath)); relative *images* did not, so they
+// resolved against document.baseURI - which is index.html *inside the asar* -
+// and silently never loaded. Measured on the real open path: naturalWidth 0 for
+// `![](shots/a.png)`, for `./shots/b.png` and for raw `<img src>` alike.
+//
+// Resolution goes through the URL parser rather than string concatenation
+// because marked percent-encodes the src it emits: `shots/my pic.png` in the
+// markdown arrives here as `shots/my%20pic.png`, and `hash#tag.png` as
+// `hash%23tag.png`. Hand-joining those onto a directory produces a path with a
+// literal `%20` in it. `new URL(src, base)` decodes, resolves `.`/`..` and
+// re-encodes in one step, with no assumptions about which forms marked emits.
+//
+// This grants no new read capability: an absolute `C:/…` src already resolves
+// and loads today (measured), so a document could always name a local file.
+function resolveDocumentRelativeImageSrc(src, docPath) {
+  const value = String(src || '').trim();
+  if (!value || !docPath) return null;
+  // A fragment-only src names no image at all. Resolving it would bake the
+  // document's own absolute path into the attribute - and from there into
+  // exported HTML and DOCX - to no purpose. (Reported in review.)
+  if (value.startsWith('#')) return null;
+  // Absolute local paths and anything already carrying a scheme are left alone.
+  if (isLocalImagePath(value) || HAS_URL_SCHEME.test(value)) return null;
+  // Belt and braces: uponSanitizeAttribute drops these before this runs.
+  if (REMOTE_SHARE_PATH.test(value)) return null;
+
+  let resolved;
+  try {
+    resolved = new URL(value, pathToFileURL(docPath));
+  } catch {
+    return null;
+  }
+  // `//host/share/x.png` resolves to a file: URL with a HOST, which on Windows
+  // is an outbound SMB fetch and an NTLMv2 leak (SEC-12). The resolver must
+  // never be the thing that reintroduces it, whatever reaches it upstream.
+  if (resolved.protocol !== 'file:' || resolved.host !== '') return null;
+  return resolved.href;
+}
+
+// The value the *document author* wrote, which is what the note and slider
+// features search the markdown source for. Those features rebuild `![alt](src)`
+// and look for it verbatim, so they must never see the resolved absolute URL.
+function authoredImageSrc(el) {
+  if (!el || typeof el.getAttribute !== 'function') return '';
+  return el.getAttribute('data-original-src') || el.getAttribute('src') || '';
+}
+
+// ...but the authored *attribute* is still not the authored *markdown*. marked
+// normalises the destination on its way into the attribute:
+//
+//   ![a](<shots/my pic.png>)   ->  src="shots/my%20pic.png"
+//   ![a](<shots/hash#tag.png>) ->  src="shots/hash%23tag.png"
+//
+// so `![alt](` + attribute + `)` simply does not occur in the source text, and
+// the note and slider features reported "Could not find image in source" for
+// any image whose path contains a space or a #. That predates the relative-path
+// resolution and is unrelated to it - it is a property of marked's output - but
+// it is the same "the src string is not what you think it is" mistake, so it is
+// fixed here rather than left as a trap for the next reader.
+//
+// Candidates are ordered most-literal first, so a document that really does
+// spell the destination the encoded way still matches on the first try.
+function markdownImageCandidates(alt, src) {
+  const out = [];
+  const push = (dest) => {
+    if (!dest) return;
+    const pattern = `![${alt}](${dest})`;
+    if (!out.includes(pattern)) out.push(pattern);
+  };
+  let decoded = null;
+  try {
+    decoded = decodeURIComponent(src);
+  } catch {
+    // A malformed escape (`%zz`) is not an error here: it just means the
+    // attribute was never percent-encoded, so there is no decoded spelling.
+    decoded = null;
+  }
+  push(src);
+  push(`<${src}>`);
+  if (decoded && decoded !== src) {
+    push(decoded);
+    push(`<${decoded}>`);
+  }
+  return out;
+}
+
+// Locate `![alt](dest)` in `content` for an image whose rendered src attribute
+// is `src`, trying each spelling marked could have normalised into it.
+// Returns { index, pattern } or null.
+function findMarkdownImage(content, alt, src) {
+  for (const pattern of markdownImageCandidates(alt, src)) {
+    const index = content.indexOf(pattern);
+    if (index !== -1) return { index, pattern };
+  }
+  return null;
 }
 
 // SEC-21: `style` is in ADD_TAGS/ADD_ATTR and cannot simply be removed - the
@@ -378,6 +487,19 @@ function installSanitizerHooks() {
       const raw = node.textContent;
       const safe = filterCssStyleSheet(raw);
       if (safe !== raw) node.textContent = safe;
+    }
+    // Resolve document-relative image sources against the file being viewed.
+    // This is the single choke point for both markdown `![](…)` images and raw
+    // `<img src>` in the document, which is why it lives here rather than in
+    // the marked renderer. The authored value is preserved on the element,
+    // because the note and slider features search the markdown source for it.
+    if (tag === 'img' && node.hasAttribute('src')) {
+      const raw = node.getAttribute('src');
+      const resolved = resolveDocumentRelativeImageSrc(raw, currentFilePath);
+      if (resolved) {
+        node.setAttribute('data-original-src', raw);
+        node.setAttribute('src', resolved);
+      }
     }
   });
 
@@ -6947,7 +7069,7 @@ noteSaveBtn.addEventListener('click', () => {
 
     let noteHtml;
     if (isImageTarget) {
-      const imgSrc = rightClickTarget.getAttribute('src') || '';
+      const imgSrc = authoredImageSrc(rightClickTarget);
       const imgAlt = rightClickTarget.getAttribute('alt') || '';
       const escapedSrc = imgSrc.replace(/"/g, '&quot;');
       const escapedAlt = imgAlt.replace(/"/g, '&quot;');
@@ -6996,18 +7118,21 @@ noteSaveBtn.addEventListener('click', () => {
       const markdownContent = getActiveMarkdown();
 
       if (isImageTarget) {
-        const imgSrc = rightClickTarget.getAttribute('src') || '';
+        const imgSrc = authoredImageSrc(rightClickTarget);
         const imgAlt = rightClickTarget.getAttribute('alt') || '';
         let found = false;
-        const mdImgPattern = `![${imgAlt}](${imgSrc})`;
-        let idx = markdownContent.indexOf(mdImgPattern);
-        if (idx !== -1) {
+        const hit = findMarkdownImage(markdownContent, imgAlt, imgSrc);
+        if (hit) {
+          const mdImgPattern = hit.pattern;
+          const idx = hit.index;
           const scrollPosition = contentWrapper.scrollTop;
           const newContent = markdownContent.substring(0, idx) + noteHtml + markdownContent.substring(idx + mdImgPattern.length);
           commitViewModeEdit(newContent, scrollPosition, () => {
-            // Image src same in both — apply to originalMarkdown too
-            const oi = originalMarkdown.indexOf(mdImgPattern);
-            if (oi !== -1) originalMarkdown = originalMarkdown.substring(0, oi) + noteHtml + originalMarkdown.substring(oi + mdImgPattern.length);
+            // Image src same in both — apply to originalMarkdown too. Matched
+            // again rather than reusing `idx`, because originalMarkdown is a
+            // different buffer and the offsets need not line up.
+            const oh = findMarkdownImage(originalMarkdown, imgAlt, imgSrc);
+            if (oh) originalMarkdown = originalMarkdown.substring(0, oh.index) + noteHtml + originalMarkdown.substring(oh.index + oh.pattern.length);
             translateNoteAttrsToOriginal(noteId, title, content);
           });
           found = true;
@@ -7981,20 +8106,32 @@ ctxAddToSlider && ctxAddToSlider.addEventListener('click', () => {
   if (!imgEl || !imgEl.src) return;
 
   const altText = imgEl.alt || '';
-  // Build the markdown image pattern to find in source (first 50 chars of src for data URIs)
-  const srcPrefix = imgEl.src.substring(0, 50);
-  const searchStart = `![${altText}](${srcPrefix}`;
-
+  // The AUTHORED src is required here: `imgEl.src` is the DOM property, which
+  // is always absolute, so a relative image never matched.
+  const authored = authoredImageSrc(imgEl);
   const content = isEditMode ? markdownEditor.value : originalMarkdown;
-  const imgIdx = content.indexOf(searchStart);
-  if (imgIdx === -1) {
-    showNotification(i18n('notif.imageNotFound'), 2000);
-    return;
-  }
 
-  // Find full image markdown: ![alt](src)
-  const imgEndIdx = content.indexOf(')', imgIdx + searchStart.length);
-  if (imgEndIdx === -1) return;
+  // Exact match first - that is what also covers the destinations marked
+  // normalises (`<shots/my pic.png>` renders as `shots/my%20pic.png`). The
+  // 50-character prefix scan below remains for data URIs, whose destination is
+  // far too long to compare whole and which marked never rewrites.
+  const hit = findMarkdownImage(content, altText, authored);
+  let imgIdx;
+  let imgEndIdx;
+  if (hit) {
+    imgIdx = hit.index;
+    imgEndIdx = hit.index + hit.pattern.length - 1;
+  } else {
+    const searchStart = `![${altText}](${authored.substring(0, 50)}`;
+    imgIdx = content.indexOf(searchStart);
+    if (imgIdx === -1) {
+      showNotification(i18n('notif.imageNotFound'), 2000);
+      return;
+    }
+    // Find full image markdown: ![alt](src)
+    imgEndIdx = content.indexOf(')', imgIdx + searchStart.length);
+    if (imgEndIdx === -1) return;
+  }
   const fullImgMd = content.substring(imgIdx, imgEndIdx + 1);
 
   // Check if this image is already inside a slider block

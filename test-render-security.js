@@ -396,7 +396,14 @@ async function run(win) {
         link: !!v.querySelector('a[href="https://example.invalid"]'),
         table: v.querySelectorAll('table tbody tr').length,
         pre: v.querySelectorAll('pre').length,
-        img: !!v.querySelector('img[src="local.png"]'),
+        // Authored-or-resolved: whether a document happens to be open (the app
+        // restores the last file at boot) decides whether the relative src is
+        // resolved to a file:// URL. This assertion is about the image
+        // surviving the pipeline, not about resolution - which has its own
+        // section below. Deliberately matched on the src rather than on the
+        // resolver's bookkeeping attribute, so dropping that attribute breaks
+        // only the assertion that is actually about it.
+        img: !!v.querySelector('img[src="local.png"], img[src$="/local.png"]'),
         inlineSpan: !!span,
         spanStyle: span ? span.getAttribute('style') : null
       };
@@ -599,6 +606,11 @@ async function run(win) {
   // pointing at a remote SMB share is fetched automatically and can hand the
   // user's NTLM credentials to a host named by untrusted markdown.
   // ==========================================================================
+  // No document is open here, so a relative src has nothing to resolve against
+  // and must survive verbatim. Set explicitly rather than relying on the order
+  // the sections happen to run in - i5 below is exactly the case the
+  // document-relative resolver rewrites once a file IS open.
+  await exec(`window.currentFilePath = null; true`);
   await render(
     "# Doc\n\n" +
       "<img id=i1 src=\"C:\\pics\\a.png\">\n\n" +
@@ -634,6 +646,218 @@ async function run(win) {
     imgs.i5 === "img/e.png",
     JSON.stringify(imgs),
   );
+
+  // ==========================================================================
+  // Document-relative image sources resolve against the file being viewed
+  //
+  // Relative *links* have always resolved against path.dirname(currentFilePath);
+  // relative *images* did not. They resolved against document.baseURI, which is
+  // index.html INSIDE THE ASAR, so `![](shots/a.png)` next to the document
+  // silently never loaded - naturalWidth 0, measured on the real open path.
+  //
+  // The assertions below are deliberately about whether the bytes LOAD, not
+  // about the shape of the src string: the whole defect was a src that looked
+  // perfectly reasonable and pointed nowhere. Real PNGs are written to disk and
+  // naturalWidth is the oracle.
+  //
+  // The encoded cases are not decoration. marked percent-encodes what it emits
+  // (`shots/my pic.png` arrives as `shots/my%20pic.png`, `hash#tag.png` as
+  // `hash%23tag.png`), so a resolver that joins strings produces a path with a
+  // literal `%20` in it and the image stays broken. Only a URL-parser
+  // resolution survives these two.
+  // ==========================================================================
+  const relDir = path.join(dir, "relimg");
+  const relShots = path.join(relDir, "shots");
+  fs.mkdirSync(relShots, { recursive: true });
+  const relPng = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAJUlEQVR42u3NMQEAAAgDoC252H0M" +
+      "PwjQk3aTLwoAAAAAAAAAAAAcWzQoAAG5jgSdAAAAAElFTkSuQmCC",
+    "base64",
+  );
+  for (const n of ["a.png", "b.png", "my pic.png", "hash#tag.png", "raw.png"]) {
+    fs.writeFileSync(path.join(relShots, n), relPng);
+  }
+  fs.writeFileSync(path.join(relDir, "sibling.png"), relPng);
+  const relDoc = path.join(relDir, "doc.md");
+  fs.writeFileSync(relDoc, "placeholder", "utf8");
+
+  // VACUITY GUARD: if the fixtures are not on disk every naturalWidth below is
+  // 0 for a reason that has nothing to do with the resolver, and the suite
+  // would be asserting against a broken setup rather than against the product.
+  check(
+    "SETUP relative-image fixtures exist on disk",
+    fs.existsSync(path.join(relShots, "a.png")) &&
+      fs.existsSync(path.join(relShots, "my pic.png")) &&
+      fs.existsSync(path.join(relShots, "hash#tag.png")) &&
+      fs.existsSync(path.join(relDir, "sibling.png")),
+    relDir,
+  );
+
+  await exec(`window.currentFilePath = ${JSON.stringify(relDoc)}; true`);
+  await render(
+    "# Doc\n\n" +
+      "![plain](shots/a.png)\n\n" +
+      "![dot](./shots/b.png)\n\n" +
+      "![space](<shots/my pic.png>)\n\n" +
+      "![hash](shots/hash%23tag.png)\n\n" +
+      "![sibling](sibling.png)\n\n" +
+      "![dotdot](sub/../shots/a.png)\n\n" +
+      '<img alt="rawhtml" src="shots/raw.png">\n\n' +
+      "![missing](shots/nope.png)\n\n" +
+      "![unc](//attacker/share/x.png)\n\n" +
+      "![frag](#nope)\n\n" +
+      '<img alt="abs" src="C:\\pics\\a.png">\n',
+    "full",
+    1800,
+  );
+  const rel = await exec(`
+    (() => {
+      const out = {};
+      for (const i of document.querySelectorAll('#viewer img')) {
+        out[i.getAttribute('alt') || '?'] = {
+          w: i.naturalWidth,
+          attr: i.getAttribute('src'),
+          authored: i.getAttribute('data-original-src')
+        };
+      }
+      return out;
+    })()
+  `);
+  const relLoaded = (k) => !!(rel[k] && rel[k].w > 0);
+  check(
+    "FEATURE document-relative images load: markdown, ./-prefixed, sibling and raw HTML",
+    relLoaded("plain") &&
+      relLoaded("dot") &&
+      relLoaded("sibling") &&
+      relLoaded("rawhtml"),
+    JSON.stringify(rel),
+  );
+  check(
+    "FEATURE percent-encoded relative images load (spaces and #)",
+    relLoaded("space") && relLoaded("hash"),
+    JSON.stringify(rel),
+  );
+  check(
+    "FEATURE a relative image traversing .. resolves to the same file",
+    relLoaded("dotdot"),
+    JSON.stringify(rel),
+  );
+  check(
+    "FEATURE the authored src is preserved for the note and slider features",
+    rel.plain &&
+      rel.plain.authored === "shots/a.png" &&
+      rel.dot &&
+      rel.dot.authored === "./shots/b.png",
+    JSON.stringify(rel),
+  );
+  check(
+    "SEC-hook a UNC image src stays stripped even with a document path set",
+    !!rel.unc && !rel.unc.attr,
+    JSON.stringify(rel),
+  );
+  check(
+    "FEATURE an absolute drive-letter src is left exactly as authored",
+    !!rel.abs && rel.abs.attr === "C:\\pics\\a.png" && !rel.abs.authored,
+    JSON.stringify(rel),
+  );
+  check(
+    "FEATURE a relative image naming a missing file stays broken, not silently rewritten elsewhere",
+    !!rel.missing && rel.missing.w === 0 && /shots\/nope\.png$/.test(rel.missing.attr || ""),
+    JSON.stringify(rel),
+  );
+  // A fragment-only src names no image. Resolving it would write the
+  // document's own absolute path into the attribute, and from there into
+  // exported HTML and DOCX, for nothing.
+  check(
+    "FEATURE a fragment-only image src is not resolved to the document's own path",
+    !!rel.frag && rel.frag.attr === "#nope" && !rel.frag.authored,
+    JSON.stringify(rel),
+  );
+
+  // With no document open there is nothing to resolve against, and the src must
+  // be left alone rather than resolved against the app's own directory.
+  await exec(`window.currentFilePath = null; true`);
+  await render("# Doc\n\n![nodoc](shots/a.png)\n", "full", 900);
+  const noDoc = await exec(`
+    (() => {
+      const i = document.querySelector('#viewer img');
+      return i ? { attr: i.getAttribute('src'), authored: i.getAttribute('data-original-src') } : null;
+    })()
+  `);
+  check(
+    "FEATURE with no file open a relative image src is left untouched",
+    !!noDoc && noDoc.attr === "shots/a.png" && !noDoc.authored,
+    JSON.stringify(noDoc),
+  );
+
+  // ==========================================================================
+  // The rendered src is not the authored markdown destination
+  //
+  // marked normalises the destination on its way into the attribute:
+  //
+  //   ![a](<shots/my pic.png>)  ->  src="shots/my%20pic.png"
+  //
+  // so the note and slider features - which rebuild `![alt](src)` and search
+  // the raw markdown for it - found nothing and reported "Could not find image
+  // in source" for any path containing a space or a #. That is older than the
+  // relative-path resolution above and independent of it, but it is the same
+  // mistake about what the src string is, so it is fixed and pinned together.
+  //
+  // Both assertions drive the REAL context-menu handlers on a REAL rendered
+  // image: a contextmenu event to set the right-click target, then a click on
+  // the actual menu item. Nothing is asserted about source text alone.
+  // ==========================================================================
+  const normSrc = "# Doc\n\n![space](<shots/my pic.png>)\n";
+  await exec(
+    `window.currentFilePath = ${JSON.stringify(relDoc)};` +
+      `window.originalMarkdown = ${JSON.stringify(normSrc)}; true`,
+  );
+  await render(normSrc, "full", 1500);
+  await exec(`
+    (() => {
+      const img = document.querySelector('#viewer img[alt="space"]');
+      if (!img) return false;
+      img.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+      document.getElementById('ctxAddToSlider').click();
+      return true;
+    })()
+  `);
+  await sleep(1500);
+  const sliderSrc = await exec(`window.originalMarkdown`);
+  check(
+    "FEATURE add-to-slider finds an image whose markdown destination marked normalised",
+    typeof sliderSrc === "string" &&
+      sliderSrc.includes("<!-- slider-start -->") &&
+      sliderSrc.includes("<shots/my pic.png>"),
+    JSON.stringify(sliderSrc),
+  );
+
+  await exec(
+    `window.currentFilePath = ${JSON.stringify(relDoc)};` +
+      `window.originalMarkdown = ${JSON.stringify(normSrc)}; true`,
+  );
+  await render(normSrc, "full", 1500);
+  await exec(`
+    (() => {
+      const img = document.querySelector('#viewer img[alt="space"]');
+      if (!img) return false;
+      img.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+      document.getElementById('ctxAddNote').click();
+      document.getElementById('noteTitle').value = 'a note';
+      document.getElementById('noteSaveBtn').click();
+      return true;
+    })()
+  `);
+  await sleep(1500);
+  const noteSrc = await exec(`window.originalMarkdown`);
+  check(
+    "FEATURE add-note-to-image finds an image whose markdown destination marked normalised",
+    typeof noteSrc === "string" &&
+      noteSrc.includes("noted-image") &&
+      !noteSrc.includes("![space]("),
+    JSON.stringify(noteSrc),
+  );
+  await exec(`window.currentFilePath = null; true`);
 
   // ==========================================================================
   // SEC-12 - a link to a local file was handed straight to shell.openPath()
