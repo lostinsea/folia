@@ -982,7 +982,7 @@ async function run(win) {
   // rightly) fails the run for. Using an image that actually loads also makes
   // the check stronger - the reused node is one that really painted.
   const IMGDOC =
-    '# Images\n\nintro paragraph\n\n<img src="markdown_viewer_icon.png" alt="one">\n\ntail paragraph\n';
+    '# Images\n\nintro paragraph\n\n<img src="app-icon.png" alt="one">\n\ntail paragraph\n';
   await render(exec, IMGDOC, "full");
   await exec(TAG_ALL);
   await render(exec, IMGDOC.replace("intro paragraph", "intro paragraph edited"), "full");

@@ -1488,6 +1488,39 @@ const REVERTS = [
     expect: [/reproduces the operative terms of every limb/],
     mustPass: [/the notices generator runs/],
   },
+  {
+    // README.md is not repository prose, it is a SHIPPED surface: extraResources
+    // puts it in the installer and the in-app welcome button opens it. Before
+    // the rewrite it described the upstream vendor's product by name, which
+    // both independent licence reviews rated blocking. The rewrite is not
+    // self-defending - prose has no compiler - so the pin is that the title is
+    // derived from package.json rather than being a fourth hand-maintained copy
+    // of the name.
+    id: "R143",
+    suite: "test:packaging",
+    what: "let the shipped README present the app as the upstream vendor's product",
+    file: path.join(ROOT, "README.md"),
+    from: "# Folia\n",
+    to: "# Omnicore Markdown Viewer\n",
+    expect: [/README titles itself with the product name/],
+  },
+  {
+    // The one assertion here that is invisible on GitHub. A relative <img src>
+    // renders perfectly in a web view of this file, so nothing about reviewing
+    // the README on github.com would reveal the defect - it only appears once
+    // the APP opens the file, where baseURI is index.html inside the asar and
+    // the image resolves to nothing. Measured: naturalWidth=0 for every
+    // relative form, 512 for a data: URI. This revert restores exactly the
+    // mistake that is easy to make (a tidy `logo.png` reference instead of a
+    // 12 KB blob) and shows the suite refusing it.
+    id: "R144",
+    suite: "test:packaging",
+    what: "reference a README image by relative path, which the app cannot resolve",
+    file: path.join(ROOT, "README.md"),
+    from: ' alt="Folia" height="100">',
+    to: ' alt="Folia" height="100">\n  <img src="logo.png" alt="Folia">',
+    expect: [/README images are embedded/],
+  },
 ];
 
 const only = process.argv.slice(2);

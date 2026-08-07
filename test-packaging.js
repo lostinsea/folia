@@ -380,11 +380,11 @@ function main() {
   // ships a runtime three majors older than it does, with the security
   // advisories that implies.
   //
-  // Only claims about what THIS FORK ships are checked. The README also says
-  // "Upstream Electron 27 triggers a macOS WindowServer bug", which is a
-  // correct historical statement about the PARENT project and must stay 27 -
-  // so this deliberately matches specific claim shapes rather than every
-  // "Electron <number>" in the file.
+  // The claim SHAPES are rewritten whenever the README is, and three of the
+  // four were invalidated by the Folia rewrite - which the suite reported as
+  // four named failures rather than silently checking nothing, because a
+  // missing match is a failure here and not a skip. That is the property worth
+  // preserving: these must be re-pointed by hand at each rewrite.
   {
     const declared =
       (pkg.devDependencies && pkg.devDependencies.electron) || "";
@@ -392,9 +392,9 @@ function main() {
     const readme = read("README.md");
     const claims = [
       ["shields.io badge", /badge\/Electron-(\d+)/],
-      ["macOS fix table row", /\|\s*\*\*Electron (\d+)\*\*\s*\|/],
-      ["re-pin description", /re-pins Electron to `\^(\d+)`/],
-      ["tech-stack list", /-\s*\*\*Electron (\d+)[.\d]*\*\*\s*-/],
+      ["what-changed summary", /Electron upgraded to (\d+)/],
+      ["tech-stack table row", /\|\s*Electron\s*\|\s*(\d+)/],
+      ["install-notes prose", /Electron (\d+) downloads its binary lazily/],
     ];
     check(
       "package.json declares an Electron version to check the README against",
@@ -483,6 +483,95 @@ function main() {
     // The vendor's MIT grant covers the code, not their marks. Renaming means
     // the marks are actually gone from what we ship, not merely relabelled.
     const VENDOR = /omnicore/i;
+
+    // README.md is a SHIPPED, USER-FACING surface, not just repository prose:
+    // it goes into the installer via extraResources and is what the in-app
+    // welcome button opens. It was also the single largest remaining piece of
+    // vendor branding - it described the vendor's product, by name, to anyone
+    // who opened it - which both independent licence reviews rated blocking,
+    // on the grounds that shipping it misrepresents who publishes the app.
+    //
+    // The vendor's name is still allowed in ONE place, and deliberately so:
+    // LICENSE names three copyright holders, and a reader who meets two
+    // unfamiliar names there needs the README to say why. So this does not
+    // sweep the name out entirely - it pins it to the provenance section,
+    // which is the assertion that actually expresses the intent. A vendor
+    // mention drifting back into the product description would fail here
+    // while the legitimate attribution keeps passing.
+    {
+      const readmeSrc = read("README.md");
+      const productName = (pkg.build && pkg.build.productName) || pkg.productName;
+      const readmeLines = readmeSrc.split(/\r?\n/);
+
+      const h1 = readmeLines.find((l) => /^#\s+\S/.test(l));
+      check(
+        "the README titles itself with the product name, not the vendor's",
+        Boolean(h1) && h1.replace(/^#\s+/, "").trim() === productName,
+        `README H1=${JSON.stringify(h1)} productName=${productName}`,
+      );
+
+      // Embedded images are REDACTED rather than having their whole line
+      // dropped: base64 is drawn from an alphabet that can spell anything, so
+      // a blob is not evidence of branding - but dropping the line would also
+      // blind these sweeps to anything else sharing it, which is a real hole
+      // in a file whose longest lines are images.
+      const prose = readmeSrc
+        .split(/\r?\n/)
+        .map((l, i) => [i + 1, l.replace(/data:image\/[A-Za-z0-9+/=;,.-]+/g, "data:image/<redacted>")]);
+
+      const provStart = prose.findIndex(([, l]) => /^###\s+Provenance\b/.test(l));
+      check(
+        "the README has a provenance section, which is where upstream attribution belongs",
+        provStart !== -1,
+        "no '### Provenance' heading found",
+      );
+      const provEnd =
+        provStart === -1
+          ? -1
+          : (() => {
+              const rest = prose.slice(provStart + 1);
+              const nxt = rest.findIndex(([, l]) => /^#{1,3}\s+\S/.test(l));
+              return nxt === -1 ? prose.length : provStart + 1 + nxt;
+            })();
+
+      const vendorHits = prose
+        .map((e, idx) => [idx, e])
+        .filter(([, [, l]]) => VENDOR.test(l));
+      const strayVendor = vendorHits
+        .filter(([idx]) => provStart === -1 || idx < provStart || idx >= provEnd)
+        .map(([, [n, l]]) => `${n}: ${l.trim().slice(0, 60)}`);
+      check(
+        "vendor branding in the README is confined to the provenance section",
+        strayVendor.length === 0,
+        strayVendor.join(" | "),
+      );
+      check(
+        "the provenance section does credit the upstream authors, so LICENSE's names are explained",
+        provStart !== -1 &&
+          vendorHits.some(
+            ([idx]) => idx >= provStart && idx < provEnd,
+          ),
+        "provenance section names no upstream vendor",
+      );
+
+      // MEASURED, and the reason every image in this file is a data: URI: a
+      // document rendered by this app has baseURI = the app's own index.html,
+      // so a relative <img src> resolves against the asar and never loads. A
+      // probe driving the real open path measured naturalWidth=0 for markdown
+      // image syntax, for './'-prefixed paths and for raw <img src> alike,
+      // against 512 for a data: URI. On GitHub a relative path renders fine,
+      // so this breaks ONLY in the shipped app - invisible to anyone reviewing
+      // the README on the web, which is exactly why it needs an assertion.
+      const relativeImgs = prose
+        .filter(([, l]) => /<img\s[^>]*src="(?!https?:|data:)/i.test(l))
+        .map(([n, l]) => `${n}: ${l.trim().slice(0, 60)}`);
+      check(
+        "README images are embedded, so they still load when the app opens it",
+        relativeImgs.length === 0,
+        relativeImgs.join(" | "),
+      );
+    }
+
     // The pre-rename generic name is a separate hazard: it carries no vendor
     // mark, so the VENDOR sweep is blind to it, and a field left behind on it
     // silently reintroduces the old identity.
@@ -1442,7 +1531,19 @@ function main() {
     );
     check(
       "LICENSE also asserts the fork's own copyright",
-      /Copyright \(c\) .*Folia/.test(licA),
+      /Copyright \(c\) .*lostinsea/.test(licA),
+      licA.split("\n").slice(0, 5).join(" | "),
+    );
+    // The intermediate fork's author never added a copyright line for himself,
+    // so MIT's retention clause does not strictly compel this one. It is here
+    // because his authorship is a FACT about the code this fork ships (43
+    // commits in the inherited history, measured with `git shortlog -s`), and
+    // copyright vests in an author whether or not he asserts it in a file.
+    // Asserted rather than left to discipline: a future rewrite of the header
+    // would otherwise drop an attribution that nothing else in the tree records.
+    check(
+      "LICENSE credits the intermediate fork's author, whose code this fork inherits",
+      /Copyright \(c\) .*Moyseyenko/.test(licA),
       licA.split("\n").slice(0, 5).join(" | "),
     );
     check(

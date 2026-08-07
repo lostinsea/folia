@@ -167,7 +167,7 @@ const ICO_SIZES = [16, 24, 32, 48, 64, 128, 256];
 const PNG_OUTPUTS = [
   ["logo.png", 512],
   ["logo_dark.png", 512],
-  ["markdown_viewer_icon.png", 512],
+  ["app-icon.png", 512],
   ["file-icon.png", 512],
 ];
 

@@ -82,7 +82,7 @@
       "logo.ico",
       "logo.png",
       "logo_dark.png",
-      "markdown_viewer_icon.png",
+      "app-icon.png",
       "file-icon.png",
       "file-icon.ico",
       "libs/**/*",
@@ -156,7 +156,7 @@
       "target": [
         "dmg"
       ],
-      "icon": "markdown_viewer_icon.png",
+      "icon": "app-icon.png",
       "fileAssociations": [
         {
           "ext": "md",
@@ -185,7 +185,7 @@
       ],
       "category": "Utility",
       "maintainer": "lostinsea <lostinsea@users.noreply.github.com>",
-      "icon": "markdown_viewer_icon.png",
+      "icon": "app-icon.png",
       "fileAssociations": [
         {
           "ext": "md",

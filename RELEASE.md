@@ -1,6 +1,6 @@
 # Release Guide
 
-This document explains how to create releases for Omnicore Markdown Viewer.
+This document explains how to create releases for Folia.
 
 ## Prerequisites
 
@@ -85,12 +85,18 @@ The following files are included in each release:
 
 | File | Platform | Description |
 |------|----------|-------------|
-| `Omnicore-Markdown-Viewer-Setup-X.X.X.exe` | Windows | NSIS installer |
-| `Omnicore.Markdown.Viewer-X.X.X.AppImage` | Linux | Portable AppImage |
-| `omnicore-markdown-viewer_X.X.X_amd64.deb` | Linux | Debian package |
-| `latest.yml` | Windows | Auto-update manifest |
-| `latest-linux.yml` | Linux | Auto-update manifest |
-| `*.blockmap` | Windows | Delta update support |
+| `Folia-Setup-X.X.X.exe` | Windows | NSIS installer |
+| `Folia-Setup-X.X.X.exe.blockmap` | Windows | Block map emitted alongside the installer |
+| `Folia-X.X.X.AppImage` | Linux | Portable AppImage |
+| `folia_X.X.X_amd64.deb` | Linux | Debian package |
+
+These names are not documentation that has to be kept in step by hand:
+`scripts/release.js` builds the same list from `package.json` and fails the
+release if an expected artifact is missing or an unexpected one appears.
+
+**No `latest.yml` / `latest-linux.yml` is produced.** Auto-update is
+intentionally disabled (`build.publish` is `null`; see `BUILD.md`), so there is
+no update manifest to publish and nothing for a client to poll.
 
 ## Platform Notes
 

@@ -505,7 +505,7 @@ function createWindow() {
       enableRemoteModule: true,
       backgroundThrottling: true, // Throttle background renderers to save CPU
     },
-    icon: path.join(__dirname, "markdown_viewer_icon.png"),
+    icon: path.join(__dirname, "app-icon.png"),
   });
 
   // The main window runs with nodeIntegration: true, so a navigation away from
@@ -1320,7 +1320,7 @@ ipcMain.on("open-mermaid-popup", (event, data) => {
     autoHideMenuBar: true,
     webPreferences: popupWebPreferences("mermaid"),
     title: "Mermaid Diagram - Zoom with mouse wheel, Pan by dragging",
-    icon: path.join(__dirname, "markdown_viewer_icon.png"),
+    icon: path.join(__dirname, "app-icon.png"),
   });
 
   registerPopup(popupWindow, "mermaid");
@@ -1684,7 +1684,7 @@ ipcMain.on("open-image-popup", (event, data) => {
     autoHideMenuBar: true,
     webPreferences: popupWebPreferences("image"),
     title,
-    icon: path.join(__dirname, "markdown_viewer_icon.png"),
+    icon: path.join(__dirname, "app-icon.png"),
   });
 
   registerPopup(popupWindow, "image");
@@ -1996,7 +1996,7 @@ ipcMain.on("open-table-popup", (event, data) => {
       contextIsolation: true,
     },
     title: "Interactive Table - Sort, Filter, Export",
-    icon: path.join(__dirname, "markdown_viewer_icon.png"),
+    icon: path.join(__dirname, "app-icon.png"),
   });
 
   registerPopup(popupWindow, "table");
@@ -2474,7 +2474,7 @@ if (!gotTheLock) {
     // Set dock icon on macOS (applies in dev mode where the .icns bundle isn't used)
     if (process.platform === "darwin" && app.dock) {
       try {
-        app.dock.setIcon(path.join(__dirname, "markdown_viewer_icon.png"));
+        app.dock.setIcon(path.join(__dirname, "app-icon.png"));
       } catch (e) {
         // Non-fatal: window still opens even if icon file is missing
       }

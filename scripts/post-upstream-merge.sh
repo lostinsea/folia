@@ -97,7 +97,7 @@ check_build_file "custom-styles.css"
 check_build_file "custom-tabs.js"
 check_build_file "custom-performance.js"
 check_build_file "custom-theme.js"
-check_build_file "markdown_viewer_icon.png"
+check_build_file "app-icon.png"
 
 if [ "$MISSING_BUILD" -eq 1 ]; then
   echo ""
@@ -146,19 +146,19 @@ else
   echo "     → Set title: 'Markdown Viewer' in new BrowserWindow()"
 fi
 
-if grep -q "markdown_viewer_icon" "$ROOT/main.js"; then
-  echo "   ✓ BrowserWindow / dock icon uses markdown_viewer_icon.png"
+if grep -q "app-icon" "$ROOT/main.js"; then
+  echo "   ✓ BrowserWindow / dock icon uses app-icon.png"
 else
-  echo "   ✗ WRONG ICON in main.js: icon references should use 'markdown_viewer_icon.png'"
-  echo "     → Replace all 'logo.ico' with 'markdown_viewer_icon.png' in BrowserWindow options"
-  echo "     → Ensure app.dock.setIcon uses 'markdown_viewer_icon.png' (macOS dev mode)"
+  echo "   ✗ WRONG ICON in main.js: icon references should use 'app-icon.png'"
+  echo "     → Replace all 'logo.ico' with 'app-icon.png' in BrowserWindow options"
+  echo "     → Ensure app.dock.setIcon uses 'app-icon.png' (macOS dev mode)"
 fi
 
-if grep -q "markdown_viewer_icon" "$ROOT/package.json"; then
-  echo "   ✓ package.json build icons use markdown_viewer_icon.png"
+if grep -q "app-icon" "$ROOT/package.json"; then
+  echo "   ✓ package.json build icons use app-icon.png"
 else
-  echo "   ✗ WRONG ICON in package.json: build.mac.icon and build.linux.icon should be 'markdown_viewer_icon.png'"
-  echo "     → Set mac.icon and linux.icon to 'markdown_viewer_icon.png' in the build section"
+  echo "   ✗ WRONG ICON in package.json: build.mac.icon and build.linux.icon should be 'app-icon.png'"
+  echo "     → Set mac.icon and linux.icon to 'app-icon.png' in the build section"
 fi
 
 # -----------------------------------------------------------------------------
