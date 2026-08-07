@@ -447,6 +447,39 @@ function main() {
       `build.productName=${JSON.stringify(pkg.build && pkg.build.productName)}`,
     );
 
+    // The name a USER SEES, which is a third place the product name lives and
+    // was the one left behind by the rename. index.html carried BOTH a full
+    // title and an abbreviated `.app-title-short` shown by the compact header
+    // below 780px, and the abbreviation still read "MV" - Markdown Viewer.
+    // It survived the rename because a two-letter string in markup is not
+    // something anyone greps for, which is the argument for deriving the
+    // assertion from package.json rather than hard-coding "Folia" again here:
+    // a fourth copy checked against a third copy proves only that two files
+    // agree.
+    {
+      const html = fs.readFileSync(path.join(ROOT, "index.html"), "utf8");
+      const productName = (pkg.build && pkg.build.productName) || pkg.productName;
+      const titleTag = /<title>([^<]*)<\/title>/i.exec(html);
+      const appTitle = /<span class="app-title">([^<]*)<\/span>/i.exec(html);
+      check(
+        "the window title is the product name",
+        Boolean(titleTag) && titleTag[1].trim() === productName,
+        `<title>=${titleTag && JSON.stringify(titleTag[1])} productName=${productName}`,
+      );
+      check(
+        "the visible header title is the product name",
+        Boolean(appTitle) && appTitle[1].trim() === productName,
+        `.app-title=${appTitle && JSON.stringify(appTitle[1])} productName=${productName}`,
+      );
+      // No second, abbreviated copy of the name to keep in step by hand.
+      check(
+        "the header carries no abbreviated second copy of the product name",
+        !/app-title-short/.test(html) &&
+          !/app-title-short/.test(fs.readFileSync(path.join(ROOT, "custom-styles.css"), "utf8")),
+        "app-title-short still present",
+      );
+    }
+
     // The vendor's MIT grant covers the code, not their marks. Renaming means
     // the marks are actually gone from what we ship, not merely relabelled.
     const VENDOR = /omnicore/i;

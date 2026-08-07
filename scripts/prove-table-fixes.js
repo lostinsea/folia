@@ -1427,6 +1427,26 @@ const REVERTS = [
       /the OFL ships beside the fonts it covers/,
     ],
   },
+  {
+    // The user reported this one: the app still called itself by its old name
+    // in one place. The compact header (< 780px) swapped the title for an
+    // abbreviated span reading "MV" - Markdown Viewer - which survived the
+    // rename because two letters in markup is not a string anyone greps for.
+    // Removing the abbreviation rather than translating it is what makes the
+    // class of bug go away: there is now one copy of the name in the markup,
+    // and it is checked against package.json rather than against itself.
+    id: "R140",
+    suite: "test:packaging",
+    what: "reintroduce an abbreviated second copy of the product name in the header",
+    file: path.join(ROOT, "index.html"),
+    from: '<span class="app-title">Folia</span>',
+    to: '<span class="app-title">Folia</span>\n            <span class="app-title-short">MV</span>',
+    expect: [/header carries no abbreviated second copy of the product name/],
+    mustPass: [
+      /the visible header title is the product name/,
+      /the window title is the product name/,
+    ],
+  },
 ];
 
 const only = process.argv.slice(2);

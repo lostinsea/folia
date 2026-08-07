@@ -39,15 +39,13 @@ div.container div.header,
   vertical-align: middle;
 }
 
-/* Short title shown only in compact mode */
-.app-title-short {
-  display: none;
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--text-primary);
-  white-space: nowrap;
-  margin-left: 8px;
-}
+/* No abbreviated variant. The compact header used to swap "Folia" for a short
+   form, which was inherited as the literal string "MV" - an abbreviation of the
+   product's OLD name that survived the rename because it was two letters in a
+   stylesheet rather than a word anyone would grep for. "Folia" measures 44px
+   against the short form's 22px, so the abbreviation was buying 22 horizontal
+   pixels in return for carrying a second copy of the product name that has to
+   be kept in step with the first by discipline alone. */
 
 /* Ensure logo link is flex so logo + title align inline */
 #logoLink {
@@ -125,12 +123,8 @@ div.container div.header,
 /* ============================================
    CUSTOM: Responsive compact mode (< 780px)
    ============================================ */
-body.compact-header .app-title {
-  display: none !important;
-}
-body.compact-header .app-title-short {
-  display: inline !important;
-}
+/* The app title needs no compact-mode treatment: "Folia" is 44px wide, which
+   fits at every width the compact header targets. */
 /* Hide text labels from File / View / Tools buttons */
 body.compact-header .btn span[data-i18n] {
   display: none !important;
