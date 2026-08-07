@@ -391,7 +391,6 @@ function main() {
     const wantMajor = (declared.match(/(\d+)/) || [])[1];
     const readme = read("README.md");
     const claims = [
-      ["shields.io badge", /badge\/Electron-(\d+)/],
       ["what-changed summary", /Electron upgraded to (\d+)/],
       ["tech-stack table row", /\|\s*Electron\s*\|\s*(\d+)/],
       ["install-notes prose", /Electron (\d+) downloads its binary lazily/],
@@ -569,6 +568,28 @@ function main() {
         "README images are embedded, so they still load when the app opens it",
         relativeImgs.length === 0,
         relativeImgs.join(" | "),
+      );
+
+      // MEASURED on the real open path, and the reason the shields.io badges
+      // were dropped: all three loaded over the network (naturalWidth 210, 78
+      // and 90). `img-src` deliberately permits `https:` - SECURITY-AUDIT.md
+      // records that as a considered trade, because remote images in markdown
+      // are a real feature - so the CSP does not stop them and was never meant
+      // to. The problem is not the directive, it is that the app's OWN bundled
+      // documentation was exercising it: opening the README sent a request to
+      // a third party every time, which is a read receipt issued by a file
+      // whose opening paragraph promises the app works entirely offline.
+      // Anything genuinely remote in a user's own document is still their
+      // business; this pins only what THIS project ships.
+      const remote = prose
+        .filter(([, l]) =>
+          /<img\s[^>]*src="https?:/i.test(l) ||
+          /!\[[^\]]*\]\(\s*https?:\/\//i.test(l))
+        .map(([n, l]) => `${n}: ${l.trim().slice(0, 70)}`);
+      check(
+        "the shipped README fetches no images over the network when the app opens it",
+        remote.length === 0,
+        remote.join(" | "),
       );
     }
 

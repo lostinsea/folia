@@ -1521,6 +1521,21 @@ const REVERTS = [
     to: ' alt="Folia" height="100">\n  <img src="logo.png" alt="Folia">',
     expect: [/README images are embedded/],
   },
+  {
+    // The one defect here that is invisible BOTH on GitHub and in the test
+    // output of every other suite: a shields.io badge renders perfectly on the
+    // web and passes every assertion about branding, wording and versions,
+    // while making the app phone a third party each time it opens its own
+    // documentation. It was found by driving the real open path and measuring
+    // naturalWidth, not by reading the file.
+    id: "R145",
+    suite: "test:packaging",
+    what: "put a remote badge back into the README the app itself opens",
+    file: path.join(ROOT, "README.md"),
+    from: "# Folia\n",
+    to: "# Folia\n\n![License](https://img.shields.io/badge/license-MIT-green)\n",
+    expect: [/fetches no images over the network/],
+  },
 ];
 
 const only = process.argv.slice(2);
