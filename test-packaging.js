@@ -1157,6 +1157,82 @@ function main() {
           }
         }
 
+        // An SPDX `AND` is not an offer to choose from, it is two obligations
+        // at once - so the election machinery above is not just inapplicable
+        // here, it would be actively wrong. This is driven off the SPDX
+        // expression rather than off a list of package names, so a future
+        // conjunctive dependency is caught without anyone remembering that
+        // conjunctive licences exist as a category.
+        const conjunctive = [];
+        {
+          const re = /\n### ([^\s]+) [^\n]*\n([\s\S]*?)(?=\n### |$)/g;
+          let m;
+          while ((m = re.exec(regenerated)) !== null) {
+            if (/^- Licence: [^\n]*\sAND\s/m.test(m[2])) {
+              conjunctive.push({ name: m[1], entry: m[2] });
+            }
+          }
+        }
+        check(
+          "the tree still contains the conjunctively-licensed package these assertions are about",
+          conjunctive.some((c) => c.name === "pako"),
+          `conjunctive entries found: ${conjunctive.map((c) => c.name).join(", ") || "none"}`,
+        );
+        for (const c of conjunctive) {
+          check(
+            `${c.name} does not claim an election it cannot make`,
+            !/elects \*\*/.test(c.entry),
+          );
+          check(
+            `${c.name} says plainly that every limb applies`,
+            /No election is made or possible/.test(c.entry),
+          );
+          // The substantive check: not "is there a second block" but "are the
+          // second licence's OWN operative clauses present". Zlib's clause 1
+          // and clause 3 appear in no other licence family in this tree, so
+          // this cannot be satisfied by the MIT text already there.
+          check(
+            `${c.name} reproduces the operative terms of every limb, not just the first`,
+            /origin of this software must not be misrepresented/i.test(c.entry) &&
+              /may not be removed or altered/i.test(c.entry),
+            c.entry.slice(0, 200),
+          );
+          check(
+            `${c.name} states which part of the package the additional terms cover`,
+            /Additional terms for `[^`]+`/.test(c.entry),
+          );
+        }
+
+        // Sensitivity probe. The guard's whole justification is that a missing
+        // limb is INVISIBLE in the output - the entry still names the full
+        // expression and still reproduces a real licence - so the guard must be
+        // shown to fire rather than assumed to. Driving it with a synthetic
+        // component is deliberate: waiting for a real conjunctive package to
+        // lose its extra block would make this assertion permanently vacuous.
+        let guardFired = false;
+        try {
+          gen.assertConjunctiveCovered([
+            { name: "pako", version: "0.0.0", spdx: "(MIT AND Zlib)", extraLicences: [] },
+          ]);
+        } catch (err) {
+          guardFired = /Conjunctive/.test(err.message);
+        }
+        check(
+          "the conjunctive-licence guard really rejects an entry that drops a limb",
+          guardFired,
+        );
+        // ...and does not fire on a licence that merely contains the letters
+        // AND, which would make it noise that gets disabled.
+        let falsePositive = false;
+        try {
+          gen.assertConjunctiveCovered([
+            { name: "standard", version: "1.0.0", spdx: "MIT", extraLicences: [] },
+          ]);
+        } catch {
+          falsePositive = true;
+        }
+        check("the conjunctive-licence guard does not fire on single licences", !falsePositive);
+
         // core.autocrlf=true is set on this repo and LICENSE is already
         // `i/lf w/crlf`. If the notices file were not pinned to LF in
         // .gitattributes, a fresh clone would hold CRLF while the generator

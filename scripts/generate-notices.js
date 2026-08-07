@@ -177,6 +177,42 @@ const DUAL_ELECTION = {
   },
 };
 
+// An SPDX `AND` is the exact opposite of an `OR`: nothing is elected, BOTH
+// licences apply at once, and both sets of terms have to be discharged. The
+// election machinery below is therefore not merely inapplicable here - reusing
+// it would be actively wrong, because it would pick one limb and drop the
+// other. Missing the second limb is invisible in the output (the entry looks
+// complete: it names the full expression and reproduces a real licence), which
+// is why `assertConjunctiveCovered` exists rather than a comment saying "don't
+// forget".
+//
+// Keyed by package name, because the SCOPE of the second licence is a fact
+// about the package's own layout, not about the expression. pako's own README
+// states the split ("MIT - all files, except /lib/zlib folder" / "ZLIB -
+// /lib/zlib content"), and lib/zlib/README is the package's self-contained
+// statement of those scoped terms - it names the folder it covers, names the
+// copyright holders, and reproduces the whole Zlib licence. Reproducing that
+// file verbatim keeps this block in the same provenance class as every other
+// licence block in this file: copied from the package, not reconstructed.
+const CONJUNCTIVE = {
+  pako: {
+    spdx: "(MIT AND Zlib)",
+    extra: [
+      {
+        rel: "lib/zlib/README",
+        spdx: "Zlib",
+        covers: "lib/zlib/",
+        why:
+          "pako's own README states the split: MIT covers every file except " +
+          "`lib/zlib/`, and the Zlib licence covers `lib/zlib/` content. The " +
+          "`AND` in the SPDX expression means both apply - neither is an " +
+          "alternative the redistributor may elect between - so the Zlib " +
+          "terms are reproduced here alongside the MIT text above.",
+      },
+    ],
+  },
+};
+
 function readLicenseText(dir, prefer) {
   let entries;
   try {
@@ -386,6 +422,32 @@ function productionPackages() {
   return out;
 }
 
+// The whole point of the CONJUNCTIVE table is that omitting a limb is INVISIBLE
+// in the rendered output, so the table cannot be trusted to be complete just
+// because the file looks right. This walks the finished component list and
+// refuses to emit notices in which any `AND` expression is unaccounted for.
+// It is deliberately driven by the SPDX expression rather than by the table:
+// a future dependency arriving with a conjunctive licence trips it without
+// anyone remembering that conjunctive licences are a category.
+function assertConjunctiveCovered(components) {
+  const missing = [];
+  for (const c of components) {
+    if (!c.spdx || !/\sAND\s/i.test(c.spdx)) continue;
+    const entry = CONJUNCTIVE[c.name];
+    if (!entry || entry.spdx !== c.spdx || !c.extraLicences || !c.extraLicences.length) {
+      missing.push(`${c.name}@${c.version} declares ${c.spdx}`);
+    }
+  }
+  if (missing.length) {
+    throw new Error(
+      "Conjunctive (AND) licences must reproduce EVERY limb, not one of them:\n  " +
+        missing.join("\n  ") +
+        "\nAdd the package to CONJUNCTIVE in scripts/generate-notices.js, " +
+        "pointing at the file in which it states the additional terms.",
+    );
+  }
+}
+
 function collect() {
   const byKey = new Map();
   for (const { dir, optional } of productionPackages()) {
@@ -433,6 +495,20 @@ function collect() {
       }
     }
     const notice = readNoticeText(dir);
+    const conj = CONJUNCTIVE[pj.name];
+    const extraLicences = [];
+    if (conj && conj.spdx === spdx) {
+      for (const e of conj.extra) {
+        const abs = path.join(dir, e.rel);
+        // Read strictly: a missing or empty file here means the package has
+        // been restructured upstream and the scoped terms are no longer where
+        // they were, which must stop the build rather than silently drop the
+        // limb that assertConjunctiveCovered is about to look for.
+        const text = fs.readFileSync(abs, "utf8").replace(/\r\n/g, "\n").trim();
+        if (!text) throw new Error(`${pj.name}: ${e.rel} is empty`);
+        extraLicences.push({ file: e.rel, text, spdx: e.spdx, covers: e.covers, why: e.why });
+      }
+    }
     byKey.set(key, {
       name: pj.name,
       version: pj.version,
@@ -449,6 +525,7 @@ function collect() {
       licenseCanonical: canonical,
       noticeFile: notice ? notice.file : null,
       noticeText: notice ? notice.text : null,
+      extraLicences,
       note: null,
     });
   }
@@ -546,6 +623,16 @@ function render(components) {
           `relied on. ${e.why}`,
       );
     }
+    // Said on the entry, and phrased as the opposite of the election line
+    // above, because the two expressions look alike and mean opposite things.
+    // A reader who sees "(MIT AND Zlib)" next to entries reading "Folia elects
+    // MIT" would otherwise reasonably assume the same thing happened here.
+    if (c.extraLicences && c.extraLicences.length) {
+      lines.push(
+        `- Conjunctively licensed. **No election is made or possible**: every ` +
+          `licence named above applies at once, and each is reproduced below.`,
+      );
+    }
     lines.push("");
     if (c.licenseText) {
       if (c.licenseFromReadme) {
@@ -589,6 +676,21 @@ function render(components) {
           "its `package.json` is reproduced above._",
       );
     }
+    // Rendered as its own labelled block per limb rather than concatenated
+    // into the main text, so it is visible which terms cover which part of the
+    // package. `covers` is the package's own statement of scope, not an
+    // inference drawn here.
+    for (const e of c.extraLicences || []) {
+      lines.push("");
+      lines.push(
+        `Additional terms for \`${e.covers}\` (${e.spdx}), reproduced from the ` +
+          `package's own \`${e.file}\`. ${e.why}`,
+      );
+      lines.push("");
+      lines.push("```");
+      lines.push(e.text);
+      lines.push("```");
+    }
     if (c.noticeText) {
       // Apache-2.0 section 4(d): the NOTICE file's attribution text must be
       // reproduced in derivative works. It is a separate obligation from
@@ -609,7 +711,9 @@ function render(components) {
 }
 
 function build() {
-  return render(collect());
+  const components = collect();
+  assertConjunctiveCovered(components);
+  return render(components);
 }
 
 function main() {
@@ -631,7 +735,9 @@ module.exports = {
   readNoticeText,
   readLicenseFromReadme,
   spdxFromReadme,
+  assertConjunctiveCovered,
   CANONICAL,
+  CONJUNCTIVE,
   LICENCE_BODY_RE,
 };
 

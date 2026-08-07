@@ -1447,6 +1447,47 @@ const REVERTS = [
       /the window title is the product name/,
     ],
   },
+  {
+    // The pako defect this defends was NOT that a licence was missing from the
+    // tree - pako's MIT text was reproduced correctly all along, and the entry
+    // read as complete. `(MIT AND Zlib)` was silently treated as if it were one
+    // of the `OR` expressions, so the second, equally binding limb was dropped.
+    // Neutralising the CONJUNCTIVE table restores exactly that state, which is
+    // why the assertion this is aimed at looks for Zlib's OWN operative clauses
+    // rather than for the presence of a second block: a block could be there
+    // and still say the wrong thing.
+    //
+    // The generator's own guard throws when it sees this state, so the reverted
+    // run fails at generation. That is the intended behaviour and the reason
+    // `the notices generator runs` is NOT in mustPass - a fail-loud generator
+    // is the fix, not collateral damage.
+    id: "R141",
+    suite: "test:packaging",
+    what: "treat a conjunctive (AND) licence as if one limb were enough",
+    file: path.join(ROOT, "scripts", "generate-notices.js"),
+    from: "const CONJUNCTIVE = {\n  pako: {",
+    to: "const CONJUNCTIVE = {\n  __disabled_pako: {",
+    expect: [/the notices generator runs/],
+  },
+  {
+    // R141 and R142 are deliberately NOT the same proof, and the split is the
+    // point. R141 shows the GUARD is load-bearing: drop the table and the
+    // generator refuses to emit at all. R142 shows the guard is not SUFFICIENT:
+    // `collect()` still populates `extraLicences`, so the guard is satisfied
+    // and the generator runs happily - while the rendered notices silently lose
+    // the Zlib text. That second state is the dangerous one, because it is the
+    // one that looks fine, and only an assertion on the reproduced TEXT catches
+    // it. Without this entry, a refactor of `render()` could re-open the
+    // original defect with every guard still green.
+    id: "R142",
+    suite: "test:packaging",
+    what: "collect a conjunctive licence's extra terms but never render them",
+    file: path.join(ROOT, "scripts", "generate-notices.js"),
+    from: "for (const e of c.extraLicences || []) {",
+    to: "for (const e of []) {",
+    expect: [/reproduces the operative terms of every limb/],
+    mustPass: [/the notices generator runs/],
+  },
 ];
 
 const only = process.argv.slice(2);
