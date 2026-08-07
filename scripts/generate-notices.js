@@ -402,6 +402,89 @@ function spdxFromReadme(dir) {
   return m ? m[1].toUpperCase().replace("APACHE-2.0", "Apache-2.0") : null;
 }
 
+// Packages whose CODE ships, but which a walk of the production dependency
+// tree cannot see, because they are vendored into libs/ rather than loaded
+// from node_modules at runtime.
+//
+// They are declared as devDependencies on purpose: node_modules/mermaid alone
+// is 79 MB, and `build.files` ships `node_modules/**/*`, so keeping them in
+// `dependencies` put ~130 MB of packages into the installer that nothing ever
+// required. What ships instead is scripts/vendor-libs.js's output - and it is
+// the same code, so the licence obligation is identical. Only its route into
+// the distribution changed.
+//
+// The transitive closure matters as much as the roots: mermaid.min.js is a
+// BUNDLE with d3, cytoscape, katex and dagre inlined into it. Those packages
+// have no directory in the installer at all, yet their code is unmistakably
+// present in the 3.5 MB file that does ship, and their licences require the
+// same notice as if they had.
+//
+// Erring towards over-inclusion here is deliberate. A bundler may tree-shake a
+// dependency out, so this set can name a package whose code did not survive
+// into the bundle. Reproducing a notice for something that turned out not to
+// ship is harmless; omitting one for something that did is the actual breach.
+const VENDORED_ROOTS = [
+  // scripts/vendor-libs.js LIBS - copied into libs/vendor/ at postinstall.
+  "marked",
+  "mermaid",
+  "dompurify",
+  // Committed under libs/prismjs/ rather than copied, so vendor-libs.js does
+  // not name it either. index.html loads libs/prismjs/prism-bundle.js.
+  "prismjs",
+];
+
+// Resolve `name` as required FROM the package at lockfile key `fromKey`, using
+// npm's actual lookup order: the nearest node_modules going up the path. The
+// lockfile is flat, so a naive `node_modules/<name>` lookup silently misses
+// every nested (version-conflicting) copy.
+function resolveLockKey(packages, fromKey, name) {
+  const segments = fromKey === "" ? [] : fromKey.split("/node_modules/");
+  for (let i = segments.length; i >= 0; i--) {
+    const prefix = segments.slice(0, i).join("/node_modules/");
+    const key = (prefix ? prefix + "/node_modules/" : "node_modules/") + name;
+    if (packages[key]) return key;
+  }
+  return null;
+}
+
+// Every lockfile entry reachable from `roots`, following runtime dependencies
+// only. optionalDependencies are included (they are installed and therefore
+// bundled when present); devDependencies of a dependency are not installed by
+// npm at all, so they cannot be in any bundle.
+function lockfileClosure(packages, roots) {
+  const seen = new Set();
+  const queue = [];
+  for (const r of roots) {
+    const key = resolveLockKey(packages, "", r);
+    if (!key) {
+      throw new Error(
+        `generate-notices: vendored package "${r}" is not in package-lock.json. ` +
+          "It ships inside libs/, so its licence must be reproduced - fix the " +
+          "name or remove it from VENDORED_ROOTS rather than losing the notice.",
+      );
+    }
+    queue.push(key);
+  }
+  while (queue.length) {
+    const key = queue.shift();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const meta = packages[key] || {};
+    const deps = Object.assign(
+      {},
+      meta.dependencies,
+      meta.optionalDependencies,
+      meta.peerDependencies,
+    );
+    for (const name of Object.keys(deps)) {
+      const next = resolveLockKey(packages, key, name);
+      // A peerDependency that nothing installed simply is not there to bundle.
+      if (next && !seen.has(next)) queue.push(next);
+    }
+  }
+  return seen;
+}
+
 // The set of packages that actually ships is the one `npm ci` installs, which
 // is exactly package-lock.json's non-dev tree - and it is what electron-builder
 // prunes to. Reading it directly rather than shelling out to `npm ls` fixes a
@@ -411,15 +494,39 @@ function spdxFromReadme(dir) {
 // `extraneous` and which is demonstrably absent from the built app.asar. The
 // notices were therefore describing the workstation rather than the product,
 // and would differ between developers.
+//
+// Plus the vendored closure above, which ships as bundled files rather than as
+// packages and which no dependency-tree walk can reach.
 function productionPackages() {
   const lock = JSON.parse(fs.readFileSync(path.join(ROOT, "package-lock.json"), "utf8"));
+  const packages = lock.packages || {};
+  const vendored = lockfileClosure(packages, VENDORED_ROOTS);
   const out = [];
-  for (const [key, meta] of Object.entries(lock.packages || {})) {
+  for (const [key, meta] of Object.entries(packages)) {
     if (!key.startsWith("node_modules/")) continue;
-    if (meta.dev || meta.devOptional) continue;
+    if ((meta.dev || meta.devOptional) && !vendored.has(key)) continue;
     out.push({ dir: path.join(ROOT, key), optional: Boolean(meta.optional) });
   }
   return out;
+}
+
+// The names in the vendored closure, for the packaging suite: these ship
+// inside a bundled file, so they legitimately have no directory in the asar
+// and must not be reported as documented-but-not-shipped.
+//
+// Names only, deliberately. A version-level view of this closure looks like a
+// stronger contract but cannot be used to POLICE the closure, because it is
+// derived from the same resolveLockKey() walk it would be checking: reverting
+// that walk moves the expectation and the output together and the check passes
+// while documenting the wrong version. test-packaging.js therefore reads
+// nested lockfile keys structurally for that job.
+function vendoredPackageNames() {
+  const lock = JSON.parse(fs.readFileSync(path.join(ROOT, "package-lock.json"), "utf8"));
+  return new Set(
+    [...lockfileClosure(lock.packages || {}, VENDORED_ROOTS)].map((k) =>
+      k.slice(k.lastIndexOf("node_modules/") + "node_modules/".length),
+    ),
+  );
 }
 
 // The whole point of the CONJUNCTIVE table is that omitting a limb is INVISIBLE
@@ -736,9 +843,11 @@ module.exports = {
   readLicenseFromReadme,
   spdxFromReadme,
   assertConjunctiveCovered,
+  vendoredPackageNames,
   CANONICAL,
   CONJUNCTIVE,
   LICENCE_BODY_RE,
+  VENDORED_ROOTS,
 };
 
 if (require.main === module) main();

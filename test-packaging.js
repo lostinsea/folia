@@ -21,6 +21,22 @@ const os = require("os");
 const ROOT = __dirname;
 let pass = 0;
 let fail = 0;
+const skipped = [];
+
+// A conditional block that quietly does nothing leaves no trace in the output
+// and simply lowers the assertion count, which is indistinguishable from an
+// assertion never having existed. Measured: touching package-lock.json after a
+// build silently removed the two asar oracles below and the suite still
+// reported "0 failed". Skips are therefore announced and counted.
+//
+// Announcing is enough for a developer reading the output, but not for CI,
+// where nobody reads it. PACKAGING_STRICT=1 turns any skip into a failure, so
+// a release job can require that the oracles actually RAN rather than merely
+// that nothing failed.
+function skip(name, reason) {
+  skipped.push(name);
+  console.log(`  SKIP  ${name}${reason ? " - " + reason : ""}`);
+}
 
 function check(name, ok, detail) {
   if (ok) {
@@ -34,6 +50,22 @@ function check(name, ok, detail) {
 
 function read(rel) {
   return fs.readFileSync(path.join(ROOT, rel), "utf8");
+}
+
+// The component names in a notices document, one place rather than three.
+// The trailing token is stripped only when it is VERSION-SHAPED. A blanket
+// `/ [^ ]+$/` looks equivalent on today's data but is not: "### Fira Code"
+// carries no version, so it was being truncated to "Fira" - which is why the
+// vendored-file allowlist below used to have to name the half-word "Fira" to
+// match. Any future version-less entry ("Noto Sans", "Source Sans") would have
+// hit the same trap, and the failure mode is a MISSING licence notice going
+// unnoticed, which is the one outcome this file exists to prevent.
+function documentedNames(notices) {
+  return new Set(
+    (notices.match(/^### .+$/gm) || []).map((h) =>
+      h.replace(/^### /, "").replace(/ \d[^ ]*$/, ""),
+    ),
+  );
 }
 
 // electron-builder uses glob semantics; only the small subset this manifest
@@ -1142,6 +1174,128 @@ function main() {
           );
         }
 
+        // COMPLIANCE, and the gap that let a 130 MB packaging win silently
+        // become a licence breach. Moving marked/mermaid/dompurify/prismjs to
+        // devDependencies removed them from the lockfile's non-dev tree, and
+        // the generator derived its package set from exactly that - so the
+        // notices lost them while their code went on shipping inside
+        // libs/vendor/*.js and libs/prismjs/. Nothing failed. The oracle here
+        // is deliberately INDEPENDENT of the generator's own VENDORED_ROOTS:
+        // it reads the LIBS table out of scripts/vendor-libs.js (the thing
+        // that actually performs the vendoring) plus the committed libs/
+        // subdirectories, so vendoring a new library without documenting it
+        // fails rather than passing by omission.
+        const vendorSrc = read("scripts/vendor-libs.js");
+        const libsTable = /const LIBS = \[([\s\S]*?)\];/.exec(vendorSrc);
+        const vendoredHere = new Set();
+        if (libsTable) {
+          for (const m of libsTable[1].matchAll(/\[\s*"([^"]+)"/g)) {
+            vendoredHere.add(m[1]);
+          }
+        }
+        // libs/prismjs and libs/tabulator are COMMITTED rather than produced by
+        // vendor-libs.js, so the LIBS table cannot see them. EVERY committed
+        // libs/ subdirectory counts: requiring a matching node_modules/<name>
+        // (as this first did) quietly excused exactly the case that needs
+        // policing most - Tabulator is not an npm dependency at all, so it was
+        // covered only by the "committed file is not stale" assertion, which
+        // anyone could satisfy by deleting its EXTRA entry and regenerating.
+        const libsDir = path.join(ROOT, "libs");
+        if (fs.existsSync(libsDir)) {
+          for (const e of fs.readdirSync(libsDir, { withFileTypes: true })) {
+            if (!e.isDirectory() || e.name === "vendor") continue;
+            vendoredHere.add(e.name);
+          }
+        }
+        check(
+          "the vendoring oracle found the libraries it is meant to police",
+          vendoredHere.size >= 4,
+          `found ${vendoredHere.size}: ${[...vendoredHere].join(", ")} - the LIBS table or libs/ layout moved, so this check stopped checking`,
+        );        // A cardinality check alone would be satisfied by any four names. These
+
+        // The root set every vendored-library oracle below scopes itself by.
+        // It is the UNION of the structurally discovered set and the
+        // generator's own list, never the generator's list alone. Both review
+        // models independently found the same residual hole: an oracle scoped
+        // by gen.VENDORED_ROOTS silently stops looking at a root the moment
+        // that list loses it, so a coordinated edit - drop "marked" from
+        // VENDORED_ROOTS and move it back to dependencies - would restore the
+        // double-shipping this whole item exists to remove while every
+        // assertion here stayed green. Unioning makes the scope monotonic:
+        // shrinking VENDORED_ROOTS can never shrink what gets checked.
+        const vendoredRootNames = new Set([...vendoredHere, ...gen.VENDORED_ROOTS]);
+        // A cardinality check alone would be satisfied by any four names. These
+        // are the four whose code is known to ship, so name them: drift that
+        // swaps one for another has to be noticed rather than counted.
+        const missingRoots = ["marked", "mermaid", "dompurify", "prismjs"].filter(
+          (n) => !vendoredHere.has(n),
+        );
+        check(
+          "the vendoring oracle is policing the libraries that actually ship",
+          missingRoots.length === 0,
+          `${missingRoots.join(", ")} not discovered - if a library really was dropped, remove it from libs/ and from the generator too`,
+        );
+        // Directory names are lower case ("libs/tabulator") while the notice
+        // heading is the project's own capitalisation ("Tabulator 6.2.5"), so
+        // the comparison has to be case-insensitive or it reports a false
+        // breach for the one library it was just widened to cover.
+        const documentedLower = new Set([...documentedNames(regenerated)].map((n) => n.toLowerCase()));
+        const undocumentedVendored = [...vendoredHere].filter(
+          (n) => !documentedLower.has(n.toLowerCase()),
+        );
+        check(
+          "every library vendored into libs/ has a notice",
+          undocumentedVendored.length === 0,
+          `${undocumentedVendored.join(", ")} - code ships inside libs/ but is documented nowhere; how it got there (npm devDependency, or committed by hand like Tabulator) does not change the obligation`,
+        );
+
+        // VERSION-level, and not merely a stricter version of the check above.
+        // mermaid bundles marked 16.4.2 while this repository's own root copy
+        // is marked 9.1.6. Both ship. If the lockfile walk ever resolved
+        // mermaid's dependency to the ROOT entry instead of the nested one -
+        // the single most plausible regression in resolveLockKey() - the
+        // notices would still contain a heading called "marked", so every
+        // name-level assertion here would stay green while the licence for the
+        // code actually inside libs/vendor/mermaid.min.js went missing.
+        //
+        // The expectation is read STRUCTURALLY out of the lockfile rather than
+        // from the generator's own closure. That distinction is not academic:
+        // this assertion was first written against gen.vendoredPackages() and
+        // was CIRCULAR - reverting resolveLockKey() to a root-only lookup moved
+        // the expectation and the output together, and the assertion passed
+        // while documenting the wrong version. A nested lockfile key IS a
+        // private copy belonging to its parent by construction, so no
+        // resolution logic is needed to know it must be documented.
+        //
+        // Assumes vendored roots are unscoped and unaliased: a scoped root
+        // (@scope/name) would need `node_modules/@scope/name/node_modules/`,
+        // and an `npm:` alias would make the folder name differ from the
+        // package name the heading is written from. Neither shape exists here.
+        const lockPkgs = JSON.parse(read("package-lock.json")).packages || {};
+        const nestedUnderVendored = Object.keys(lockPkgs).filter((k) =>
+          [...vendoredRootNames].some((r) => k.includes(`node_modules/${r}/node_modules/`)),
+        );
+        check(
+          "the duplicate-version oracle found the nested copies it exists to police",
+          nestedUnderVendored.length > 0,
+          "no vendored root has a private nested dependency in the lockfile - this check is no longer checking anything",
+        );
+        const headings = new Set((regenerated.match(/^### .+$/gm) || []).map((h) => h.slice(4)));
+        const missingVersions = nestedUnderVendored
+          .map((k) => ({
+            name: k.slice(k.lastIndexOf("node_modules/") + "node_modules/".length),
+            version: (lockPkgs[k] || {}).version,
+          }))
+          .filter((p) => p.version && !headings.has(`${p.name} ${p.version}`));
+        check(
+          "every bundled version is documented, including duplicate versions of the same package",
+          missingVersions.length === 0,
+          `${missingVersions.length} missing: ${missingVersions
+            .slice(0, 8)
+            .map((p) => `${p.name}@${p.version}`)
+            .join(", ")} - a nested lockfile entry is a private copy bundled into its parent, so the parent's bundle contains THAT version`,
+        );
+
         // THE INDEPENDENT ORACLE: what electron-builder actually put in the
         // asar. Not derived from package.json or package-lock.json at all, so
         // it is the only check here that can catch the generator and its input
@@ -1161,28 +1315,63 @@ function main() {
           fs.statSync(asarPath).mtimeMs >= fs.statSync(lockPath).mtimeMs;
         if (asarFresh) {
           let shipped = null;
+          let shippedFiles = null;
+          let asarErr = null;
           try {
             const asar = require("@electron/asar");
             shipped = new Set();
+            shippedFiles = new Set();
             for (const f of asar.listPackage(asarPath)) {
-              const m = /^.*\/node_modules\/(@[^/]+\/[^/]+|[^/]+)\/package\.json$/.exec(
-                f.replace(/\\/g, "/"),
-              );
+              const norm = f.replace(/\\/g, "/");
+              shippedFiles.add(norm);
+              const m = /^.*\/node_modules\/(@[^/]+\/[^/]+|[^/]+)\/package\.json$/.exec(norm);
               if (m) shipped.add(m[1]);
             }
-          } catch {
+          } catch (e) {
+            asarErr = e;
             shipped = null;
+            shippedFiles = null;
+          }
+          // A build exists and is fresh, so these oracles are OWED. Letting a
+          // failure to read it fall through to `if (shipped)` would delete the
+          // only assertions that inspect the actual artefact, with neither a
+          // FAIL nor a SKIP - the same silent disappearance the skip()
+          // mechanism was added to end, just via a different door.
+          check(
+            "the built app.asar can be inspected",
+            shippedFiles !== null && shipped.size > 0,
+            asarErr
+              ? `@electron/asar threw: ${asarErr.message}`
+              : "archive read but no node_modules package.json found in it",
+          );
+          if (shippedFiles) {
+            // build.files states the INTENT to package libs/; this is the FACT
+            // that it happened. The distinction stopped being academic when
+            // marked/mermaid/dompurify/prismjs moved to devDependencies: from
+            // that point libs/ is the ONLY copy of those libraries in the
+            // installer, so a globbing change that dropped it would take the
+            // renderer's syntax highlighting and every diagram with it, and
+            // the two existing "in build.files" assertions would still pass.
+            for (const rel of [
+              "libs/vendor/marked.min.js",
+              "libs/vendor/mermaid.min.js",
+              "libs/vendor/purify.min.js",
+              "libs/prismjs/components/prism-core.min.js",
+            ]) {
+              check(
+                `${rel} is really inside the built app.asar`,
+                shippedFiles.has("/" + rel),
+                "declared in build.files but absent from the archive - this is now the only copy that ships",
+              );
+            }
           }
           if (shipped && shipped.size > 0) {
+            const vendoredClosure = gen.vendoredPackageNames();
             // Names only. Reading each package.json out of the asar to compare
             // versions would be stronger still, but the failure this guards
             // against - a package shipping with no notice at all - is a name
             // level fact, and the staleness check above pins the versions.
-            const documented = new Set(
-              (regenerated.match(/^### .+$/gm) || []).map((h) =>
-                h.replace(/^### /, "").replace(/ [^ ]+$/, ""),
-              ),
-            );
+            const documented = documentedNames(regenerated);
             const undocumented = [...shipped].filter((n) => !documented.has(n));
             check(
               "every package inside the built app.asar has a notice",
@@ -1196,8 +1385,15 @@ function main() {
             // developer's workstation rather than the product, and two
             // developers would produce different files from the same commit.
             // Tabulator and Fira Code are vendored files rather than packages,
-            // so they are legitimately absent from node_modules.
-            const VENDORED = new Set(["Tabulator", "Fira"]);
+            // so they are legitimately absent from node_modules. ("Fira Code"
+            // in full now - it used to be spelled "Fira" here only because the
+            // name parser truncated version-less headings.) So is the whole
+            // marked/mermaid/dompurify/prismjs closure: that code ships
+            // pre-bundled under libs/, which is why it is a devDependency and
+            // why it has no directory in the asar. The exemption is taken from
+            // the generator rather than hard-coded so the two cannot drift.
+            const VENDORED = new Set(["Tabulator", "Fira Code"]);
+            for (const n of vendoredClosure) VENDORED.add(n);
             const overIncluded = [...documented].filter(
               (n) => !shipped.has(n) && !VENDORED.has(n),
             );
@@ -1206,7 +1402,65 @@ function main() {
               overIncluded.length === 0,
               `${overIncluded.length} over-included: ${overIncluded.slice(0, 8).join(", ")}`,
             );
+
+            // THE 130 MB GUARD. build.files ships `node_modules/**/*`, so
+            // every production dependency lands in the asar whether any
+            // shipped file requires it or not. Measured: marked, mermaid,
+            // dompurify and prismjs were production dependencies and
+            // contributed 130.4 MB to a 153.6 MB asar, while the renderer
+            // loaded none of them from node_modules - it loads the vendored
+            // bundles under libs/. Nothing failed, because a package that
+            // ships and is documented satisfies both oracles above; the cost
+            // was invisible to every assertion in this suite.
+            //
+            // Policed over the whole CLOSURE, not just the four roots. The
+            // roots are the obvious regression; the transitives are the likely
+            // one - d3, cytoscape, katex and dagre are already inlined into
+            // libs/vendor/mermaid.min.js, so a future production dependency
+            // that pulls any of them in ships that code TWICE while every
+            // other assertion here stays green. Measured against the current
+            // build: the closure (105 packages) and the asar's node_modules
+            // (94 packages) do not intersect at all, so this is a genuine
+            // widening rather than a rule the tree already violates.
+            //
+            // The structurally discovered roots are unioned in for the same
+            // reason as vendoredRootNames above, and the shape of the hole was
+            // MEASURED rather than taken on the reviewer's description of it.
+            // Both models proposed the same compound regression - drop a root
+            // from VENDORED_ROOTS and move it back to dependencies - using
+            // `marked` as the example. Building that exact state (asar 24.1 MB,
+            // marked back in node_modules) showed the closure-only guard
+            // catching it anyway: mermaid depends on marked, so marked stays in
+            // the closure even when it is not a root. The reviewers' conclusion
+            // was right and their example was wrong.
+            //
+            // Reachability of each root via the other three, measured:
+            //   marked    -> still reachable (via mermaid)
+            //   dompurify -> still reachable (via mermaid)
+            //   mermaid   -> NOT reachable, closure collapses 105 -> 4
+            //   prismjs   -> NOT reachable, closure 105 -> 104
+            // So for mermaid and prismjs the closure-only guard is
+            // structurally incapable of naming them, for any asar contents.
+            // That is what the union fixes. No revert entry pins it, because
+            // the two sets are disjoint in the current tree and such an entry
+            // would be permanently vacuous - the same reason R110b was deleted
+            // rather than kept.
+            const vendorDirs = [...new Set([...vendoredClosure, ...vendoredRootNames])].filter(
+              (n) => shipped.has(n),
+            );
+            check(
+              "no vendored library is also shipped as a node_modules copy",
+              vendorDirs.length === 0,
+              `${vendorDirs.join(", ")} ship twice - once under libs/ and again in node_modules; they belong in devDependencies`,
+            );
           }
+        } else {
+          skip(
+            "built app.asar oracles",
+            fs.existsSync(asarPath)
+              ? "dist build is older than package-lock.json - run `npm run build`"
+              : "no dist build present - run `npm run build`",
+          );
         }
 
         // Six shipped packages publish no licence file. Their terms live only
@@ -1227,10 +1481,18 @@ function main() {
         {
           const entries = regenerated.split(/^### /m).slice(1);
           const toothless = entries.filter((e) => !gen.LICENCE_BODY_RE.test(e));
+          // The vacuity guard used to be a hard-coded `entries.length > 200`
+          // against a real count of 220. Twenty packages of headroom made it
+          // a false failure waiting to happen, and it fired as exactly that:
+          // a run with a smaller (deliberately broken) tree reported "107
+          // entries, 0 WITHOUT" - a failure whose own diagnostic said nothing
+          // was wrong. Tied to the collected component list instead, so it
+          // measures a relationship rather than a remembered number.
+          const collected = gen.collect().length;
           check(
             "every component entry reproduces operative licence language",
-            entries.length > 200 && toothless.length === 0,
-            `${entries.length} entries, ${toothless.length} without: ${toothless
+            collected > 0 && entries.length === collected && toothless.length === 0,
+            `${collected} components collected, ${entries.length} rendered as entries, ${toothless.length} without operative language: ${toothless
               .map((e) => e.split("\n")[0])
               .slice(0, 8)
               .join(", ")}`,
@@ -1635,7 +1897,17 @@ function main() {
     );
   }
 
-  console.log(`\n=== ${pass} passed, ${fail} failed ===\n`);
+  const strict = process.env.PACKAGING_STRICT === "1";
+  if (strict && skipped.length) {
+    check(
+      "no oracle was skipped (PACKAGING_STRICT=1)",
+      false,
+      `skipped: ${skipped.join(", ")} - the release must verify the artefact, not merely fail to contradict it`,
+    );
+  }
+  console.log(
+    `\n=== ${pass} passed, ${fail} failed${skipped.length ? `, ${skipped.length} SKIPPED: ${skipped.join(", ")}` : ""} ===\n`,
+  );
   process.exit(fail === 0 ? 0 : 1);
 }
 

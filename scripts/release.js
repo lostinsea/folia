@@ -575,6 +575,21 @@ async function main() {
   // Confirm
   await confirmRelease(version);
 
+  // Licence compliance and packaging, BEFORE the version bump is committed and
+  // pushed. The notices are generated from package-lock.json, so a stale or
+  // incomplete THIRD-PARTY-NOTICES.md is invisible until something checks it -
+  // and this script previously went straight from confirmation to build, which
+  // meant a hand-driven release could publish binaries whose notices no oracle
+  // had ever consulted. Failing here costs the operator a re-run; failing to
+  // check ships a licence breach.
+  //
+  // Runs in a dry run too, like the other read-only prerequisite checks above:
+  // a dry run that reports "would release" while the notices are stale is
+  // exactly the reassurance nobody should be given.
+  logInfo('Checking packaging and licence notices...');
+  exec('npm run test:packaging', { allowInDryRun: true });
+  logSuccess('Packaging and licence notices OK');
+
   // Update version in package.json if needed
   const versionChanged = updateVersion(version);
   if (versionChanged) {
@@ -588,6 +603,31 @@ async function main() {
   } else {
     logInfo('Skipping build (--skip-build flag)');
   }
+
+  // The check above runs BEFORE the build, where the oracles that read the
+  // built app.asar have nothing to read and therefore skip() themselves. That
+  // verifies the notices against package-lock.json but says nothing about the
+  // archive that is one step away from being uploaded. PACKAGING_STRICT=1
+  // turns any skipped oracle into a failure, so this second run either
+  // inspects the real artifact or refuses to continue.
+  //
+  // It runs on the --skip-build path too, and deliberately so: those artifacts
+  // are the least verified of all, having been built at some unknown earlier
+  // point. If the version bump has since rewritten package-lock.json the asar
+  // is genuinely stale, the oracles skip, and strict mode says so.
+  //
+  // NOT allowInDryRun, unlike the pre-build check: a dry run does not build,
+  // so demanding a fresh asar there would fail on the absence of work the dry
+  // run was never going to do. Nothing is published in a dry run either.
+  //
+  // env must spread process.env - execSync replaces the child environment
+  // wholesale when `env` is given, so PATH and npm's own variables would
+  // otherwise be blanked.
+  logInfo('Verifying the built artifacts against the licence notices...');
+  exec('npm run test:packaging', {
+    env: { ...process.env, PACKAGING_STRICT: '1' }
+  });
+  logSuccess('Built artifacts match the licence notices');
 
   // Collect artifacts
   const artifacts = getArtifacts(version);

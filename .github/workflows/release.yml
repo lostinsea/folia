@@ -55,6 +55,17 @@ jobs:
         # anything that was ever tested.
         run: npm ci
 
+      # Licence compliance was enforced only by whoever remembered to run the
+      # suite locally: this workflow went straight from `npm ci` to `build`, so
+      # a release could publish binaries whose THIRD-PARTY-NOTICES.md no oracle
+      # in this repository had consulted. Run before the build, so a stale or
+      # incomplete notices file fails in seconds rather than after three
+      # platform builds. The asar oracles cannot run yet and will report SKIP,
+      # which is why the Windows leg re-runs this in strict mode after its
+      # build.
+      - name: Check packaging and licence notices
+        run: npm run test:packaging
+
       - name: Build Linux packages
         if: matrix.os == 'ubuntu-latest'
         run: npm run build-linux
@@ -66,6 +77,17 @@ jobs:
         run: npm run build-all
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Only this leg produces dist/win-unpacked, so it is the only one that can
+      # compare the notices against what electron-builder ACTUALLY archived.
+      # PACKAGING_STRICT=1 makes a skipped oracle a failure: without it a build
+      # that never produced an asar would report "0 failed" having verified
+      # nothing about the artefact being released.
+      - name: Verify the built archive against the notices
+        if: matrix.os == 'windows-latest'
+        run: npm run test:packaging
+        env:
+          PACKAGING_STRICT: '1'
 
       - name: Build macOS packages
         if: matrix.os == 'macos-latest'

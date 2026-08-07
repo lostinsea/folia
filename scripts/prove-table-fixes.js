@@ -1607,6 +1607,47 @@ const REVERTS = [
     to: "  if (false) return null;",
     expect: [/fragment-only image src is not resolved/],
   },
+  {
+    id: "R151",
+    suite: "test:packaging",
+    what: "derive the notices from the lockfile's non-dev tree alone, so code that ships pre-bundled under libs/ as a devDependency is documented nowhere",
+    file: NOTICES_GEN,
+    // Neutralise the FUNCTION rather than a line inside it, so the entry
+    // survives the body being restructured (the R53 lesson).
+    from: "function lockfileClosure(packages, roots) {",
+    to: "function lockfileClosure(packages, roots) { if (roots) return new Set();",
+    expect: [/every library vendored into libs\/ has a notice/],
+  },
+  {
+    id: "R152",
+    suite: "test:packaging",
+    // Tabulator is vendored into libs/tabulator/ and is NOT an npm dependency,
+    // so no dependency-tree walk can reach it. Before the libs/ oracle was
+    // widened, deleting this entry and regenerating simply produced a smaller
+    // notices file that every assertion accepted.
+    what: "drop the hand-written Tabulator notice, losing the licence for code that ships in libs/tabulator/",
+    file: NOTICES_GEN,
+    from: '    name: "Tabulator",',
+    to: '    name: "TabulatorDropped",',
+    expect: [/every library vendored into libs\/ has a notice/],
+  },
+  {
+    id: "R153",
+    suite: "test:packaging",
+    // The nearest-node_modules walk is what finds mermaid's OWN marked 16.4.2
+    // rather than the repository's root marked 9.1.6. Collapsed to a root-only
+    // lookup, the notices still contain a heading called "marked", so every
+    // name-level assertion stays green while the licence for the code actually
+    // bundled into libs/vendor/mermaid.min.js goes missing. Only the
+    // version-level assertion can see this.
+    what: "resolve nested dependencies against the lockfile root only, silently documenting the wrong version of a bundled package",
+    file: NOTICES_GEN,
+    from: "function resolveLockKey(packages, fromKey, name) {",
+    to: "function resolveLockKey(packages, fromKey, name) { if (name) return packages['node_modules/' + name] ? 'node_modules/' + name : null;",
+    expect: [
+      /every bundled version is documented, including duplicate versions of the same package/,
+    ],
+  },
 ];
 
 const only = process.argv.slice(2);
