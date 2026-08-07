@@ -862,7 +862,7 @@ body.dark-mode .nav-btn:hover:not(:disabled) {
    was OVERWRITTEN by .attr("class","200"). On 11.16.0 the class is APPENDED, not
    overwritten, so `.actor-line` matches and mermaid's own themeVariables.actorLineColor
    applies - measured at #404040, against the #888 the override would force.
-   Taking that hunk would therefore fight the theme, corporate mode included.
+   Taking that hunk would therefore fight the theme in both light and dark.
    REJECTION IS PINNED: test-mermaid-render.js scenario 13c, revert R108. */
 
 /* Welcome screen */
@@ -3040,24 +3040,6 @@ body.dark-mode .context-menu {
 .table-insert-preview th {
   background: var(--secondary-color);
   color: var(--primary-color);
-}
-
-/* ============================================
-   CORPORATE MODE
-   ============================================ */
-
-
-body.corporate-mode .markdown-body::after {
-  content: 'CONFIDENTIAL — OMNICORE DOCUMENT';
-  display: block;
-  margin-top: 40px;
-  padding-top: 12px;
-  border-top: 2px solid var(--primary-color);
-  font-size: 11px;
-  color: var(--text-secondary);
-  text-align: center;
-  letter-spacing: 2px;
-  font-weight: 600;
 }
 
 /* ============================================

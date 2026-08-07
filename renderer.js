@@ -521,8 +521,8 @@ const UI_STRINGS = {
     'history': 'History', 'editMode': 'Edit Mode',
     'allNotes': 'All Notes', 'noNotes': 'No notes found',
     'view': 'View', 'title.view': 'View',
-    'tools': 'Tools', 'darkMode': 'Dark Mode', 'corporateMode': 'Corporate Mode', 'fullscreen': 'Fullscreen', 'showNotes': 'Show Notes',
-    'corporateModeEnabled': 'Corporate letterhead enabled', 'corporateModeDisabled': 'Corporate letterhead disabled',
+    'tools': 'Tools', 'darkMode': 'Dark Mode', 'fullscreen': 'Fullscreen', 'showNotes': 'Show Notes',
+    
     'save': 'Save', 'reload': 'Reload', 'dismiss': 'Dismiss',
     'cancel': 'Cancel', 'find': 'Find', 'later': 'Later', 'exit': 'Exit',
     'title.open': 'Open File (Ctrl+O)', 'title.recent': 'Recent Files',
@@ -647,8 +647,8 @@ const UI_STRINGS = {
     'history': 'Geçmiş', 'editMode': 'Düzenleme Modu',
     'allNotes': 'Tüm Notlar', 'noNotes': 'Not bulunamadı',
     'view': 'Görünüm', 'title.view': 'Görünüm',
-    'tools': 'Araçlar', 'darkMode': 'Karanlık Mod', 'corporateMode': 'Kurumsal Mod', 'fullscreen': 'Tam Ekran', 'showNotes': 'Notları Göster',
-    'corporateModeEnabled': 'Kurumsal antet etkinleştirildi', 'corporateModeDisabled': 'Kurumsal antet devre dışı',
+    'tools': 'Araçlar', 'darkMode': 'Karanlık Mod', 'fullscreen': 'Tam Ekran', 'showNotes': 'Notları Göster',
+    
     'save': 'Kaydet', 'reload': 'Yenile', 'dismiss': 'Kapat',
     'cancel': 'İptal', 'find': 'Bul', 'later': 'Sonra', 'exit': 'Çıkış',
     'title.open': 'Dosya Aç (Ctrl+O)', 'title.recent': 'Son Dosyalar',
@@ -1018,26 +1018,6 @@ function historyClear() {
   redoHistory = [];
 }
 
-// ============================================
-// CORPORATE MODE
-// ============================================
-let corporateMode = false; // Always starts disabled; user must press Ctrl+Shift+O to enable
-
-function setCorporateMode(enabled) {
-  corporateMode = enabled;
-  const toggleEl = document.getElementById('corporateModeToggle');
-  if (toggleEl) toggleEl.classList.toggle('active', enabled);
-  if (enabled) {
-    document.body.classList.add('corporate-mode');
-  } else {
-    document.body.classList.remove('corporate-mode');
-  }
-}
-
-// Initialize corporate mode on startup
-if (corporateMode) {
-  document.body.classList.add('corporate-mode');
-}
 
 // File watching state
 let isFileTrackingActive = false;
@@ -1999,22 +1979,6 @@ document.addEventListener('fullscreenchange', () => {
   fullscreenToggle.classList.toggle('active', !!document.fullscreenElement);
 });
 
-// Corporate Mode toggle handler
-const corporateModeToggle = document.getElementById('corporateModeToggle');
-if (corporateModeToggle) {
-  corporateModeToggle.classList.toggle('active', corporateMode);
-  corporateModeToggle.addEventListener('click', (e) => {
-    e.stopPropagation();
-    setCorporateMode(!corporateMode);
-  });
-}
-
-// Listen for Ctrl+Shift+O from main process
-ipcRenderer.on('toggle-corporate-mode', () => {
-  setCorporateMode(!corporateMode);
-  showNotification(i18n(corporateMode ? 'corporateModeEnabled' : 'corporateModeDisabled'), 2500);
-});
-
 // Show/Hide Notes toggle
 let notesVisible = localStorage.getItem('notesVisible') !== 'hidden';
 
@@ -2410,7 +2374,7 @@ exportPdfBtn.addEventListener('click', () => {
   const pathParts = currentFilePath.split(/[\\/]/);
   const currentFileName = pathParts.pop();
 
-  const channel = corporateMode ? 'export-pdf-corporate' : 'export-pdf';
+  const channel = 'export-pdf';
   ipcRenderer.send(channel, { currentFileName });
 });
 
@@ -2633,7 +2597,7 @@ exportWordBtn.addEventListener('click', async () => {
     const htmlContent = viewerClone.innerHTML;
     console.log('Sending export-word IPC, HTML length:', htmlContent.length);
 
-    const wordChannel = corporateMode ? 'export-word-corporate' : 'export-word';
+    const wordChannel = 'export-word';
     ipcRenderer.send(wordChannel, { currentFileName, htmlContent });
   } catch (err) {
     console.error('Word export error:', err);
@@ -2730,7 +2694,6 @@ function reloadCurrentFile() {
 }
 
 // Before printToPDF: main signals renderer to drop dark mode for a clean light export
-// Letterhead is handled by main.js via printToPDF headerTemplate/footerTemplate (every page)
 //
 // Mermaid colours are baked into the emitted SVG, so removing the body class is
 // not enough on its own: a document exported from dark mode used to produce a
@@ -3126,9 +3089,6 @@ document.addEventListener('keydown', (e) => {
     historyRedo();
   }
 });
-
-// Note: Ctrl+Shift+O is intercepted by main.js (before-input-event) and forwarded
-// as 'toggle-corporate-mode' IPC — handled above at ipcRenderer.on('toggle-corporate-mode')
 
 // Ctrl+S keyboard shortcut
 document.addEventListener('keydown', (e) => {
@@ -4851,7 +4811,7 @@ async function renderMarkdownFull(content, generation) {
           maxBtn.addEventListener('click', () => {
             const svgContent = svg.outerHTML;
             const isDarkMode = document.body.classList.contains('dark-mode');
-            ipcRenderer.send('open-mermaid-popup', { svgContent, isDarkMode, isCorporateMode: corporateMode });
+            ipcRenderer.send('open-mermaid-popup', { svgContent, isDarkMode });
           });
 
           container.appendChild(maxBtn);
@@ -8417,7 +8377,7 @@ async function renderMermaidInDOM(code, mode, replaceTarget) {
   maxBtn.addEventListener('click', () => {
     const svg = mermaidEl.querySelector('svg');
     if (svg) {
-      ipcRenderer.send('open-mermaid-popup', { svgContent: svg.outerHTML, isDarkMode: document.body.classList.contains('dark-mode'), isCorporateMode: corporateMode });
+      ipcRenderer.send('open-mermaid-popup', { svgContent: svg.outerHTML, isDarkMode: document.body.classList.contains('dark-mode') });
     }
   });
   container.appendChild(maxBtn);
@@ -9137,7 +9097,7 @@ try {
     if (!event.data) return;
     if (event.data.type === 'request-pdf-export') {
       const currentFileName = currentFilePath ? path.basename(currentFilePath) : null;
-      const channel = corporateMode ? 'export-pdf-corporate' : 'export-pdf';
+      const channel = 'export-pdf';
       ipcRenderer.send(channel, { currentFileName });
       ipcRenderer.once('pdf-export-result', (_ev, result) => {
         exportChannel.postMessage({ type: 'export-result', ...result });

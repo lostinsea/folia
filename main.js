@@ -514,10 +514,6 @@ function createWindow() {
       } else if (input.key === "q" && input.type === "keyDown") {
         event.preventDefault();
         app.quit();
-      } else if (input.key === "O" && input.type === "keyDown" && input.shift) {
-        // Ctrl+Shift+O → Corporate mode toggle (forwarded to renderer)
-        event.preventDefault();
-        mainWindow.webContents.send("toggle-corporate-mode");
       }
     }
 
@@ -869,98 +865,6 @@ function openFileAfterExport(filePath) {
   }
 }
 
-// Build corporate letterhead header/footer templates for printToPDF
-function buildCorporateTemplates(label) {
-  const logoPath = path.join(__dirname, "omnicore-letterhead-logo.png");
-  let logoDataUri = "";
-  try {
-    const logoData = fs.readFileSync(logoPath);
-    logoDataUri = "data:image/png;base64," + logoData.toString("base64");
-  } catch (e) {
-    console.warn("Corporate logo not found:", logoPath);
-  }
-  const headerTemplate = `<div style="-webkit-print-color-adjust:exact;color-adjust:exact;width:100%;padding:5px 36px 0 31px;box-sizing:border-box;display:flex;justify-content:space-between;align-items:flex-start;">
-    <div style="-webkit-print-color-adjust:exact;color-adjust:exact;height:26px;width:115px;background-image:url('${logoDataUri}');background-size:contain;background-repeat:no-repeat;background-position:left center;flex-shrink:0;"></div>
-    <span style="font-size:9px;color:#999999;font-family:Arial,sans-serif;padding-top:4px;">${label || ""}</span>
-  </div>`;
-  const footerTemplate = `<div style="-webkit-print-color-adjust:exact;color-adjust:exact;width:100%;height:100%;padding:4px 0 0 36px;box-sizing:border-box;display:flex;justify-content:space-between;align-items:flex-end;font-family:Arial,sans-serif;overflow:visible;">
-    <div style="line-height:1.5;">
-      <div style="font-size:7px;font-weight:bold;font-style:italic;color:#279EA7;">OMNICORE STRATEJİK TEKNOLOJİLER LİMİTED ŞİRKETİ</div>
-      <div style="font-size:6px;color:#1F3244;">KÜÇÜKBAKKALKÖY MAH. SELVİLİ SK. NO: 4 İÇ KAPI NO: 20 ATAŞEHİR</div>
-      <div style="font-size:6px;color:#1F3244;">1074342 / 0642108183700001</div>
-      <div style="font-size:6px;color:#279EA7;">www.omnicore.com.tr</div>
-    </div>
-    <div style="display:flex;align-items:flex-end;gap:22px;overflow:visible;align-self:stretch;">
-      <div style="display:flex;gap:3px;height:70%;align-self:flex-end;margin-bottom:-20px;overflow:visible;">
-        <div style="width:1px;background:#279EA7;"></div>
-        <div style="width:1px;background:#279EA7;"></div>
-        <div style="width:1px;background:#279EA7;"></div>
-      </div>
-      <span class="pageNumber" style="font-size:20px;font-weight:300;color:#1F3244;padding-right:28px;"></span>
-    </div>
-  </div>`;
-  return { headerTemplate, footerTemplate };
-}
-
-// Handle corporate PDF export (with letterhead)
-ipcMain.on("export-pdf-corporate", async (event, data) => {
-  try {
-    const { currentFileName } = data;
-
-    let defaultFilename = "document-corporate.pdf";
-    if (currentFileName) {
-      const nameWithoutExt = currentFileName.replace(/\.[^/.]+$/, "");
-      defaultFilename = `${nameWithoutExt}-corporate.pdf`;
-    }
-
-    const result = await dialog.showSaveDialog(mainWindow, {
-      title: "Export to PDF (Corporate)",
-      defaultPath: defaultFilename,
-      filters: [{ name: "PDF Files", extensions: ["pdf"] }],
-    });
-
-    if (result.canceled || !result.filePath) return;
-
-    // Ask renderer to switch to light mode so PDF is always captured in light theme
-    mainWindow.webContents.send("prepare-for-pdf-export");
-    await new Promise((resolve) => ipcMain.once("pdf-export-ready", resolve));
-
-    // Build corporate letterhead templates (header/footer appear on every page via Chromium)
-    const { headerTemplate, footerTemplate } =
-      buildCorporateTemplates(currentFileName);
-
-    const pdfData = await mainWindow.webContents.printToPDF({
-      printBackground: true,
-      landscape: false,
-      pageSize: "A4",
-      displayHeaderFooter: true,
-      headerTemplate,
-      footerTemplate,
-      margins: { top: 1.2, bottom: 1.0, left: 0.8, right: 0.8 },
-    });
-
-    fs.writeFile(result.filePath, pdfData, (err) => {
-      if (err) {
-        mainWindow.webContents.send("pdf-export-result", {
-          success: false,
-          error: err.message,
-        });
-      } else {
-        openFileAfterExport(result.filePath);
-        mainWindow.webContents.send("pdf-export-result", {
-          success: true,
-          path: result.filePath,
-        });
-      }
-    });
-  } catch (error) {
-    mainWindow.webContents.send("pdf-export-result", {
-      success: false,
-      error: error.message,
-    });
-  }
-});
-
 ipcMain.on("export-pdf", async (event, data) => {
   try {
     const { currentFileName } = data;
@@ -1125,107 +1029,6 @@ ipcMain.on("export-word", async (event, data) => {
     });
   } catch (error) {
     console.error("Error exporting Word document:", error);
-    mainWindow.webContents.send("word-export-result", {
-      success: false,
-      error: error.message,
-    });
-  }
-});
-
-// Handle corporate Word export (with letterhead)
-ipcMain.on("export-word-corporate", async (event, data) => {
-  try {
-    const { currentFileName, htmlContent } = data;
-
-    let defaultFilename = "document-corporate.docx";
-    if (currentFileName) {
-      const nameWithoutExt = currentFileName.replace(/\.[^/.]+$/, "");
-      defaultFilename = `${nameWithoutExt}-corporate.docx`;
-    }
-
-    const result = await dialog.showSaveDialog(mainWindow, {
-      title: "Export to Word (Corporate)",
-      defaultPath: defaultFilename,
-      filters: [{ name: "Word Documents", extensions: ["docx"] }],
-    });
-
-    if (result.canceled || !result.filePath) return;
-
-    // Corporate letterhead HTML wrapper
-    const corporateHeader = `
-      <div style="border-bottom: 3pt solid #279EA7; padding-bottom: 8pt; margin-bottom: 16pt;">
-        <p style="font-size: 10pt; color: #279EA7; font-weight: bold; letter-spacing: 2pt; margin: 0;">OMNICORE</p>
-      </div>
-    `;
-    const corporateFooter = `
-      <div style="border-top: 2pt solid #279EA7; padding-top: 8pt; margin-top: 32pt;">
-        <p style="font-size: 9pt; color: #666; text-align: center; letter-spacing: 2pt; margin: 0;">CONFIDENTIAL &mdash; OMNICORE DOCUMENT</p>
-      </div>
-    `;
-
-    const fullHtml = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="UTF-8">
-        <style>
-          body { font-family: 'Calibri', 'Arial', sans-serif; font-size: 11pt; line-height: 1.6; color: #333; }
-          h1 { font-size: 24pt; color: #1F3244; margin-top: 24pt; margin-bottom: 12pt; }
-          h2 { font-size: 18pt; color: #1F3244; margin-top: 18pt; margin-bottom: 10pt; }
-          h3 { font-size: 14pt; color: #1F3244; margin-top: 14pt; margin-bottom: 8pt; }
-          h4, h5, h6 { font-size: 12pt; color: #1F3244; margin-top: 12pt; margin-bottom: 6pt; }
-          p { margin-bottom: 10pt; }
-          code { font-family: 'Consolas', 'Courier New', monospace; background-color: #f5f5f5; padding: 2pt 4pt; font-size: 10pt; }
-          pre { font-family: 'Consolas', 'Courier New', monospace; background-color: #f5f5f5; padding: 10pt; font-size: 10pt; border: 1pt solid #ddd; }
-          table { border-collapse: collapse; width: 100%; margin-bottom: 12pt; }
-          th, td { border: 1pt solid #ddd; padding: 8pt; text-align: left; }
-          th { background-color: #1F3244; color: white; }
-          blockquote { border-left: 3pt solid #279EA7; padding-left: 12pt; margin-left: 0; color: #666; }
-          a { color: #279EA7; }
-          ul, ol { margin-bottom: 10pt; }
-          li { margin-bottom: 4pt; }
-          img { max-width: 100%; height: auto; }
-        </style>
-      </head>
-      <body>
-        ${corporateHeader}
-        ${htmlContent}
-        ${corporateFooter}
-      </body>
-      </html>
-    `;
-
-    const docxBuffer = await getHTMLtoDOCX()(fullHtml, null, {
-      table: { row: { cantSplit: true } },
-      footer: true,
-      pageNumber: true,
-      font: "Calibri",
-      fontSize: 22,
-      margins: {
-        top: 1440,
-        right: 1440,
-        bottom: 1440,
-        left: 1440,
-        header: 720,
-        footer: 720,
-        gutter: 0,
-      },
-    });
-
-    fs.writeFile(result.filePath, docxBuffer, (err) => {
-      if (err) {
-        mainWindow.webContents.send("word-export-result", {
-          success: false,
-          error: err.message,
-        });
-      } else {
-        mainWindow.webContents.send("word-export-result", {
-          success: true,
-          path: result.filePath,
-        });
-      }
-    });
-  } catch (error) {
     mainWindow.webContents.send("word-export-result", {
       success: false,
       error: error.message,
@@ -1401,7 +1204,7 @@ ipcMain.on("reload-file", (event, data) => {
 // ============================================
 
 ipcMain.on("open-mermaid-popup", (event, data) => {
-  const { svgContent, isDarkMode, isCorporateMode } = data;
+  const { svgContent, isDarkMode } = data;
 
   // Create popup window
   const popupWindow = new BrowserWindow({
@@ -1726,21 +1529,12 @@ ipcMain.on("open-mermaid-popup", (event, data) => {
   const mermaidPdfHandler = async (ev) => {
     if (BrowserWindow.fromWebContents(ev.sender) !== popupWindow) return;
     try {
-      const printOptions = isCorporateMode
-        ? {
-            printBackground: true,
-            landscape: true,
-            pageSize: "A4",
-            displayHeaderFooter: true,
-            ...buildCorporateTemplates("mermaid-diagram.pdf"),
-            margins: { top: 1.2, bottom: 1.0, left: 0.8, right: 0.8 },
-          }
-        : {
-            printBackground: true,
-            landscape: true,
-            pageSize: "A4",
-            margins: { top: 0, bottom: 0, left: 0, right: 0 },
-          };
+      const printOptions = {
+        printBackground: true,
+        landscape: true,
+        pageSize: "A4",
+        margins: { top: 0, bottom: 0, left: 0, right: 0 },
+      };
 
       const pdfData = await popupWindow.webContents.printToPDF(printOptions);
 
