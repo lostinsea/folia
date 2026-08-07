@@ -591,6 +591,48 @@ function main() {
         remote.length === 0,
         remote.join(" | "),
       );
+
+      // A relative LINK in the README must point at something that is actually
+      // there after installation, and "there" is not the repository. MEASURED:
+      // relative links resolve against the DOCUMENT's own directory (unlike
+      // images, which resolve against index.html - the app is inconsistent, and
+      // that is tracked separately), and in an install the README sits in
+      // resources/ with only whatever extraResources put beside it. A probe of
+      // the first draft found 7 of its 8 relative targets missing there,
+      // including `LICENSE` - which ships only as `LICENSE.txt`.
+      //
+      // The failure is quiet and it is on a page the app itself offers from the
+      // welcome screen, so nothing about running the app would reveal it, and
+      // every one of those links works perfectly on GitHub. Repository-only
+      // documents are therefore absolute URLs now; this pins the rest to what
+      // extraResources genuinely ships, reading that list rather than repeating
+      // it, so adding a link to an unshipped doc fails here.
+      {
+        const extras = ((pkg.build && pkg.build.extraResources) || []).map((e) =>
+          typeof e === "string" ? e : e.to || e.from,
+        );
+        const linkTargets = [];
+        for (const [n, l] of prose) {
+          for (const m of l.matchAll(/\]\(([^)\s]+)\)/g)) {
+            const t = m[1];
+            if (/^(https?:|mailto:|#|data:)/i.test(t)) continue;
+            linkTargets.push([n, t.replace(/#.*$/, "")]);
+          }
+        }
+        check(
+          "the README does link to local files, so this assertion has something to judge",
+          linkTargets.length > 0,
+          "no relative links found at all",
+        );
+        const dangling = linkTargets
+          .filter(([, t]) => !extras.includes(t))
+          .map(([n, t]) => `${n}: ${t}`);
+        check(
+          "every relative README link points at a file that ships beside it",
+          dangling.length === 0,
+          `${dangling.join(", ")} - not in extraResources (${extras.join(", ")})`,
+        );
+      }
     }
 
     // The pre-rename generic name is a separate hazard: it carries no vendor

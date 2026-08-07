@@ -1517,8 +1517,8 @@ const REVERTS = [
     suite: "test:packaging",
     what: "reference a README image by relative path, which the app cannot resolve",
     file: path.join(ROOT, "README.md"),
-    from: ' alt="Folia" height="100">',
-    to: ' alt="Folia" height="100">\n  <img src="logo.png" alt="Folia">',
+    from: ' alt="Folia" width="100">',
+    to: ' alt="Folia" width="100">\n  <img src="logo.png" alt="Folia">',
     expect: [/README images are embedded/],
   },
   {
@@ -1535,6 +1535,23 @@ const REVERTS = [
     from: "# Folia\n",
     to: "# Folia\n\n![License](https://img.shields.io/badge/license-MIT-green)\n",
     expect: [/fetches no images over the network/],
+  },
+  {
+    // The README is offered from the app's welcome screen, so its links are
+    // product surface. They resolve against the DOCUMENT's directory, which
+    // after installation is resources/ - containing only what extraResources
+    // put there. Every one of these links works on GitHub, and the first draft
+    // had 7 of 8 dangling in an install, so neither reading the file nor
+    // browsing the repository would have caught it. This restores the most
+    // deceptive instance: `LICENSE`, which exists in the repo and ships only
+    // as `LICENSE.txt`.
+    id: "R146",
+    suite: "test:packaging",
+    what: "link the README at a repository file that does not ship with the app",
+    file: path.join(ROOT, "README.md"),
+    from: "MIT - see [`LICENSE`](LICENSE.txt).",
+    to: "MIT - see [`LICENSE`](LICENSE).",
+    expect: [/every relative README link points at a file that ships beside it/],
   },
 ];
 
