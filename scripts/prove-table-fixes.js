@@ -1684,6 +1684,28 @@ const REVERTS = [
     to: '"build": "electron-builder --win portable"',
     expect: [/every electron-builder script disables implicit publishing/],
   },
+  {
+    id: "R156",
+    suite: "test:packaging",
+    // This revert introduces the DEFECT rather than removing the fix, because
+    // the fix here is a detector and the only honest way to prove a detector is
+    // to hand it the thing it is meant to detect. The single stray \r below is
+    // exactly what an automated edit put into test-packaging.js: it makes git
+    // classify the whole file as `-text`, which turns off autocrlf for it, so
+    // the working tree's CRLF is committed verbatim and a 285-line change lands
+    // as 1913 insertions / 1642 deletions. Nothing else reports it - not
+    // `git status`, not `git diff --numstat`, not any editor.
+    //
+    // Note this can only exercise the byte scan. The companion `i/-text`
+    // assertion reads the INDEX, which a worktree-only revert cannot move; it
+    // fired for real on the committed defect and is kept as the post-commit
+    // half of the same guard.
+    what: "put a lone CR back into a tracked source file, as a stray automated edit would",
+    file: path.join(ROOT, "CUSTOMIZATIONS.md"),
+    from: "## Modifying Customizations",
+    to: "## Modifying Customizations\r",
+    expect: [/no tracked source file contains a lone CR/],
+  },
 ];
 
 const only = process.argv.slice(2);

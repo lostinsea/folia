@@ -17,6 +17,7 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const { execFileSync } = require("child_process");
 
 const ROOT = __dirname;
 let pass = 0;
@@ -1752,6 +1753,107 @@ function main() {
             "assets/logo.svg is stored with LF endings, as pinned",
             fs.existsSync(p) && !fs.readFileSync(p, "utf8").includes("\r\n"),
           );
+        }
+
+        // A LONE CR - a \r that is not part of a \r\n pair - silently disables
+        // git's end-of-line normalisation for the ENTIRE file. git's own
+        // text/binary heuristic classifies such a file as `-text`, after which
+        // core.autocrlf stops converting it and the working tree's CRLF is
+        // committed verbatim. Nothing announces this: `git diff --numstat`
+        // still counts it as text, `git status` is silent, and the file reads
+        // normally in every editor. The only symptom is an implausibly large
+        // diffstat - here, a 285-line change to this very file was committed as
+        // 1913 insertions / 1642 deletions because one stray \r had been
+        // introduced by an automated edit.
+        //
+        // The .gitattributes pins above defend six specific generated or
+        // verbatim files. They cannot defend the rest of the tree, because the
+        // damage does not come from a missing pin - it comes from a byte that
+        // should never have been written. So this checks the bytes.
+        {
+          let tracked = null;
+          try {
+            tracked = execFileSync("git", ["ls-files", "--eol", "-z"], {
+              cwd: ROOT,
+              encoding: "utf8",
+              maxBuffer: 32 * 1024 * 1024,
+            });
+          } catch {
+            tracked = null;
+          }
+
+          if (tracked === null) {
+            skip(
+              "tracked-source end-of-line hygiene",
+              "git is unavailable or this is not a checkout; run inside the repository to enable",
+            );
+          } else {
+            // Extensions whose contents are text by construction. Deliberately
+            // an allow-list rather than a deny-list: a new binary format added
+            // to the repo must not be able to fail this by accident, whereas a
+            // new source extension that goes unchecked is a gap this comment
+            // exists to make visible.
+            const TEXT_EXT = new Set([
+              ".js",
+              ".cjs",
+              ".mjs",
+              ".json",
+              ".md",
+              ".css",
+              ".html",
+              ".yml",
+              ".yaml",
+              ".txt",
+              ".svg",
+              ".sh",
+            ]);
+
+            const rows = tracked.split("\0").filter(Boolean);
+            const loneCr = [];
+            const notText = [];
+            let scanned = 0;
+
+            for (const row of rows) {
+              // `i/lf    w/crlf  attr/text=auto  <path>` - the path is
+              // separated from the attribute columns by a TAB, and a path may
+              // itself contain spaces, so split on the tab and nothing else.
+              const tab = row.indexOf("\t");
+              if (tab === -1) continue;
+              const cols = row.slice(0, tab);
+              const rel = row.slice(tab + 1);
+              if (!TEXT_EXT.has(path.extname(rel).toLowerCase())) continue;
+
+              const abs = path.join(ROOT, rel);
+              if (!fs.existsSync(abs)) continue; // staged deletion mid-run
+              scanned += 1;
+
+              // git's own verdict. `-text` means normalisation is OFF for this
+              // file, whatever .gitattributes or core.autocrlf say.
+              if (/(^|\s)i\/-text(\s|$)/.test(cols)) notText.push(rel);
+
+              const buf = fs.readFileSync(abs, "latin1");
+              const hits = buf.match(/\r(?!\n)/g);
+              if (hits) loneCr.push(`${rel} (${hits.length})`);
+            }
+
+            // Without this the whole block would pass by scanning nothing - the
+            // exact shape of vacuous green this suite has been bitten by before.
+            check(
+              "the end-of-line sweep actually reached the tracked source files",
+              scanned >= 30,
+              `${scanned} text files scanned`,
+            );
+            check(
+              "no tracked source file contains a lone CR, which would silently disable EOL normalisation",
+              loneCr.length === 0,
+              loneCr.slice(0, 10).join(", "),
+            );
+            check(
+              "git classifies every tracked source file as text, so autocrlf still applies to it",
+              notText.length === 0,
+              notText.slice(0, 10).join(", "),
+            );
+          }
         }
       }
     }
