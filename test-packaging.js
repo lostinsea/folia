@@ -1358,6 +1358,24 @@ function main() {
             fs.existsSync(p) && !fs.readFileSync(p, "utf8").includes("\r\n"),
           );
         }
+
+        // The logo SVG is generated, like the notices above, and needs the same
+        // pin for the same reason - but it earned its own assertion by failing
+        // in a worse way than the others. `git add -A` ABORTED on safecrlf, and
+        // the `git commit` that ran next still SUCCEEDED, capturing only the
+        // paths that happened to be staged already. The result was a commit
+        // that looked ordinary and contained a fraction of the change. Nothing
+        // about an aborted add stops the commit after it, so the guard has to
+        // live here rather than relying on noticing the abort.
+        {
+          const pinned = /^assets\/logo\.svg\s+text\s+eol=lf\s*$/m.test(attrs);
+          check(".gitattributes pins the generated logo SVG to LF", pinned);
+          const p = path.join(ROOT, "assets", "logo.svg");
+          check(
+            "assets/logo.svg is stored with LF endings, as pinned",
+            fs.existsSync(p) && !fs.readFileSync(p, "utf8").includes("\r\n"),
+          );
+        }
       }
     }
 
