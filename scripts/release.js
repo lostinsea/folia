@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 
 /**
- * Release Script for Omnicore Markdown Viewer
+ * Release Script for Folia
  *
  * This script automates the release process:
  * 1. Prompts for version
  * 2. Builds for Windows and Linux
  * 3. Creates a GitHub release
- * 4. Uploads all artifacts for auto-update
+ * 4. Uploads all build artifacts to that release
+ *
+ * Note: Folia does not auto-update (build.publish is null - see BUILD.md).
+ * Releases are download-and-install only.
  *
  * Prerequisites:
  * - GitHub CLI (gh) installed and authenticated
@@ -45,6 +48,26 @@ function repoSlug() {
   return 'unknown/unknown';
 }
 
+// `gh` calls are pinned with --repo, but plain `git` calls are not: `git push
+// origin :refs/tags/X` deletes a tag on whatever `origin` happens to point at.
+// That is the same hazard the --repo pin exists for - this checkout carries
+// three remotes and two of them are other people's repositories - so the
+// remote is verified against the same source of truth rather than trusted by
+// name. Returns the remote's slug, or null if it cannot be determined.
+function remoteSlug(remote) {
+  try {
+    const url = execSync(`git remote get-url ${remote}`, {
+      cwd: ROOT_DIR,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    const m = url.match(/github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/i);
+    return m ? m[1] : null;
+  } catch {
+    return null;
+  }
+}
+
 // Colors for console output
 const colors = {
   reset: '\x1b[0m',
@@ -76,6 +99,10 @@ function logError(message) {
 
 function logInfo(message) {
   log(`ℹ ${message}`, colors.blue);
+}
+
+function logWarning(message) {
+  log(`⚠ ${message}`, colors.yellow);
 }
 
 function logDryRun(message) {
@@ -242,6 +269,14 @@ function isWSL() {
   }
 }
 
+function willBuildLinux() {
+  // Native Windows cannot produce Linux artifacts without WSL. This is the one
+  // source of truth for that fact: the dry run, the artifact list and the
+  // release notes all consult it, so they cannot drift apart and promise
+  // downloads the real run never produces.
+  return isWSL() || process.platform !== 'win32';
+}
+
 function buildWindows() {
   logStep(2, 'Building for Windows');
 
@@ -284,27 +319,22 @@ function buildLinux() {
   logStep(3, 'Building for Linux');
 
   if (dryRun) {
-    if (isWSL() || process.platform === 'linux') {
+    if (willBuildLinux()) {
       logDryRun('Would run Linux build');
-    } else if (process.platform === 'win32') {
-      logDryRun('Would skip Linux build (native Windows without WSL)');
     } else {
-      logDryRun('Would run Linux build');
+      logDryRun('Would skip Linux build (native Windows without WSL)');
     }
     return;
   }
 
+  if (!willBuildLinux()) {
+    logInfo('Linux build skipped (run from WSL or Linux for Linux builds)');
+    return;
+  }
+
   try {
-    if (isWSL() || process.platform === 'linux') {
-      exec('npm run build-linux', { timeout: 600000 });
-      logSuccess('Linux build completed');
-    } else if (process.platform === 'win32') {
-      // Native Windows can't build Linux without WSL
-      logInfo('Linux build skipped (run from WSL or Linux for Linux builds)');
-    } else {
-      exec('npm run build-linux', { timeout: 600000 });
-      logSuccess('Linux build completed');
-    }
+    exec('npm run build-linux', { timeout: 600000 });
+    logSuccess('Linux build completed');
   } catch (error) {
     logInfo('Linux build failed or skipped');
   }
@@ -314,22 +344,31 @@ function getArtifacts(version) {
   logStep(4, 'Collecting build artifacts');
 
   if (dryRun) {
-    // Show expected artifacts in dry-run mode
+    // Must match what electron-builder actually emits. `build.publish` is null
+    // by deliberate policy (see "Auto-update is intentionally disabled" in
+    // BUILD.md), so no latest.yml / latest-linux.yml update manifest is ever
+    // written - listing them here promised files the real run could never
+    // produce, and a dry run that disagrees with the real run is worse than
+    // no dry run at all.
     const expectedArtifacts = [
-      `Omnicore-Markdown-Viewer-Setup-${version}.exe`,
-      `Omnicore Markdown Viewer Setup ${version}.exe`,
-      `Omnicore.Markdown.Viewer-${version}.AppImage`,
-      `omnicore-markdown-viewer_${version}_amd64.deb`,
-      'latest.yml',
-      'latest-linux.yml',
-      `Omnicore-Markdown-Viewer-Setup-${version}.exe.blockmap`
+      `Folia-Setup-${version}.exe`,
+      `Folia-Setup-${version}.exe.blockmap`
     ];
+    // Only list what this host can actually produce. Listing the Linux
+    // artifacts on native Windows made the dry run describe a release that the
+    // real run cannot assemble - the same class of lie as the update manifests
+    // removed above.
+    if (willBuildLinux()) {
+      expectedArtifacts.push(`Folia-${version}.AppImage`);
+      expectedArtifacts.push(`folia_${version}_amd64.deb`);
+    }
     logDryRun('Expected artifacts:');
     expectedArtifacts.forEach(a => logDryRun(`  - ${a}`));
     return expectedArtifacts.map(a => path.join(DIST_DIR, a));
   }
 
   const artifacts = [];
+  const stale = [];
 
   if (!fs.existsSync(DIST_DIR)) {
     logError('dist/ directory not found. Run build first.');
@@ -338,7 +377,9 @@ function getArtifacts(version) {
 
   const files = fs.readdirSync(DIST_DIR);
 
-  // Find relevant files
+  // Find relevant files. The update-manifest pattern is kept deliberately:
+  // it costs nothing while publish is null (nothing matches), and it means
+  // enabling publishing later uploads the manifests without a code change.
   const patterns = [
     /Setup.*\.exe$/i,
     /\.AppImage$/i,
@@ -352,12 +393,27 @@ function getArtifacts(version) {
       if (pattern.test(file)) {
         const filePath = path.join(DIST_DIR, file);
         if (fs.statSync(filePath).isFile()) {
-          artifacts.push(filePath);
-          logSuccess(`Found: ${file}`);
+          // dist/ is not cleaned between builds, so a previous version's
+          // installer - or a Linux artifact left over from a WSL run - is still
+          // sitting there and matches these patterns exactly. Uploading it
+          // attaches a differently-versioned binary to this release under a
+          // name that looks right. electron-builder puts the version in every
+          // artifact filename except the update manifests, which are rewritten
+          // on every publishing build.
+          if (!file.includes(version) && !/^latest.*\.yml$/i.test(file)) {
+            stale.push(file);
+          } else {
+            artifacts.push(filePath);
+            logSuccess(`Found: ${file}`);
+          }
         }
         break;
       }
     }
+  }
+
+  if (stale.length > 0) {
+    logWarning(`Ignoring ${stale.length} artifact(s) from another version: ${stale.join(', ')}`);
   }
 
   if (artifacts.length === 0) {
@@ -369,42 +425,46 @@ function getArtifacts(version) {
   return artifacts;
 }
 
-function renameWindowsInstaller(version) {
-  // Rename installer to use dashes (required for auto-update)
-  const spaceName = path.join(DIST_DIR, `Omnicore Markdown Viewer Setup ${version}.exe`);
-  const dashName = path.join(DIST_DIR, `Omnicore-Markdown-Viewer-Setup-${version}.exe`);
-
-  if (dryRun) {
-    logDryRun(`Would copy installer with dashes: Omnicore-Markdown-Viewer-Setup-${version}.exe`);
-    return;
-  }
-
-  if (fs.existsSync(spaceName) && !fs.existsSync(dashName)) {
-    fs.copyFileSync(spaceName, dashName);
-    logSuccess(`Created: Omnicore-Markdown-Viewer-Setup-${version}.exe`);
-  }
-}
-
 function createGitHubRelease(version, artifacts) {
   logStep(5, 'Creating GitHub release');
 
   const tag = `v${version}`;
   const title = `v${version}`;
 
-  // Create release notes
-  const releaseNotes = `## Omnicore Markdown Viewer v${version}
+  // The Downloads section is derived from the artifacts actually collected,
+  // not from a fixed list. A native-Windows release has no Linux build, and a
+  // Linux build that failed leaves nothing to link to either - in both cases a
+  // hardcoded list published dead download instructions naming files that were
+  // never uploaded.
+  const names = artifacts.map(a => path.basename(a));
+  const downloads = [];
+  const setup = names.find(n => /Setup.*\.exe$/i.test(n));
+  const appImage = names.find(n => /\.AppImage$/i.test(n));
+  const deb = names.find(n => /\.deb$/i.test(n));
+  if (setup) downloads.push(`- **Windows**: Download \`${setup}\``);
+  if (appImage) downloads.push(`- **Linux AppImage**: Download \`${appImage}\``);
+  if (deb) downloads.push(`- **Linux DEB**: Download \`${deb}\``);
+
+  const runStep = appImage
+    ? '2. Run the installer (Windows) or make executable and run (Linux AppImage)'
+    : '2. Run the installer';
+
+  // Release notes must not promise auto-update. `build.publish` is null by
+  // deliberate policy (BUILD.md, "Auto-update is intentionally disabled"), so
+  // no update feed exists and no installation will ever detect this release on
+  // its own. Telling users otherwise means they simply never update.
+  const releaseNotes = `## Folia v${version}
 
 ### Downloads
-- **Windows**: Download \`Omnicore-Markdown-Viewer-Setup-${version}.exe\`
-- **Linux AppImage**: Download \`Omnicore.Markdown.Viewer-${version}.AppImage\`
-- **Linux DEB**: Download \`omnicore-markdown-viewer_${version}_amd64.deb\`
+${downloads.join('\n')}
 
-### Auto-Update
-Existing installations will automatically detect this update.
+### Updating
+Folia does not auto-update. Download the installer above and run it over your
+existing installation; your settings, recent files and open tabs are preserved.
 
 ### Installation
 1. Download the appropriate file for your OS
-2. Run the installer (Windows) or make executable and run (Linux AppImage)
+${runStep}
 `;
 
   if (dryRun) {
@@ -416,13 +476,43 @@ Existing installations will automatically detect this update.
     return `https://github.com/${repoSlug()}/releases/tag/${tag}`;
   }
 
+  // Every `gh` call is pinned to the repository named in package.json.
+  //
+  // Without --repo, `gh` resolves the target from the git remotes, and this
+  // checkout has three: origin (this fork), the parent it was forked from, and
+  // the original vendor's repository. Measured here, a bare `gh repo view`
+  // resolved to the VENDOR's repository, not ours. Since the block below runs
+  // `gh release delete --yes`, an unpinned call could destroy releases on
+  // somebody else's project. repoSlug() was already used for the dry-run URL;
+  // the live calls have to agree with it.
+  const repo = repoSlug();
+  if (repo === "unknown/unknown") {
+    logError("Cannot determine the target repository from package.json.");
+    logError("Refusing to run gh release commands that could target the wrong repo.");
+    process.exit(1);
+  }
+  const ghRepo = `--repo ${repo}`;
+
   // Check if release already exists
   try {
-    exec(`gh release view ${tag}`, { silent: true });
+    exec(`gh release view ${tag} ${ghRepo}`, { silent: true });
     logInfo(`Release ${tag} already exists, deleting...`);
-    exec(`gh release delete ${tag} --yes`, { ignoreError: true });
+    exec(`gh release delete ${tag} ${ghRepo} --yes`, { ignoreError: true });
     exec(`git tag -d ${tag}`, { ignoreError: true, silent: true });
-    exec(`git push origin :refs/tags/${tag}`, { ignoreError: true, silent: true });
+    // Deleting the REMOTE tag is the one destructive git operation here, and
+    // `origin` is not guaranteed to be the repo package.json names. Verified
+    // against repoSlug() rather than assumed, and skipped loudly on a
+    // mismatch: silently deleting a tag on somebody else's repository is
+    // exactly the failure the --repo pin above was added to prevent.
+    const originSlug = remoteSlug('origin');
+    if (originSlug && originSlug.toLowerCase() === repo.toLowerCase()) {
+      exec(`git push origin :refs/tags/${tag}`, { ignoreError: true, silent: true });
+    } else {
+      logWarning(
+        `Skipping remote tag delete: origin is ${originSlug || 'unresolvable'}, ` +
+          `but package.json names ${repo}. Delete the tag manually if needed.`,
+      );
+    }
   } catch {
     // Release doesn't exist, that's fine
   }
@@ -433,7 +523,7 @@ Existing installations will automatically detect this update.
 
   // Create the release
   const artifactArgs = artifacts.map(a => `"${a}"`).join(' ');
-  exec(`gh release create ${tag} --title "${title}" --notes-file "${notesPath}" ${artifactArgs}`);
+  exec(`gh release create ${tag} ${ghRepo} --title "${title}" --notes-file "${notesPath}" ${artifactArgs}`);
 
   // Clean up
   fs.unlinkSync(notesPath);
@@ -441,7 +531,7 @@ Existing installations will automatically detect this update.
   logSuccess(`GitHub release ${tag} created successfully!`);
 
   // Get release URL
-  const releaseUrl = exec(`gh release view ${tag} --json url --jq .url`, { silent: true }).trim();
+  const releaseUrl = exec(`gh release view ${tag} ${ghRepo} --json url --jq .url`, { silent: true }).trim();
   logInfo(`Release URL: ${releaseUrl}`);
 
   return releaseUrl;
@@ -461,7 +551,7 @@ async function main() {
   dryRun = args.includes('--dry-run');
   const versionArg = args.find(a => /^\d+\.\d+\.\d+$/.test(a));
 
-  log('\n🚀 Omnicore Markdown Viewer Release Script\n', colors.bright + colors.cyan);
+  log('\n🚀 Folia Release Script\n', colors.bright + colors.cyan);
 
   if (dryRun) {
     log('⚠️  DRY-RUN MODE - No changes will be made\n', colors.yellow);
@@ -495,9 +585,6 @@ async function main() {
   if (!skipBuild) {
     buildWindows();
     buildLinux();
-
-    // Rename Windows installer for auto-update compatibility
-    renameWindowsInstaller(version);
   } else {
     logInfo('Skipping build (--skip-build flag)');
   }

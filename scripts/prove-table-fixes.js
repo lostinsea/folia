@@ -17,6 +17,8 @@ const RENDERER = path.join(ROOT, "renderer.js");
 const TABS = path.join(ROOT, "custom-tabs.js");
 const COLLAPSE = path.join(ROOT, "custom-collapse.js");
 const MAIN = path.join(ROOT, "main.js");
+const VISUAL = path.join(ROOT, "test-visual-utils.js");
+const RELEASE = path.join(ROOT, "scripts", "release.js");
 
 const REVERTS = [
   {
@@ -956,6 +958,178 @@ const REVERTS = [
     to: "      will-change: transform;\n      /* will-change is deliberately absent here too - see the mermaid popup for",
     expect: [/image pop-out renders vector content crisply at 600%/],
     mustPass: [/sharpness: the image pop-out opened/],
+  },
+
+  // ----------------------------------------------------------------------
+  // Folia rebrand + review findings. Not table work, but this is the
+  // project's only permanent revert harness and a proof that lives in a
+  // throwaway script is a proof that expires the moment the script is
+  // deleted - which is precisely how these fixes could be reintroduced
+  // silently later.
+  // ----------------------------------------------------------------------
+  {
+    // On Windows the taskbar, jump list, pinning and toasts identify the app
+    // by AppUserModelID, not by window title, so a rename that stops here
+    // leaves the app grouping and notifying under the old identity.
+    id: "R111",
+    suite: "test:packaging",
+    what: "drop the explicit setAppUserModelId call",
+    file: MAIN,
+    from: "    if (appId) app.setAppUserModelId(appId);",
+    to: "    void appId;",
+    expect: [/sets an explicit AppUserModelId/],
+  },
+  {
+    id: "R112",
+    suite: "test:packaging",
+    what: "hardcode the AppUserModelId instead of deriving it from build.appId",
+    file: MAIN,
+    from: '    const { appId } = require("./package.json").build;\n    if (appId) app.setAppUserModelId(appId);',
+    to: '    const appId = "io.github.lostinsea.folia";\n    if (appId) app.setAppUserModelId("io.github.lostinsea.folia");',
+    expect: [/read from build\.appId rather than duplicated/],
+    mustPass: [/sets an explicit AppUserModelId/],
+  },
+  {
+    // Chromium marks a fully covered window hidden and suspends its layout, so
+    // renderer-side window metrics go stale while getContentBounds() keeps
+    // tracking. Measured A/B: covered window reported document.hidden=true and
+    // a resize to 1900 left outerWidth frozen at 1200.
+    id: "R113",
+    suite: "test:visual",
+    what: "never apply the occlusion switches at all",
+    file: VISUAL,
+    from: "if (app && app.commandLine && !app.isReady()) {",
+    to: "if (false) {",
+    // Neutralises the whole block, so both switch assertions fail. Declared
+    // rather than narrowed: the alternative is weakening one of two
+    // assertions that cover the same block from different angles.
+    expect: [
+      /native window occlusion is disabled/,
+      /backgrounding are disabled too/,
+    ],
+  },
+  {
+    // Measured, not assumed: appendSwitch("disable-features", A) followed by
+    // appendSwitch("disable-features", B) leaves B ALONE. A naive second
+    // append therefore silently discards whatever Electron already disabled.
+    id: "R114",
+    suite: "test:visual",
+    what: "merge disabled features by clobbering, as a naive appendSwitch would",
+    file: VISUAL,
+    from: "  for (const f of wanted) if (!seen.includes(f)) seen.push(f);\n  return seen.join(\",\");",
+    to: "  return wanted.join(\",\");",
+    expect: [/merging preserves features/],
+  },
+  {
+    id: "R115",
+    suite: "test:visual",
+    what: "drop the two boolean backgrounding switches",
+    file: VISUAL,
+    from: '    app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");\n    app.commandLine.appendSwitch("disable-renderer-backgrounding");',
+    to: "    void 0;",
+    expect: [/backgrounding are disabled too/],
+    mustPass: [/native window occlusion is disabled/],
+  },
+  {
+    // This checkout carries three remotes and two are other people's
+    // repositories, so an unpinned `gh release delete --yes` can destroy
+    // releases on the vendor's project.
+    id: "R116",
+    suite: "test:packaging",
+    what: "unpin the destructive gh release delete from an explicit --repo",
+    file: RELEASE,
+    from: "exec(`gh release delete ${tag} ${ghRepo} --yes`",
+    to: "exec(`gh release delete ${tag} --yes`",
+    expect: [/pinned to an explicit --repo/],
+  },
+  {
+    // The --repo pin covers `gh`, not `git`. Deleting a REMOTE tag targets
+    // `origin`, which is not guaranteed to be the repo package.json names.
+    id: "R117",
+    suite: "test:packaging",
+    what: "delete the remote tag without checking which repo origin is",
+    file: RELEASE,
+    from: "    const originSlug = remoteSlug('origin');",
+    to: "    const originSlug = repo;",
+    expect: [/verifies origin against the package\.json repo/],
+  },
+  {
+    // A native-Windows host cannot build Linux artifacts, so hardcoded notes
+    // published download instructions for two files never uploaded.
+    id: "R118",
+    suite: "test:packaging",
+    what: "hardcode the Linux downloads in the release notes",
+    file: RELEASE,
+    from: "if (appImage) downloads.push(",
+    to: "if (true) downloads.push(",
+    expect: [/do not offer Linux downloads that were not built/],
+    mustPass: [/name the Windows installer that was collected/],
+  },
+  {
+    id: "R119",
+    suite: "test:packaging",
+    what: "advertise Linux artifacts in the dry-run list unconditionally",
+    file: RELEASE,
+    from: "    if (willBuildLinux()) {\n      expectedArtifacts.push(`Folia-${version}.AppImage`);",
+    to: "    if (true) {\n      expectedArtifacts.push(`Folia-${version}.AppImage`);",
+    expect: [/advertises Linux builds only where they can be produced/],
+    mustPass: [/willBuildLinux\(\) agrees with the host/],
+  },
+  {
+    // dist/ is never cleaned, so a previous version's installer matches the
+    // same patterns and gets attached to the release under a name that looks
+    // right.
+    id: "R120",
+    suite: "test:packaging",
+    what: "upload every matching file in dist/, including a previous version's",
+    file: RELEASE,
+    from: "          if (!file.includes(version) && !/^latest.*\\.yml$/i.test(file)) {",
+    to: "          if (false) {",
+    expect: [/ignores a previous version left in dist/],
+    mustPass: [/collects this version's files/],
+  },
+  {
+    // A plain recursive copy writes the destination incrementally, so an
+    // interruption leaves a TRUNCATED file; the next launch sees it exists,
+    // force:false skips it, and the sentinel blesses the corrupt profile
+    // permanently.
+    id: "R121",
+    suite: "test:migration",
+    what: "copy the legacy profile straight into the target instead of staging it",
+    file: MAIN,
+    from: "    moveTreeNoClobber(staging, target);",
+    to: "    fs.cpSync(legacy, target, { recursive: true, force: false, errorOnExist: false });",
+    expect: [/reaches the profile by an atomic rename/],
+  },
+  {
+    id: "R122",
+    suite: "test:migration",
+    what: "stage, but copy into place instead of renaming (truncation window returns)",
+    file: MAIN,
+    from: "      fs.renameSync(src, dst);",
+    to: "      fs.copyFileSync(src, dst);",
+    expect: [
+      /reaches the profile by an atomic rename/,
+      /non-atomic copy/,
+    ],
+  },
+  {
+    id: "R123",
+    suite: "test:migration",
+    what: "merge stale staging debris from a dead run into the profile",
+    file: MAIN,
+    from: "    fs.rmSync(staging, { recursive: true, force: true });\n    fs.cpSync(legacy, staging,",
+    to: "    fs.cpSync(legacy, staging,",
+    expect: [/wiped rather than merged/],
+  },
+  {
+    id: "R124",
+    suite: "test:migration",
+    what: "leave the staging area behind after a successful migration",
+    file: MAIN,
+    from: "    moveTreeNoClobber(staging, target);\n    fs.rmSync(staging, { recursive: true, force: true });",
+    to: "    moveTreeNoClobber(staging, target);",
+    expect: [/staging area does not survive/],
   },
 ];
 

@@ -333,11 +333,48 @@ async function run(win) {
       if (i > 0 && i % 20 === 0 && !(accepted() && arrived(last))) {
         if (win.isMaximized()) win.unmaximize();
         win.setBounds(bounds);
+        // A page that Chromium has marked occluded stops laying out, so it will
+        // never agree with the window no matter how many times the bounds are
+        // re-issued (measured: innerWidth frozen at 988 for six seconds while
+        // contentWidth tracked every request). test-visual-utils.js disables
+        // native occlusion detection, which should prevent this outright; this
+        // is the second line of defence, because a switch name is an
+        // implementation detail of the Electron version and this is not.
+        try {
+          const hidden = await exec("document.hidden");
+          if (hidden) {
+            win.showInactive();
+            win.moveTop();
+          }
+        } catch {
+          /* the page may be mid-navigation; the next iteration retries */
+        }
       }
     }
     // Fail loud and name the cause. Letting this through means every geometric
     // assertion below is measured against the wrong window, and the failures it
     // produces point at the tables instead of at the resize that never happened.
+    //
+    // The detail is deliberately rich. Twice now this has failed only under
+    // full-suite load, where the cheap fields (requested vs innerSize) said
+    // "stuck" without saying why, and the diagnosis cost a full run each time.
+    // Everything below is read only on the failure path, so it costs nothing
+    // when the resize works.
+    let pageDiag = "{}";
+    try {
+      pageDiag = await exec(
+        "JSON.stringify({dpr:devicePixelRatio," +
+          "docClient:document.documentElement.clientWidth," +
+          "vv:(window.visualViewport?Math.round(window.visualViewport.width):null)," +
+          "vvScale:(window.visualViewport?window.visualViewport.scale:null)," +
+          "outer:window.outerWidth," +
+          "htmlZoom:getComputedStyle(document.documentElement).zoom," +
+          "bodyZoom:getComputedStyle(document.body).zoom," +
+          "hidden:document.hidden,vis:document.visibilityState})",
+      );
+    } catch (e) {
+      pageDiag = "exec failed: " + e.message;
+    }
     check(
       "the window reached the size this section measures at",
       false,
@@ -347,6 +384,23 @@ async function run(win) {
         contentWidth: contentWidth(),
         outerWidth: win.getBounds().width,
         accepted: accepted(),
+        // Which window are we actually driving? A second BrowserWindow left
+        // open by an earlier section would make every measurement below
+        // describe a popup rather than the document.
+        windowCount: BrowserWindow.getAllWindows().length,
+        isTarget: BrowserWindow.getAllWindows()[0] === win,
+        flags: {
+          visible: win.isVisible(),
+          minimized: win.isMinimized(),
+          maximized: win.isMaximized(),
+          fullScreen: win.isFullScreen(),
+          resizable: win.isResizable(),
+          focused: win.isFocused(),
+        },
+        min: win.getMinimumSize(),
+        max: win.getMaximumSize(),
+        zoomFactor: win.webContents.getZoomFactor(),
+        page: pageDiag,
       }),
     );
   }

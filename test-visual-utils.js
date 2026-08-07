@@ -65,6 +65,85 @@ for (const stream of [process.stdout, process.stderr]) {
 }
 
 // ---------------------------------------------------------------------------
+// Keep the window laying out even when the desktop covers it.
+//
+// Chromium on Windows computes *native window occlusion*: when another window
+// fully covers the app, the page is marked hidden
+// (`document.visibilityState === "hidden"`) and layout is suspended to save
+// work. That is correct behaviour for a real app and a disaster for a
+// geometric test harness, because a suspended page stops updating
+// `window.innerWidth` while the OS-level bounds keep tracking every resize.
+//
+// MEASURED, not inferred. Under a full `npm test` the table suite reported:
+//   requested width 2000, outerWidth 2000, contentWidth 1988  (main process: correct)
+//   innerWidth 988, documentElement.clientWidth 988           (renderer: frozen)
+//   win.isVisible() true, isMinimized() false, focused true
+//   document.hidden TRUE, visibilityState "hidden"            <- the actual cause
+// The window really had resized; the page had simply stopped laying out. Ten
+// geometric assertions then failed naming TABLES, and the same suite passed
+// 95/95 in isolation - because in isolation nothing was covering the window.
+//
+// A/B proven with a forced-occlusion probe (a second opaque always-on-top
+// window fully covering the target, then a resize of the covered window):
+//   STOCK          hiddenWhileCovered=true   outerWidth STALE at 1200 after a
+//                                            resize to 1900
+//   WITH SWITCHES  hiddenWhileCovered=false  outerWidth 1900 (correct)
+// Note the probe froze `outerWidth` where the suite froze `innerWidth`: WHICH
+// renderer-side window metric goes stale is not fixed, so the invariant worth
+// stating is the general one - an occluded page stops updating its own view of
+// the window, and these switches stop the page being marked occluded at all.
+//
+// Disabled here rather than in each suite because every Electron harness
+// requires this module, and rather than in main.js because the product should
+// keep normal occlusion behaviour - this is a property of the test
+// environment, not of the app.
+//
+// Three switches, because they cover three different mechanisms and the first
+// alone is not enough on every Electron version:
+//   CalculateNativeWinOcclusion - the Windows occlusion calculation itself
+//   disable-backgrounding-occluded-windows - throttling once occluded
+//   disable-renderer-backgrounding - throttling of non-foreground renderers
+//
+// `disable-features` is a VALUE switch, and appendSwitch REPLACES the value
+// rather than adding to it. MEASURED, because the wording of the API suggests
+// otherwise:
+//   appendSwitch("disable-features", "FeatureAlpha")  -> "FeatureAlpha"
+//   appendSwitch("disable-features", "FeatureBeta")   -> "FeatureBeta"   (!)
+//   appendSwitch("disable-features", "Alpha,Beta")    -> "Alpha,Beta"
+// So a second caller anywhere - a future suite, a product feature, a
+// dependency - would silently switch this one back on, and the failure would
+// surface as unexplained geometric flakiness rather than as anything naming
+// occlusion. Merge with whatever is already there instead of assuming this is
+// the only caller. The other two are boolean switches and stack fine.
+const DISABLED_FEATURES = ["CalculateNativeWinOcclusion"];
+
+function mergeDisabledFeatures(existing, wanted) {
+  const seen = String(existing || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  for (const f of wanted) if (!seen.includes(f)) seen.push(f);
+  return seen.join(",");
+}
+
+try {
+  const { app } = require("electron");
+  if (app && app.commandLine && !app.isReady()) {
+    app.commandLine.appendSwitch(
+      "disable-features",
+      mergeDisabledFeatures(
+        app.commandLine.getSwitchValue("disable-features"),
+        DISABLED_FEATURES,
+      ),
+    );
+    app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
+    app.commandLine.appendSwitch("disable-renderer-backgrounding");
+  }
+} catch {
+  // Required from plain Node (the selfcheck does this) - nothing to do.
+}
+
+// ---------------------------------------------------------------------------
 // The in-page probe.
 //
 // This is a real function so it stays lintable and syntax-highlighted; it is
@@ -767,4 +846,9 @@ module.exports = {
   proveSentinelAlive,
   LIVENESS_MUTE_REASON,
   SHOT_DIR,
+  // Exported for the selfcheck only: the merge is the load-bearing half of the
+  // occlusion fix (appendSwitch replaces rather than appends), so it has to be
+  // assertable rather than trusted.
+  mergeDisabledFeatures,
+  DISABLED_FEATURES,
 };

@@ -42,7 +42,7 @@
                base-uri 'none';
                form-action 'none'"
     />
-    <title>Markdown Viewer</title>
+    <title>Folia</title>
     <link rel="stylesheet" href="styles.css" />
     <link rel="stylesheet" href="custom-styles.css" />
     <link
@@ -70,10 +70,10 @@
     <div class="container">
       <div class="header">
         <div class="header-left">
-          <a href="#" id="logoLink" title="Markdown Viewer">
+          <a href="#" id="logoLink" title="Folia">
             <img src="logo.png" alt="Logo" class="app-logo logo-light" />
             <img src="logo_dark.png" alt="Logo" class="app-logo logo-dark" />
-            <span class="app-title">Markdown Viewer</span>
+            <span class="app-title">Folia</span>
             <span class="app-title-short">MV</span>
           </a>
         </div>
@@ -518,7 +518,7 @@
 
           <div id="viewer" class="markdown-body">
             <div class="welcome">
-              <h1 data-i18n="welcome.title">Welcome to Markdown Viewer</h1>
+              <h1 data-i18n="welcome.title">Welcome to Folia</h1>
               <p data-i18n="welcome.subtitle">
                 Press Ctrl+O to open a markdown file
               </p>
@@ -721,8 +721,14 @@
               </div>
               <!-- /.welcome-feature-slider -->
 
-              <!-- Version badge — fixed at bottom-left of window -->
-              <span class="welcome-version" id="welcomeVersion">v2.0.0</span>
+              <!-- Version badge — fixed at bottom-left of window.
+                   Deliberately EMPTY: renderer.js fills it from the main
+                   process via app.getVersion(). A literal here is a second
+                   source of truth that silently goes stale on every release -
+                   it read v2.0.0 while package.json said 1.0.0, and it is what
+                   the user sees if the IPC call ever fails. Pinned by
+                   test-packaging.js. -->
+              <span class="welcome-version" id="welcomeVersion"></span>
             </div>
           </div>
 

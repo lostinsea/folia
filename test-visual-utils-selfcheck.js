@@ -2,7 +2,12 @@
 // failure mode it claims to. A visual assertion that cannot fail is worse than
 // no assertion, because it reads as coverage. Run with: npm run test:visual
 const { app, BrowserWindow } = require("electron");
-const { inspectVisual, captureScreenshot } = require("./test-visual-utils");
+const {
+  inspectVisual,
+  captureScreenshot,
+  mergeDisabledFeatures,
+  DISABLED_FEATURES,
+} = require("./test-visual-utils");
 
 const PAGE =
   "data:text/html;charset=utf-8," +
@@ -45,6 +50,55 @@ app.whenReady().then(async () => {
   }, 30000);
 
   try {
+    // ---------------------------------------------------------------------
+    // The occlusion switches. Every geometric suite depends on these: with
+    // native occlusion active, a covered window's page stops laying out and
+    // its own width readings freeze, which surfaces as geometric assertions
+    // failing while naming the CONTENT rather than the window.
+    //
+    // Two distinct things are proven here, because they fail differently.
+    // ---------------------------------------------------------------------
+
+    // 1. The switch is actually live in this process. Asserted against the
+    //    command line Chromium was given, not against the source text - a
+    //    source grep would still pass if the block were moved after app ready,
+    //    where appendSwitch is silently too late to matter.
+    const live = app.commandLine.getSwitchValue("disable-features");
+    expect(
+      "native window occlusion is disabled for this process",
+      DISABLED_FEATURES.every((f) => live.split(",").includes(f)),
+      `disable-features=${JSON.stringify(live)}`,
+    );
+    expect(
+      "occluded-window and renderer backgrounding are disabled too",
+      app.commandLine.hasSwitch("disable-backgrounding-occluded-windows") &&
+        app.commandLine.hasSwitch("disable-renderer-backgrounding"),
+      `occluded=${app.commandLine.hasSwitch("disable-backgrounding-occluded-windows")} ` +
+        `renderer=${app.commandLine.hasSwitch("disable-renderer-backgrounding")}`,
+    );
+
+    // 2. The merge preserves a pre-existing value. appendSwitch REPLACES the
+    //    value of `disable-features` rather than adding to it (measured:
+    //    appendSwitch(X) then appendSwitch(Y) leaves Y alone), so a naive
+    //    second caller anywhere in the process would silently switch occlusion
+    //    back on. This is the half that has no visible symptom until a
+    //    geometric suite starts failing for no stated reason.
+    expect(
+      "merging preserves features an earlier caller already disabled",
+      mergeDisabledFeatures("SomeOtherFeature", ["CalculateNativeWinOcclusion"]) ===
+        "SomeOtherFeature,CalculateNativeWinOcclusion",
+      mergeDisabledFeatures("SomeOtherFeature", ["CalculateNativeWinOcclusion"]),
+    );
+    expect(
+      "merging does not duplicate a feature that is already disabled",
+      mergeDisabledFeatures("CalculateNativeWinOcclusion", [
+        "CalculateNativeWinOcclusion",
+      ]) === "CalculateNativeWinOcclusion",
+      mergeDisabledFeatures("CalculateNativeWinOcclusion", [
+        "CalculateNativeWinOcclusion",
+      ]),
+    );
+
     const win = new BrowserWindow({ show: false, width: 900, height: 900 });
     await win.loadURL(PAGE);
 

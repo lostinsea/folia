@@ -1,4 +1,14 @@
-# Security Audit — Omnicore Markdown Viewer (fork)
+# Security Audit — Folia (formerly Omnicore Markdown Viewer)
+
+> **Amendment (1.0 rebrand).** This audit was written while the fork was still
+> named Omnicore Markdown Viewer. The product is now **Folia**, and identifiers
+> derived from the old name changed with it (`omnicore-temp-*` → `folia-*`,
+> `omnicore-update.bat` → a `folia-update-*` temp directory,
+> `omnicore-rawhtml-resize` → `folia-rawhtml-resize`). Code quoted below is
+> reproduced **as it stood at audit time** — it is evidence of the vulnerable
+> state, and several assertions still pin the old strings precisely so those
+> predictable paths cannot return. Descriptions of the *current, fixed* code
+> use the new names.
 
 > **Amendment (OmniWare removal).** The OmniWare wireframe feature (`omniwire/`,
 > `omniware-config.js`, the `.ow` file association, the `open-omniware-popup`
@@ -1171,13 +1181,19 @@ A local attacker who wins the race between the write and the `exec` gets code ex
 
 Also note the temp files are only removed on the `closed` event — an app crash leaves attacker-derived HTML on disk.
 
-**Fix.** Use `fs.mkdtempSync(path.join(os.tmpdir(), 'omnicore-'))` for a unique 0700 directory per invocation, and open with `flag: 'wx'` to fail on a pre-existing path.
+**Fix.** Use `fs.mkdtempSync(path.join(os.tmpdir(), '<app>-'))` for a unique 0700 directory per invocation, and open with `flag: 'wx'` to fail on a pre-existing path.
+
+> The vulnerable paths quoted above are reproduced **verbatim as they were at
+> audit time**, when the app was named Omnicore Markdown Viewer. The 1.0 rename
+> to Folia changed the prefix to `folia-`; the historical strings are left
+> unedited because they are evidence, and `test-popup-security.js` still
+> asserts against them to prove the old predictable paths cannot come back.
 
 ### FIXED
 
 Two helpers in `main.js`, `writePopupDocument(kind, html)` and `removePopupDocument(tmp)`,
 replace the five hand-rolled paths. Each popup document goes into its own
-`mkdtempSync(path.join(os.tmpdir(), "omnicore-"))` directory — unpredictable name, mode
+`mkdtempSync(path.join(os.tmpdir(), "folia-"))` directory — unpredictable name, mode
 0700 — and is written with `{ flag: "wx", mode: 0o600 }`. The two controls are
 complementary and both are needed:
 
@@ -1362,7 +1378,8 @@ counted as verified, the same way the portable-update batch rewrite under SEC-20
 
 **Severity: Low** · Category: SecurityMisconfiguration · Confidence 8/10 · Upstream
 
-**Location:** `renderer.js:~3245` (the `omnicore-rawhtml-resize` listener)
+**Location:** `renderer.js:~3245` (the raw-HTML resize listener, since renamed to
+`folia-rawhtml-resize` by the 1.0 rebrand; quoted below as it stood at audit time)
 
 ```js
 window.addEventListener('message', function(e) {

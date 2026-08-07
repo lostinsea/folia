@@ -16,6 +16,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
 
 const ROOT = __dirname;
 let pass = 0;
@@ -411,6 +412,444 @@ function main() {
       );
     }
   }
+
+  // ==========================================================================
+  // PRODUCT IDENTITY
+  // ==========================================================================
+  // The 1.0 rebrand replaced the upstream vendor's identity with this project's
+  // own. These are not cosmetic assertions: `appId` and the app name decide the
+  // Windows install target, the single-instance lock and, through Electron's
+  // userData path, where the user's recent-file list and tab session live.
+  // Silently drifting back to the old identity would strand user data and point
+  // installs at the vendor's namespace.
+  {
+    check(
+      "package.json declares a productName, so Electron and the installer agree on the app name",
+      pkg.productName === "Folia",
+      `productName=${JSON.stringify(pkg.productName)}`,
+    );
+    check(
+      "package name matches the product",
+      pkg.name === "folia",
+      `name=${JSON.stringify(pkg.name)}`,
+    );
+
+    // build.productName, not root productName, is what electron-builder uses
+    // to name the executable, the Program Files directory and the Add/Remove
+    // Programs entry (it resolves build.productName || productName || name).
+    // The two are separate keys, so renaming the root one alone produced a
+    // build whose RUNTIME called itself Folia while the INSTALLER still called
+    // itself Markdown Viewer. Pinned explicitly rather than left to the
+    // vendor-mark sweep below, which only looks for the vendor's name.
+    check(
+      "build.productName names the installer, so the installed app is not the old name",
+      pkg.build && pkg.build.productName === "Folia",
+      `build.productName=${JSON.stringify(pkg.build && pkg.build.productName)}`,
+    );
+
+    // The vendor's MIT grant covers the code, not their marks. Renaming means
+    // the marks are actually gone from what we ship, not merely relabelled.
+    const VENDOR = /omnicore/i;
+    // The pre-rename generic name is a separate hazard: it carries no vendor
+    // mark, so the VENDOR sweep is blind to it, and a field left behind on it
+    // silently reintroduces the old identity.
+    const STALE_PRODUCT = /markdown[\s-]?viewer/i;
+    const identityFields = {
+      name: pkg.name,
+      productName: pkg.productName,
+      "build.productName": pkg.build && pkg.build.productName,
+      description: pkg.description,
+      homepage: pkg.homepage,
+      "author.name": pkg.author && pkg.author.name,
+      "build.appId": pkg.build && pkg.build.appId,
+      "build.nsis.shortcutName":
+        pkg.build && pkg.build.nsis && pkg.build.nsis.shortcutName,
+      "build.linux.maintainer":
+        pkg.build && pkg.build.linux && pkg.build.linux.maintainer,
+      "build.win.artifactName":
+        pkg.build && pkg.build.win && pkg.build.win.artifactName,
+      "build.nsis.artifactName":
+        pkg.build && pkg.build.nsis && pkg.build.nsis.artifactName,
+    };
+    const branded = Object.entries(identityFields)
+      .filter(([, v]) => typeof v === "string" && VENDOR.test(v))
+      .map(([k, v]) => `${k}=${v}`);
+    check(
+      "no vendor branding survives in the shipped package identity",
+      branded.length === 0,
+      branded.join("; "),
+    );
+
+    // Fields exempt from the stale-name sweep, each for a distinct reason:
+    //   homepage      - the GitHub repository really is still named
+    //                   markdown-viewer, so this must keep that slug or it
+    //                   points at nothing. Renaming the repo is an
+    //                   owner-only decision, separate from the product rename.
+    //   description   - "markdown viewer" is the product CATEGORY, and saying
+    //                   what the app is is the field's entire job. Sweeping it
+    //                   would force prose that avoids naming its own category.
+    // Everything left is used as an IDENTIFIER by Electron, electron-builder
+    // or the OS, and none of those may still say the old name.
+    const STALE_EXEMPT = new Set(["homepage", "description"]);
+    const stale = Object.entries(identityFields)
+      .filter(([k]) => !STALE_EXEMPT.has(k))
+      .filter(([, v]) => typeof v === "string" && STALE_PRODUCT.test(v))
+      .map(([k, v]) => `${k}=${v}`);
+    check(
+      "no pre-rename product name survives in the shipped package identity",
+      stale.length === 0,
+      stale.join("; "),
+    );
+
+    check(
+      "appId is this project's own reverse-DNS namespace, not the vendor's",
+      typeof (pkg.build && pkg.build.appId) === "string" &&
+        pkg.build.appId === "io.github.lostinsea.folia",
+      `appId=${pkg.build && pkg.build.appId}`,
+    );
+
+    // On Windows the taskbar, jump list, pinning and toast notifications all
+    // identify the app by its AppUserModelID, NOT by its window title. With no
+    // explicit call the runtime falls back to a default id, so a correctly
+    // titled window can still group and notify under a different identity -
+    // which is exactly the kind of half-finished rename this block exists to
+    // catch.
+    //
+    // Asserted on main.js's source rather than on the running app because the
+    // packaging suite is not an Electron harness. Two separate things are
+    // pinned: that the call exists at all, and that its argument is DERIVED
+    // from build.appId rather than a second copy of the string. A hardcoded
+    // literal here would drift the moment appId changed, silently splitting
+    // one app into two Windows identities - the failure mode is invisible in
+    // the UI, so only a structural assertion catches it.
+    const mainSrc = fs.readFileSync(path.join(__dirname, "main.js"), "utf8");
+    check(
+      "main.js sets an explicit AppUserModelId, so Windows groups and notifies as Folia",
+      /app\.setAppUserModelId\(/.test(mainSrc),
+      "no setAppUserModelId call found in main.js",
+    );
+    check(
+      "the AppUserModelId is read from build.appId rather than duplicated as a literal",
+      /appId\s*\}\s*=\s*require\(["']\.\/package\.json["']\)\.build/.test(
+        mainSrc,
+      ) && !/setAppUserModelId\(\s*["']/.test(mainSrc),
+      "expected the id to come from package.json build.appId",
+    );
+
+    // The letterhead PNG was deleted with Corporate Mode. If the allowlist
+    // still named it, electron-builder would fail the build on a missing file.
+    check(
+      "the deleted letterhead asset is not still on the build allowlist",
+      !files.some((f) => /letterhead/i.test(String(f))),
+      files.filter((f) => /letterhead/i.test(String(f))).join(", "),
+    );
+
+    // Installer filenames are what release.js and electron-updater agree on.
+    // The old config emitted dot-separated names while release.js hunted for
+    // dash-separated ones, so the rename step it ran was permanently dead.
+    for (const [where, value] of [
+      ["win", pkg.build && pkg.build.win && pkg.build.win.artifactName],
+      ["nsis", pkg.build && pkg.build.nsis && pkg.build.nsis.artifactName],
+    ]) {
+      check(
+        `${where} artifactName uses dashes, matching what release.js expects`,
+        typeof value === "string" &&
+          value.startsWith("Folia-") &&
+          !/\s/.test(value),
+        `${where} artifactName=${JSON.stringify(value)}`,
+      );
+    }
+
+    // release.js spells the expected filenames out in its dry-run listing and
+    // its release notes. Those must track build config or the notes tell users
+    // to download files that were never produced.
+    {
+      const rel = fs.readFileSync(
+        path.join(__dirname, "scripts", "release.js"),
+        "utf8",
+      );
+      check(
+        "release.js no longer references the vendor's installer names",
+        !VENDOR.test(rel),
+        (rel.match(/.*omnicore.*/gi) || []).slice(0, 3).join(" | "),
+      );
+      check(
+        "release.js dropped the dead space-to-dash installer rename",
+        !/renameWindowsInstaller/.test(rel),
+      );
+
+      // Every `gh release` call is pinned with --repo so it cannot resolve the
+      // target from git remotes. This checkout carries three remotes and two
+      // of them are other people's repositories, so an unpinned
+      // `gh release delete --yes` could destroy releases on the vendor's
+      // project. Counted rather than pattern-spotted: a single new unpinned
+      // call is exactly the regression worth catching, and it would be
+      // invisible to a "does --repo appear anywhere" check.
+      {
+        // Scoped to real invocations - `exec(`gh release …`)` - not to any
+        // occurrence of the words. The first attempt matched free text and
+        // flagged a comment and a log message that merely NAME the command,
+        // which would have trained the next reader to ignore this assertion.
+        const GH_CALL = new RegExp("exec\\(`gh release [^`]*`", "g");
+        const ghCalls = rel.match(GH_CALL) || [];
+        const unpinned = ghCalls.filter((c) => !/\$\{ghRepo\}|--repo/.test(c));
+        check(
+          "every gh release call is pinned to an explicit --repo",
+          ghCalls.length >= 4 && unpinned.length === 0,
+          `calls=${ghCalls.length} unpinned=${JSON.stringify(unpinned)}`,
+        );
+      }
+
+      // The --repo pin covers `gh`, not `git`. Deleting a REMOTE tag is the
+      // one destructive git operation in the script and it targets `origin`,
+      // which is not guaranteed to be the repo package.json names - the same
+      // hazard, one tool over. Assert the verification exists rather than that
+      // the push exists, so restructuring is free but removing the guard is not.
+      check(
+        "the remote tag delete verifies origin against the package.json repo",
+        /remoteSlug\(['"]origin['"]\)/.test(rel) &&
+          /git push origin :refs\/tags\//.test(rel) &&
+          rel.indexOf("remoteSlug('origin')") < rel.indexOf("git push origin :refs/tags/"),
+        "expected remoteSlug('origin') to be checked before the remote tag delete",
+      );
+
+      // The release notes and the build config are written in different files
+      // and drifted apart: the notes told every user "existing installations
+      // will automatically detect this update" while `build.publish` was null,
+      // so no feed existed and nobody ever updated. Couple them, in whichever
+      // direction the project later chooses.
+      const publishEnabled = Boolean(
+        pkg.build &&
+          pkg.build.publish !== null &&
+          pkg.build.publish !== undefined,
+      );
+      const promisesAutoUpdate =
+        /automatically detect this update|will auto-?update/i.test(rel);
+      check(
+        publishEnabled
+          ? "release notes may promise auto-update because publishing is configured"
+          : "release notes do not promise auto-update while publishing is disabled",
+        publishEnabled || !promisesAutoUpdate,
+        `build.publish=${JSON.stringify(pkg.build && pkg.build.publish)}`,
+      );
+
+      // Same drift, second symptom: the dry-run listing advertised update
+      // manifests that a publish-less build never emits, so a dry run showed
+      // artifacts the real run could not produce.
+      const dryRunListsManifests = /['"`]latest(-\w+)?\.yml['"`]/.test(rel);
+      check(
+        publishEnabled
+          ? "dry-run artifact list may include update manifests because publishing is configured"
+          : "dry-run artifact list does not advertise update manifests that are never built",
+        publishEnabled || !dryRunListsManifests,
+        dryRunListsManifests
+          ? (rel.match(/.*['"`]latest(-\w+)?\.yml['"`].*/g) || [])
+              .slice(0, 2)
+              .join(" | ")
+          : "",
+      );
+
+      // Everything above reads release.js as TEXT. The next block runs it.
+      //
+      // A native-Windows host cannot build Linux artifacts, but the dry-run
+      // listing and the published release notes both named an AppImage and a
+      // DEB unconditionally - so a Windows release shipped download
+      // instructions for two files that were never uploaded. Text assertions
+      // cannot see that, because the strings are present in the source either
+      // way; only running the code with a known artifact set can.
+      //
+      // The real source is evaluated (minus its trailing `main()` call), not a
+      // copy, so this cannot pass against code that no longer ships.
+      {
+        const MAIN_CALL = "main().catch(";
+        const cut = rel.indexOf(MAIN_CALL);
+        check(
+          "release.js still ends with the main() entry point the harness slices off",
+          cut > 0,
+          "expected to find " + JSON.stringify(MAIN_CALL),
+        );
+
+        if (cut > 0) {
+          const body =
+            rel.slice(0, cut).replace(/^#![^\n]*/, "") +
+            "\nreturn { willBuildLinux, getArtifacts, createGitHubRelease," +
+            " setDryRun: (v) => { dryRun = v; } };\n";
+          const api = new Function(
+            "require",
+            "__dirname",
+            "process",
+            "console",
+            body,
+          )(
+            require,
+            path.join(__dirname, "scripts"),
+            process,
+            console,
+          );
+          api.setDryRun(true);
+
+          // logDryRun -> log -> console.log, so the notes come back through
+          // stdout. Capture rather than re-derive them.
+          const captured = [];
+          const realLog = console.log;
+          console.log = (...a) => captured.push(a.join(" "));
+          let notesFor;
+          try {
+            notesFor = (files) => {
+              captured.length = 0;
+              api.createGitHubRelease(
+                "9.9.9",
+                files.map((f) => path.join(__dirname, "dist", f)),
+              );
+              return captured.join("\n");
+            };
+
+            const winOnly = notesFor([
+              "Folia-Setup-9.9.9.exe",
+              "Folia-Setup-9.9.9.exe.blockmap",
+            ]);
+            const allThree = notesFor([
+              "Folia-Setup-9.9.9.exe",
+              "Folia-9.9.9.AppImage",
+              "folia_9.9.9_amd64.deb",
+            ]);
+
+            const listedArtifacts = (() => {
+              captured.length = 0;
+              api.getArtifacts("9.9.9");
+              return captured.join("\n");
+            })();
+
+            console.log = realLog;
+
+            check(
+              "release notes name the Windows installer that was collected",
+              /Folia-Setup-9\.9\.9\.exe/.test(winOnly),
+            );
+            check(
+              "release notes do not offer Linux downloads that were not built",
+              !/AppImage|\.deb/i.test(winOnly),
+              (winOnly.match(/.*(AppImage|\.deb).*/gi) || [])
+                .slice(0, 2)
+                .join(" | "),
+            );
+            check(
+              "release notes do offer Linux downloads when they were built",
+              /Folia-9\.9\.9\.AppImage/.test(allThree) &&
+                /folia_9\.9\.9_amd64\.deb/.test(allThree),
+            );
+
+            // Independent oracle: decided from the host, not from the
+            // implementation's own willBuildLinux(). On this machine the two
+            // must agree; asserting only "list matches willBuildLinux()" would
+            // pass against a helper that always returned true.
+            const hostCanBuildLinux =
+              process.platform !== "win32" ||
+              fs.existsSync("/proc/version");
+            const listsLinux = /AppImage|\.deb/i.test(listedArtifacts);
+            check(
+              "the dry-run artifact list advertises Linux builds only where they can be produced",
+              listsLinux === hostCanBuildLinux,
+              `platform=${process.platform} hostCanBuildLinux=${hostCanBuildLinux} listsLinux=${listsLinux}`,
+            );
+            check(
+              "willBuildLinux() agrees with the host it is running on",
+              api.willBuildLinux() === hostCanBuildLinux,
+            );
+          } finally {
+            console.log = realLog;
+          }
+
+          // The scan half of getArtifacts, driven against a real directory.
+          // dist/ is never cleaned, so a previous version's installer sits
+          // there matching the same patterns; uploading it attaches a
+          // wrong-version binary to the release. DIST_DIR derives from
+          // __dirname, so a fake root gives the real function a real directory
+          // to walk without touching this checkout's dist/.
+          const fakeRoot = fs.mkdtempSync(
+            path.join(os.tmpdir(), "folia-release-scan-"),
+          );
+          try {
+            fs.mkdirSync(path.join(fakeRoot, "scripts"));
+            fs.mkdirSync(path.join(fakeRoot, "dist"));
+            fs.writeFileSync(
+              path.join(fakeRoot, "package.json"),
+              JSON.stringify({ version: "9.9.9" }),
+            );
+            const dist = path.join(fakeRoot, "dist");
+            for (const f of [
+              "Folia-Setup-9.9.9.exe",
+              "Folia-Setup-9.9.9.exe.blockmap",
+              "Folia-Setup-9.9.8.exe",
+              "Folia-9.9.8.AppImage",
+              "notes.txt",
+            ]) {
+              fs.writeFileSync(path.join(dist, f), "x");
+            }
+
+            const scanApi = new Function(
+              "require",
+              "__dirname",
+              "process",
+              "console",
+              body,
+            )(
+              require,
+              path.join(fakeRoot, "scripts"),
+              process,
+              console,
+            );
+
+            const quiet = [];
+            const realLog2 = console.log;
+            console.log = (...a) => quiet.push(a.join(" "));
+            let found;
+            try {
+              found = scanApi
+                .getArtifacts("9.9.9")
+                .map((p) => path.basename(p));
+            } finally {
+              console.log = realLog2;
+            }
+
+            check(
+              "the artifact scan collects this version's files",
+              found.includes("Folia-Setup-9.9.9.exe") &&
+                found.includes("Folia-Setup-9.9.9.exe.blockmap"),
+              JSON.stringify(found),
+            );
+            check(
+              "the artifact scan ignores a previous version left in dist/",
+              !found.some((f) => f.includes("9.9.8")),
+              JSON.stringify(found),
+            );
+            check(
+              "the stale files really were there, so the filter had something to reject",
+              fs.existsSync(path.join(dist, "Folia-9.9.8.AppImage")),
+            );
+          } finally {
+            fs.rmSync(fakeRoot, { recursive: true, force: true });
+          }
+        }
+      }
+    }
+  }
+
+    // The welcome screen's version badge must come from app.getVersion() at
+    // runtime, never from a literal in the markup. The old markup hardcoded
+    // "v2.0.0" and was still claiming it after the 1.0 rebrand, because nothing
+    // made the two agree.
+    {
+      const html = fs.readFileSync(path.join(__dirname, "index.html"), "utf8");
+      const m = html.match(
+        /id="welcomeVersion"[^>]*>([^<]*)</,
+      );
+      check(
+        "the welcome version badge carries no hardcoded version literal",
+        Boolean(m) && m[1].trim() === "",
+        m ? `badge contains ${JSON.stringify(m[1])}` : "welcomeVersion element not found",
+      );
+    }
 
   console.log(`\n=== ${pass} passed, ${fail} failed ===\n`);
   process.exit(fail === 0 ? 0 : 1);

@@ -1,7 +1,8 @@
 {
-  "name": "markdown-viewer",
-  "version": "2.0.7",
-  "description": "Markdown Viewer - A sleek cross-platform markdown viewer with Mermaid support",
+  "name": "folia",
+  "version": "1.0.0",
+  "productName": "Folia",
+  "description": "Folia - a fast, offline markdown viewer with tabs, Mermaid diagrams and live reload",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -20,13 +21,14 @@
     "test:security": "electron test-render-security.js",
     "test:popups": "electron test-popup-security.js",
     "test:packaging": "node test-packaging.js",
+    "test:migration": "node test-userdata-migration.js",
     "test:mermaid": "electron test-mermaid-render.js",
     "test:visual": "electron test-visual-utils-selfcheck.js",
     "test:startup": "electron test-startup-perf.js",
     "test:search": "electron test-search.js",
     "test:patch": "electron test-render-patch.js",
     "test:translate": "electron test-translate-network.js",
-    "test": "npm run test:packaging && npm run test:startup && npm run test:tabs && npm run test:security && npm run test:popups && npm run test:visual && npm run test:search && npm run test:mermaid && npm run test:patch && npm run test:tables",
+    "test": "npm run test:packaging && npm run test:migration && npm run test:startup && npm run test:tabs && npm run test:security && npm run test:popups && npm run test:visual && npm run test:search && npm run test:mermaid && npm run test:patch && npm run test:tables",
     "test:tables": "node --check test-table-display.js && electron test-table-display.js"
   },
   "keywords": [
@@ -34,13 +36,13 @@
     "viewer",
     "electron",
     "mermaid",
-    "omnicore"
+    "folia"
   ],
   "author": {
-    "name": "Viktor Moyseyenko (Yumedzi)"
+    "name": "lostinsea"
   },
   "license": "MIT",
-  "homepage": "https://www.omnicore.com.tr",
+  "homepage": "https://github.com/lostinsea/markdown-viewer#readme",
   "repository": {
     "type": "git",
     "url": "https://github.com/lostinsea/markdown-viewer.git"
@@ -64,8 +66,8 @@
     "brace-expansion": "^5.0.8"
   },
   "build": {
-    "appId": "com.omnicore.markdownviewer",
-    "productName": "Markdown Viewer",
+    "appId": "io.github.lostinsea.folia",
+    "productName": "Folia",
     "publish": null,
     "directories": {
       "output": "dist"
@@ -149,7 +151,7 @@
           "role": "Viewer"
         }
       ],
-      "artifactName": "Omnicore.Markdown.Viewer.${version}.${ext}"
+      "artifactName": "Folia-${version}.${ext}"
     },
     "mac": {
       "target": [
@@ -183,7 +185,7 @@
         "AppImage"
       ],
       "category": "Utility",
-      "maintainer": "Omnicore <info@omnicore.com.tr>",
+      "maintainer": "lostinsea <lostinsea@users.noreply.github.com>",
       "icon": "markdown_viewer_icon.png",
       "fileAssociations": [
         {
@@ -216,7 +218,7 @@
       }
     ],
     "nsis": {
-      "artifactName": "Omnicore.Markdown.Viewer.Setup.${version}.${ext}",
+      "artifactName": "Folia-Setup-${version}.${ext}",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "allowElevation": true,
@@ -225,7 +227,7 @@
       "installerHeaderIcon": "logo.ico",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Omnicore Markdown Viewer",
+      "shortcutName": "Folia",
       "runAfterFinish": true,
       "menuCategory": true,
       "displayLanguageSelector": false,

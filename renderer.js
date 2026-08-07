@@ -438,7 +438,7 @@ function buildRawHtmlDocument(code) {
     code,
     '<scr' + 'ipt>',
     'window.addEventListener("load",function(){',
-    '  function notify(){window.parent.postMessage({type:"omnicore-rawhtml-resize",h:document.body.scrollHeight},"*");}',
+    '  function notify(){window.parent.postMessage({type:"folia-rawhtml-resize",h:document.body.scrollHeight},"*");}',
     '  setTimeout(notify,100);setTimeout(notify,600);setTimeout(notify,1500);',
     '});',
     '</scr' + 'ipt>',
@@ -543,7 +543,7 @@ const UI_STRINGS = {
     'searchPlaceholder': 'Search in document...', 'noRecentFiles': 'No recent files',
     'noHeaders': 'No headers found', 'unsaved': '● Unsaved',
     'editorPlaceholder': 'Start typing markdown...',
-    'welcome.title': 'Welcome to Omnicore Markdown Viewer',
+    'welcome.title': 'Welcome to Folia',
     'welcome.subtitle': 'Press Ctrl+O to open a markdown file',
     'welcome.features': 'Features',
     'fileUpdated': 'File Updated',
@@ -669,7 +669,7 @@ const UI_STRINGS = {
     'searchPlaceholder': 'Belgede ara...', 'noRecentFiles': 'Son dosya yok',
     'noHeaders': 'Başlık bulunamadı', 'unsaved': '● Kaydedilmemiş',
     'editorPlaceholder': 'Markdown yazmaya başlayın...',
-    'welcome.title': 'Omnicore Markdown Viewer\'a Hoş Geldiniz',
+    'welcome.title': 'Folia\'ya Hoş Geldiniz',
     'welcome.subtitle': 'Bir markdown dosyası açmak için Ctrl+O tuşlayın',
     'welcome.features': 'Özellikler',
     'fileUpdated': 'Dosya Güncellendi',
@@ -2037,7 +2037,7 @@ function applyNoteStyles() {
 // Logo link - open website
 logoLink.addEventListener('click', (e) => {
   e.preventDefault();
-  shell.openExternal('https://www.omnicore.com.tr');
+  shell.openExternal('https://github.com/lostinsea/markdown-viewer');
 });
 
 // Extension policy for links that resolve to a local file (SEC-12).
@@ -9092,7 +9092,7 @@ function patchNoteInDOM(noteId, updates) {
 // ============================================
 
 try {
-  const exportChannel = new BroadcastChannel('omnicore-export');
+  const exportChannel = new BroadcastChannel('folia-export');
   exportChannel.onmessage = (event) => {
     if (!event.data) return;
     if (event.data.type === 'request-pdf-export') {
@@ -9334,7 +9334,7 @@ ctxNotesPanelDelete.addEventListener('click', () => {
 // iframe - could resize a different block's frame, and the reported index went
 // straight into a querySelector string.
 window.addEventListener('message', function(e) {
-  if (!e.data || e.data.type !== 'omnicore-rawhtml-resize') return;
+  if (!e.data || e.data.type !== 'folia-rawhtml-resize') return;
   if (!viewer || !e.source) return;
   const height = Number(e.data.h);
   if (!Number.isFinite(height) || height <= 0) return;

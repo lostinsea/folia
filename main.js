@@ -8,6 +8,112 @@ const os = require("os");
 const crypto = require("crypto");
 
 // ============================================
+// USERDATA MIGRATION (markdown-viewer -> Folia)
+// ============================================
+// Electron derives the userData directory from the application name, so the
+// 1.0 rename moves it from <appData>/markdown-viewer to <appData>/Folia. That
+// directory holds Local Storage - the recent-file list, the restored tab
+// session and the theme choice - plus window-state.json. Without this copy the
+// rename would silently look like data loss on first launch.
+//
+// Runs before WINDOW_STATE_FILE is computed below, and before app ready.
+// Calling app.getPath("userData") this early is supported; the directory is
+// resolved from the app name, not created by readiness.
+//
+// Completion is recorded with a sentinel file rather than inferred from the
+// target directory existing. Directory existence is NOT evidence of a finished
+// migration: fs.cpSync is not atomic, so an interrupted copy, an EBUSY on a
+// LevelDB lock held by a still-running old build, or two first launches racing
+// all leave a directory that exists but is incomplete. Gating on existence
+// would then suppress every future retry and strand the user on a half-copied
+// profile forever. Gating on the sentinel means an incomplete attempt is
+// simply retried on the next launch.
+//
+// Copies rather than moves, so an older build pointed at the old directory
+// still works and the original is never at risk.
+const LEGACY_USERDATA_NAME = "markdown-viewer";
+const MIGRATION_SENTINEL = ".folia-migrated";
+const MIGRATION_STAGING = ".folia-migrate-staging";
+
+// Copies one tree into another WITHOUT overwriting anything that already
+// exists, moving each file into place with a rename.
+//
+// The rename is the point. A plain recursive copy writes each destination file
+// incrementally, so an interruption - a crash, a kill, a full disk - leaves a
+// TRUNCATED file behind. On the next launch that file exists, so a
+// non-overwriting copy skips it, and the migration then completes and marks
+// itself done: a corrupted profile blessed as good, permanently. A rename
+// within one volume is atomic, so a destination file is either absent or
+// complete, and "exists" becomes trustworthy enough to skip on.
+function moveTreeNoClobber(from, to) {
+  fs.mkdirSync(to, { recursive: true });
+  for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
+    const src = path.join(from, entry.name);
+    const dst = path.join(to, entry.name);
+    if (entry.isDirectory()) {
+      moveTreeNoClobber(src, dst);
+      continue;
+    }
+    if (fs.existsSync(dst)) continue;
+    try {
+      fs.renameSync(src, dst);
+    } catch (e) {
+      // EXDEV means the staging area landed on another volume, which should
+      // not happen (it is a sibling of the target) but is not worth failing
+      // the whole migration over. copyFile is not atomic, so this path
+      // reintroduces the truncation window - accepted only as a fallback.
+      if (e.code !== "EXDEV") throw e;
+      fs.copyFileSync(src, dst, fs.constants.COPYFILE_EXCL);
+    }
+  }
+}
+
+function migrateLegacyUserData() {
+  try {
+    const target = app.getPath("userData");
+    const sentinel = path.join(target, MIGRATION_SENTINEL);
+    if (fs.existsSync(sentinel)) return;
+
+    const legacy = path.join(path.dirname(target), LEGACY_USERDATA_NAME);
+    // path.resolve, because on Windows <appData>/markdown-viewer and a target
+    // that differs only in case are the same directory - copying it onto
+    // itself would be destructive.
+    if (path.resolve(legacy).toLowerCase() === path.resolve(target).toLowerCase()) return;
+    if (!fs.existsSync(legacy) || !fs.statSync(legacy).isDirectory()) return;
+
+    // Stage the whole copy first, then move it into place. Staging is a
+    // sibling of the target so the moves stay on one volume, and it is wiped
+    // first because anything left there is the debris of an interrupted run.
+    const staging = path.join(path.dirname(target), MIGRATION_STAGING);
+    fs.rmSync(staging, { recursive: true, force: true });
+    fs.cpSync(legacy, staging, { recursive: true, errorOnExist: false });
+
+    // Never overwrites: the user may already have used the new profile (a
+    // failed migration does not stop the app starting), and their current
+    // settings must outrank a copy of the old ones.
+    moveTreeNoClobber(staging, target);
+    fs.rmSync(staging, { recursive: true, force: true });
+
+    // Written last, and only on a clean pass. Anything that throws above
+    // leaves the sentinel absent, so the next launch tries again.
+    fs.writeFileSync(sentinel, new Date().toISOString() + "\n");
+    console.log("Migrated settings from " + legacy + " to " + target);
+  } catch (e) {
+    // Never block startup over this; a fresh profile is a recoverable outcome,
+    // a crash loop is not. No sentinel is written, so this retries next launch.
+    //
+    // Two launches racing (a double-click, or a shell association firing
+    // twice) are safe without a lock, and it is worth being precise about why:
+    // it is not the sentinel that makes it safe - both racers read it as
+    // absent - it is that every write is a no-clobber rename and the sentinel
+    // is written last. The loser's renames fail or skip; neither can produce a
+    // half-written file.
+    console.warn("userData migration incomplete, will retry next launch:", e.message);
+  }
+}
+migrateLegacyUserData();
+
+// ============================================
 // POPUP DOCUMENT ESCAPING
 //
 // The image, mermaid and table popups are built by concatenating
@@ -80,7 +186,7 @@ function makeNonce() {
  * @returns {{dir: string, file: string}} pass to removePopupDocument() on close
  */
 function writePopupDocument(kind, htmlContent) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omnicore-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "folia-"));
   const file = path.join(dir, `${kind}.html`);
   fs.writeFileSync(file, htmlContent, {
     encoding: "utf8",
@@ -391,7 +497,7 @@ function createWindow() {
     width: savedState ? savedState.width : 1200,
     height: savedState ? savedState.height : 800,
     show: false, // Don't show until ready
-    title: "Markdown Viewer",
+    title: "Folia",
     backgroundColor: "#f5f5f5",
     webPreferences: {
       nodeIntegration: true,
@@ -2303,6 +2409,27 @@ ipcMain.on("request-open-file", (event, data) => {
 // SINGLE INSTANCE LOCK & APP LIFECYCLE
 // ============================================
 
+// Windows identifies an application by its AppUserModelID, not by its window
+// title. Without one set explicitly, a dev run groups under Electron's default
+// id and a packaged run relies on the shortcut the installer wrote - so
+// taskbar grouping, jump lists, pinning and toast attribution can all name
+// something other than Folia even though the title bar reads correctly. Read
+// from package.json rather than repeated as a literal, because electron-builder
+// writes that same appId into the installer and the shortcut: any drift here
+// silently splits one app into two taskbar identities.
+//
+// Windows-only by design - the call is a documented no-op elsewhere, but
+// guarding it keeps the intent legible.
+if (process.platform === "win32") {
+  try {
+    const { appId } = require("./package.json").build;
+    if (appId) app.setAppUserModelId(appId);
+  } catch {
+    // Packaged asar layouts always contain package.json; a failure here must
+    // never be the reason the app does not start.
+  }
+}
+
 const gotTheLock = app.requestSingleInstanceLock();
 
 if (!gotTheLock) {
@@ -2578,7 +2705,7 @@ ipcMain.on("install-update", () => {
       // code execution as the user. mkdtempSync gives an unpredictable 0700
       // directory, and "wx" refuses to write if anything is already there.
       const batchDir = fs.mkdtempSync(
-        path.join(os.tmpdir(), "omnicore-update-"),
+        path.join(os.tmpdir(), "folia-update-"),
       );
       const batchPath = path.join(batchDir, "update.bat");
       const batch =

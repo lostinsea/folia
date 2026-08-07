@@ -1,4 +1,4 @@
-# Building Omnicore Markdown Viewer
+# Building Folia
 
 This guide explains how to create a standalone executable (.exe) file.
 
@@ -32,17 +32,17 @@ npm run build
 After the build completes, look in the `dist/` folder:
 ```
 dist/
-├── Omnicore.Markdown.Viewer.<version>.exe   <- portable, single file
-└── win-unpacked/                            <- the same app, unpacked
-    └── Markdown Viewer.exe
+├── Folia-<version>.exe    <- portable, single file
+└── win-unpacked/          <- the same app, unpacked
+    └── Folia.exe
 ```
 
 The portable `.exe` is your **standalone executable**. The version in the
 filename comes from `version` in `package.json`.
 
-Note that the running process is named **`Markdown Viewer`** (from
-`build.productName`), not `Omnicore...` — relevant when looking for it in Task
-Manager or with `Get-Process`.
+Both the portable exe and the unpacked binary take their name from
+`build.productName`, so the running process appears as **`Folia`** in Task
+Manager and `Get-Process`.
 
 ## Alternative Build Options
 
@@ -50,7 +50,7 @@ Manager or with `Get-Process`.
 ```bash
 npm run build-installer
 ```
-Creates: `dist/Omnicore Markdown Viewer Setup <version>.exe`
+Creates: `dist/Folia-Setup-<version>.exe`
 
 ### Build Everything
 ```bash

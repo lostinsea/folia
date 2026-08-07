@@ -12,7 +12,7 @@ This guide helps you test the Windows installer to ensure everything works corre
 ### Installation Test
 
 1. **Run the Installer**
-   - Double-click `Omnicore.Markdown.Viewer.Setup.2.0.4.exe`
+   - Double-click `Folia-Setup-1.0.0.exe`
    - UAC prompt should appear (requires admin rights)
 
 2. **License Agreement**
@@ -20,7 +20,7 @@ This guide helps you test the Windows installer to ensure everything works corre
    - [ ] "I Agree" button is clickable
 
 3. **Installation Directory**
-   - [ ] Default path shows: `C:\Program Files\Omnicore Markdown Viewer`
+   - [ ] Default path shows: `C:\Program Files\Folia`
    - [ ] "Browse" button allows changing install location
    - [ ] Selected path is remembered
 
@@ -34,7 +34,7 @@ This guide helps you test the Windows installer to ensure everything works corre
    - [ ] Installation completes successfully
 
 6. **Post-Installation**
-   - [ ] "Run Omnicore Markdown Viewer" checkbox appears
+   - [ ] "Run Folia" checkbox appears
    - [ ] Application launches if checkbox is selected
 
 ### Verification Tests
@@ -45,30 +45,34 @@ This guide helps you test the Windows installer to ensure everything works corre
 - [ ] Double-clicking shortcut launches application
 
 #### Start Menu
-- [ ] Start Menu folder exists: `Start > Omnicore Markdown Viewer`
+- [ ] Start Menu folder exists: `Start > Folia`
 - [ ] Shortcut launches application
 - [ ] Uninstall shortcut is present
 
 #### File Associations
+
+> **Note:** `build.fileAssociations` is not set in `package.json`, so the
+> installer registers **no** file associations. The checks below therefore
+> document expected behaviour if associations are added later — today the
+> honest expected result for every one of them is "not associated". Verified
+> against the build config rather than assumed. The `.ow` OmniWare format was
+> removed from the product, so it is no longer listed.
 
 Create test files:
 ```bash
 echo # Test Markdown > test.md
 echo graph TD; A-->B; > test.mmd
 echo graph TD; A-->B; > test.mermaid
-echo [Header: Test] > test.ow
 ```
 
-Test each file type:
-- [ ] `.md` files show Omnicore icon
-- [ ] `.mmd` files show Omnicore icon
-- [ ] `.mermaid` files show Omnicore icon
-- [ ] `.ow` files show Omnicore icon
-- [ ] Double-clicking `.md` opens in Omnicore
-- [ ] Double-clicking `.mmd` opens in Omnicore
-- [ ] Double-clicking `.mermaid` opens in Omnicore
-- [ ] Double-clicking `.ow` opens in Omnicore
-- [ ] Right-click > "Open with" shows Omnicore
+Test each file type (only once `build.fileAssociations` exists):
+- [ ] `.md` files show the Folia icon
+- [ ] `.mmd` files show the Folia icon
+- [ ] `.mermaid` files show the Folia icon
+- [ ] Double-clicking `.md` opens in Folia
+- [ ] Double-clicking `.mmd` opens in Folia
+- [ ] Double-clicking `.mermaid` opens in Folia
+- [ ] Right-click > "Open with" shows Folia
 
 #### Application Functionality
 - [ ] Application window opens correctly
@@ -82,30 +86,31 @@ Test each file type:
 
 #### Programs and Features
 - [ ] Open "Add/Remove Programs" (Windows Settings > Apps)
-- [ ] "Omnicore Markdown Viewer" appears in list
-- [ ] Version number is correct (2.0.4)
-- [ ] Publisher shows as "Omnicore"
+- [ ] "Folia" appears in list
+- [ ] Version number is correct (1.0.0)
+- [ ] Publisher shows as the signing certificate's subject, or is blank on an
+      unsigned build (`build.win.signtoolOptions` is null — see BUILD.md)
 - [ ] Install location shows correct path
 
 ### Uninstallation Test
 
 1. **Via Add/Remove Programs**
    - [ ] Open Settings > Apps > Installed apps
-   - [ ] Find "Omnicore Markdown Viewer"
+   - [ ] Find "Folia"
    - [ ] Click "Uninstall"
    - [ ] Uninstaller launches
    - [ ] Progress bar shows during uninstallation
    - [ ] Uninstall completes without errors
 
 2. **Via Start Menu**
-   - [ ] Start > Omnicore Markdown Viewer > Uninstall
+   - [ ] Start > Folia > Uninstall
    - [ ] Uninstaller launches and completes
 
 3. **Post-Uninstallation**
    - [ ] Application removed from Programs and Features
    - [ ] Desktop shortcut removed (if created)
    - [ ] Start Menu folder removed
-   - [ ] Installation directory removed: `C:\Program Files\Omnicore Markdown Viewer`
+   - [ ] Installation directory removed: `C:\Program Files\Folia`
    - [ ] File associations reverted (optional, depends on user settings)
 
 ### Clean Reinstallation
@@ -160,8 +165,8 @@ Test on multiple Windows versions if possible:
 **Solution**:
 1. Close all instances of the application
 2. Uninstall via Add/Remove Programs
-3. Manually delete `C:\Program Files\Omnicore Markdown Viewer` if it remains
-4. Delete `%APPDATA%\Omnicore Markdown Viewer` if needed
+3. Manually delete `C:\Program Files\Folia` if it remains
+4. Delete `%APPDATA%\Folia` if needed
 
 ## Automation Testing (Advanced)
 
@@ -169,26 +174,26 @@ For automated testing, use silent installation:
 
 ```batch
 REM Install silently
-Omnicore.Markdown.Viewer.Setup.2.0.4.exe /S
+Folia-Setup-1.0.0.exe /S
 
 REM Wait for installation
 timeout /t 10
 
 REM Test if installed
-if exist "C:\Program Files\Omnicore Markdown Viewer\Omnicore Markdown Viewer.exe" (
+if exist "C:\Program Files\Folia\Folia.exe" (
     echo [PASS] Installation successful
 ) else (
     echo [FAIL] Installation failed
 )
 
 REM Uninstall silently
-"C:\Program Files\Omnicore Markdown Viewer\Uninstall Omnicore Markdown Viewer.exe" /S
+"C:\Program Files\Folia\Uninstall Folia.exe" /S
 
 REM Wait for uninstallation
 timeout /t 10
 
 REM Test if uninstalled
-if not exist "C:\Program Files\Omnicore Markdown Viewer" (
+if not exist "C:\Program Files\Folia" (
     echo [PASS] Uninstallation successful
 ) else (
     echo [FAIL] Uninstallation failed

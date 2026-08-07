@@ -638,7 +638,7 @@
         if (window.viewer) {
           window.viewer.innerHTML = `
             <div class="welcome">
-              <h1>Welcome to Markdown Viewer</h1>
+              <h1>Welcome to Folia</h1>
               <p>Press <kbd>Ctrl+O</kbd> to open a markdown file</p>
             </div>
           `;

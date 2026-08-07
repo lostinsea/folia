@@ -76,7 +76,7 @@
     noHeaders: "Заголовків не знайдено",
     unsaved: "● Незбережено",
     editorPlaceholder: "Почніть вводити markdown...",
-    "welcome.title": "Ласкаво просимо до Markdown Viewer",
+    "welcome.title": "Ласкаво просимо до Folia",
     "welcome.subtitle": "Натисніть Ctrl+O, щоб відкрити файл markdown",
     "welcome.features": "Можливості",
     fileUpdated: "Файл оновлено",
