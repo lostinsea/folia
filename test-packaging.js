@@ -851,6 +851,499 @@ function main() {
       );
     }
 
+  // ------------------------------------------------------------------
+  // Third-party licence compliance.
+  //
+  // Folia being MIT does not discharge anything here. MIT, ISC, BSD and
+  // Apache-2.0 each grant redistribution ON CONDITION that their own copyright
+  // notice and licence text are reproduced in the distribution. That obligation
+  // belongs to each dependency, and `build.files` ships `node_modules/**/*`, so
+  // every one of them is in the installer.
+  // ------------------------------------------------------------------
+  {
+    const NOTICES = "THIRD-PARTY-NOTICES.md";
+    const noticesPath = path.join(ROOT, NOTICES);
+    check("the third-party notices file exists", fs.existsSync(noticesPath));
+
+    // WHERE THESE FILES ACTUALLY SHIP - measured against a real
+    // `electron-builder --win dir` build with probe files planted in each
+    // position, not reasoned from the docs:
+    //
+    //   probe listed BEFORE `!**/*.md`         -> not in asar
+    //   probe listed AFTER  `!**/*.md`         -> IN asar   (order IS honoured)
+    //   probe in build.files AND extraResources -> NOT in asar, in resources/
+    //   probe in build.files only               -> IN asar
+    //
+    // The third line is the one that matters here: electron-builder removes a
+    // file from the asar when it is also an extraResources source, so it is
+    // not shipped twice. So listing an extraResources file in `build.files` as
+    // well changes nothing - it is dead configuration that reads as
+    // load-bearing. An earlier version of this file did exactly that and had a
+    // revert entry "proving" it, which could only ever have been vacuous.
+    // extraResources is the whole mechanism, so that is what is asserted.
+    const extra = (pkg.build && pkg.build.extraResources) || [];
+    check(
+      "the notices file ships unpacked in resources/, where a reader can find it",
+      extra.some((e) => (e && e.from) === NOTICES),
+      JSON.stringify(extra),
+    );
+    check(
+      "the notices file is not also listed in build.files (that entry is inert)",
+      !files.includes(NOTICES),
+      `files: ${JSON.stringify(files.filter((f) => /\.md$|\.txt$/.test(f)))}`,
+    );
+    // The same trap, for the two files that were in both lists for the same
+    // reason. main.js:2639 resolves README from process.resourcesPath when
+    // packaged, which is only correct because extraResources is what puts it
+    // there.
+    for (const f of ["README.md", "LICENSE.txt"]) {
+      check(
+        `${f} ships via extraResources and is not duplicated into build.files`,
+        extra.some((e) => (e && e.from) === f) && !files.includes(f),
+        `inExtra=${extra.some((e) => (e && e.from) === f)} inFiles=${files.includes(f)}`,
+      );
+    }
+
+    // The generator reads the dependency tree that is actually installed, so
+    // regenerating in memory and comparing catches the case that matters:
+    // a dependency added, removed or upgraded without refreshing the notices.
+    if (fs.existsSync(noticesPath)) {
+      let regenerated = null;
+      let genErr = null;
+      let gen = null;
+      try {
+        gen = require("./scripts/generate-notices");
+        regenerated = gen.build();
+      } catch (e) {
+        genErr = e;
+      }
+      check("the notices generator runs", regenerated !== null, genErr && genErr.message);
+      if (regenerated) {
+        const committed = fs.readFileSync(noticesPath, "utf8");
+        check(
+          "the committed notices file is not stale",
+          committed === regenerated,
+          `committed ${committed.length} bytes, regenerated ${regenerated.length} bytes - run \`npm run notices\``,
+        );
+
+        // A second source describing the same tree. NOTE ON ITS STRENGTH: the
+        // generator now reads package-lock.json directly (it used to walk
+        // `npm ls`, which reported 259 packages against the lockfile's 219
+        // because it includes EXTRANEOUS ones left behind by earlier
+        // installs - jsdom among them, which is demonstrably absent from the
+        // built asar). That fix made this oracle share a source with the
+        // generator, so it no longer checks the SOURCE - it checks the walk,
+        // the dedupe and the rendering between that source and the output. The
+        // asar oracle below is the one that is genuinely independent.
+        const lockPath = path.join(ROOT, "package-lock.json");
+        if (fs.existsSync(lockPath)) {
+          const lock = JSON.parse(fs.readFileSync(lockPath, "utf8"));
+          const prod = new Set();
+          for (const [p, meta] of Object.entries(lock.packages || {})) {
+            if (!p.startsWith("node_modules/")) continue;
+            if (meta.dev || meta.devOptional) continue;
+            prod.add(p.slice(p.lastIndexOf("node_modules/") + "node_modules/".length));
+          }
+          const documented = new Set(
+            (committed.match(/^### (.+?)(?: \d[^\s]*)?$/gm) || []).map((h) =>
+              h.replace(/^### /, "").replace(/ \d[^\s]*$/, ""),
+            ),
+          );
+          const missing = [...prod].filter((n) => !documented.has(n));
+          check(
+            "every production dependency in package-lock.json has a notice",
+            prod.size > 0 && missing.length === 0,
+            `${prod.size} production packages, ${missing.length} undocumented: ${missing.slice(0, 8).join(", ")}`,
+          );
+        }
+
+        // THE INDEPENDENT ORACLE: what electron-builder actually put in the
+        // asar. Not derived from package.json or package-lock.json at all, so
+        // it is the only check here that can catch the generator and its input
+        // agreeing with each other and both being wrong about the product.
+        // Skipped when there is no build, because requiring one would make the
+        // suite depend on a 4-minute step; the checks above still run.
+        const asarPath = path.join(ROOT, "dist", "win-unpacked", "resources", "app.asar");
+        // Only trusted when the build is NEWER than the lockfile. A stale asar
+        // produces a confident FALSE FAILURE - add a dependency without
+        // rebuilding and the notices correctly document a package the old asar
+        // cannot contain, which this would report as over-inclusion. An oracle
+        // that fails for reasons unrelated to the thing it measures gets
+        // muted by whoever hits it next, so it is skipped instead.
+        const asarFresh =
+          fs.existsSync(asarPath) &&
+          fs.existsSync(lockPath) &&
+          fs.statSync(asarPath).mtimeMs >= fs.statSync(lockPath).mtimeMs;
+        if (asarFresh) {
+          let shipped = null;
+          try {
+            const asar = require("@electron/asar");
+            shipped = new Set();
+            for (const f of asar.listPackage(asarPath)) {
+              const m = /^.*\/node_modules\/(@[^/]+\/[^/]+|[^/]+)\/package\.json$/.exec(
+                f.replace(/\\/g, "/"),
+              );
+              if (m) shipped.add(m[1]);
+            }
+          } catch {
+            shipped = null;
+          }
+          if (shipped && shipped.size > 0) {
+            // Names only. Reading each package.json out of the asar to compare
+            // versions would be stronger still, but the failure this guards
+            // against - a package shipping with no notice at all - is a name
+            // level fact, and the staleness check above pins the versions.
+            const documented = new Set(
+              (regenerated.match(/^### .+$/gm) || []).map((h) =>
+                h.replace(/^### /, "").replace(/ [^ ]+$/, ""),
+              ),
+            );
+            const undocumented = [...shipped].filter((n) => !documented.has(n));
+            check(
+              "every package inside the built app.asar has a notice",
+              undocumented.length === 0,
+              `${shipped.size} packages in the asar, ${undocumented.length} undocumented: ${undocumented
+                .slice(0, 8)
+                .join(", ")}`,
+            );
+            // The other direction, and the one that caught the original
+            // defect: documenting a package that does not ship describes the
+            // developer's workstation rather than the product, and two
+            // developers would produce different files from the same commit.
+            // Tabulator and Fira Code are vendored files rather than packages,
+            // so they are legitimately absent from node_modules.
+            const VENDORED = new Set(["Tabulator", "Fira"]);
+            const overIncluded = [...documented].filter(
+              (n) => !shipped.has(n) && !VENDORED.has(n),
+            );
+            check(
+              "the notices document nothing that is absent from the built app.asar",
+              overIncluded.length === 0,
+              `${overIncluded.length} over-included: ${overIncluded.slice(0, 8).join(", ")}`,
+            );
+          }
+        }
+
+        // Six shipped packages publish no licence file. Their terms live only
+        // in a README, and `!**/*.md` strips READMEs out of the packaged app,
+        // so before this the text existed NOWHERE in the distribution. An
+        // entry that says "ships no licence file" is an admission that the
+        // condition attached to the grant was not met, not a notice.
+        check(
+          "no shipped package is left with a placeholder instead of licence terms",
+          !/ships no licence file/.test(regenerated),
+          (regenerated.match(/^### .+\n(?:[\s\S]{0,900}?ships no licence file)/gm) || [])
+            .map((s) => s.split("\n")[0])
+            .slice(0, 8)
+            .join(", "),
+        );
+        // Stronger than "there is a fenced block": a block containing none of
+        // the operative phrases is a badge or a pointer, not a grant.
+        {
+          const entries = regenerated.split(/^### /m).slice(1);
+          const toothless = entries.filter((e) => !gen.LICENCE_BODY_RE.test(e));
+          check(
+            "every component entry reproduces operative licence language",
+            entries.length > 200 && toothless.length === 0,
+            `${entries.length} entries, ${toothless.length} without: ${toothless
+              .map((e) => e.split("\n")[0])
+              .slice(0, 8)
+              .join(", ")}`,
+          );
+        }
+        // Where canonical text is used it must SAY so. Presenting a
+        // reconstructed licence as if it had been copied from the package
+        // would be the more damaging error of the two.
+        check(
+          "canonical licence text is labelled as reconstructed, not passed off as the package's own",
+          !/canonical text of that licence/.test(regenerated) ||
+            /publishes no licence file and no licence text in its README/.test(regenerated),
+          "canonical block present without its provenance note",
+        );
+
+        check(
+          "the vendored Tabulator is documented despite not being an npm dependency",
+          /^### Tabulator \d+\.\d+\.\d+$/m.test(committed),
+          "no versioned Tabulator heading",
+        );
+        check(
+          "Fira Code is documented",
+          /^### Fira Code/m.test(committed) && committed.includes("OFL-1.1"),
+        );
+        // A dual licence is an offer, not a description; the notice has to say
+        // which limb was taken or downstream cannot tell what terms they got.
+        // Checking the ELECTION TEXT alone would be weak, because the licence
+        // body reproduced underneath is chosen by a separate code path: for
+        // dompurify the Apache `LICENSE` beats the MPL `LICENSE-MPL` on a
+        // shortest-filename tiebreak, so the two agreed only by coincidence.
+        // These assert the body actually matches the election.
+        const elections = [
+          {
+            heading: "dompurify",
+            spdx: "(MPL-2.0 OR Apache-2.0)",
+            elected: "Apache-2.0",
+            body: /Apache License/,
+            rejected: /Mozilla Public License/,
+          },
+          { heading: "jszip", spdx: "(MIT OR GPL-3.0-or-later)", elected: "MIT", body: /MIT License/ },
+        ];
+        // Checked against the REGENERATED text, not the committed copy. A
+        // generator regression shows up in what it produces now; the committed
+        // file would only catch it one `npm run notices` later, by which point
+        // the wrong licence has already shipped. The staleness assertion above
+        // ties the two together, so checking the live output is strictly
+        // stronger rather than a different subject.
+        for (const e of elections) {
+          // No `m` flag: with it, the `$` in the lookahead would match the end
+          // of the first LINE, truncating every entry to nothing - which made
+          // the negative "does not contain the rejected limb" check pass
+          // vacuously while the positive ones failed.
+          const m = new RegExp(
+            `\\n### ${e.heading} [^\\n]*\\n([\\s\\S]*?)(?=\\n### |$)`,
+          ).exec(regenerated);
+          if (!m) {
+            check(`${e.heading} appears in the notices`, false, "no heading found");
+            continue;
+          }
+          const entry = m[1];
+          check(
+            `${e.heading}'s entry names the licence Folia elects`,
+            entry.includes(`elects **${e.elected}**`),
+            entry.split("\n").slice(0, 6).join(" | "),
+          );
+          check(
+            `${e.heading}'s reproduced licence text is the one elected, not merely the one that sorted first`,
+            e.body.test(entry),
+            `entry does not contain ${e.body}`,
+          );
+          if (e.rejected) {
+            check(
+              `${e.heading} does not reproduce the rejected limb's text instead`,
+              !e.rejected.test(entry),
+            );
+          }
+        }
+
+        // core.autocrlf=true is set on this repo and LICENSE is already
+        // `i/lf w/crlf`. If the notices file were not pinned to LF in
+        // .gitattributes, a fresh clone would hold CRLF while the generator
+        // keeps emitting LF, and the byte-for-byte staleness check above would
+        // fail on a clean checkout with no way to fix it - regenerating writes
+        // LF and git converts it straight back.
+        check(
+          "the committed notices file is LF, as .gitattributes pins it",
+          !committed.includes("\r"),
+          `${(committed.match(/\r/g) || []).length} CR bytes present`,
+        );
+        const attrs = fs.readFileSync(path.join(ROOT, ".gitattributes"), "utf8");
+        check(
+          ".gitattributes pins the generated notices to LF",
+          /^THIRD-PARTY-NOTICES\.md\s+text\s+eol=lf\s*$/m.test(attrs),
+        );
+        // Verbatim third-party licence texts. Their provenance rests on a
+        // byte-for-byte match with the upstream artifact (the OFL as SIL
+        // publishes it; Tabulator's licence as it comes out of `npm pack`), so
+        // an end-of-line rewrite on checkout would break that verification -
+        // and for the OFL it would alter the very file clause 2 requires to
+        // travel with the font binaries. This is also not hypothetical: git's
+        // own core.safecrlf guard REFUSED to stage these files until they were
+        // pinned, because the LF -> repo -> CRLF round trip is not reversible.
+        for (const f of ["assets/fonts/LICENSE-FiraCode.txt", "libs/tabulator/LICENSE"]) {
+          const pinned = new RegExp(
+            `^${f.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s+text\\s+eol=lf\\s*$`,
+            "m",
+          ).test(attrs);
+          check(`.gitattributes pins ${f} to LF so it stays byte-faithful`, pinned);
+          const p = path.join(ROOT, f);
+          check(
+            `${f} is stored with LF endings, as pinned`,
+            fs.existsSync(p) && !fs.readFileSync(p, "utf8").includes("\r\n"),
+          );
+        }
+      }
+    }
+
+    // Apache-2.0 section 4(d) makes propagating a dependency's NOTICE file a
+    // condition of redistribution, and it is a SEPARATE obligation from
+    // reproducing the licence text. Nothing in this tree ships one today, so
+    // the scan below finds nothing - which is why the collector is proved
+    // sensitive first. An assertion that scans for something that does not
+    // exist, using a collector that has never been shown to detect anything,
+    // is two vacuous checks agreeing with each other.
+    {
+      const gen = require("./scripts/generate-notices");
+      const probe = fs.mkdtempSync(path.join(os.tmpdir(), "folia-notice-"));
+      try {
+        const withNotice = path.join(probe, "with");
+        const withoutNotice = path.join(probe, "without");
+        fs.mkdirSync(withNotice);
+        fs.mkdirSync(withoutNotice);
+        fs.writeFileSync(path.join(withNotice, "NOTICE"), "Example Corp\nDerived from X.\n");
+        fs.writeFileSync(path.join(withoutNotice, "LICENSE"), "MIT\n");
+        const hit = gen.readNoticeText(withNotice);
+        const miss = gen.readNoticeText(withoutNotice);
+        check(
+          "the NOTICE collector detects a NOTICE file and ignores a licence-only package",
+          Boolean(hit) && hit.text.includes("Example Corp") && miss === null,
+          `hit=${JSON.stringify(hit)} miss=${JSON.stringify(miss)}`,
+        );
+      } finally {
+        fs.rmSync(probe, { recursive: true, force: true });
+      }
+
+      // The README harvester needs the same treatment, and for a sharper
+      // reason: its first version returned null for EVERY package, and that
+      // presented as "no package happens to state its licence in prose"
+      // rather than as a failure. (`\Z` is not a JavaScript escape - it
+      // matches a literal "Z" - and the heading-level lookahead was inverted.)
+      // A harvester that cannot be shown to harvest is indistinguishable from
+      // one that is broken.
+      {
+        const probe2 = fs.mkdtempSync(path.join(os.tmpdir(), "folia-readme-"));
+        try {
+          const real = path.join(probe2, "real");
+          const label = path.join(probe2, "label");
+          const trailing = path.join(probe2, "trailing");
+          for (const d of [real, label, trailing]) fs.mkdirSync(d);
+          const MIT =
+            "Copyright (c) 2013 Example Person &lt;p@example.com&gt;\n\n" +
+            "Permission is hereby granted, free of charge, to any person obtaining a copy " +
+            "of this software and associated documentation files (the \"Software\"), to deal " +
+            "in the Software without restriction, including without limitation the rights " +
+            "to use, copy, modify, merge, publish, distribute, sublicense, and/or sell " +
+            "copies of the Software, subject to the following conditions:\n\n" +
+            "THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND.\n";
+          fs.writeFileSync(path.join(real, "README.md"), `# thing\n\n## License\n\n${MIT}`);
+          // The failure mode that matters most: a heading whose body is just
+          // the SPDX id. Reproducing that would satisfy a naive "has a licence
+          // section" check while discharging nothing.
+          fs.writeFileSync(path.join(label, "README.md"), "# thing\n\n## License\n\nMIT\n");
+          fs.writeFileSync(
+            path.join(trailing, "README.md"),
+            `# thing\n\n## License\n\n${MIT}\n## Contributing\n\nSend patches to nobody.\n`,
+          );
+          const hit = gen.readLicenseFromReadme(real);
+          const miss = gen.readLicenseFromReadme(label);
+          const bounded = gen.readLicenseFromReadme(trailing);
+          check(
+            "the README harvester extracts real licence prose and rejects a bare SPDX label",
+            Boolean(hit) && /Permission is hereby granted/.test(hit.text) && miss === null,
+            `hit=${hit && hit.text.length} miss=${JSON.stringify(miss)}`,
+          );
+          check(
+            "the README harvester decodes HTML entities in the copyright line",
+            Boolean(hit) && hit.text.includes("<p@example.com>") && !hit.text.includes("&lt;"),
+            hit && hit.text.split("\n")[0],
+          );
+          check(
+            "the README harvester stops at the next heading of the same level",
+            Boolean(bounded) && !/Send patches/.test(bounded.text),
+            bounded && bounded.text.slice(-80),
+          );
+          // spdxFromReadme fires for no package in the tree today (`error`
+          // turned out to declare MIT through the legacy `licenses` array in
+          // its package.json, which spdxOf already handles). Kept as a guard
+          // for the next such package, and proved sensitive so that it is a
+          // guard rather than dead code.
+          check(
+            "the README SPDX declaration reader discriminates",
+            gen.spdxFromReadme(label) === null &&
+              gen.spdxFromReadme(
+                (() => {
+                  const d = path.join(probe2, "declared");
+                  fs.mkdirSync(d);
+                  fs.writeFileSync(path.join(d, "README.md"), "# t\n\n## MIT Licenced\n\nhi\n");
+                  return d;
+                })(),
+              ) === "MIT",
+            `label=${gen.spdxFromReadme(label)}`,
+          );
+        } finally {
+          fs.rmSync(probe2, { recursive: true, force: true });
+        }
+      }
+
+      // Now the real tree, using the same collector that was just shown to work.
+      const modules = path.join(ROOT, "node_modules");
+      const unpropagated = [];
+      if (fs.existsSync(noticesPath) && fs.existsSync(modules)) {
+        const committedText = fs.readFileSync(noticesPath, "utf8");
+        const stack = [modules];
+        while (stack.length) {
+          const dir = stack.pop();
+          let entries = [];
+          try {
+            entries = fs.readdirSync(dir, { withFileTypes: true });
+          } catch {
+            continue;
+          }
+          if (entries.some((e) => e.isFile() && e.name === "package.json")) {
+            const n = gen.readNoticeText(dir);
+            if (n && !committedText.includes(n.text.slice(0, 120))) {
+              unpropagated.push(path.relative(modules, dir).replace(/\\/g, "/"));
+            }
+          }
+          for (const e of entries) {
+            if (e.isDirectory() && (e.name === "node_modules" || !e.name.startsWith("."))) {
+              stack.push(path.join(dir, e.name));
+            }
+          }
+        }
+      }
+      check(
+        "no dependency ships a NOTICE file that the notices omit",
+        unpropagated.length === 0,
+        `unpropagated: ${unpropagated.slice(0, 8).join(", ")}`,
+      );
+    }
+
+    // OFL-1.1 clause 2 is stricter than the MIT-style notices above: the
+    // licence has to travel WITH the font files, not merely be reproduced
+    // somewhere in the distribution.
+    check(
+      "the OFL ships beside the fonts it covers",
+      fs.existsSync(path.join(ROOT, "fonts", "LICENSE-FiraCode.txt")) &&
+        isPackaged(files, "fonts/LICENSE-FiraCode.txt"),
+    );
+    check(
+      "Tabulator's licence ships beside the code it covers",
+      fs.existsSync(path.join(ROOT, "libs", "tabulator", "LICENSE")) &&
+        isPackaged(files, "libs/tabulator/LICENSE"),
+    );
+
+    // LICENSE and LICENSE.txt both exist because both are load-bearing:
+    // GitHub's licence detection and README's link want `LICENSE`, while the
+    // NSIS installer agreement page is configured to `LICENSE.txt`. Two files
+    // that must agree by discipline alone had already drifted - one said 2025
+    // and the other 2026 - so the agreement is asserted rather than assumed.
+    const licA = fs.readFileSync(path.join(ROOT, "LICENSE"), "utf8");
+    const licB = fs.readFileSync(path.join(ROOT, "LICENSE.txt"), "utf8");
+    check(
+      "LICENSE and LICENSE.txt have not drifted apart",
+      licA === licB,
+      "the NSIS installer shows LICENSE.txt; GitHub and README show LICENSE",
+    );
+    // MIT requires the ORIGINAL copyright notice to be retained in derivative
+    // works, so the upstream line is not optional and must not be replaced by
+    // the fork's own.
+    check(
+      "LICENSE retains the upstream copyright, as MIT requires of a derivative",
+      /Copyright \(c\) [\d-]*2025[\d-]* Omnicore/.test(licA),
+      licA.split("\n").slice(0, 5).join(" | "),
+    );
+    check(
+      "LICENSE also asserts the fork's own copyright",
+      /Copyright \(c\) .*Folia/.test(licA),
+      licA.split("\n").slice(0, 5).join(" | "),
+    );
+    check(
+      "the NSIS installer agreement points at a licence file that exists",
+      Boolean(pkg.build && pkg.build.nsis && pkg.build.nsis.license) &&
+        fs.existsSync(path.join(ROOT, pkg.build.nsis.license)),
+      pkg.build && pkg.build.nsis && pkg.build.nsis.license,
+    );
+  }
+
   console.log(`\n=== ${pass} passed, ${fail} failed ===\n`);
   process.exit(fail === 0 ? 0 : 1);
 }

@@ -19,6 +19,12 @@ const COLLAPSE = path.join(ROOT, "custom-collapse.js");
 const MAIN = path.join(ROOT, "main.js");
 const VISUAL = path.join(ROOT, "test-visual-utils.js");
 const RELEASE = path.join(ROOT, "scripts", "release.js");
+const PKG = path.join(ROOT, "package.json");
+const NOTICES = path.join(ROOT, "THIRD-PARTY-NOTICES.md");
+const LICENSE_TXT = path.join(ROOT, "LICENSE.txt");
+const LICENSE_MD = path.join(ROOT, "LICENSE");
+const NOTICES_GEN = path.join(ROOT, "scripts", "generate-notices.js");
+const ATTRS = path.join(ROOT, ".gitattributes");
 
 const REVERTS = [
   {
@@ -1166,6 +1172,259 @@ const REVERTS = [
     mustPass: [
       /a widened table was on screen to be squeezed by the drawer/,
       /does not paint over the document scrollbar in normal view/,
+    ],
+  },
+  {
+    // Re-aimed after measurement. This entry used to move the notices file
+    // above `!**/*.md` in build.files, on the theory that its position there
+    // was what shipped it. A probe build (four planted files, one per
+    // position) showed BOTH halves of that theory were half-right and the
+    // conclusion was wrong: ordering IS honoured (a probe after the negation
+    // reaches the asar, one before it does not), but a file that is also an
+    // extraResources source is REMOVED from the asar so it is not shipped
+    // twice. The build.files entry was therefore inert, and a revert of inert
+    // configuration can only ever be vacuous. extraResources is the whole
+    // mechanism, so that is what this now neutralises - and the file then
+    // ships nowhere at all.
+    id: "R127",
+    suite: "test:packaging",
+    what: "ship an installer with no third-party notices in it",
+    file: PKG,
+    from: '        "from": "THIRD-PARTY-NOTICES.md",',
+    to: '        "from": "README.md",',
+    expect: [/notices file ships unpacked in resources/],
+    mustPass: [/committed notices file is not stale/],
+  },
+  {
+    // The real historical state: upstream carried LICENSE at 2025 and
+    // LICENSE.txt at 2026, and nothing noticed because nothing compared them.
+    // Only LICENSE.txt is packaged and shown by the NSIS installer, so the
+    // copy a user actually agrees to was the one nobody was reading.
+    id: "R128",
+    suite: "test:packaging",
+    what: "let LICENSE.txt drift away from LICENSE again",
+    file: LICENSE_TXT,
+    // Deliberately a single-line anchor. LICENSE/LICENSE.txt are stored LF in
+    // the index and checked out CRLF only where core.autocrlf=true, so an
+    // anchor spanning a line break would match on Windows and silently
+    // SETUP-FAIL on a Linux CI checkout - proving the fix on one platform only.
+    from: "Copyright (c) 2025-2026 Omnicore",
+    to: "Copyright (c) 2026 Omnicore",
+    expect: [/LICENSE and LICENSE\.txt have not drifted apart/],
+    mustPass: [
+      /LICENSE retains the upstream copyright/,
+      /LICENSE also asserts the fork's own copyright/,
+    ],
+  },
+  {
+    // MIT grants the right to redistribute ON CONDITION that the original
+    // copyright notice is retained. Replacing the upstream line with the
+    // fork's own - the obvious thing to do when rebranding - is precisely the
+    // move the licence forbids.
+    id: "R129",
+    suite: "test:packaging",
+    what: "drop the upstream copyright when rebranding, as MIT forbids",
+    file: LICENSE_MD,
+    // Single-line anchor, for the portability reason given on R128. Replacing
+    // the upstream line with the fork's own is exactly the rebrand mistake
+    // being guarded against, and it leaves no Omnicore attribution at all.
+    from: "Copyright (c) 2025-2026 Omnicore",
+    to: "Copyright (c) 2026 Folia contributors",
+    expect: [
+      /LICENSE retains the upstream copyright/,
+      /LICENSE and LICENSE\.txt have not drifted apart/,
+    ],
+    mustPass: [/LICENSE also asserts the fork's own copyright/],
+  },
+  {
+    // A generated file that is committed is a cache, and a cache with no
+    // invalidation goes stale silently. Adding or upgrading a dependency
+    // without regenerating leaves the shipped notices describing a tree that
+    // is no longer the one in the installer.
+    id: "R130",
+    suite: "test:packaging",
+    what: "let the committed notices drift from the installed dependency tree",
+    file: NOTICES,
+    from: "# Third-party notices",
+    to: "# Third-party notices (stale copy)",
+    expect: [/committed notices file is not stale/],
+    mustPass: [
+      /every production dependency in package-lock\.json has a notice/,
+      /vendored Tabulator is documented/,
+    ],
+  },
+  {
+    // Proves the coverage oracle is live rather than decorative. NOTE: since
+    // the generator was changed to read package-lock.json directly, this
+    // oracle shares a source with it and so checks the walk and the rendering
+    // rather than the source. The asar oracle (R135) is the independent one.
+    id: "R131",
+    suite: "test:packaging",
+    what: "ship notices with a production dependency missing from them",
+    file: NOTICES,
+    from: "### dompurify 3.4.12",
+    to: "### (removed)",
+    expect: [
+      /every production dependency in package-lock\.json has a notice/,
+      /committed notices file is not stale/,
+    ],
+    mustPass: [
+      /vendored Tabulator is documented/,
+      /Fira Code is documented/,
+      /dompurify's reproduced licence text is the one elected/,
+    ],
+  },
+  {
+    // The NSIS agreement page is the one licence a Windows user is actually
+    // shown. electron-builder resolves this path at build time, so a typo here
+    // is a broken installer rather than a broken test.
+    id: "R132",
+    suite: "test:packaging",
+    what: "point the installer agreement at a licence file that does not exist",
+    file: PKG,
+    from: '"license": "LICENSE.txt"',
+    to: '"license": "LICENSE-does-not-exist.txt"',
+    expect: [/NSIS installer agreement points at a licence file that exists/],
+    mustPass: [/LICENSE and LICENSE\.txt have not drifted apart/],
+  },
+  {
+    // Pointing the marker at the REJECTED limb simulates the real hazard:
+    // upstream renaming its licence files so filename order no longer happens
+    // to coincide with the election. Simply deleting the marker proves nothing
+    // today - the shortest-filename tiebreak selects the same Apache file, so
+    // the output is byte-identical and the suite stays green. That is precisely
+    // why the coincidence needed replacing with something load-bearing.
+    id: "R133",
+    suite: "test:packaging",
+    what: "select a dual-licensed package's text by something other than the elected licence",
+    file: NOTICES_GEN,
+    from: '    marker: /\\bApache License\\b/i,',
+    to: '    marker: /\\bMozilla Public License\\b/i,',
+    expect: [
+      /dompurify's reproduced licence text is the one elected/,
+      /dompurify does not reproduce the rejected limb's text instead/,
+      /committed notices file is not stale/,
+    ],
+    mustPass: [
+      /dompurify's entry names the licence Folia elects/,
+      /jszip's reproduced licence text is the one elected/,
+    ],
+  },
+  {
+    // The repo has core.autocrlf=true. Unpin the notices file and a fresh
+    // checkout gets CRLF while the generator keeps emitting LF, so the
+    // byte-for-byte staleness check fails on a clean clone and regenerating
+    // cannot fix it.
+    id: "R134",
+    suite: "test:packaging",
+    what: "stop pinning the generated notices to LF under core.autocrlf=true",
+    file: ATTRS,
+    from: "THIRD-PARTY-NOTICES.md text eol=lf",
+    to: "# THIRD-PARTY-NOTICES.md text eol=lf",
+    expect: [/\.gitattributes pins the generated notices to LF/],
+    mustPass: [
+      /committed notices file is LF/,
+      /committed notices file is not stale/,
+    ],
+  },
+  {
+    // OVER-INCLUSION. The generator originally walked
+    // `npm ls --omit=dev --all --parseable`, which reports whatever is on
+    // disk INCLUDING extraneous packages left behind by earlier installs.
+    // Measured on this machine: 259 packages against the lockfile's 219, with
+    // 23 extraneous names among them. One of those, jsdom@30.0.0, was
+    // documented in the shipped notices while being absent from the built
+    // app.asar - so the file described the developer's workstation rather
+    // than the product, and two developers would generate different notices
+    // from the same commit. Dropping the dev filter reproduces that class of
+    // error from the lockfile side, and the asar - which no part of the
+    // generator reads - is what catches it.
+    id: "R135",
+    suite: "test:packaging",
+    what: "document packages that are not in the shipped app.asar",
+    file: NOTICES_GEN,
+    from: "    if (meta.dev || meta.devOptional) continue;",
+    to: "    if (false) continue;",
+    expect: [/notices document nothing that is absent from the built app\.asar/],
+    mustPass: [
+      /every package inside the built app\.asar has a notice/,
+      /vendored Tabulator is documented/,
+      /Fira Code is documented/,
+    ],
+  },
+  {
+    // The README harvester. Its first version returned null for every package
+    // in the tree (`\Z` is not a JavaScript escape, and the heading-level
+    // lookahead was inverted), and that presented as "no package happens to
+    // state its licence in prose" rather than as a failure - which is why the
+    // probe below asserts on a planted README rather than on the real tree.
+    id: "R136",
+    suite: "test:packaging",
+    what: "stop harvesting licence prose from READMEs",
+    file: NOTICES_GEN,
+    from: "  const atxLevel = (l) => {",
+    to: "  const atxLevel = () => 0; const unusedAtxLevel = (l) => {",
+    expect: [/README harvester extracts real licence prose/],
+    mustPass: [
+      /README SPDX declaration reader discriminates/,
+      /no shipped package is left with a placeholder/,
+    ],
+  },
+  {
+    // Six shipped packages publish no licence file at all, and ten more keep
+    // their licence in a LICENSE.md that `!**/*.md` strips out of the
+    // packaged app. Without the canonical-text fallback those packages'
+    // terms appear nowhere in the distribution, and the notices say so in
+    // prose - which is an admission that the condition attached to the grant
+    // was not met, not a notice.
+    id: "R137",
+    suite: "test:packaging",
+    what: "leave packages that publish no licence file with a placeholder instead of terms",
+    file: NOTICES_GEN,
+    from: "      const template = spdx && CANONICAL[spdx];",
+    to: "      const template = null;",
+    expect: [
+      /no shipped package is left with a placeholder/,
+      /every component entry reproduces operative licence language/,
+    ],
+    mustPass: [/README harvester extracts real licence prose/],
+  },
+  {
+    // Records a DECISION rather than guarding a behaviour, in the same way as
+    // the deliberately un-widened `ul` gutter. A probe build proved that
+    // electron-builder removes a file from the asar when it is also an
+    // extraResources source, so listing it in build.files as well is dead
+    // configuration that reads as load-bearing - and the earlier revert
+    // written against that entry could only ever have been vacuous.
+    id: "R138",
+    suite: "test:packaging",
+    what: "reintroduce the inert build.files entry for an extraResources file",
+    file: PKG,
+    from: '      "!**/*.md",',
+    to: '      "!**/*.md",\n      "THIRD-PARTY-NOTICES.md",',
+    expect: [/notices file is not also listed in build\.files/],
+    mustPass: [
+      /notices file ships unpacked in resources/,
+      /committed notices file is not stale/,
+    ],
+  },
+  {
+    // Not hypothetical: `git add` REFUSED this file until it was pinned.
+    // core.safecrlf blocks staging an LF file on a machine with
+    // core.autocrlf=true because the LF -> repo -> CRLF round trip is not
+    // reversible. Unpinning it means a fresh clone gets a CRLF copy of the
+    // OFL, which breaks the byte-for-byte provenance check and alters the
+    // very file OFL clause 2 requires to travel with the font binaries.
+    id: "R139",
+    suite: "test:packaging",
+    what: "let checkout rewrite the line endings of a verbatim third-party licence",
+    file: ATTRS,
+    from: "assets/fonts/LICENSE-FiraCode.txt text eol=lf",
+    to: "# assets/fonts/LICENSE-FiraCode.txt text eol=lf",
+    expect: [/pins assets\/fonts\/LICENSE-FiraCode\.txt to LF/],
+    mustPass: [
+      /pins libs\/tabulator\/LICENSE to LF/,
+      /the OFL ships beside the fonts it covers/,
     ],
   },
 ];

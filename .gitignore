@@ -77,6 +77,11 @@ screenshots/
 fonts/*.ttf
 fonts/*.woff
 fonts/*.woff2
+# The OFL copy that scripts/vendor-libs.js places beside the fonts is a build
+# output too. The tracked source of truth is assets/fonts/LICENSE-FiraCode.txt;
+# committing the copy would leave two files that must agree by discipline, which
+# is exactly how LICENSE and LICENSE.txt came to disagree.
+fonts/LICENSE-FiraCode.txt
 !fonts/README.md
 
 # Runtime libraries copied out of node_modules by scripts/vendor-libs.js on

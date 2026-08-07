@@ -40,6 +40,7 @@ const LIBS = [
 // dropped to a generic monospace with nothing reporting why.
 const FONT_SRC = path.join(ROOT, "assets", "fonts");
 const FONT_OUT = path.join(ROOT, "fonts");
+const FONT_LICENSE = "LICENSE-FiraCode.txt";
 
 function copy(from, to, label) {
   if (!fs.existsSync(from)) {
@@ -107,6 +108,18 @@ function main() {
   for (const f of wanted) {
     copy(path.join(FONT_SRC, f), path.join(FONT_OUT, f), "font");
   }
+
+  // The OFL is not like the MIT licence here: clause 2 requires the licence and
+  // the copyright notice to travel WITH the font files themselves, in every
+  // distribution. A THIRD-PARTY-NOTICES entry alone does not satisfy it while
+  // the TTFs sit in fonts/ with nothing beside them. copy() throws when the
+  // source is missing, so removing this file breaks the build rather than
+  // silently shipping unlicensed fonts.
+  copy(
+    path.join(FONT_SRC, FONT_LICENSE),
+    path.join(FONT_OUT, FONT_LICENSE),
+    "font licence",
+  );
 
   // Recorded so the shipped versions are auditable without unminifying.
   fs.writeFileSync(

@@ -8,6 +8,7 @@
     "start": "electron .",
     "postinstall": "node scripts/vendor-libs.js",
     "vendor": "node scripts/vendor-libs.js",
+    "notices": "node scripts/generate-notices.js",
     "build": "electron-builder --win portable",
     "build-installer": "electron-builder --win nsis",
     "build-all": "electron-builder --win",
@@ -78,8 +79,6 @@
       "renderer.js",
       "popup-preload.js",
       "styles.css",
-      "README.md",
-      "LICENSE.txt",
       "logo.ico",
       "logo.png",
       "logo_dark.png",
@@ -215,6 +214,14 @@
       {
         "from": "README.md",
         "to": "README.md"
+      },
+      {
+        "from": "THIRD-PARTY-NOTICES.md",
+        "to": "THIRD-PARTY-NOTICES.md"
+      },
+      {
+        "from": "LICENSE.txt",
+        "to": "LICENSE.txt"
       }
     ],
     "nsis": {
