@@ -371,6 +371,35 @@ function main() {
       reasons.length === 0,
       reasons.length ? `publishes from ${reasons.join("; ")}` : "",
     );
+
+    // Auto-update is now ENABLED, and the negative check above passes just as
+    // happily when it is off - `publish: null` points at nobody, including the
+    // parent. These assert the positive fact, so silently reverting to null
+    // (which is where this started) fails rather than reading as compliant.
+    const publishCfg = [].concat(pkg.build && pkg.build.publish ? pkg.build.publish : []);
+    const github = publishCfg.filter(
+      (p) => p && typeof p === "object" && p.provider === "github",
+    );
+    check(
+      "auto-update publishes to this fork's own GitHub releases",
+      github.length === 1 && github[0].owner === "lostinsea" && github[0].repo === "markdown-viewer",
+      `build.publish=${JSON.stringify(pkg.build && pkg.build.publish)} - electron-builder writes no app-update.yml without it, so installed builds can never see a release`,
+    );
+
+    // Every build script must pass --publish never. electron-builder's default
+    // is onTagOrDraft: with publish configured, a tag build inside the release
+    // matrix would upload on all three legs at once, racing the create-release
+    // job that is meant to be the single writer. This was invisible while
+    // publish was null, because nothing could upload regardless.
+    const buildScripts = Object.entries(pkg.scripts || {}).filter(([k, v]) =>
+      /^build/.test(k) && /electron-builder/.test(v),
+    );
+    const unguarded = buildScripts.filter(([, v]) => !/--publish\s+never/.test(v)).map(([k]) => k);
+    check(
+      "every electron-builder script disables implicit publishing",
+      buildScripts.length >= 4 && unguarded.length === 0,
+      `${buildScripts.length} build scripts, ${unguarded.length} without --publish never: ${unguarded.join(", ")}`,
+    );
   }
 
   // scripts/post-upstream-merge.sh re-pins Electron with `npm pkg set`. If that
@@ -1365,6 +1394,29 @@ function main() {
               );
             }
           }
+
+          // app-update.yml is what makes the packaged app able to find an
+          // update at all: electron-updater reads it from resourcesPath, and
+          // without it every check fails at config load. It is emitted only
+          // because build.publish is set, so this is the artefact-level fact
+          // behind the config-level assertion earlier - the same intent/fact
+          // split as the libs/ bundles above. Measured on a real build before
+          // asserting it: present, and resolving to lostinsea/markdown-viewer.
+          const updateYml = path.join(
+            ROOT, "dist", "win-unpacked", "resources", "app-update.yml",
+          );
+          const updateCfg = fs.existsSync(updateYml)
+            ? fs.readFileSync(updateYml, "utf8")
+            : "";
+          check(
+            "the packaged app carries an update feed config",
+            /provider:\s*github/.test(updateCfg) &&
+              /owner:\s*lostinsea/.test(updateCfg) &&
+              /repo:\s*markdown-viewer/.test(updateCfg),
+            updateCfg
+              ? `app-update.yml does not name this fork: ${updateCfg.replace(/\s+/g, " ").trim()}`
+              : "app-update.yml is absent from resources/ - electron-updater has no feed and every check fails at config load",
+          );
           if (shipped && shipped.size > 0) {
             const vendoredClosure = gen.vendoredPackageNames();
             // Names only. Reading each package.json out of the asar to compare

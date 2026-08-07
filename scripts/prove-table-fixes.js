@@ -1648,6 +1648,42 @@ const REVERTS = [
       /every bundled version is documented, including duplicate versions of the same package/,
     ],
   },
+  {
+    id: "R154",
+    suite: "test:packaging",
+    // Where this item started: build.publish was null, so electron-builder
+    // wrote no app-update.yml, electron-updater had no feed, and the startup
+    // check could only ever fail - while the app still paid for it 5s after
+    // every packaged launch. The pre-existing "does not point at the upstream
+    // parent" assertion passes just as happily in that state, because null
+    // points at nobody, so nothing caught the regression on the way back.
+    what: "disable auto-update again by nulling build.publish, so no update feed is packaged",
+    file: path.join(ROOT, "package.json"),
+    from: '"publish": [{ "provider": "github", "owner": "lostinsea", "repo": "markdown-viewer" }],',
+    to: '"publish": null,',
+    expect: [
+      /auto-update publishes to this fork's own GitHub releases/,
+      // Not collateral. With no feed, electron-builder emits no manifests, so
+      // a dry run that lists them describes a release the real run cannot
+      // assemble - which is precisely what this assertion exists to catch, and
+      // what the list said before this change.
+      /dry-run artifact list does not advertise update manifests that are never built/,
+    ],
+  },
+  {
+    id: "R155",
+    suite: "test:packaging",
+    // electron-builder's default publish mode is onTagOrDraft. With a feed
+    // configured, a tag build would upload from all three matrix legs at once,
+    // racing create-release - the single job that is supposed to hold
+    // contents: write. Harmless while publish was null, because nothing could
+    // upload regardless, which is exactly why the flag is easy to drop.
+    what: "let a build script publish implicitly by dropping --publish never",
+    file: path.join(ROOT, "package.json"),
+    from: '"build": "electron-builder --win portable --publish never"',
+    to: '"build": "electron-builder --win portable"',
+    expect: [/every electron-builder script disables implicit publishing/],
+  },
 ];
 
 const only = process.argv.slice(2);

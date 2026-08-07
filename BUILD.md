@@ -130,23 +130,40 @@ warnings:
 > Azure Trusted Signing is the other option, under `win.azureSignOptions`;
 > it cannot be combined with `signtoolOptions`.
 
-## Auto-update is intentionally disabled
+## Auto-update
 
-`build.publish` is `null` in this fork, so no `app-update.yml` is written into
-the package and `electron-updater` has no feed to consult. The startup check
-still runs in packaged builds, fails to load a config, and is swallowed by the
-existing error handler — verified: no dialog, toast or console noise appears.
+`build.publish` targets this fork's own GitHub releases:
 
-This is deliberate, and differs from the parent project
-(`OmniCoreST/omnicore-markdown-viewer`), which publishes to its own GitHub
-releases. Keeping it `null` means a fork build can never be replaced by
-binaries from the parent repo, and it avoids opening an unsigned auto-update
-channel — which is a code-execution path — for a fork that publishes no
-releases. Consequently the fork's `version` is independent of the parent's and
-is not expected to track it.
+```json
+"publish": [{ "provider": "github", "owner": "lostinsea", "repo": "markdown-viewer" }]
+```
 
-To enable updates later, set `build.publish` to this fork's own repo **and**
-sign the releases; do not point it at the parent.
+electron-builder therefore writes `app-update.yml` into the package and emits
+`latest.yml` (plus `latest-linux.yml` / `latest-mac.yml`) alongside the
+installers. `electron-updater` reads the former at runtime and fetches the
+latter from the release assets. Verified on a real build: `app-update.yml`
+resolves to `github.com/lostinsea/markdown-viewer`, and until the first release
+is published the check simply returns 404 and is swallowed by the existing
+handler.
+
+**It must never point at a parent repo.** `OmniCoreST/omnicore-markdown-viewer`
+and `yumedzi/markdown-viewer` publish their own releases; aiming the feed at
+either would let their binaries silently replace a Folia build and discard every
+fix in this repository. `test-packaging.js` asserts this and covers the shapes
+that make it easy to get wrong — the `"github"` provider shorthand, an object
+with no `owner`/`repo`, the combined `repo: "owner/name"` form and a per-platform
+`publish` block all fall back to `package.json.repository`. The fork's `version`
+is independent of either parent's and is not expected to track them.
+
+Every `build*` script passes `--publish never`. electron-builder still generates
+the manifests; it just does not upload them, because uploading is the release
+workflow's job (`create-release` in `.github/workflows/release.yml`, the only job
+holding `contents: write`). Without the flag electron-builder's default
+`onTagOrDraft` would publish from inside the build matrix as well, racing that
+job with three concurrent uploads of the same tag.
+
+Windows builds are signed (`build.win.signtoolOptions`); macOS builds are not,
+so macOS auto-update will fail signature validation until they are.
 
 ## Clean Build
 

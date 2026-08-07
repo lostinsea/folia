@@ -94,9 +94,9 @@ These names are not documentation that has to be kept in step by hand:
 `scripts/release.js` builds the same list from `package.json` and fails the
 release if an expected artifact is missing or an unexpected one appears.
 
-**No `latest.yml` / `latest-linux.yml` is produced.** Auto-update is
-intentionally disabled (`build.publish` is `null`; see `BUILD.md`), so there is
-no update manifest to publish and nothing for a client to poll.
+**`latest.yml` / `latest-linux.yml` are produced and uploaded.** They are the
+update manifests `electron-updater` polls; without them in the release assets an
+installed build cannot see the release. See `BUILD.md`, "Auto-update".
 
 ## Platform Notes
 

@@ -2659,10 +2659,10 @@ ipcMain.on("check-for-updates", () => {
     return;
   }
   if (app.isPackaged) {
-    // Without a `.catch()` this rejects unhandled whenever no update feed is
-    // configured (`build.publish` is null in this fork, so no app-update.yml is
-    // packaged and loading the config always fails). Route it through the same
-    // status channel the renderer already handles instead.
+    // Without a `.catch()` this rejects unhandled if the feed cannot be
+    // reached - a network failure, or a repository with no published release
+    // yet, which returns 404. Route it through the same status channel the
+    // renderer already handles instead of leaving an unhandled rejection.
     Promise.resolve(updater.checkForUpdates()).catch((err) => {
       log("Manual update check failed:", err.message);
       if (mainWindow && mainWindow.webContents) {

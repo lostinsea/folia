@@ -9,13 +9,13 @@
     "postinstall": "node scripts/vendor-libs.js",
     "vendor": "node scripts/vendor-libs.js",
     "notices": "node scripts/generate-notices.js",
-    "build": "electron-builder --win portable",
-    "build-installer": "electron-builder --win nsis",
-    "build-all": "electron-builder --win",
-    "build-linux": "electron-builder --linux",
-    "build-linux-appimage": "electron-builder --linux AppImage",
-    "build-linux-deb": "electron-builder --linux deb",
-    "build-mac": "electron-builder --mac",
+    "build": "electron-builder --win portable --publish never",
+    "build-installer": "electron-builder --win nsis --publish never",
+    "build-all": "electron-builder --win --publish never",
+    "build-linux": "electron-builder --linux --publish never",
+    "build-linux-appimage": "electron-builder --linux AppImage --publish never",
+    "build-linux-deb": "electron-builder --linux deb --publish never",
+    "build-mac": "electron-builder --mac --publish never",
     "release": "node scripts/release.js",
     "test:tabs": "electron test-tab-refresh.js",
     "start-dev": "NODE_ENV=development electron .",
@@ -69,7 +69,7 @@
   "build": {
     "appId": "io.github.lostinsea.folia",
     "productName": "Folia",
-    "publish": null,
+    "publish": [{ "provider": "github", "owner": "lostinsea", "repo": "markdown-viewer" }],
     "directories": {
       "output": "dist"
     },
@@ -247,7 +247,6 @@
       "license": "LICENSE.txt"
     }
   },
-  "publish": null,
   "engines": {
     "node": ">=22.12.0"
   },

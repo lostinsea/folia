@@ -9,8 +9,10 @@
  * 3. Creates a GitHub release
  * 4. Uploads all build artifacts to that release
  *
- * Note: Folia does not auto-update (build.publish is null - see BUILD.md).
- * Releases are download-and-install only.
+ * Note: installed builds auto-update from this fork's own GitHub releases
+ * (build.publish - see BUILD.md), so the latest*.yml manifests must be
+ * uploaded alongside the installers or no client can see the release.
+ * The portable .exe never self-updates.
  *
  * Prerequisites:
  * - GitHub CLI (gh) installed and authenticated
@@ -344,23 +346,26 @@ function getArtifacts(version) {
   logStep(4, 'Collecting build artifacts');
 
   if (dryRun) {
-    // Must match what electron-builder actually emits. `build.publish` is null
-    // by deliberate policy (see "Auto-update is intentionally disabled" in
-    // BUILD.md), so no latest.yml / latest-linux.yml update manifest is ever
-    // written - listing them here promised files the real run could never
-    // produce, and a dry run that disagrees with the real run is worse than
-    // no dry run at all.
+    // Must match what electron-builder actually emits. `build.publish` targets
+    // this fork's GitHub releases, so the update manifests ARE written and
+    // have to be listed: a dry run that disagrees with the real run is worse
+    // than no dry run at all, and this list was wrong in both directions at
+    // different times - it once promised manifests a publish-less build could
+    // never produce, and would now omit manifests the release must upload or
+    // no installed build ever sees the release.
     const expectedArtifacts = [
       `Folia-Setup-${version}.exe`,
-      `Folia-Setup-${version}.exe.blockmap`
+      `Folia-Setup-${version}.exe.blockmap`,
+      'latest.yml'
     ];
     // Only list what this host can actually produce. Listing the Linux
     // artifacts on native Windows made the dry run describe a release that the
     // real run cannot assemble - the same class of lie as the update manifests
-    // removed above.
+    // above.
     if (willBuildLinux()) {
       expectedArtifacts.push(`Folia-${version}.AppImage`);
       expectedArtifacts.push(`folia_${version}_amd64.deb`);
+      expectedArtifacts.push('latest-linux.yml');
     }
     logDryRun('Expected artifacts:');
     expectedArtifacts.forEach(a => logDryRun(`  - ${a}`));
@@ -377,9 +382,9 @@ function getArtifacts(version) {
 
   const files = fs.readdirSync(DIST_DIR);
 
-  // Find relevant files. The update-manifest pattern is kept deliberately:
-  // it costs nothing while publish is null (nothing matches), and it means
-  // enabling publishing later uploads the manifests without a code change.
+  // Find relevant files. The update manifests are what make an installed build
+  // able to see this release at all, so they are uploaded alongside the
+  // installers rather than treated as build debris.
   const patterns = [
     /Setup.*\.exe$/i,
     /\.AppImage$/i,
@@ -449,18 +454,23 @@ function createGitHubRelease(version, artifacts) {
     ? '2. Run the installer (Windows) or make executable and run (Linux AppImage)'
     : '2. Run the installer';
 
-  // Release notes must not promise auto-update. `build.publish` is null by
-  // deliberate policy (BUILD.md, "Auto-update is intentionally disabled"), so
-  // no update feed exists and no installation will ever detect this release on
-  // its own. Telling users otherwise means they simply never update.
+  // Release notes describe the update path the build actually has. This block
+  // was previously the opposite claim ("Folia does not auto-update"), correct
+  // while `build.publish` was null; it now targets this fork's own releases, so
+  // an installed NSIS build really does find this release on its own. The
+  // portable .exe genuinely does not - electron-updater cannot replace a
+  // running single-file executable, which is why main.js carries a separate
+  // `isPortable` path - so it is called out rather than glossed over.
   const releaseNotes = `## Folia v${version}
 
 ### Downloads
 ${downloads.join('\n')}
 
 ### Updating
-Folia does not auto-update. Download the installer above and run it over your
-existing installation; your settings, recent files and open tabs are preserved.
+Installed builds check for updates automatically and will offer this version.
+You can also check on demand from the Help menu. The portable .exe does not
+self-update - download it again to upgrade. Settings, recent files and open
+tabs are preserved either way.
 
 ### Installation
 1. Download the appropriate file for your OS
