@@ -5,7 +5,6 @@ const { ipcRenderer, shell, clipboard } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
-const html2canvas = require('html2canvas');
 
 // Helper modules
 const { removeBOM, getFileName, getDirectory, escapeRegex, formatBytes } = require('./utils');
@@ -1334,8 +1333,38 @@ zoomResetBtn.addEventListener('click', () => {
 // Dark mode toggle
 darkModeToggle.addEventListener('click', (e) => {
   e.stopPropagation();
+
+  // An export forces the document into light, rasterises every diagram, and
+  // only then restores the reader's preference. A theme change applied inside
+  // that window re-themes the diagrams the export is still reading: measured
+  // on a Word export interrupted by picking Dark from the theme menu, the
+  // exported PNG came out CLOSER TO THE DARK reference than the light one.
+  //
+  // Nothing is lost by holding it. The preference itself has already been
+  // written by the caller - custom-theme.js sets 'themeMode' and only then
+  // clicks this button - and every export restores from
+  // resolveDarkPreference() when it finishes, so the reader's choice lands a
+  // moment later instead of corrupting the export. The legacy key is kept in
+  // step here so the two never disagree.
+  //
+  // The hold belongs on this side rather than in the export because it is the
+  // DIAGRAMS, not the body class, that must hold still: an export cannot undo
+  // a mermaid re-render it has already read.
+  if (exportThemeHold > 0) {
+    const heldDark = resolveDarkPreference();
+    localStorage.setItem('darkMode', heldDark ? 'enabled' : 'disabled');
+    darkModeToggle.classList.toggle('active', heldDark);
+    return;
+  }
+
   document.body.classList.toggle('dark-mode');
   const isDarkMode = document.body.classList.contains('dark-mode');
+  // Only the LEGACY key is written here, never 'themeMode'. custom-theme.js
+  // owns the preference: it writes it - and the value may be 'desktop' - and
+  // only then delegates to this button for the mermaid side effects below.
+  // Writing 'themeMode' here would overwrite "Follow Desktop" with whichever
+  // concrete theme it had just resolved, and the app would stop following the
+  // OS from that click onward. Pinned by R164.
   localStorage.setItem('darkMode', isDarkMode ? 'enabled' : 'disabled');
   darkModeToggle.classList.toggle('active', isDarkMode);
 
@@ -2500,119 +2529,168 @@ exportPdfBtn.addEventListener('click', () => {
   ipcRenderer.send(channel, { currentFileName });
 });
 
-// Convert Mermaid element to base64 PNG using native browser rendering
-async function mermaidToBase64Png(mermaidElement) {
-  return new Promise((resolve, reject) => {
-    try {
-      const svg = mermaidElement.querySelector('svg');
-      if (!svg) {
-        reject(new Error('No SVG found in mermaid element'));
-        return;
-      }
+// Put the document into light theme for an export, and report what it was.
+//
+// mermaid bakes its colours into the SVG it emits, so dropping the body class
+// is not enough on its own - a document exported from dark mode produced a
+// white page carrying dark diagrams. Measured on a gantt chart exported from
+// dark mode: the title and every date label came out light grey on white, i.e.
+// invisible. Both export paths need this, so it lives in one place; the PDF
+// path has to call the two halves from separate IPC handlers (main runs
+// printToPDF between them), which is why this is a pair of primitives rather
+// than a wrapper function.
 
-      // Get SVG dimensions
-      const bbox = svg.getBBox();
-      const width = bbox.width || svg.clientWidth || 800;
-      const height = bbox.height || svg.clientHeight || 600;
+// Depth of the "an export owns the theme" hold. A counter rather than a flag
+// because the two export paths are independent and a reader can start a PDF
+// while a Word export is still rasterising; the last one out restores.
+// Read by the darkModeToggle handler, which explains what it is for.
+let exportThemeHold = 0;
 
-      // Clone SVG
-      const svgClone = svg.cloneNode(true);
+function beginExportThemeHold() {
+  exportThemeHold++;
+}
 
-      // Set explicit dimensions
-      svgClone.setAttribute('width', width);
-      svgClone.setAttribute('height', height);
+function endExportThemeHold() {
+  if (exportThemeHold > 0) exportThemeHold--;
+  return exportThemeHold;
+}
 
-      // Ensure viewBox is set
-      if (!svgClone.getAttribute('viewBox')) {
-        svgClone.setAttribute('viewBox', `0 0 ${width} ${height}`);
-      }
+async function setExportTheme(dark) {
+  document.body.classList.toggle('dark-mode', dark);
+  try {
+    await updateMermaidTheme(dark);
+    // PERF-07 re-themes only the diagrams the reader can currently see and
+    // defers the rest to idle chunks, so updateMermaidTheme() resolving means
+    // "the visible ones are done", not "all of them are". An export reads the
+    // WHOLE document, so it must wait for the deferred tail as well or a long
+    // document exports a mixture of themes - the diagrams below the fold
+    // keeping the colours of the theme the reader was in.
+    await whenMermaidSettled();
+  } catch (e) {
+    console.warn('Mermaid re-theme for export failed:', e);
+  }
+}
 
-      // Get all computed styles and inline them
-      const allElements = svg.querySelectorAll('*');
-      const clonedElements = svgClone.querySelectorAll('*');
+// Convert a rendered mermaid diagram to a base64 PNG for embedding in exports.
+//
+// Serialise the SVG and let the engine decode it, rather than re-implementing
+// CSS layout. This replaced html2canvas, which cost 3.2 MB in the installer and
+// 13.7 ms of renderer startup on every single launch to serve this one call
+// site. Measured on the same diagram: html2canvas 672.5 ms producing a
+// 1720x960 frame (it captures the full-width CONTAINER, so half the image was
+// empty background); this route 5.7 ms producing 899x876 - the diagram itself.
+//
+// Sizing comes from the SVG's own viewBox, which is in user units, and NOT from
+// getBoundingClientRect(), which is viewport pixels and therefore scales with
+// the reader's app zoom. Measured on one diagram: viewBox stayed 126.2 wide at
+// 50%, 100% and 150% zoom while the rect read 63.1 / 126.2 / 189.2. An exported
+// document should not change size because of how the reader had zoomed.
+//
+// No styles are inlined and no foreignObject is rewritten. mermaid emits its
+// own <style> element INSIDE the svg, so the serialised copy carries its own
+// colours; and although mermaid runs with htmlLabels:true - putting labels in
+// <foreignObject>, which an SVG decoded through an <img> is not obliged to
+// render - that was measured across all six diagram types the app produces
+// (flowchart, sequence, class, state, pie, gantt) and labels draw in every one.
+// Fonts are the one thing that does not travel: @font-face faces from the
+// app's stylesheet are unavailable in the image context, so text falls back
+// down the stack mermaid declares. html2canvas fell back identically, so this
+// is not a regression, and the diagram's box geometry is fixed by mermaid at
+// layout time either way.
+async function mermaidToPngDataUrl(mermaidElement) {
+  let svg = mermaidElement && mermaidElement.querySelector('svg');
 
-      allElements.forEach((el, i) => {
-        if (clonedElements[i]) {
-          const computedStyle = window.getComputedStyle(el);
-          const importantStyles = ['fill', 'stroke', 'stroke-width', 'font-family', 'font-size', 'font-weight', 'opacity', 'transform'];
-          importantStyles.forEach(prop => {
-            const value = computedStyle.getPropertyValue(prop);
-            if (value && value !== 'none' && value !== '') {
-              clonedElements[i].style[prop] = value;
-            }
-          });
-        }
-      });
+  // A missing <svg> is not necessarily a broken diagram: renderMermaidBatch()
+  // restores `data-mermaid-src` into the element SYNCHRONOUSLY and only then
+  // awaits mermaid.run(), so on paper there is a window in which the element
+  // holds source text and no SVG at all, and an export reading it there would
+  // substitute the "[Mermaid Diagram]" placeholder and silently drop a diagram
+  // from the document. Draining the mermaid work queue - which every re-render
+  // goes through - waits out any such window before concluding the diagram is
+  // genuinely unrenderable. The export loop itself is deliberately NOT queued
+  // (setExportTheme enqueues, so wrapping the loop would deadlock), which is
+  // what makes awaiting a drain from inside it safe.
+  //
+  // MEASURED SCOPE, and it is the same shape as the width/height attributes
+  // below: this does no work today. The window is real - 29 of 30 diagrams
+  // have no <svg> the instant renderMermaidBatch's synchronous prefix returns,
+  // observed from inside the queued call - but it is not observable from any
+  // other TASK, because mermaid.run puts every SVG back before the renderer
+  // services its task queue again, and this loop resumes on img.onload, which
+  // is a task. Forty real re-renders issued over the diagrams of a live export
+  // produced zero placeholders with this branch disabled. It is kept as
+  // defence for the case where that stops holding (mermaid yielding mid-run, a
+  // slower font path). No revert pins it: it cannot fail, and an entry that
+  // cannot fail is worse than none (R110b). Section 8f records the
+  // measurement.
+  if (!svg && mermaidElement) {
+    await queueMermaidWork(() => {});
+    svg = mermaidElement.querySelector('svg');
+  }
+  if (!svg) throw new Error('No SVG found in mermaid element');
 
-      // Handle foreignObject - extract text and convert to SVG text
-      svgClone.querySelectorAll('foreignObject').forEach(fo => {
-        const text = fo.textContent?.trim() || '';
-        const x = fo.getAttribute('x') || '0';
-        const y = fo.getAttribute('y') || '0';
-        const foWidth = parseFloat(fo.getAttribute('width')) || 100;
-        const foHeight = parseFloat(fo.getAttribute('height')) || 20;
+  const box = svg.viewBox && svg.viewBox.baseVal;
+  const width = (box && box.width) || svg.clientWidth || 800;
+  const height = (box && box.height) || svg.clientHeight || 600;
 
-        // Create SVG text element
-        const textEl = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-        textEl.setAttribute('x', parseFloat(x) + foWidth / 2);
-        textEl.setAttribute('y', parseFloat(y) + foHeight / 2 + 4);
-        textEl.setAttribute('text-anchor', 'middle');
-        textEl.setAttribute('dominant-baseline', 'middle');
-        textEl.setAttribute('font-family', 'Arial, sans-serif');
-        textEl.setAttribute('font-size', '14');
-        textEl.setAttribute('fill', '#333');
-        textEl.textContent = text;
+  const clone = svg.cloneNode(true);
+  clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  // mermaid leaves width="100%" and no height on its SVG, with the real px
+  // hidden in style.maxWidth. A percentage resolves against nothing in an
+  // image context, so the size is stated explicitly here rather than carried
+  // over from the DOM.
+  //
+  // MEASURED SCOPE, because a revert entry written for these two lines came
+  // back VACUOUS twice: given the viewBox below, Chromium already has enough
+  // to establish an intrinsic size, and drawImage sizes the destination
+  // anyway - so on this engine, with a viewBox present, these two setAttribute
+  // calls change nothing. They are kept because they make the intrinsic size a
+  // stated fact rather than an inference. Note the distinction: the `width` and
+  // `height` VARIABLES above are load-bearing regardless - they size the canvas
+  // and supply the viewBox fallback below - it is only these two attribute
+  // writes that do no work today. No revert pins them: an entry that cannot
+  // fail is worse than none (R110b).
+  clone.setAttribute('width', width);
+  clone.setAttribute('height', height);
+  clone.style.maxWidth = 'none';
+  if (!clone.getAttribute('viewBox')) {
+    clone.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  }
 
-        fo.parentNode.replaceChild(textEl, fo);
-      });
-
-      // Serialize SVG
-      const serializer = new XMLSerializer();
-      let svgString = serializer.serializeToString(svgClone);
-
-      // Add XML declaration and namespace
-      if (!svgString.includes('xmlns="http://www.w3.org/2000/svg"')) {
-        svgString = svgString.replace('<svg', '<svg xmlns="http://www.w3.org/2000/svg"');
-      }
-
-      // Create image from SVG
-      const img = new Image();
-      const svgBlob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
-      const url = URL.createObjectURL(svgBlob);
-
-      img.onload = () => {
-        try {
-          // Create high-res canvas
-          const scale = 2;
-          const canvas = document.createElement('canvas');
-          canvas.width = width * scale;
-          canvas.height = height * scale;
-
-          const ctx = canvas.getContext('2d');
-          ctx.fillStyle = '#ffffff';
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
-          ctx.scale(scale, scale);
-          ctx.drawImage(img, 0, 0, width, height);
-
-          const base64 = canvas.toDataURL('image/png');
-          URL.revokeObjectURL(url);
-          resolve({ base64, width, height });
-        } catch (err) {
-          URL.revokeObjectURL(url);
-          reject(err);
-        }
-      };
-
-      img.onerror = () => {
-        URL.revokeObjectURL(url);
-        reject(new Error('Failed to load SVG image'));
-      };
-
-      img.src = url;
-    } catch (err) {
-      reject(err);
-    }
+  const xml = new XMLSerializer().serializeToString(clone);
+  const img = new Image();
+  await new Promise((resolve, reject) => {
+    img.onload = resolve;
+    img.onerror = () => reject(new Error('Failed to decode diagram SVG'));
+    // A data: URI rather than a blob: URL. An earlier version of this comment
+    // claimed blob: was outside the img-src CSP allow-list; that was WRONG -
+    // index.html allows `blob:` - and it is corrected here rather than quietly
+    // deleted, because the wrong reason is what a later reader would have
+    // trusted. The real reasons are that a data: URI needs no lifetime
+    // management (no revokeObjectURL, so no leak if the decode throws) and
+    // that it keeps this helper synchronous in its inputs. The cost is one
+    // encodeURIComponent over a string that measured 449x438 diagram serialises
+    // to; the whole route runs in 5.7 ms against html2canvas's 672.5 ms.
+    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
   });
+
+  // Chromium refuses canvases beyond ~32767 px on a side and ~268 Mpx in area:
+  // getContext returns a context that silently draws nothing, and toDataURL
+  // yields "data:,". No mermaid diagram is anywhere near that, but the failure
+  // is silent - an empty image in the exported file with no error anywhere - so
+  // the 2x upscale is clamped rather than trusted.
+  const MAX_SIDE = 16384;
+  const scale = Math.min(2, MAX_SIDE / width, MAX_SIDE / height);
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(width * scale));
+  canvas.height = Math.max(1, Math.round(height * scale));
+  const ctx = canvas.getContext('2d');
+  // Word has no page background of its own to show through a transparent PNG.
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+  return { dataUrl: canvas.toDataURL('image/png'), width, height };
 }
 
 // Export to Word button
@@ -2623,7 +2701,25 @@ exportWordBtn.addEventListener('click', async () => {
     return;
   }
 
+  // The document must be light BEFORE the clone is taken and before any
+  // diagram is rasterised: mermaid bakes its colours into the SVG, so a Word
+  // file exported from dark mode carried dark diagrams - and on a gantt chart
+  // that meant a light-grey title and date axis on white, i.e. invisible.
+  // The PDF path has done this since it was fixed; the Word path never did.
+  //
+  // Unconditional, like the PDF path, and not `if (wasDark)`. Body class and
+  // diagram colours are not the same fact: after a dark->light toggle on a long
+  // document the body is light immediately while PERF-07 is still re-theming
+  // the diagrams below the fold in idle chunks. Skipping the call because the
+  // body already looks right would export those stale dark diagrams and skip
+  // the settle wait that exists to prevent exactly that.
+  //
+  // The hold is taken FIRST and released in the finally, so the whole
+  // rasterisation window is covered even if the re-theme itself fails.
+  beginExportThemeHold();
   try {
+    await setExportTheme(false);
+
     // Show loading notification
     showNotification(i18n('notif.preparingWord'), 10000);
 
@@ -2650,42 +2746,17 @@ exportWordBtn.addEventListener('click', async () => {
 
       if (mermaidElement && clonedContainer) {
         try {
-          console.log('Converting mermaid diagram', i + 1);
+          const { dataUrl, width, height } = await mermaidToPngDataUrl(mermaidElement);
 
-          // Scroll element into view to ensure it's visible
-          mermaidElement.scrollIntoView({ block: 'center' });
-          await new Promise(resolve => setTimeout(resolve, 100)); // Wait for scroll
-
-          // Capture using html2canvas
-          const canvas = await html2canvas(mermaidElement, {
-            backgroundColor: '#ffffff',
-            scale: 2,
-            logging: false,
-            useCORS: true,
-            allowTaint: true,
-            foreignObjectRendering: false, // Disable to avoid issues
-            onclone: (clonedDoc) => {
-              // In the cloned document, find the mermaid element and ensure visibility
-              const clonedMermaid = clonedDoc.querySelector('.mermaid');
-              if (clonedMermaid) {
-                clonedMermaid.style.display = 'block';
-                clonedMermaid.style.visibility = 'visible';
-              }
-            }
-          });
-
-          const base64 = canvas.toDataURL('image/png');
-          const width = canvas.width / 2; // Account for scale
-          const height = canvas.height / 2;
-
-          console.log('Converted diagram', i + 1, 'size:', width, 'x', height);
-
-          // Create an img element with the base64 PNG
+          // Create an img element with the rasterised PNG
           const imgElement = document.createElement('img');
-          imgElement.src = base64;
+          imgElement.src = dataUrl;
           imgElement.style.cssText = `max-width: 100%; height: auto; display: block; margin: 10px auto;`;
-          imgElement.setAttribute('width', Math.min(width, 600)); // Limit max width for Word
-          imgElement.setAttribute('height', Math.round(height * (Math.min(width, 600) / width)));
+          // Word lays the image out at these attributes, so cap the width and
+          // scale the height by the SAME factor or the diagram is distorted.
+          const shownWidth = Math.min(width, 600);
+          imgElement.setAttribute('width', Math.round(shownWidth));
+          imgElement.setAttribute('height', Math.round(height * (shownWidth / width)));
 
           // Replace the container with the image
           clonedContainer.parentNode.replaceChild(imgElement, clonedContainer);
@@ -2694,7 +2765,11 @@ exportWordBtn.addEventListener('click', async () => {
           // Fallback to placeholder if conversion fails
           const placeholder = document.createElement('div');
           placeholder.style.cssText = 'padding: 20px; background: #f5f5f5; border: 1px solid #ddd; text-align: center; color: #666; margin: 10px 0;';
-          placeholder.innerHTML = '<strong>[Mermaid Diagram]</strong><br><em>' + i18n('mermaid.error') + '</em>';
+          const strong = document.createElement('strong');
+          strong.textContent = '[Mermaid Diagram]';
+          const em = document.createElement('em');
+          em.textContent = i18n('mermaid.error');
+          placeholder.append(strong, document.createElement('br'), em);
           clonedContainer.parentNode.replaceChild(placeholder, clonedContainer);
         }
       }
@@ -2724,6 +2799,38 @@ exportWordBtn.addEventListener('click', async () => {
   } catch (err) {
     console.error('Word export error:', err);
     alert(i18n('alert.wordError') + err.message);
+  } finally {
+    // Restore unconditionally. An export that throws halfway must not strand
+    // the reader in light mode.
+    //
+    // The source of truth is resolveDarkPreference(), NOT a snapshot of the
+    // body class taken before the export, and NOT for style: this export is
+    // awaited across several async hops (rasterising every diagram), and the
+    // reader can toggle the theme inside that window. A snapshot would then
+    // restore the theme they just left. resolveDarkPreference() reads the
+    // preference itself, which setExportTheme deliberately never writes, so it
+    // is unaffected by our own light-mode forcing. The PDF path already
+    // restored this way; the two now agree.
+    // Release the hold BEFORE restoring: the restore is itself a theme change
+    // and by this point there is no diagram left to protect. Reconciling
+    // against the body class rather than assuming it is light also covers the
+    // narrow case where a held click lands between the release and the
+    // restore - it will have applied the same preference we are about to read,
+    // so this becomes a no-op instead of a fight.
+    //
+    // Only the LAST export out restores. Two exports can overlap - start a
+    // Word export, reopen the File menu and choose Export as PDF - and they
+    // read the document for seconds. Restoring on every release put the
+    // reader's theme back underneath an export that was still rasterising:
+    // measured on a 30-diagram document scrolled to the bottom, the worst
+    // diagram in the finished Word file came out at distance 2.55 from the
+    // DARK reference and 99.17 from the light one, i.e. fully dark-baked.
+    if (endExportThemeHold() === 0) {
+      const restoreDark = resolveDarkPreference();
+      if (restoreDark !== document.body.classList.contains('dark-mode')) {
+        await setExportTheme(restoreDark);
+      }
+    }
   }
 });
 
@@ -2822,24 +2929,28 @@ function reloadCurrentFile() {
 // light page carrying dark diagrams. Re-theme the diagrams and only report
 // ready once that has finished, or printToPDF races the re-render.
 ipcRenderer.on('prepare-for-pdf-export', async () => {
-  document.body.classList.remove('dark-mode');
-  try {
-    await updateMermaidTheme(false);
-  } catch (e) {
-    console.warn('Mermaid light re-theme for PDF export failed:', e);
-  }
+  // Held across printToPDF, which runs in the main process between this
+  // handler and the result one. A theme change from the menu inside that
+  // window would re-theme the diagrams the printer is about to capture; the
+  // hold defers it to the restore below. See the darkModeToggle handler.
+  beginExportThemeHold();
+  await setExportTheme(false);
   // Double rAF ensures the style change is painted before main calls printToPDF
   requestAnimationFrame(() => requestAnimationFrame(() => ipcRenderer.send('pdf-export-ready')));
 });
 
 ipcRenderer.on('pdf-export-result', async (event, data) => {
-  // Restore dark mode if it was active before the export
-  if (resolveDarkPreference()) {
-    document.body.classList.add('dark-mode');
-    try {
-      await updateMermaidTheme(true);
-    } catch (e) {
-      console.warn('Mermaid dark re-theme after PDF export failed:', e);
+  // Restore to the reader's CURRENT preference, which may have been changed
+  // (and held) while the PDF was being written. Every path in main.js replies
+  // on this channel, including its failure branches, so the hold cannot leak.
+  //
+  // Gated on the hold reaching zero for the same reason as the Word path: a
+  // PDF export started on top of a Word export must not put the reader's theme
+  // back while the Word export is still rasterising.
+  if (endExportThemeHold() === 0) {
+    const restoreDark = resolveDarkPreference();
+    if (restoreDark !== document.body.classList.contains('dark-mode')) {
+      await setExportTheme(restoreDark);
     }
   }
   if (data.success) {

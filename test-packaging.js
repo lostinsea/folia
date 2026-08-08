@@ -249,6 +249,80 @@ function main() {
     check(`fonts/${f} is in build.files`, isPackaged(files, "fonts/" + f));
   }
 
+  // Production dependencies and bare requires must be the SAME set, in both
+  // directions. This is the general form of the finding that shrank app.asar
+  // from 153.6 MB to 23.2 MB: `build.files` ships `node_modules/**/*` and
+  // electron-builder prunes only devDependencies, so a package declared in
+  // `dependencies` is installed into every user's machine whether any shipped
+  // line requires it or not. That sweep was done by hand once; this is the
+  // version that keeps being true.
+  //
+  // The reverse direction matters just as much and fails far more loudly: a
+  // bare require with no matching dependency works forever on the developer's
+  // machine, where the package is present transitively or left over from an
+  // earlier install, and throws on a clean install.
+  {
+    const shippedJs = fs
+      .readdirSync(ROOT)
+      .filter(
+        (f) =>
+          f.endsWith(".js") &&
+          !/^(test-|bench-|probe-)/.test(f) &&
+          isPackaged(files, f),
+      );
+    const builtins = new Set(require("module").builtinModules);
+    const required = new Map();
+    const bareRe = /\brequire\(\s*["']([^"'.\/][^"']*)["']\s*\)/g;
+    for (const f of shippedJs) {
+      const src = read(f);
+      let mm;
+      while ((mm = bareRe.exec(src))) {
+        // Scoped and subpath specifiers resolve to their package root.
+        const spec = mm[1];
+        const pkgName = spec.startsWith("@")
+          ? spec.split("/").slice(0, 2).join("/")
+          : spec.split("/")[0];
+        if (builtins.has(pkgName) || pkgName === "electron" || pkgName.startsWith("node:")) continue;
+        if (!required.has(pkgName)) required.set(pkgName, new Set());
+        required.get(pkgName).add(f);
+      }
+    }
+    const declared = new Set(Object.keys(pkg.dependencies || {}));
+
+    // Vacuity floor. A regex that silently stops matching - because requires
+    // move behind a helper, or the shipped-file filter changes shape - would
+    // otherwise satisfy both assertions below by finding nothing at all.
+    //
+    // Tied to the DECLARED count rather than a constant, because a constant
+    // floor sits at whatever today's number is and a dependency removal walks
+    // straight under it. Two of anything is not a meaningful floor when the
+    // tree declares exactly two production dependencies.
+    check(
+      "the bare-require scan found something to check",
+      required.size >= declared.size && declared.size > 0,
+      `${required.size} bare require(s) across ${shippedJs.length} shipped file(s): ` +
+        `${[...required.keys()].join(", ")} - fewer than the ${declared.size} declared ` +
+        "dependencies, so the scan or the file filter has gone blind",
+    );
+
+    const undeclared = [...required.keys()].filter((n) => !declared.has(n));
+    check(
+      "every bare require in shipped code is a declared production dependency",
+      undeclared.length === 0,
+      undeclared
+        .map((n) => `${n} (required by ${[...required.get(n)].join(", ")})`)
+        .join("; ") + " - present on this machine, absent on a clean install",
+    );
+
+    const unused = [...declared].filter((n) => !required.has(n));
+    check(
+      "every production dependency is actually required by shipped code",
+      unused.length === 0,
+      `${unused.join(", ")} ship into every installer but nothing loads them; ` +
+        "they belong in devDependencies, or the require that justified them is gone",
+    );
+  }
+
   // Shipping the right file list is useless if electron-builder refuses the
   // configuration outright. The 24 -> 26 upgrade removed `win.sign` (signing
   // moved under `win.signtoolOptions`), which made EVERY packaged build fail
@@ -401,6 +475,48 @@ function main() {
       buildScripts.length >= 4 && unguarded.length === 0,
       `${buildScripts.length} build scripts, ${unguarded.length} without --publish never: ${unguarded.join(", ")}`,
     );
+
+    // Auto-update exists for the packaged app only if an app-update.yml is
+    // packed beside it, and electron-builder writes that file ONLY when an
+    // NSIS (or updater-aware appx) target is part of the build - read out of
+    // app-builder-lib's own isSuitableWindowsTarget(), not assumed. A
+    // portable-only build therefore ships an app that cannot check for
+    // updates at all, silently, while main.js still carries a whole portable
+    // update-install path (the temp batch script) that can never be reached.
+    //
+    // `npm run build` is exactly such a build, which is why the artefact-level
+    // assertion further down has to state its precondition instead of reading
+    // whichever target happened to run last. THIS assertion is the
+    // order-independent half: whatever the release workflow runs must include
+    // an auto-updatable target.
+    const workflowPath = path.join(ROOT, ".github", "workflows", "release.yml");
+    if (fs.existsSync(workflowPath)) {
+      const wf = fs.readFileSync(workflowPath, "utf8");
+      const winScripts = [...wf.matchAll(/run:\s*npm run (build[\w-]*)/g)]
+        .map((m) => m[1])
+        .filter((s) => /electron-builder --win/.test((pkg.scripts || {})[s] || ""));
+      const updatable = winScripts.filter((s) => {
+        const cmd = pkg.scripts[s];
+        // `--win` with no target list builds the configured win.target set.
+        // The negative lookahead matters: without it `--win --publish never`
+        // parses "--publish" as a target list (a `-` inside the character
+        // class), and a correctly configured build reads as having no nsis
+        // target at all.
+        const explicit = cmd.match(/--win\s+(?!-)([\w,-]+)/);
+        const targets = explicit
+          ? explicit[1].split(",")
+          : [].concat((pkg.build && pkg.build.win && pkg.build.win.target) || []);
+        return targets.some((t) => /^nsis/.test(typeof t === "string" ? t : t.target || ""));
+      });
+      check(
+        "the Windows release build includes an auto-updatable target",
+        winScripts.length > 0 && updatable.length === winScripts.length,
+        `release.yml runs ${winScripts.join(", ") || "no Windows build"}; ` +
+          `${updatable.length} of ${winScripts.length} include an nsis target - ` +
+          "without one electron-builder writes no app-update.yml and the " +
+          "shipped app can never check for updates",
+      );
+    }
   }
 
   // scripts/post-upstream-merge.sh re-pins Electron with `npm pkg set`. If that
@@ -1398,26 +1514,37 @@ function main() {
 
           // app-update.yml is what makes the packaged app able to find an
           // update at all: electron-updater reads it from resourcesPath, and
-          // without it every check fails at config load. It is emitted only
-          // because build.publish is set, so this is the artefact-level fact
-          // behind the config-level assertion earlier - the same intent/fact
-          // split as the libs/ bundles above. Measured on a real build before
-          // asserting it: present, and resolving to lostinsea/markdown-viewer.
+          // without it every check fails at config load. It is the
+          // artefact-level fact behind the config-level assertion earlier -
+          // the same intent/fact split as the libs/ bundles above.
+          //
+          // Its PRECONDITION has to be stated, and getting that wrong is how
+          // this assertion first failed: electron-builder writes the file only
+          // when an nsis target is in the build (app-builder-lib's
+          // isSuitableWindowsTarget), so `npm run build` - portable only -
+          // leaves win-unpacked with no feed, and the assertion was really
+          // reading whichever target happened to build last. A skip that names
+          // the remedy is honest; a failure would be blaming the tree for the
+          // command the developer chose.
           const updateYml = path.join(
             ROOT, "dist", "win-unpacked", "resources", "app-update.yml",
           );
-          const updateCfg = fs.existsSync(updateYml)
-            ? fs.readFileSync(updateYml, "utf8")
-            : "";
-          check(
-            "the packaged app carries an update feed config",
-            /provider:\s*github/.test(updateCfg) &&
-              /owner:\s*lostinsea/.test(updateCfg) &&
-              /repo:\s*markdown-viewer/.test(updateCfg),
-            updateCfg
-              ? `app-update.yml does not name this fork: ${updateCfg.replace(/\s+/g, " ").trim()}`
-              : "app-update.yml is absent from resources/ - electron-updater has no feed and every check fails at config load",
-          );
+          if (!fs.existsSync(updateYml)) {
+            skip(
+              "packaged update feed config",
+              "the last build produced no auto-updatable target, so electron-builder " +
+                "wrote no app-update.yml - run `npm run build-all` (what release.yml runs)",
+            );
+          } else {
+            const updateCfg = fs.readFileSync(updateYml, "utf8");
+            check(
+              "the packaged app carries an update feed config",
+              /provider:\s*github/.test(updateCfg) &&
+                /owner:\s*lostinsea/.test(updateCfg) &&
+                /repo:\s*markdown-viewer/.test(updateCfg),
+              `app-update.yml does not name this fork: ${updateCfg.replace(/\s+/g, " ").trim()}`,
+            );
+          }
           if (shipped && shipped.size > 0) {
             const vendoredClosure = gen.vendoredPackageNames();
             // Names only. Reading each package.json out of the asar to compare

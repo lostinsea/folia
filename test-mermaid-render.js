@@ -594,7 +594,866 @@ async function run(win) {
     JSON.stringify(exportState),
   );
 
-  // --- 9. Concurrent theme changes are serialised -------------------------
+  // Complete the handshake. main.js replies on this channel from EVERY branch
+  // including its failure ones, so a `prepare` without a `result` is not a
+  // state the product can reach - but driving only half of it here left the
+  // renderer's export hold raised for the rest of the suite, which silently
+  // disabled the theme menu and surfaced two sections later as an unrelated
+  // failure. The assertion below turns that discovery into a guard: a
+  // completed PDF export must leave nothing held.
+  {
+    const restored = new Promise((resolve) =>
+      ipcMain.once("pdf-restore-observed", () => resolve(true)),
+    );
+    await exec(`(() => {
+      const { ipcRenderer } = require('electron');
+      const once = () => { ipcRenderer.send('pdf-restore-observed'); };
+      setTimeout(once, 2500);
+      return true;
+    })()`);
+    win.webContents.send("pdf-export-result", {
+      success: true,
+      path: "C:\\\\tmp\\\\suite-pdf-handshake.pdf",
+    });
+    await Promise.race([restored, sleep(8000)]);
+    ipcMain.removeAllListeners("pdf-restore-observed");
+    const held = await exec(
+      `(typeof exportThemeHold === 'number' ? exportThemeHold : -1)`,
+    );
+    check(
+      "a completed PDF export leaves no theme hold behind",
+      held === 0,
+      `exportThemeHold=${held}`,
+    );
+  }
+
+  // --- 8b. The export rasteriser draws the diagram, not just its box -------
+  // Exports embed each diagram as a PNG. That used to go through html2canvas -
+  // 3.2 MB in the installer and 13.7 ms of renderer startup on every launch to
+  // serve this one call site - and now goes through the engine's own SVG
+  // decoder instead (mermaidToPngDataUrl). Two things about that route deserve
+  // to be distrusted rather than assumed, and both are measured here.
+  //
+  // FIRST: mermaid runs with htmlLabels:true, so labels live in
+  // <foreignObject>. An SVG decoded through an <img> is a restricted context
+  // which is not obliged to render foreign content, and if it quietly declines
+  // the export ships diagrams that are the right size, the right colour and
+  // completely blank. No dimension or luminance check would notice.
+  //
+  // The oracle is a control arm, not a threshold: rasterise each diagram with
+  // its labels emptied and require the result to DIFFER from the real one.
+  // Identical output means the labels were never drawn - which is exactly the
+  // failure, and is the one thing a "labels are present in the DOM" assertion
+  // cannot see.
+  //
+  // Crucially there are TWO blank arms, one per label mechanism. A single arm
+  // blanking `foreignObject, text, tspan` together was the first version and
+  // was NOT sound: gantt, pie and state diagrams also carry axis labels, tick
+  // marks and percentages as native <text>, so blanking those alone moves
+  // enough pixels to satisfy the assertion. Chromium could stop drawing
+  // foreignObject entirely - the precise regression this section exists for -
+  // and the combined arm would still pass. Found in independent review.
+  {
+    const raster = `(async (svg, blank) => {
+      const box = svg.viewBox && svg.viewBox.baseVal;
+      const w = (box && box.width) || svg.clientWidth || 800;
+      const h = (box && box.height) || svg.clientHeight || 600;
+      const clone = svg.cloneNode(true);
+      if (blank) {
+        clone.querySelectorAll(blank).forEach(n => { n.textContent = ''; });
+      }
+      clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+      clone.setAttribute('width', w);
+      clone.setAttribute('height', h);
+      clone.style.maxWidth = 'none';
+      if (!clone.getAttribute('viewBox')) clone.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+      const img = new Image();
+      await new Promise((res, rej) => {
+        img.onload = res;
+        img.onerror = () => rej(new Error('decode failed'));
+        img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(new XMLSerializer().serializeToString(clone));
+      });
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(w * 2));
+      c.height = Math.max(1, Math.round(h * 2));
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, c.width, c.height);
+      ctx.drawImage(img, 0, 0, c.width, c.height);
+      return c;
+    })`;
+
+    const labelReport = await exec(`(async () => {
+      const raster = ${raster};
+      const pixelDiff = (x, y) => {
+        const a = x.getContext('2d').getImageData(0,0,x.width,x.height).data;
+        const b = y.getContext('2d').getImageData(0,0,y.width,y.height).data;
+        let diff = 0;
+        for (let i = 0; i < a.length; i += 4) {
+          if (a[i]!==b[i] || a[i+1]!==b[i+1] || a[i+2]!==b[i+2]) diff++;
+        }
+        return diff;
+      };
+      const out = [];
+      for (const el of document.querySelectorAll('.mermaid')) {
+        const svg = el.querySelector('svg');
+        if (!svg) continue;
+        let real, noForeign, noText;
+        try {
+          real = await raster(svg, null);
+          noForeign = await raster(svg, 'foreignObject');
+          noText = await raster(svg, 'text, tspan');
+        } catch (e) {
+          out.push({ error: String(e && e.message) });
+          continue;
+        }
+        out.push({
+          foreignObjects: svg.querySelectorAll('foreignObject').length,
+          textNodes: svg.querySelectorAll('text').length,
+          foreignObjectPixels: pixelDiff(real, noForeign),
+          textPixels: pixelDiff(real, noText),
+          area: real.width * real.height,
+        });
+      }
+      return out;
+    })()`);
+
+    check(
+      "the export rasteriser has diagrams to measure",
+      labelReport.length >= 3,
+      `${labelReport.length} diagrams rasterised`,
+    );
+    check(
+      "every diagram rasterises without a decode failure",
+      labelReport.every((r) => !r.error),
+      JSON.stringify(labelReport.filter((r) => r.error)),
+    );
+    // Each arm is checked only on the diagrams that actually use that
+    // mechanism, so "this diagram has no <text>" is not read as "text did not
+    // draw". A diagram that uses a mechanism must lose pixels when it is
+    // blanked.
+    const foSilent = labelReport.filter(
+      (r) => !r.error && r.foreignObjects > 0 && !(r.foreignObjectPixels > 0),
+    );
+    check(
+      "foreignObject labels are actually drawn into the export raster",
+      foSilent.length === 0,
+      `${foSilent.length} diagram(s) rasterised identically with their foreignObject ` +
+        `labels blanked - an <img>-decoded SVG is not obliged to render foreign ` +
+        `content, and this is what that looks like: ${JSON.stringify(labelReport)}`,
+    );
+    const textSilent = labelReport.filter(
+      (r) => !r.error && r.textNodes > 0 && !(r.textPixels > 0),
+    );
+    check(
+      "native <text> labels are actually drawn into the export raster",
+      textSilent.length === 0,
+      `${textSilent.length} diagram(s) rasterised identically with their <text> ` +
+        `blanked: ${JSON.stringify(labelReport)}`,
+    );
+    // Guards the guards: both mechanisms must be represented in the fixture, or
+    // the assertions above are quietly checking an empty set. htmlLabels could
+    // be flipped to false in mermaid-config.js and the foreignObject assertion
+    // would stop covering anything at all while still reporting PASS.
+    check(
+      "the fixture exercises both label mechanisms, so neither arm is empty",
+      labelReport.some((r) => !r.error && r.foreignObjects > 0) &&
+        labelReport.some((r) => !r.error && r.textNodes > 0),
+      JSON.stringify(
+        labelReport.map((r) => ({ fo: r.foreignObjects, text: r.textNodes })),
+      ),
+    );
+  }
+
+  // SECOND: the raster must be a property of the DOCUMENT, not of how the
+  // reader happens to have zoomed. getBoundingClientRect() is viewport pixels
+  // and scales with the app's CSS zoom; the SVG's own viewBox is user units and
+  // does not. Measured on one diagram: viewBox stayed 126.2 wide at 50%, 100%
+  // and 150% zoom while the rect read 63.1 / 126.2 / 189.2. Driven through the
+  // real zoom buttons so the wiring is covered too.
+  {
+    const sizeAt = async () =>
+      exec(`(async () => {
+        const el = document.querySelector('.mermaid');
+        const r = await mermaidToPngDataUrl(el);
+        return { w: r.width, h: r.height, zoom: getComputedStyle(document.getElementById('viewer')).zoom };
+      })()`);
+
+    await exec(`document.getElementById('zoomReset').click(); true`);
+    await sleep(600);
+    const at100 = await sizeAt();
+    await exec(
+      `(() => { for (let i = 0; i < 5; i++) document.getElementById('zoomIn').click(); return true; })()`,
+    );
+    await sleep(900);
+    const atZoomed = await sizeAt();
+    await exec(`document.getElementById('zoomReset').click(); true`);
+    await sleep(600);
+
+    check(
+      "the zoom leg really did change the applied zoom",
+      Number(atZoomed.zoom) > Number(at100.zoom),
+      JSON.stringify({ at100, atZoomed }),
+    );
+    check(
+      "the exported diagram is the same size whatever the reader's zoom",
+      Math.abs(at100.w - atZoomed.w) <= 1 && Math.abs(at100.h - atZoomed.h) <= 1,
+      JSON.stringify({ at100, atZoomed }),
+    );
+  }
+
+  // --- 8c. Word export must re-theme too, not just PDF --------------------
+  // Same defect as section 8, in the path that never had the fix. Word export
+  // took a clone of the viewer as it stood, so exporting from dark mode wrote
+  // dark diagrams onto white Word pages. On a gantt chart that meant a light
+  // grey title and date axis on white - measured, and invisible.
+  //
+  // The oracle is the HTML actually handed to the export-word IPC channel, so
+  // this drives the real menu button and needs no native save dialog: the
+  // channel is intercepted before main can open one.
+  {
+    const wordDoc = path.join(dir, "word.md");
+    fs.writeFileSync(
+      wordDoc,
+      "# Word\n\n```mermaid\ngantt\n  title Alpha\n  dateFormat YYYY-MM-DD\n" +
+        "  section Bravo\n  Charlie :a1, 2024-01-01, 30d\n```\n",
+      "utf8",
+    );
+
+    let captured = null;
+    const listeners = ipcMain.listeners("export-word");
+    ipcMain.removeAllListeners("export-word");
+    ipcMain.on("export-word", (e, data) => {
+      captured = data;
+    });
+
+    // One shared measurement so every arm is compared with identical
+    // arithmetic. A 16x16 grid of mean luminance is enough to say "this is
+    // the same picture in the same colours" without being a pixel baseline.
+    //
+    // Two simpler metrics were tried first and BOTH were measured to be
+    // ambiguous on this chart, which is why the oracle is a comparison rather
+    // than a threshold: MEAN luminance reads 234.6 dark and 234.7 light (the
+    // chart has no full background rect, so most of the frame is the
+    // exporter's white fill either way), and the share of dark "ink" pixels
+    // goes the WRONG way - a dark gantt has dark section bands, giving it
+    // MORE dark pixels than the light one, not fewer.
+    const PNG_STATS = `window.__pngSig = async (src) => {
+      const img = new Image();
+      await new Promise((res, rej) => { img.onload = res; img.onerror = () => rej(new Error('decode failed')); img.src = src; });
+      const N = 16;
+      const c = document.createElement('canvas');
+      c.width = N; c.height = N;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, N, N);
+      ctx.drawImage(img, 0, 0, N, N);
+      const d = ctx.getImageData(0, 0, N, N).data;
+      const sig = [];
+      for (let i = 0; i < d.length; i += 4) sig.push(0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2]);
+      return sig;
+    };
+    window.__sigDistance = (a, b) => {
+      let s = 0;
+      for (let i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]);
+      return +(s / a.length).toFixed(2);
+    }; true`;
+
+    // Rasterise the live diagram through the very helper the exporter uses,
+    // so a control arm differs from the real thing only in theme.
+    const RASTER_SIG = `(async () => {
+      const el = document.querySelector('.mermaid');
+      const r = await mermaidToPngDataUrl(el);
+      return await window.__pngSig(r.dataUrl);
+    })()`;
+    // A faithful stand-in for the app's own theme toggle, which writes the
+    // PREFERENCE as well as the class (custom-theme.js). That matters here:
+    // the export restores from resolveDarkPreference(), not from a snapshot of
+    // the class taken before it started, so a simulation that moved only the
+    // class would leave the export with nothing to restore to and would fail
+    // for a reason belonging to the test rather than the product.
+    const setTheme = async (dark) => {
+      await exec(`(async () => {
+        localStorage.setItem('themeMode', ${dark ? "'dark'" : "'light'"});
+        document.body.classList.${dark ? "add" : "remove"}('dark-mode');
+        await updateMermaidTheme(${dark});
+        return true;
+      })()`);
+      await sleep(1500);
+    };
+
+    try {
+      await exec(
+        `(() => { const t = window.CustomTabs.createTab(${JSON.stringify(wordDoc)}, window.fs.readFileSync(${JSON.stringify(wordDoc)}, 'utf8')); return t.id; })()`,
+      );
+      await sleep(4000);
+      await exec(PNG_STATS);
+
+      // Both control arms, captured through the app's own theme path so the
+      // SVG really is baked each way rather than merely re-classed.
+      await setTheme(false);
+      const lightSig = await exec(RASTER_SIG);
+      await setTheme(true);
+      const darkSig = await exec(RASTER_SIG);
+
+      const darkBefore = await exec(`document.body.classList.contains('dark-mode')`);
+      await exec(`window.__wordAlerts = []; window.alert = (m) => window.__wordAlerts.push(String(m)); true`);
+      await exec(`document.getElementById('exportWord').click(); true`);
+      await sleep(6000);
+      const darkAfter = await exec(`document.body.classList.contains('dark-mode')`);
+      const alerts = await exec(`window.__wordAlerts || []`);
+
+      check(
+        "the Word export path actually ran",
+        captured !== null && typeof captured.htmlContent === "string",
+        `alerts: ${JSON.stringify(alerts)}`,
+      );
+
+      const html = (captured && captured.htmlContent) || "";
+      const pngs = [...html.matchAll(/src="data:image\/png;base64,([^"]+)"/g)].map((m) => m[1]);
+      check(
+        "every diagram reaches the Word document as a PNG",
+        pngs.length >= 1 && !/<svg/.test(html),
+        `${pngs.length} png(s), ${(html.match(/<svg/g) || []).length} raw svg(s)`,
+      );
+
+      // The real assertion: the exported raster must look like the LIGHT
+      // control arm and not like the DARK one. Stated as a comparison against
+      // two measured references rather than a threshold, so it cannot be
+      // satisfied by a coincidence of brightness.
+      let dists = [];
+      if (pngs.length) {
+        dists = await exec(`(async () => {
+          const srcs = ${JSON.stringify(pngs.map((p) => "data:image/png;base64," + p))};
+          const light = ${JSON.stringify(lightSig)}, dark = ${JSON.stringify(darkSig)};
+          const out = [];
+          for (const s of srcs) {
+            const sig = await window.__pngSig(s);
+            out.push({ toLight: window.__sigDistance(sig, light), toDark: window.__sigDistance(sig, dark) });
+          }
+          return out;
+        })()`);
+      }
+      const themeSpread = await exec(
+        `window.__sigDistance(${JSON.stringify(lightSig)}, ${JSON.stringify(darkSig)})`,
+      );
+      check(
+        "the Word export renders diagrams in the light theme, not the reader's dark one",
+        dists.length > 0 && dists.every((d) => d.toLight < d.toDark && d.toLight < themeSpread / 2),
+        `${JSON.stringify(dists)}; light-vs-dark spread ${themeSpread}`,
+      );
+      // Vacuity guard: if the two themes rasterise to nearly the same picture
+      // there is nothing for the assertion above to discriminate, and if the
+      // app was not really dark at click time it proves nothing either.
+      check(
+        "the two themes are genuinely distinguishable and the export ran from dark",
+        darkBefore === true && typeof themeSpread === "number" && themeSpread > 5,
+        `darkBefore=${darkBefore} spread=${themeSpread}`,
+      );
+      check(
+        "the reader is put back into dark mode after a Word export",
+        darkAfter === true,
+        `before=${darkBefore} after=${darkAfter}`,
+      );
+
+      // A Word export is awaited across the rasterisation of every diagram in
+      // the document, and the reader can change the theme inside that window.
+      // Restoring from a snapshot taken before the export started would put
+      // them back into the theme they had just left. Drive exactly that: start
+      // from dark, move the preference to light while the export is in flight,
+      // and require the app to honour the newer preference. The assertion
+      // above pins the other direction, so the pair says "restore, but to the
+      // current preference" rather than merely "restore".
+      captured = null;
+      // Deterministic, not a sleep race. A first attempt flipped the
+      // preference 500 ms after the click and measured after=true: this
+      // document is one small gantt, so the whole export had already finished
+      // and restored inside that window, and the flip landed on a settled app.
+      // click() dispatches synchronously and the handler runs to its first
+      // await - which is inside setExportTheme(false) - so a statement placed
+      // immediately after it is guaranteed to execute with the export parked
+      // in flight. `captured` being null at that instant is the guard that
+      // says so, since the IPC send is the last thing the handler does.
+      const midExport = await exec(`(() => {
+        document.getElementById('exportWord').click();
+        localStorage.setItem('themeMode', 'light');
+        return { bodyDark: document.body.classList.contains('dark-mode') };
+      })()`);
+      const inFlight = captured === null;
+      await sleep(6000);
+      const afterMidToggle = await exec(`document.body.classList.contains('dark-mode')`);
+      // Diagnosed separately from the assertion below. If the export throws
+      // before its IPC send, `captured` stays null forever and the theme
+      // assertion would fail naming the theme - a misleading diagnosis for an
+      // export that never completed.
+      check(
+        "8c the mid-export preference flip really reached a completed export",
+        captured !== null,
+        `inFlight=${inFlight} exported=${captured !== null}`,
+      );
+      check(
+        "a theme change made during a Word export is not undone when it finishes",
+        afterMidToggle === false && captured !== null && inFlight === true,
+        `inFlight=${inFlight} midExportBodyDark=${midExport && midExport.bodyDark} after=${afterMidToggle} exported=${captured !== null}`,
+      );
+
+      // The other half of the same window, and the dangerous one. Above, the
+      // reader moved the preference towards the theme the export had already
+      // forced, which is benign. Here they move it the other way: the export
+      // has put the document into light and is rasterising, and the reader
+      // picks Dark from the theme menu. That is not a preference write - it
+      // goes through custom-theme.js, which clicks the real toggle, which
+      // re-themes every diagram to dark underneath the export. The exported
+      // document must still be light: an export captures the document as it
+      // was asked for, not as the reader retheme it mid-flight.
+      //
+      // Driven through the REAL menu option rather than a hand-rolled
+      // simulation, because the defect lives in the coupling between the menu,
+      // the hidden toggle and the export - a simulation that wrote themeMode
+      // and stopped there would exercise none of it.
+      captured = null;
+      const midDark = await exec(`(() => {
+        document.getElementById('exportWord').click();
+        const opt = document.querySelector('.custom-theme-option[data-mode="dark"]');
+        if (opt) opt.click();
+        return { clicked: !!opt, bodyDark: document.body.classList.contains('dark-mode') };
+      })()`);
+      const inFlight2 = captured === null;
+      await sleep(6000);
+      const darkAfterMid = await exec(`document.body.classList.contains('dark-mode')`);
+      const html2 = (captured && captured.htmlContent) || "";
+      const pngs2 = [...html2.matchAll(/src="data:image\/png;base64,([^"]+)"/g)].map((m) => m[1]);
+      let dists2 = [];
+      if (pngs2.length) {
+        dists2 = await exec(`(async () => {
+          const srcs = ${JSON.stringify(pngs2.map((p) => "data:image/png;base64," + p))};
+          const light = ${JSON.stringify(lightSig)}, dark = ${JSON.stringify(darkSig)};
+          const out = [];
+          for (const s of srcs) {
+            const sig = await window.__pngSig(s);
+            out.push({ toLight: window.__sigDistance(sig, light), toDark: window.__sigDistance(sig, dark) });
+          }
+          return out;
+        })()`);
+      }
+      check(
+        "8c the mid-export dark toggle really reached a completed export",
+        captured !== null && pngs2.length > 0,
+        `exported=${captured !== null} pngs=${pngs2.length} inFlight=${inFlight2}`,
+      );
+      check(
+        "a theme change made during a Word export cannot re-theme the diagrams it is exporting",
+        dists2.length > 0 && dists2.every((d) => d.toLight < d.toDark && d.toLight < themeSpread / 2),
+        `${JSON.stringify(dists2)}; spread ${themeSpread}; inFlight=${inFlight2} clicked=${midDark && midDark.clicked}`,
+      );
+      check(
+        "the theme the reader picked during the export is applied once it finishes",
+        darkAfterMid === true && inFlight2 === true && midDark.clicked === true,
+        `inFlight=${inFlight2} clicked=${midDark && midDark.clicked} after=${darkAfterMid}`,
+      );
+
+      // Recording a DECISION, not guarding a defect - raised in review as a
+      // "footgun worth fixing at source". It must not be fixed at source.
+      //
+      // The legacy #darkModeToggle handler writes only the legacy 'darkMode'
+      // key and deliberately never 'themeMode'. custom-theme.js owns the
+      // preference: it writes it - and the value may be 'desktop' - and only
+      // then delegates to this button for the mermaid side effects. A handler
+      // that also wrote 'themeMode' would immediately overwrite "Follow
+      // Desktop" with the concrete theme it had just resolved, and the app
+      // would stop following the OS from that click onward.
+      const desktop = await exec(`(() => {
+        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        // Start on the OPPOSITE side so applyTheme('desktop') is forced to
+        // delegate; without this the click is skipped and nothing is proven.
+        document.body.classList.toggle('dark-mode', !prefersDark);
+        const opt = document.querySelector('.custom-theme-option[data-mode="desktop"]');
+        if (!opt) return { found: false };
+        opt.click();
+        return {
+          found: true,
+          mode: localStorage.getItem('themeMode'),
+          delegated: document.body.classList.contains('dark-mode') === prefersDark,
+          prefersDark,
+          hold: (typeof exportThemeHold === 'number' ? exportThemeHold : 'n/a'),
+        };
+      })()`);
+      check(
+        "choosing Follow Desktop survives the toggle it delegates to",
+        desktop.found === true && desktop.delegated === true && desktop.mode === "desktop",
+        `found=${desktop.found} delegated=${desktop.delegated} mode=${desktop.mode} prefersDark=${desktop.prefersDark} hold=${desktop.hold}`,
+      );
+    } finally {
+      ipcMain.removeAllListeners("export-word");
+      for (const l of listeners) ipcMain.on("export-word", l);
+      await exec(`(async () => {
+        localStorage.removeItem('themeMode');
+        document.body.classList.remove('dark-mode');
+        await updateMermaidTheme(false);
+        return true;
+      })()`);
+      // Hand the suite back the document it was running on. Leaving this
+      // section's single-gantt tab active starved section 9, whose measure
+      // needs the multi-diagram document, and it failed with measured:0 -
+      // a failure that named section 9 but belonged to this one.
+      await exec(`(() => {
+        const gantt = window.CustomTabs.getTabs().find(t => t.filePath === ${JSON.stringify(wordDoc)});
+        const home = window.CustomTabs.getTabs().find(t => t.filePath === ${jsM});
+        if (home) window.CustomTabs.switchToTab(home.id);
+        if (gantt) window.CustomTabs.closeTab(gantt.id);
+        return true;
+      })()`);
+      await waitFor(exec, "the suite's own document to come back after the Word export", DIAGRAMS_READY);
+    }
+  }
+
+  // --- 8e. Two exports must not overlap -----------------------------------
+  // Reachable with two clicks: start a Word export, reopen the File menu and
+  // choose Export as PDF. Both paths force the document light and then read
+  // EVERY diagram - Word by rasterising them one at a time across many awaits,
+  // PDF by having main print the live page - so an overlap corrupts both, in
+  // two independent ways:
+  //
+  //   1. The second export's own setExportTheme() calls applyMermaidTheme,
+  //      which clears mermaidSvgCache and re-renders every diagram IN PLACE
+  //      (renderer.js: `el.textContent = src`). The first export's loop can
+  //      then find a .mermaid element with no <svg> in it, throw "No SVG
+  //      found", and silently substitute its "[Mermaid Diagram]" placeholder -
+  //      a diagram missing from the exported file, with no error shown.
+  //   2. Whichever export finishes first restores the reader's theme
+  //      underneath the one still running, so the remaining diagrams are baked
+  //      in the reader's theme - the exact defect sections 8 and 8c exist for,
+  //      reintroduced through the back door.
+  //
+  // Driven with the REAL IPC messages main.js sends, in main.js's own order,
+  // so this is not a hand-rolled approximation of the PDF path. The fixture is
+  // deliberately large: the one-gantt document of 8c rasterises faster than the
+  // overlap window, and would report success without ever overlapping.
+  {
+    const overlapDoc = path.join(dir, "overlap.md");
+    fs.writeFileSync(
+      overlapDoc,
+      "# Overlap\n\n" +
+        Array.from(
+          { length: 30 },
+          (_, i) =>
+            `## Part ${i}\n\n` +
+            "```mermaid\ngraph TD\n" +
+            `  O${i}A[Over ${i} A] --> O${i}B[Over ${i} B]\n` +
+            "```\n\n" +
+            "filler\n\n".repeat(10),
+        ).join(""),
+      "utf8",
+    );
+
+    let captured = null;
+    const listeners = ipcMain.listeners("export-word");
+    ipcMain.removeAllListeners("export-word");
+    ipcMain.on("export-word", (e, data) => {
+      captured = data;
+    });
+
+    const armSig = `(async () => {
+      const el = document.querySelector('.mermaid');
+      const r = await mermaidToPngDataUrl(el);
+      return await window.__pngSig(r.dataUrl);
+    })()`;
+    const setTheme = async (dark) => {
+      await exec(`(async () => {
+        localStorage.setItem('themeMode', ${dark ? "'dark'" : "'light'"});
+        document.body.classList.${dark ? "add" : "remove"}('dark-mode');
+        await updateMermaidTheme(${dark});
+        return true;
+      })()`);
+      await sleep(2000);
+    };
+
+    try {
+      await exec(
+        `(() => { const t = window.CustomTabs.createTab(${JSON.stringify(overlapDoc)}, window.fs.readFileSync(${JSON.stringify(overlapDoc)}, 'utf8')); return t.id; })()`,
+      );
+      await waitFor(exec, "the 8e overlap fixture to finish drawing", DIAGRAMS_READY);
+      await exec(`window.alert = () => {}; true`);
+
+      await setTheme(false);
+      const lightSig = await exec(armSig);
+      await setTheme(true);
+      const darkSig = await exec(armSig);
+      const spread = await exec(
+        `window.__sigDistance(${JSON.stringify(lightSig)}, ${JSON.stringify(darkSig)})`,
+      );
+
+      // Start the Word export, then drive the PDF handshake into the middle of
+      // it exactly as main.js would: prepare, wait for ready, then result.
+      //
+      // SCROLLED TO THE BOTTOM, and that is load-bearing. PERF-07 re-themes
+      // only the diagrams the reader can SEE and defers the rest to idle
+      // chunks, which never get idle time while the export loop is running.
+      // With the document at the top - the obvious way to write this - the
+      // visible diagrams are the first few, which the loop has already
+      // rasterised by the time any interference lands, so the export is
+      // immune and the section passes without testing anything. Measured
+      // exactly that on 12 and again on 30 diagrams. At the bottom the visible
+      // diagrams are the ones the loop reaches LAST, which is the only
+      // ordering in which a concurrent re-theme can reach them first.
+      captured = null;
+      await exec(`(() => {
+        const w = document.querySelector('.content-wrapper');
+        w.scrollTop = w.scrollHeight;
+        return w.scrollTop;
+      })()`);
+      await sleep(1500);
+      await exec(`document.getElementById('exportWord').click(); true`);
+      const wordInFlight = captured === null;
+
+      const pdfReady = new Promise((resolve) =>
+        ipcMain.once("pdf-export-ready", () => resolve(true)),
+      );
+      win.webContents.send("prepare-for-pdf-export");
+      const readyFired = await Promise.race([
+        pdfReady,
+        sleep(20000).then(() => false),
+      ]);
+      // THE vacuity guard for this whole section, and it has to be a witness
+      // the FIX cannot invalidate. Two earlier attempts were both unsound:
+      // checking that the Word export was still running when the result was
+      // SENT passed on unfixed code (the message had not been processed yet),
+      // and waiting for the document to go dark stopped working the moment the
+      // fix deferred that restore to the last export out - the guard would
+      // then fail on correct code.
+      //
+      // Settled on the state at the moment of the send: the PDF handshake is
+      // open (pdf-export-ready has fired, main would be printing) and the Word
+      // export has not sent its IPC, so both are demonstrably in flight. That
+      // witness is invariant under any change to the result HANDLER, which
+      // matters because R166 makes that handler await a full re-theme before
+      // it notifies - a guard read after the notification would then be
+      // measuring the Word loop against the restore's own duration and could
+      // report VACUOUS instead of failing the assertion it exists to prove.
+      // `handledInFlight` below is the stronger-but-fragile form, kept as
+      // reported detail rather than as the gate.
+      const beforeSend = captured === null;
+      win.webContents.send("pdf-export-result", {
+        success: true,
+        path: "C:\\\\tmp\\\\overlap.pdf",
+      });
+      await waitFor(
+        exec,
+        "the PDF export result to be handled by the renderer",
+        `document.getElementById('notificationMessage').textContent.includes('overlap.pdf')`,
+      );
+      const handledInFlight = captured === null;
+
+      // Long enough for the Word loop to finish all 12 diagrams.
+      for (let i = 0; i < 40 && captured === null; i++) await sleep(1000);
+
+      const html = (captured && captured.htmlContent) || "";
+      const pngs = [...html.matchAll(/src="data:image\/png;base64,([^"]+)"/g)].map((m) => m[1]);
+      check(
+        "8e the overlapping Word export really ran to completion",
+        captured !== null && wordInFlight === true && readyFired === true,
+        `inFlight=${wordInFlight} pdfReady=${readyFired} exported=${captured !== null}`,
+      );
+      check(
+        "8e the two exports genuinely overlapped",
+        beforeSend === true,
+        `word still running when the PDF result was sent: ${beforeSend}; still running when it was handled: ${handledInFlight}`,
+      );
+      check(
+        "8e the two themes are distinguishable on the overlap fixture",
+        typeof spread === "number" && spread > 5,
+        `spread=${spread}`,
+      );
+
+      // Symptom 1: a diagram the concurrent re-render wiped comes out as the
+      // failure placeholder instead of a picture.
+      check(
+        "a concurrent export cannot drop a diagram from the export it overlaps",
+        pngs.length === 30 && !/\[Mermaid Diagram\]/.test(html),
+        `${pngs.length}/30 png(s), placeholder=${/\[Mermaid Diagram\]/.test(html)}`,
+      );
+
+      // Symptom 2: the diagrams rasterised after the other export restored the
+      // reader's theme are baked dark. Measured against the same two control
+      // arms the rest of this suite uses, not against a threshold.
+      let worst = null;
+      if (pngs.length) {
+        const dists = await exec(`(async () => {
+          const srcs = ${JSON.stringify(pngs.map((p) => "data:image/png;base64," + p))};
+          const light = ${JSON.stringify(lightSig)}, dark = ${JSON.stringify(darkSig)};
+          const out = [];
+          for (const s of srcs) {
+            const sig = await window.__pngSig(s);
+            out.push({ toLight: window.__sigDistance(sig, light), toDark: window.__sigDistance(sig, dark) });
+          }
+          return out;
+        })()`);
+        worst = dists.reduce(
+          (w, d) => (w === null || d.toLight - d.toDark > w.toLight - w.toDark ? d : w),
+          null,
+        );
+      }
+      check(
+        "a concurrent export cannot re-theme the diagrams the export it overlaps is still reading",
+        worst !== null && worst.toLight < worst.toDark && worst.toLight < spread / 2,
+        `worst=${JSON.stringify(worst)} spread=${spread}`,
+      );
+
+      // The MIRROR ordering, and it needs its own assertion: above, the PDF
+      // finished first and the Word export was the one still reading, so only
+      // the PDF-side gate was exercised. Here the PDF handshake is left open -
+      // exactly the window in which main.js runs printToPDF - and a Word
+      // export starts and finishes inside it. The Word export's own release
+      // must not restore the reader's dark theme, or main prints a dark page
+      // from a document that was supposed to be light.
+      captured = null;
+      const pdfReady2 = new Promise((resolve) =>
+        ipcMain.once("pdf-export-ready", () => resolve(true)),
+      );
+      win.webContents.send("prepare-for-pdf-export");
+      const ready2 = await Promise.race([
+        pdfReady2,
+        sleep(20000).then(() => false),
+      ]);
+      await exec(`document.getElementById('exportWord').click(); true`);
+      for (let i = 0; i < 40 && captured === null; i++) await sleep(1000);
+      const lightAtPrintTime = await exec(
+        `document.body.classList.contains('dark-mode')`,
+      );
+      check(
+        "an export that finishes cannot restore the theme while a PDF export is still capturing",
+        lightAtPrintTime === false && captured !== null && ready2 === true,
+        `bodyDark=${lightAtPrintTime} wordDone=${captured !== null} pdfReady=${ready2}`,
+      );
+      win.webContents.send("pdf-export-result", {
+        success: true,
+        path: "C:\\\\tmp\\\\overlap2.pdf",
+      });
+      await waitFor(
+        exec,
+        "the second PDF export result to be handled",
+        `document.getElementById('notificationMessage').textContent.includes('overlap2.pdf')`,
+      );
+      check(
+        "the reader's theme comes back once the last export has finished",
+        (await exec(`document.body.classList.contains('dark-mode')`)) === true,
+        "both exports are done, so the held preference must have been applied",
+      );
+
+      // --- 8f. The concurrent re-render's WIPE - MEASURED UNREACHABLE -------
+      //
+      // Raised in review as the residual after the depth gate: gating the
+      // RESTORE stops one export putting the reader's theme back under
+      // another, but the second export's own setExportTheme(false) still calls
+      // applyMermaidTheme, which clears the cache and re-renders
+      // UNCONDITIONALLY - there is no "already this theme" early return. And
+      // renderMermaidBatch writes `data-mermaid-src` back into every node it
+      // is given SYNCHRONOUSLY before it awaits mermaid.run, so on paper there
+      // is a window in which those elements hold source text and no <svg>, and
+      // an export loop reading one of them would drop the diagram and
+      // substitute the failure placeholder.
+      //
+      // THREE MEASUREMENTS, AND THEY SAY THE WINDOW IS NOT REACHABLE:
+      //
+      // 1. The production-shaped attempt - a second export driven into the
+      //    middle of the first, fixture scrolled to the top so the wipe would
+      //    land on the diagrams the loop reaches first - was VACUOUS. The
+      //    reason is structural and worth recording, because it is most of why
+      //    this hazard is narrower than it looks: setExportTheme awaits
+      //    whenMermaidSettled(), so the loop does not start until the mermaid
+      //    work queue AND the deferred catch-up have drained. Every re-render
+      //    queued before the loop starts is therefore waited out by
+      //    construction, and a second export arriving up to that moment queues
+      //    behind it.
+      //
+      // 2. So the collision was engineered instead - a real renderMermaidBatch
+      //    over all 30 diagrams, on the real queue, re-issued every 120ms for
+      //    the whole duration of a real export. Still no corruption.
+      //
+      // 3. The reason, measured rather than assumed: the wipe DOES happen -
+      //    observed from inside the queued call, 29 of the 30 diagrams have no
+      //    <svg> the instant renderMermaidBatch's synchronous prefix returns -
+      //    but it is never observable from another TASK. Sampling the same
+      //    count from executeJavaScript between wipes reported 0 every single
+      //    time. mermaid.run puts every SVG back before the renderer services
+      //    its task queue again, and the export loop resumes on img.onload,
+      //    which is a task. It cannot see the window.
+      //
+      // What is asserted here is therefore the robustness fact, not a fix: an
+      // export survives an arbitrary number of concurrent re-renders over the
+      // diagrams it is reading. mermaidToPngDataUrl carries a one-shot queue
+      // drain for the case where that stops being true (mermaid yielding
+      // mid-run, a slower font path); by the measurement above it does no work
+      // today, so NO REVERT PINS IT - an entry that cannot fail is worse than
+      // none (the R110b precedent), and the same call was written as R167 and
+      // deleted after it came back VACUOUS twice.
+      captured = null;
+      await exec(`window.__wipes = 0; window.__blankAtStart = 0; true`);
+      await exec(`document.getElementById('exportWord').click(); true`);
+      const wipeInFlight = captured === null;
+      let wipes = 0;
+      let blankAtStart = 0;
+      for (let i = 0; i < 40 && captured === null; i++) {
+        const s = await exec(`(() => {
+          const els = Array.from(document.querySelectorAll('.mermaid'));
+          if (els.length) {
+            queueMermaidWork(() => {
+              // The blank is observed INSIDE the call, immediately after the
+              // synchronous prefix. Sampling it from out here reads 0 always,
+              // which is the whole finding.
+              const p = renderMermaidBatch(els, mermaidRunSeq);
+              const blank = els.filter((e) => !e.querySelector('svg')).length;
+              if (blank > window.__blankAtStart) window.__blankAtStart = blank;
+              return p;
+            });
+            window.__wipes++;
+          }
+          return { wipes: window.__wipes, blank: window.__blankAtStart };
+        })()`);
+        wipes = s.wipes;
+        blankAtStart = s.blank;
+        await sleep(120);
+      }
+      for (let i = 0; i < 40 && captured === null; i++) await sleep(1000);
+      const wipeHtml = (captured && captured.htmlContent) || "";
+      const wipePngs = [
+        ...wipeHtml.matchAll(/src="data:image\/png;base64,([^"]+)"/g),
+      ].map((m) => m[1]);
+      // Without this the section would assert that nothing broke while nothing
+      // was actually happening - which is exactly how the first two attempts
+      // at it passed.
+      check(
+        "8f the concurrent re-renders really blanked the diagrams mid-export",
+        wipeInFlight === true && wipes >= 2 && blankAtStart >= 1 && captured !== null,
+        `inFlight=${wipeInFlight} wipes=${wipes} blankedInsideCall=${blankAtStart} exported=${captured !== null}`,
+      );
+      check(
+        "an export survives concurrent re-renders of the diagrams it is reading",
+        wipePngs.length === 30 && !/\[Mermaid Diagram\]/.test(wipeHtml),
+        `${wipePngs.length}/30 png(s), placeholder=${/\[Mermaid Diagram\]/.test(wipeHtml)}`,
+      );
+      await exec(`(async () => { await queueMermaidWork(() => {}); return true; })()`);
+    } finally {
+      ipcMain.removeAllListeners("export-word");
+      for (const l of listeners) ipcMain.on("export-word", l);
+      await exec(`(async () => {
+        localStorage.removeItem('themeMode');
+        document.body.classList.remove('dark-mode');
+        await updateMermaidTheme(false);
+        return true;
+      })()`);
+      await exec(`(() => {
+        const mine = window.CustomTabs.getTabs().find(t => t.filePath === ${JSON.stringify(overlapDoc)});
+        const home = window.CustomTabs.getTabs().find(t => t.filePath === ${jsM});
+        if (home) window.CustomTabs.switchToTab(home.id);
+        if (mine) window.CustomTabs.closeTab(mine.id);
+        return true;
+      })()`);
+      await waitFor(exec, "the suite's own document to come back after the 8e overlap", DIAGRAMS_READY);
+    }
+  }
+
+
   // Two rapid toggles used to produce two overlapping mermaid.run() calls over
   // the same nodes and the same cache; a reviewer measured maxActive=2. The
   // danger is not just a garbled render: an older call finishing last writes
@@ -1213,6 +2072,69 @@ async function run(win) {
     staleRun.count > 0 && staleRun.changed === 0,
     JSON.stringify(staleRun),
   );
+
+  // --- 8d. An export must wait for the deferred tail, not just the fold ----
+  // Lives here rather than beside the other export sections because it needs
+  // PERF-07's fixture: 10+ diagrams with some off screen. Sections 8b and 8c
+  // each hold a single visible diagram, so neither can see this failure, and
+  // both stayed green while it was live - it was found in independent review.
+  //
+  // PERF-07 deliberately re-themes only what the reader can see and defers the
+  // rest to idle chunks, so updateMermaidTheme() resolving means "the visible
+  // ones are done". An export reads the WHOLE document. Without a settle wait
+  // it captures a MIXTURE: the diagrams above the fold in the export theme,
+  // the ones below still wearing the reader's.
+  //
+  // The oracle is the real export entry point (setExportTheme, which both the
+  // PDF handler and the Word button call), measured at the instant it
+  // resolves - not after an extra sleep, which would let the catch-up finish
+  // on its own and make the assertion pass for the wrong reason.
+  {
+    await exec(`
+      (async () => {
+        document.getElementById('viewer').parentElement.scrollTop = 0;
+        document.body.classList.add('dark-mode');
+        await updateMermaidTheme(true);
+        await whenMermaidSettled();
+        return null;
+      })()
+    `);
+    const allDark = await exec(FILLS);
+    check(
+      "8d the fixture really is all-dark and has diagrams below the fold",
+      allDark.items.length >= 10 &&
+        allDark.items.filter((x) => !x.onScreen).length > 0 &&
+        allDark.items.every((x) => x.lum !== null && x.lum < 0.3),
+      JSON.stringify({
+        blocks: allDark.items.length,
+        offScreen: allDark.items.filter((x) => !x.onScreen).length,
+        notDark: allDark.items.filter((x) => !(x.lum !== null && x.lum < 0.3)).length,
+      }),
+    );
+
+    const atExportReady = await exec(`
+      (async () => {
+        await setExportTheme(false);
+        return (${FILLS});
+      })()
+    `);
+    const stale = atExportReady.items.filter((x) => !(x.lum !== null && x.lum > 0.6));
+    check(
+      "every diagram below the fold is re-themed before an export reads it",
+      atExportReady.items.length === allDark.items.length && stale.length === 0,
+      `${stale.length} of ${atExportReady.items.length} still on the reader's theme when the ` +
+        `export was told the document was ready: ${JSON.stringify(stale)}`,
+    );
+
+    await exec(`
+      (async () => {
+        document.body.classList.remove('dark-mode');
+        await updateMermaidTheme(false);
+        await whenMermaidSettled();
+        return null;
+      })()
+    `);
+  }
 
   // --- 13. Upstream 03b5423: batch resilience, error sink, lifelines --------
   // Three independent claims from that commit, measured against THIS fork
@@ -2065,7 +2987,7 @@ app.whenReady().then(async () => {
     }
     await run(win);
   } catch (e) {
-    check("harness completed without throwing", false, String(e && e.stack));
+    check("harness completed without throwing", false, String((e && e.stack) || (e && e.message) || require("util").inspect(e)));
   }
 
   clearTimeout(watchdog);
