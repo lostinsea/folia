@@ -62,7 +62,7 @@ document. Everything marked FIXED below is covered by a regression test — in
 |---|---|---|
 | SEC-26 | **FIXED** | `renderMarkdownFull` reordered to parse → assemble → sanitize → insert, so DOMPurify is the last step before DOM insertion in *both* render paths. |
 | SEC-02 | **FIXED** | Mermaid bodies escaped at every interpolation site, and inserted as text rather than markup. |
-| SEC-03 | **FIXED** | Slider `src`/`alt` escaped before assembly. |
+| SEC-03 | **FIXED** (feature since removed) | Slider `src`/`alt` escaped before assembly; the slider itself was removed in `8c2`, so the sink is gone. The payload was retained against the ordinary image path. |
 | SEC-04 | **FIXED** | OmniWare DSL and error text escaped before assembly. Mitigated at the pipeline level by sanitize-last; not yet escaped at source in `omniwire/omniware.js`. |
 | SEC-01 | **FIXED** (mitigated, feature retained) | `@@@html` frames are pinned to `sandbox="allow-scripts"` with no `allow-same-origin` — enforced both on emission and by a global DOMPurify `afterSanitizeAttributes` hook, so markdown cannot author an un-sandboxed iframe. The frame therefore has an opaque origin and cannot reach `window.parent`. The feature is kept rather than removed. |
 | SEC-23 | **FIXED** | The `postMessage` resize listener now identifies the sender by matching `event.source` against the managed frames instead of trusting an index from the message body, and coerces/clamps the reported height. No attacker-controlled string reaches a selector. |
@@ -268,6 +268,26 @@ Zero-click payload:
 This renders as `<img src="a.png" alt="" onerror="require('child_process').exec('calc.exe')">`. `a.png` does not exist, `onerror` fires on DOM insertion, `require` is in scope because `contextIsolation: false`.
 
 **Fix.** HTML-attribute-escape both values, or build the elements with `document.createElement` + `setAttribute` instead of string concatenation.
+
+**Superseded — the feature was removed outright.** The escaping fix shipped first
+and held. The image slider itself was then removed in `8c2`, so the injection
+sink described above no longer exists in any form: nothing assembles `<img>`
+markup by hand after DOMPurify any more, and the `<!-- slider-start -->` markers
+are now inert HTML comments that `marked` passes through.
+
+The demonstrated hazard, however, is a property of image rendering and not of the
+slider, so its payload was **kept and re-pointed** at the ordinary image path
+rather than deleted with the feature — see `SEC-03 image alt-attribute breakout
+does not execute` in `test-render-security.js`, which now drives the same
+`![" onerror="...](a.png)` payload as plain markdown, and a second assertion that
+drives it still wrapped in the legacy markers. `SEC-26` covers both on the
+light-format path.
+
+A third assertion, `REMOVAL a legacy slider document degrades to plain images`,
+pins the removal itself: a document authored against the old syntax must still
+render its images, with the markers invisible, rather than silently losing them.
+`R170` proves it is not vacuous — reinstating the extraction step alone drops the
+image count from 2 to 0.
 
 ---
 

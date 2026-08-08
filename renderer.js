@@ -235,7 +235,7 @@ function resolveDocumentRelativeImageSrc(src, docPath) {
   return resolved.href;
 }
 
-// The value the *document author* wrote, which is what the note and slider
+// The value the *document author* wrote, which is what the note
 // features search the markdown source for. Those features rebuild `![alt](src)`
 // and look for it verbatim, so they must never see the resolved absolute URL.
 function authoredImageSrc(el) {
@@ -250,7 +250,7 @@ function authoredImageSrc(el) {
 //   ![a](<shots/hash#tag.png>) ->  src="shots/hash%23tag.png"
 //
 // so `![alt](` + attribute + `)` simply does not occur in the source text, and
-// the note and slider features reported "Could not find image in source" for
+// the note feature reported "Could not find image in source" for
 // any image whose path contains a space or a #. That predates the relative-path
 // resolution and is unrelated to it - it is a property of marked's output - but
 // it is the same "the src string is not what you think it is" mistake, so it is
@@ -491,7 +491,7 @@ function installSanitizerHooks() {
     // This is the single choke point for both markdown `![](…)` images and raw
     // `<img src>` in the document, which is why it lives here rather than in
     // the marked renderer. The authored value is preserved on the element,
-    // because the note and slider features search the markdown source for it.
+    // because the note feature searches the markdown source for it.
     if (tag === 'img' && node.hasAttribute('src')) {
       const raw = node.getAttribute('src');
       const resolved = resolveDocumentRelativeImageSrc(raw, currentFilePath);
@@ -678,7 +678,6 @@ const UI_STRINGS = {
     'ctx.addNote': 'Add Note', 'ctx.editNote': 'Edit Note',
     'ctx.deleteNote': 'Delete Note', 'ctx.findNote': 'Find Note',
     'ctx.insertImage': 'Insert Image', 'ctx.deleteImage': 'Delete Image',
-    'ctx.addToSlider': 'Add to Slider',
     'ctx.selectAll': 'Select All',
     'ctx.openFolder': 'Open Containing Folder', 'ctx.copyPath': 'Copy Path',
     'ctx.removeRecent': 'Remove from Recent',
@@ -801,7 +800,6 @@ const UI_STRINGS = {
     'ctx.addNote': 'Not Ekle', 'ctx.editNote': 'Notu Düzenle',
     'ctx.deleteNote': 'Notu Sil', 'ctx.findNote': 'Not Bul',
     'ctx.insertImage': 'Resim Ekle', 'ctx.deleteImage': 'Resmi Sil',
-    'ctx.addToSlider': 'Slider\'a Ekle',
     'ctx.selectAll': 'Tümünü Seç',
     'ctx.openFolder': 'Klasörü Aç', 'ctx.copyPath': 'Yolu Kopyala',
     'ctx.removeRecent': 'Son Dosyalardan Kaldır',
@@ -3895,11 +3893,10 @@ const mermaidSvgCache = new Map(); // Cache: mermaid source → rendered SVG inn
 function detectRenderMode(oldContent, newContent) {
   if (!oldContent) return 'full';
 
-  // Check if mermaid/slider blocks changed
+  // Check if mermaid blocks changed
   const hasMermaid = /```mermaid/i.test(newContent) || /```mermaid/i.test(oldContent);
-  const hasSlider = /<!--\s*slider/i.test(newContent) || /<!--\s*slider/i.test(oldContent);
 
-  if (!hasMermaid && !hasSlider) {
+  if (!hasMermaid) {
     // Only text/format changes — check if images changed
     const imgRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
     const oldImgs = [...oldContent.matchAll(imgRegex)].map(m => m[2]).join(',');
@@ -4267,26 +4264,6 @@ async function renderMarkdownFull(content, generation) {
     // Parse emoji shortcodes (e.g., :star: -> ⭐)
     content = parseEmojis(content);
 
-    // Extract image slider blocks and replace with placeholders
-    const sliderBlocks = [];
-    let sliderIndex = 0;
-    content = content.replace(/<!--\s*slider-start\s*-->([\s\S]*?)<!--\s*slider-end\s*-->/g, (match, inner) => {
-      const placeholder = `SLIDER_PLACEHOLDER_${sliderIndex}`;
-      // Extract images from the inner block
-      const images = [];
-      const imgRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
-      let imgMatch;
-      while ((imgMatch = imgRegex.exec(inner)) !== null) {
-        images.push({ alt: imgMatch[1], src: imgMatch[2] });
-      }
-      if (images.length > 0) {
-        sliderBlocks.push({ placeholder, images });
-        sliderIndex++;
-        return placeholder;
-      }
-      return match; // no images found — leave unchanged
-    });
-
     // First, extract mermaid blocks and replace with placeholders
     const mermaidBlocks = [];
     let mermaidIndex = 0;
@@ -4311,31 +4288,6 @@ async function renderMarkdownFull(content, generation) {
 
   // Parse markdown with marked (allows HTML)
   let html = marked.parse(content);
-
-  // Replace slider placeholders with slider HTML
-  sliderBlocks.forEach(({ placeholder, images }) => {
-    const zoomBtnHtml = `<button class="img-zoom-btn" title="Zoom"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="22" y2="22"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg></button>`;
-    const slidesHtml = images.map((img, i) =>
-      `<div class="slider-slide${i === 0 ? ' active' : ''}" data-index="${i}">
-        <img src="${escapeHtml(img.src)}" alt="${escapeHtml(img.alt || '')}">
-        ${zoomBtnHtml}
-      </div>`
-    ).join('');
-    const dotsHtml = images.map((_, i) =>
-      `<span class="slider-dot${i === 0 ? ' active' : ''}" data-idx="${i}"></span>`
-    ).join('');
-    const sliderHtml = `<div class="image-slider" data-slider-initialized="false" data-slider-total="${images.length}" data-slider-current="0">
-      <div class="slider-track">${slidesHtml}</div>
-      <button class="slider-btn slider-prev" title="Previous">&#8249;</button>
-      <button class="slider-btn slider-next" title="Next">&#8250;</button>
-      <div class="slider-footer">
-        <div class="slider-dots">${dotsHtml}</div>
-        <span class="slider-counter">1 / ${images.length}</span>
-      </div>
-    </div>`;
-    // Use a regex to handle the placeholder that may be wrapped in <p> by marked
-    html = html.replace(new RegExp(`<p>${placeholder}</p>|${placeholder}`), sliderHtml);
-  });
 
   // Replace placeholders with mermaid divs. The fence body is display text
   // inside a <pre>, never markup, so it is escaped in both the attribute and
@@ -4493,10 +4445,7 @@ async function renderMarkdownFull(content, generation) {
     // Add maximize buttons to tables
     addTableMaximizeButtons();
 
-    // Initialize image sliders (must run before initImageZoom so slider imgs are wrapped)
-    initSliders();
-
-    // Initialize image zoom buttons (after sliders so .slider-slide imgs are excluded)
+    // Initialize image zoom buttons
     initImageZoom();
 
     // Build table of contents
@@ -4558,87 +4507,6 @@ async function renderMarkdownFull(content, generation) {
     </div>`;
     hideLoadingScreenFor(generation);
   }
-}
-
-// ============================================
-// IMAGE SLIDER
-// ============================================
-
-function initSliders() {
-  viewer.querySelectorAll('.image-slider[data-slider-initialized="false"]').forEach(slider => {
-    slider.setAttribute('data-slider-initialized', 'true');
-
-    const slides = slider.querySelectorAll('.slider-slide');
-    const dots = slider.querySelectorAll('.slider-dot');
-    const counter = slider.querySelector('.slider-counter');
-    const prevBtn = slider.querySelector('.slider-prev');
-    const nextBtn = slider.querySelector('.slider-next');
-    const total = slides.length;
-    let current = 0;
-    let autoPlayTimer = null;
-
-    function goTo(idx) {
-      slides[current].classList.remove('active');
-      dots[current].classList.remove('active');
-      current = ((idx % total) + total) % total;
-      slides[current].classList.add('active');
-      dots[current].classList.add('active');
-      slider.setAttribute('data-slider-current', current);
-      if (counter) counter.textContent = `${current + 1} / ${total}`;
-    }
-
-    function startAutoPlay() {
-      stopAutoPlay();
-      if (total > 1) autoPlayTimer = setInterval(() => goTo(current + 1), 5000);
-    }
-
-    function stopAutoPlay() {
-      if (autoPlayTimer) { clearInterval(autoPlayTimer); autoPlayTimer = null; }
-    }
-
-    prevBtn && prevBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      goTo(current - 1);
-      startAutoPlay();
-    });
-
-    nextBtn && nextBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      goTo(current + 1);
-      startAutoPlay();
-    });
-
-    dots.forEach((dot, i) => {
-      dot.addEventListener('click', (e) => {
-        e.stopPropagation();
-        goTo(i);
-        startAutoPlay();
-      });
-    });
-
-    // Pause on hover
-    slider.addEventListener('mouseenter', stopAutoPlay);
-    slider.addEventListener('mouseleave', startAutoPlay);
-
-    // Per-slide zoom button — open image in popup (same as regular image zoom)
-    slides.forEach(slide => {
-      const zoomBtn = slide.querySelector('.img-zoom-btn');
-      if (!zoomBtn) return;
-      zoomBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const img = slide.querySelector('img');
-        if (img) {
-          ipcRenderer.send('open-image-popup', {
-            src: img.src,
-            alt: img.alt || '',
-            isDarkMode: document.body.classList.contains('dark-mode')
-          });
-        }
-      });
-    });
-
-    startAutoPlay();
-  });
 }
 
 // Space left either side of a table that has been widened beyond the reading
@@ -5044,10 +4912,10 @@ if (typeof ResizeObserver === 'function') {
   }
 }
 
-// Wrap standalone images with a zoom button (skips slider images)
+// Wrap standalone images with a zoom button
 function initImageZoom() {
   const imgs = viewer.querySelectorAll(
-    '.markdown-body img:not(.slider-slide img), #viewer img:not(.slider-slide img)'
+    '.markdown-body img, #viewer img'
   );
 
   imgs.forEach(img => {
@@ -5484,7 +5352,6 @@ let savedSelectionHtml = null;
 let savedSelectionOccurrence = 0;
 let savedRange = null;
 let rightClickTarget = null;
-let pendingSliderImageAdd = false; // flag: image dialog opened by "Add to Slider", not "Insert Image"
 let rightClickY = 0;
 let rightClickX = 0;
 let rightClickCaretInfo = null;
@@ -7047,7 +6914,6 @@ ctxInsertImage.addEventListener('click', () => {
     showNotification(i18n('notif.openFileFirst'), 2000);
     return;
   }
-  pendingSliderImageAdd = false;
   ipcRenderer.send('open-image-dialog');
 });
 
@@ -7219,57 +7085,6 @@ function insertImageMarkdown(imageMarkdown, originalSize, compressedSize) {
       renderMarkdown(markdownEditor.value);
     }, PREVIEW_DEBOUNCE_DELAY);
   } else {
-    // View mode: if right-clicked on a data-URI image, create/extend a slider
-    const clickedImg = rightClickTarget && (
-      rightClickTarget.tagName === 'IMG' ? rightClickTarget : rightClickTarget.closest?.('img')
-    );
-    if (clickedImg && clickedImg.src && clickedImg.src.startsWith('data:')) {
-      const altText = clickedImg.alt || '';
-      const srcPrefix = clickedImg.src.substring(0, 50);
-      const searchStart = `![${altText}](${srcPrefix}`;
-      const content = originalMarkdown;
-      const imgIdx = content.indexOf(searchStart);
-      if (imgIdx !== -1) {
-        const imgEndIdx = content.indexOf(')', imgIdx + searchStart.length);
-        if (imgEndIdx !== -1) {
-          const beforeImg = content.substring(0, imgIdx);
-          const afterImg = content.substring(imgEndIdx + 1);
-          const lastSliderStart = beforeImg.lastIndexOf('<!-- slider-start -->');
-          const lastSliderEndBeforeImg = beforeImg.lastIndexOf('<!-- slider-end -->');
-
-          if (lastSliderStart !== -1 && lastSliderStart > lastSliderEndBeforeImg) {
-            // Image is already in a slider — add the new image inside it
-            const sliderEndAfter = afterImg.indexOf('<!-- slider-end -->');
-            if (sliderEndAfter !== -1) {
-              const sliderContent = content.substring(lastSliderStart, imgEndIdx + 1 + sliderEndAfter + '<!-- slider-end -->'.length);
-              const existingImages = (sliderContent.match(/!\[[^\]]*\]\([^)]+\)/g) || []);
-              if (existingImages.length >= 5) {
-                showNotification(i18n('ctx.addToSlider') + ': max 5 images', 2000);
-                return;
-              }
-              applySliderImageAdd(imageMarkdown, imgEndIdx + 1);
-              return;
-            }
-          } else {
-            // Image is NOT in a slider — wrap both in a new slider block
-            historyPush(originalMarkdown);
-            const fullImgMd = content.substring(imgIdx, imgEndIdx + 1);
-            const newContent = content.substring(0, imgIdx)
-              + '<!-- slider-start -->\n' + fullImgMd + '\n' + imageMarkdown + '\n<!-- slider-end -->'
-              + content.substring(imgEndIdx + 1);
-            const scrollPosition = contentWrapper.scrollTop;
-            originalMarkdown = newContent;
-            renderMarkdown(originalMarkdown, 'full').then(() => {
-              contentWrapper.scrollTop = scrollPosition;
-            });
-            hasUnsavedChanges = true;
-            showNotification('Slider created', 1500);
-            return;
-          }
-        }
-      }
-    }
-
     // Standard insert: place after the clicked element's position in markdown
     const scrollPosition = contentWrapper.scrollTop;
     const activeContent = getActiveMarkdown();
@@ -7290,11 +7105,6 @@ function insertImageMarkdown(imageMarkdown, originalSize, compressedSize) {
 
 // Handle image selected from main process
 ipcRenderer.on('image-selected', (event, data) => {
-  // If the dialog was opened by "Add to Slider", skip here — handled by the once() listener
-  if (pendingSliderImageAdd) {
-    pendingSliderImageAdd = false;
-    return;
-  }
   if (data.error) {
     showNotification(i18n('notif.imageFailed') + data.error, 3000);
     return;
@@ -7422,7 +7232,6 @@ const ctxDeleteMermaid = document.getElementById('ctxDeleteMermaid');
 const ctxDeleteTable = document.getElementById('ctxDeleteTable');
 const ctxCopyCode = document.getElementById('ctxCopyCode');
 const ctxCopyImageSrc = document.getElementById('ctxCopyImageSrc');
-const ctxAddToSlider = document.getElementById('ctxAddToSlider');
 
 // Copy Image Source (base64 data URL)
 ctxCopyImageSrc && ctxCopyImageSrc.addEventListener('click', () => {
@@ -7448,147 +7257,6 @@ ctxCopyCode && ctxCopyCode.addEventListener('click', () => {
   }
 });
 
-// Add to Slider — create or expand a slider around the right-clicked image (max 5 images)
-ctxAddToSlider && ctxAddToSlider.addEventListener('click', () => {
-  hideContextMenu();
-  if (!rightClickTarget || !currentFilePath) return;
-
-  const imgEl = rightClickTarget.tagName === 'IMG' ? rightClickTarget : rightClickTarget.closest?.('img');
-  if (!imgEl || !imgEl.src) return;
-
-  const altText = imgEl.alt || '';
-  // The AUTHORED src is required here: `imgEl.src` is the DOM property, which
-  // is always absolute, so a relative image never matched.
-  const authored = authoredImageSrc(imgEl);
-  const content = isEditMode ? markdownEditor.value : originalMarkdown;
-
-  // Exact match first - that is what also covers the destinations marked
-  // normalises (`<shots/my pic.png>` renders as `shots/my%20pic.png`). The
-  // 50-character prefix scan below remains for data URIs, whose destination is
-  // far too long to compare whole and which marked never rewrites.
-  const hit = findMarkdownImage(content, altText, authored);
-  let imgIdx;
-  let imgEndIdx;
-  if (hit) {
-    imgIdx = hit.index;
-    imgEndIdx = hit.index + hit.pattern.length - 1;
-  } else {
-    const searchStart = `![${altText}](${authored.substring(0, 50)}`;
-    imgIdx = content.indexOf(searchStart);
-    if (imgIdx === -1) {
-      showNotification(i18n('notif.imageNotFound'), 2000);
-      return;
-    }
-    // Find full image markdown: ![alt](src)
-    imgEndIdx = content.indexOf(')', imgIdx + searchStart.length);
-    if (imgEndIdx === -1) return;
-  }
-  const fullImgMd = content.substring(imgIdx, imgEndIdx + 1);
-
-  // Check if this image is already inside a slider block
-  const beforeImg = content.substring(0, imgIdx);
-  const afterImg = content.substring(imgEndIdx + 1);
-  const lastSliderStart = beforeImg.lastIndexOf('<!-- slider-start -->');
-  const lastSliderEndBeforeImg = beforeImg.lastIndexOf('<!-- slider-end -->');
-
-  if (lastSliderStart !== -1 && lastSliderStart > lastSliderEndBeforeImg) {
-    // Image is already inside a slider — check if we can add another image
-    const sliderEndAfter = afterImg.indexOf('<!-- slider-end -->');
-    if (sliderEndAfter !== -1) {
-      const sliderContent = content.substring(lastSliderStart, imgEndIdx + 1 + sliderEndAfter + '<!-- slider-end -->'.length);
-      const existingImages = (sliderContent.match(/!\[[^\]]*\]\([^)]+\)/g) || []);
-      if (existingImages.length >= 5) {
-        showNotification(i18n('ctx.addToSlider') + ': max 5 images', 2000);
-        return;
-      }
-      // Open image dialog to add a new image to this slider
-      pendingSliderImageAdd = true;
-      ipcRenderer.send('open-image-dialog');
-      // We'll insert the new image right after the current one
-      ipcRenderer.once('image-selected', (event, data) => {
-        if (data.error) {
-          showNotification(i18n('notif.imageFailed') + data.error, 3000);
-          return;
-        }
-        const { base64, mimeType, fileName: fn } = data;
-        let newImgMd;
-        if (mimeType === 'image/svg+xml') {
-          newImgMd = `![${fn}](data:${mimeType};base64,${base64})`;
-        } else {
-          // Compress to WebP like standard image insertion
-          const tmpImg = new Image();
-          tmpImg.onload = () => {
-            let w = tmpImg.naturalWidth, h = tmpImg.naturalHeight;
-            if (w > 1000 || h > 1000) {
-              const scale = Math.min(1000 / w, 1000 / h);
-              w = Math.round(w * scale); h = Math.round(h * scale);
-            }
-            const canvas = document.createElement('canvas');
-            canvas.width = w; canvas.height = h;
-            canvas.getContext('2d').drawImage(tmpImg, 0, 0, w, h);
-            const dataUrl = canvas.toDataURL('image/webp', 0.70);
-            newImgMd = `![${fn}](${dataUrl})`;
-            applySliderImageAdd(newImgMd, imgEndIdx + 1);
-          };
-          tmpImg.src = `data:${mimeType};base64,${base64}`;
-          return; // wait for onload
-        }
-        applySliderImageAdd(newImgMd, imgEndIdx + 1);
-      });
-      return;
-    }
-  }
-
-  // Image is NOT in a slider — wrap it in a new slider block
-  historyPush(isEditMode ? markdownEditor.value : originalMarkdown);
-
-  // Find the full line range of the image (including leading/trailing newlines)
-  let wrapStart = imgIdx;
-  let wrapEnd = imgEndIdx + 1;
-
-  const newContent = content.substring(0, wrapStart)
-    + '<!-- slider-start -->\n' + fullImgMd + '\n<!-- slider-end -->'
-    + content.substring(wrapEnd);
-
-  if (isEditMode) {
-    markdownEditor.value = newContent;
-    hasUnsavedChanges = true;
-    updateUnsavedIndicator();
-    clearTimeout(previewDebounceTimer);
-    previewDebounceTimer = setTimeout(() => renderMarkdown(markdownEditor.value), TIMING.previewDebounceDelay);
-  } else {
-    const scrollPosition = contentWrapper.scrollTop;
-    originalMarkdown = newContent;
-    renderMarkdown(originalMarkdown, 'full').then(() => {
-      contentWrapper.scrollTop = scrollPosition;
-    });
-    hasUnsavedChanges = true;
-  }
-  showNotification('Slider created', 1500);
-});
-
-// Helper: add an image markdown string to the slider at the given position
-function applySliderImageAdd(newImgMd, insertPos) {
-  historyPush(isEditMode ? markdownEditor.value : originalMarkdown);
-  const content = isEditMode ? markdownEditor.value : originalMarkdown;
-  const newContent = content.substring(0, insertPos) + '\n' + newImgMd + content.substring(insertPos);
-
-  if (isEditMode) {
-    markdownEditor.value = newContent;
-    hasUnsavedChanges = true;
-    updateUnsavedIndicator();
-    clearTimeout(previewDebounceTimer);
-    previewDebounceTimer = setTimeout(() => renderMarkdown(markdownEditor.value), TIMING.previewDebounceDelay);
-  } else {
-    const scrollPosition = contentWrapper.scrollTop;
-    originalMarkdown = newContent;
-    renderMarkdown(originalMarkdown, 'full').then(() => {
-      contentWrapper.scrollTop = scrollPosition;
-    });
-    hasUnsavedChanges = true;
-  }
-  showNotification('Image added to slider', 1500);
-}
 
 // Insert Mermaid → open MermaidTemplateDialog
 ctxInsertMermaid && ctxInsertMermaid.addEventListener('click', () => {
@@ -7839,11 +7507,6 @@ function updateNewContextMenuItems() {
   ctxDeleteTable && (ctxDeleteTable.style.display = isTable ? '' : 'none');
   ctxCopyCode && (ctxCopyCode.style.display = isCode ? '' : 'none');
   ctxCopyImageSrc && (ctxCopyImageSrc.style.display = isImg ? '' : 'none');
-
-  // Show "Add to Slider" for images with data: src (same condition as delete image)
-  const imgForSlider = isImg && (target.tagName === 'IMG' ? target : target.closest?.('img'));
-  const hasDataSrc = imgForSlider && imgForSlider.src && imgForSlider.src.startsWith('data:');
-  ctxAddToSlider && (ctxAddToSlider.style.display = hasDataSrc ? '' : 'none');
 }
 
 // ============================================

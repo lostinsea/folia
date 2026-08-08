@@ -1565,20 +1565,20 @@ const REVERTS = [
       /document-relative images load: markdown/,
       /percent-encoded relative images load/,
       /relative image traversing \.\. resolves/,
-      /authored src is preserved for the note and slider/,
+      /authored src is preserved for the note/,
     ],
   },
   {
     id: "R148",
     suite: "test:security",
-    what: "stop recording the authored image src (the note and slider features rebuild `![alt](src)` and search the markdown source for it, so they stop matching)",
+    what: "stop recording the authored image src (the note feature rebuilds `![alt](src)` and searches the markdown source for it, so it stops matching)",
     file: RENDERER,
     from: "        node.setAttribute('data-original-src', raw);",
     to: "        void raw;",
     // Deliberately narrow, and that is the point: the images still LOAD under
     // this revert. Only the source-matching contract breaks, which is the half
     // a "does the picture appear" test can never see.
-    expect: [/authored src is preserved for the note and slider/],
+    expect: [/authored src is preserved for the note/],
   },
   {
     id: "R149",
@@ -1588,11 +1588,10 @@ const REVERTS = [
     from: "  for (const pattern of markdownImageCandidates(alt, src)) {",
     to: "  for (const pattern of [`![${alt}](${src})`]) {",
     // Both consumers, driven through their real context-menu handlers. This is
-    // what makes "the note and slider features still work" a measured claim
+    // what makes "the note feature still works" a measured claim
     // rather than an inference from the fact that the image now loads - R148
     // already showed those two properties are independent.
     expect: [
-      /add-to-slider finds an image whose markdown destination marked normalised/,
       /add-note-to-image finds an image whose markdown destination marked normalised/,
     ],
   },
@@ -1983,6 +1982,58 @@ const REVERTS = [
     // the update check outright and the assertion above is passing vacuously
     // rather than because the identifier reappeared.
     mustPass: [/the update check really reached the stand-in feed/],
+  },
+  {
+    // The slider was removed in 8c2, so there is no code left to break. What
+    // CAN regress is the claim that legacy documents degrade: this reinstates
+    // the extraction step alone, which swallows the marker block into a bare
+    // placeholder string with nothing left to expand it. Measured under the
+    // revert: imgCount drops from 2 to 0 -- the images vanish outright, which
+    // is exactly the "unrendered rather than degraded" failure the assertion
+    // exists to catch.
+    id: "R170",
+    suite: "test:security",
+    what: "half-restore the slider by extracting its blocks with nothing left to render them",
+    file: RENDERER,
+    from: "    // First, extract mermaid blocks and replace with placeholders",
+    to:
+      "    content = content.replace(\n" +
+      "      /<!--\\s*slider-start\\s*-->([\\s\\S]*?)<!--\\s*slider-end\\s*-->/g,\n" +
+      '      () => "SLIDER_PLACEHOLDER_0",\n' +
+      "    );\n" +
+      "    // First, extract mermaid blocks and replace with placeholders",
+    expect: [/a legacy slider document degrades to plain images/],
+    // An unrelated document must still render. If this fails too, the revert
+    // has broken rendering outright rather than only the degradation path.
+    mustPass: [/mermaid source containing '<\|--' survives intact/],
+  },
+  {
+    // The light-format twin of R170, and the measurement that settles a
+    // reviewer disagreement: one reviewer held that the SEC-26 light-format
+    // assertion already covered legacy-document degradation. It does not.
+    // SEC-26 asserts only that window.__pwned stayed null, which a blank page
+    // satisfies. Under this revert the light-format path swallows the marker
+    // block, the images disappear, and SEC-26 still passes -- which is exactly
+    // why the dedicated light-format degradation assertion had to be added.
+    id: "R171",
+    suite: "test:security",
+    what: "swallow legacy slider blocks on the light-format path, so the images disappear instead of degrading",
+    file: RENDERER,
+    from: "  // Extract and placeholder special blocks (same as full render)",
+    to:
+      "  content = content.replace(\n" +
+      "    /<!--\\s*slider-start\\s*-->([\\s\\S]*?)<!--\\s*slider-end\\s*-->/g,\n" +
+      '    () => "SLIDER_PH_0",\n' +
+      "  );\n" +
+      "  // Extract and placeholder special blocks (same as full render)",
+    expect: [/a legacy slider document degrades on the light-format path too/],
+    // The full-render twin must KEEP passing: this revert touches only
+    // renderLightFormat, so a failure there would mean the two assertions are
+    // not actually measuring separate paths.
+    mustPass: [
+      /a legacy slider document degrades to plain images/,
+      /SEC-26 legacy slider payload is blocked on the light-format path too/,
+    ],
   },
 ];
 

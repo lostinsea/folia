@@ -6,7 +6,7 @@
 // of them execute. Every attack test is paired with a feature test, because the
 // remedy - making DOMPurify the last step in the pipeline instead of the third
 // of nine - is exactly the kind of change that can silently stop mermaid,
-// sliders or @@@html blocks from rendering at all.
+// images or @@@html blocks from rendering at all.
 //
 // Payloads set window.__pwned rather than spawning a process. The property that
 // matters is whether attacker-authored script runs in the Node-privileged
@@ -133,8 +133,32 @@ async function run(win) {
   );
 
   // ==========================================================================
-  // SEC-03 - image-slider src/alt injected raw after DOMPurify
+  // SEC-03 - an image alt breaking out of its src/alt attribute
+  //
+  // This was found in the image-slider feature, which built `<img src=... alt=...>`
+  // by hand and injected it AFTER DOMPurify. That feature is gone (8c2), and with
+  // it the sink: nothing assembles image markup by hand after sanitisation any
+  // more, so this is no longer a regression test for a live SEC-03 sink and a
+  // revert reintroducing that sink cannot be constructed.
+  //
+  // It is retained deliberately, relabelled for what it now measures: that the
+  // ordinary marked -> DOMPurify composition still escapes an alt containing a
+  // quote, so the same payload cannot be revived by a future change that goes
+  // back to assembling image markup by hand. The second assertion drives the
+  // payload still wrapped in the legacy `<!-- slider-start -->` markers, which is
+  // the stronger of the two: it is the regression guard for the removal itself.
   // ==========================================================================
+  const altBreakoutPayload =
+    "# Doc\n\n" +
+    "![\" onerror=\"window.__pwned='alt'](a.png)\n\n" +
+    "![second](b.png)\n";
+
+  check(
+    "SEC-03 an image alt cannot break out of its attribute via markdown",
+    (await render(altBreakoutPayload, "full")) === null,
+    "window.__pwned was set from an image alt attribute",
+  );
+
   const sliderPayload =
     "# Doc\n\n<!-- slider-start -->\n" +
     "![\" onerror=\"window.__pwned='slider'](a.png)\n" +
@@ -142,9 +166,9 @@ async function run(win) {
     "<!-- slider-end -->\n";
 
   check(
-    "SEC-03 slider alt-attribute breakout does not execute",
+    "SEC-03 the same payload in legacy slider markers does not execute",
     (await render(sliderPayload, "full")) === null,
-    "window.__pwned was set from a slider alt attribute",
+    "window.__pwned was set from a legacy slider block",
   );
 
   // ==========================================================================
@@ -294,35 +318,74 @@ async function run(win) {
     JSON.stringify(mermaidAngle),
   );
 
-  // Slider still renders every slide with its real src and alt.
+  // REMOVAL PIN: the image slider was removed from the fork (8c2). Its markers
+  // were HTML comments wrapping ordinary markdown images, so a document authored
+  // against the old syntax must DEGRADE, not break: the images still render, and
+  // the markers stay invisible rather than surfacing as literal text. Asserting
+  // the absence of `.image-slider` alone would pass on a blank page.
   await render(
     "# Doc\n\n<!-- slider-start -->\n![one](a.png)\n![two](b.png)\n<!-- slider-end -->\n",
     "full",
   );
-  const slider = await exec(`
+  const legacySlider = await exec(`
     (() => {
-      const s = document.querySelector('.image-slider');
-      if (!s) return { present: false };
-      const imgs = [...s.querySelectorAll('.slider-slide img')];
+      const v = document.getElementById('viewer');
+      const imgs = [...v.querySelectorAll('img')];
       return {
-        present: true,
-        slides: s.querySelectorAll('.slider-slide').length,
-        dots: s.querySelectorAll('.slider-dot').length,
+        sliderEl: !!v.querySelector('.image-slider, .slider-slide, .slider-dot'),
+        imgCount: imgs.length,
         srcs: imgs.map(i => i.getAttribute('src')),
         alts: imgs.map(i => i.getAttribute('alt')),
-        zoomBtns: s.querySelectorAll('.img-zoom-btn').length
+        markerText: v.textContent.includes('slider-start') ||
+                    v.textContent.includes('slider-end')
       };
     })()
   `);
   check(
-    "FEATURE image slider still renders slides, dots, srcs and alts",
-    slider.present &&
-      slider.slides === 2 &&
-      slider.dots === 2 &&
-      slider.zoomBtns === 2 &&
-      slider.srcs.join(",").includes("a.png") &&
-      slider.alts.join(",") === "one,two",
-    JSON.stringify(slider),
+    "REMOVAL a legacy slider document degrades to plain images",
+    legacySlider.imgCount === 2 &&
+      legacySlider.srcs.join(",").includes("a.png") &&
+      legacySlider.alts.join(",") === "one,two" &&
+      legacySlider.sliderEl === false &&
+      legacySlider.markerText === false,
+    JSON.stringify(legacySlider),
+  );
+
+  // The same claim on the OTHER render path. Removing `hasSlider` from
+  // detectRenderMode is what makes this necessary: a legacy document used to be
+  // forced onto 'full', and is now eligible for 'light-format' too.
+  //
+  // The SEC-26 light-format assertion below does NOT cover this. It checks only
+  // that window.__pwned stayed null, which a blank page satisfies just as well
+  // as a correctly rendered one. Non-execution and degradation are different
+  // properties and need different oracles. R171 makes that concrete: it breaks
+  // light-format degradation only, and SEC-26 keeps passing while this fails.
+  await render(
+    "# Doc\n\n<!-- slider-start -->\n![one](a.png)\n![two](b.png)\n<!-- slider-end -->\n",
+    "light-format",
+  );
+  const legacySliderLF = await exec(`
+    (() => {
+      const v = document.getElementById('viewer');
+      const imgs = [...v.querySelectorAll('img')];
+      return {
+        sliderEl: !!v.querySelector('.image-slider, .slider-slide, .slider-dot'),
+        imgCount: imgs.length,
+        srcs: imgs.map(i => i.getAttribute('src')),
+        alts: imgs.map(i => i.getAttribute('alt')),
+        markerText: v.textContent.includes('slider-start') ||
+                    v.textContent.includes('slider-end')
+      };
+    })()
+  `);
+  check(
+    "REMOVAL a legacy slider document degrades on the light-format path too",
+    legacySliderLF.imgCount === 2 &&
+      legacySliderLF.srcs.join(",").includes("a.png") &&
+      legacySliderLF.alts.join(",") === "one,two" &&
+      legacySliderLF.sliderEl === false &&
+      legacySliderLF.markerText === false,
+    JSON.stringify(legacySliderLF),
   );
 
   // REMOVAL PIN: the OmniWare wireframe renderer was removed from the fork.
@@ -460,9 +523,13 @@ async function run(win) {
   // Both render paths must agree; a payload blocked on one and not the other is
   // exactly the inconsistency SEC-26 describes.
   check(
-    "SEC-26 slider payload is blocked on the light-format path too",
+    "SEC-26 image alt payload is blocked on the light-format path too",
+    (await render(altBreakoutPayload, "light-format")) === null,
+    "light-format path executed the image alt payload",
+  );  check(
+    "SEC-26 legacy slider payload is blocked on the light-format path too",
     (await render(sliderPayload, "light-format")) === null,
-    "light-format path executed the slider payload",
+    "light-format path executed the legacy slider payload",
   );
   check(
     "SEC-26 removed-feature fence is blocked on the light-format path too",
@@ -743,7 +810,7 @@ async function run(win) {
     JSON.stringify(rel),
   );
   check(
-    "FEATURE the authored src is preserved for the note and slider features",
+    "FEATURE the authored src is preserved for the note feature",
     rel.plain &&
       rel.plain.authored === "shots/a.png" &&
       rel.dot &&
@@ -797,40 +864,22 @@ async function run(win) {
   //
   //   ![a](<shots/my pic.png>)  ->  src="shots/my%20pic.png"
   //
-  // so the note and slider features - which rebuild `![alt](src)` and search
-  // the raw markdown for it - found nothing and reported "Could not find image
-  // in source" for any path containing a space or a #. That is older than the
+  // so the note feature - which rebuilds `![alt](src)` and searches the raw
+  // markdown for it - found nothing and reported "Could not find image in
+  // source" for any path containing a space or a #. That is older than the
   // relative-path resolution above and independent of it, but it is the same
   // mistake about what the src string is, so it is fixed and pinned together.
   //
-  // Both assertions drive the REAL context-menu handlers on a REAL rendered
+  // The image slider was the second consumer of this contract and had its own
+  // assertion here until 8c2 removed the feature. The contract itself is
+  // unchanged and is still measured, because the note feature exercises the
+  // same helpers (markdownImageCandidates, data-original-src) end to end.
+  //
+  // The assertion drives the REAL context-menu handler on a REAL rendered
   // image: a contextmenu event to set the right-click target, then a click on
   // the actual menu item. Nothing is asserted about source text alone.
   // ==========================================================================
   const normSrc = "# Doc\n\n![space](<shots/my pic.png>)\n";
-  await exec(
-    `window.currentFilePath = ${JSON.stringify(relDoc)};` +
-      `window.originalMarkdown = ${JSON.stringify(normSrc)}; true`,
-  );
-  await render(normSrc, "full", 1500);
-  await exec(`
-    (() => {
-      const img = document.querySelector('#viewer img[alt="space"]');
-      if (!img) return false;
-      img.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
-      document.getElementById('ctxAddToSlider').click();
-      return true;
-    })()
-  `);
-  await sleep(1500);
-  const sliderSrc = await exec(`window.originalMarkdown`);
-  check(
-    "FEATURE add-to-slider finds an image whose markdown destination marked normalised",
-    typeof sliderSrc === "string" &&
-      sliderSrc.includes("<!-- slider-start -->") &&
-      sliderSrc.includes("<shots/my pic.png>"),
-    JSON.stringify(sliderSrc),
-  );
 
   await exec(
     `window.currentFilePath = ${JSON.stringify(relDoc)};` +

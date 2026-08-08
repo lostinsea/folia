@@ -1600,7 +1600,7 @@ async function run(win) {
   // renderMarkdownFull: `await ensureMermaid()`. The previous stale-render check
   // sits above it, so a render that loses the race while parked there used to
   // wake up and run the rest of the function - TOC build, collapsible headers,
-  // slider/zoom setup, and a scroll reset - against whatever document had since
+  // image zoom setup, and a scroll reset - against whatever document had since
   // won. Measured before the fix: the user's scroll position was slammed from
   // 400 back to 0 and the table of contents was rebuilt a second time.
   //

@@ -181,6 +181,12 @@ app.whenReady().then(async () => {
 > documents still route through `'full'`, but that path is no longer expensive:
 > `patchViewerDOM()` now preserves the drawn diagram, so the cost that made the
 > fast path desirable is gone.
+>
+> The code quoted below is the snapshot as audited and is left unedited as a
+> dated record. Two of the features it names have since been removed from the
+> fork: OmniWare (`7b`) and the image slider (`8c2`). `detectRenderMode` now
+> tests `hasMermaid` alone, and the proposed alternative's reference to
+> "Mermaid / OmniWare / slider blocks" should be read as "Mermaid blocks".
 
 - **File:line:** `renderer.js:2888-2898`, `renderer.js:3077-3385`, `renderer.js:3241-3263`
 - **Code:**

@@ -99,7 +99,6 @@
     "ctx.findNote": "Знайти нотатку",
     "ctx.insertImage": "Вставити зображення",
     "ctx.deleteImage": "Видалити зображення",
-    "ctx.addToSlider": "Додати до слайдера",
     "ctx.selectAll": "Вибрати все",
     "ctx.openFolder": "Відкрити папку",
     "ctx.copyPath": "Копіювати шлях",
