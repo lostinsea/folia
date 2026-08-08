@@ -2178,6 +2178,134 @@ function main() {
     );
   }
 
+  // ── Localisation removal ─────────────────────────────────────────────────
+  // The Turkish and Ukrainian locales and the language switcher were removed:
+  // both arrived from the two upstream forks and neither served this product.
+  // These oracles are static because the failure mode is a *leftover*, and a
+  // leftover is a source fact. The i18n() seam is deliberately retained, so
+  // "no localisation" cannot be asserted by its absence - it has to be
+  // asserted against the specific machinery that was taken out.
+  {
+    const rendererSrc = fs.readFileSync(path.join(ROOT, "renderer.js"), "utf8");
+    const htmlSrc = fs.readFileSync(path.join(ROOT, "index.html"), "utf8");
+    // "Shipped" is defined by package.json build.files, not by a hand-kept list
+    // here. An earlier version of this block scanned only renderer.js,
+    // index.html and custom-*.js while claiming to cover every shipped file -
+    // which silently exempted main.js, popup-preload.js and the seven helper
+    // modules from the leftover sweep. Deriving the list from the manifest
+    // means adding a script to the package automatically puts it in scope.
+    const shippedScripts = pkg.build.files.filter(
+      (f) => /^[^!*]+\.js$/.test(f) && fs.existsSync(path.join(ROOT, f)),
+    );
+    const allSrc =
+      htmlSrc +
+      "\n" +
+      shippedScripts
+        .map((f) => fs.readFileSync(path.join(ROOT, f), "utf8"))
+        .join("\n");
+
+    // Vacuity guard: if the manifest filter matched nothing (or almost
+    // nothing) every "is gone" assertion below would pass by scanning air.
+    check(
+      "the shipped-script list really was resolved from the packaging manifest",
+      shippedScripts.length >= 12 &&
+        shippedScripts.includes("renderer.js") &&
+        shippedScripts.includes("main.js") &&
+        shippedScripts.includes("popup-preload.js"),
+      `${shippedScripts.length}: ${shippedScripts.join(", ")}`,
+    );
+
+    check(
+      "the language switcher is gone from every shipped script",
+      !/interfaceLang|applyInterfaceLang|langSubmenu|data-lang=/.test(allSrc),
+      (allSrc.match(/interfaceLang|applyInterfaceLang|langSubmenu|data-lang=/g) || [])
+        .join(", "),
+    );
+
+    check(
+      "the Ukrainian overlay file is deleted, not merely unregistered",
+      !fs.existsSync(path.join(ROOT, "custom-language.js")) &&
+        !/custom-language\.js/.test(htmlSrc) &&
+        !JSON.stringify(pkg.build.files).includes("custom-language.js"),
+      "custom-language.js still present on disk, in index.html, or in build.files",
+    );
+
+    check(
+      "the emptied Tools menu was removed rather than left as a dead button",
+      !/id="toolsBtn"|id="toolsMenu"/.test(htmlSrc) &&
+        !/toolsBtn|toolsMenu/.test(rendererSrc),
+      "toolsBtn/toolsMenu references survive",
+    );
+
+    // The View menu shares the .tools-* CSS class family with the removed
+    // Tools menu, and custom-theme.js injects its Theme submenu into it. A
+    // deletion that took the classes with it would silently unstyle both, so
+    // the survivors are pinned explicitly.
+    const cssSrc = fs.readFileSync(path.join(ROOT, "styles.css"), "utf8");
+    check(
+      "the shared submenu styling the Theme menu depends on survived the removal",
+      // Anchored at line start on purpose: an unanchored /\.tools-submenu\s*\{/
+      // is also satisfied by the descendant selector
+      // ".tools-menu-item.has-submenu:hover > .tools-submenu {", so deleting
+      // the standalone rule that actually positions and hides the panel left
+      // the check green. R175 measured that.
+      /^\.tools-submenu\s*\{/m.test(cssSrc) &&
+        /^\.tools-submenu-item\s*\{/m.test(cssSrc) &&
+        /^\.submenu-arrow\s*\{/m.test(cssSrc) &&
+        /\.tools-menu-item\.has-submenu:hover\s*>\s*\.tools-submenu\s*\{/.test(
+          cssSrc,
+        ) &&
+        /id="viewMenu"/.test(htmlSrc),
+      "custom-theme.js builds .tools-menu-item.has-submenu > .tools-submenu inside #viewMenu",
+    );
+
+    // UI_STRINGS is now a flat single-locale table. Parse it and require every
+    // key to have a consumer. Without this the table silently accumulates dead
+    // entries: 19 were already unreferenced before the locales were removed,
+    // and nothing would ever have said so.
+    const lines = rendererSrc.split(/\r?\n/);
+    const iDecl = lines.indexOf("const UI_STRINGS = {");
+    const iEnd = lines.indexOf("};", iDecl);
+    const tableBody = lines.slice(iDecl + 1, iEnd).join("\n");
+    const uiKeys = [];
+    const keyRe = /'((?:[^'\\]|\\.)*)':\s*'/g;
+    let km;
+    while ((km = keyRe.exec(tableBody))) uiKeys.push(km[1]);
+
+    check(
+      "UI_STRINGS is a flat single-locale table",
+      iDecl >= 0 && iEnd > iDecl && !/^\s{2}(en|tr|uk):\s*\{/m.test(tableBody),
+      `iDecl=${iDecl} iEnd=${iEnd}`,
+    );
+
+    // Vacuity guard: a parse that finds nothing would make the sweep below
+    // pass by measuring an empty set.
+    check(
+      "the UI string table really was parsed",
+      uiKeys.length >= 100,
+      `${uiKeys.length} keys parsed`,
+    );
+
+    // Reference syntaxes recognised here: i18n('key'), the data-i18n family,
+    // and custom-tabs.js's local t('key', fallback) wrapper. That wrapper is
+    // the reason this list is explicit rather than a bare i18n() match - an
+    // overlay key reachable ONLY through t() would otherwise be swept up as
+    // dead and deleted. Any future indirection must be added here too.
+    const orphaned = uiKeys.filter((k) => {
+      const q = k.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      return (
+        !new RegExp(`i18n\\(\\s*['"\`]${q}['"\`]`).test(allSrc) &&
+        !new RegExp(`\\bt\\(\\s*['"\`]${q}['"\`]`).test(allSrc) &&
+        !new RegExp(`data-i18n(?:-title|-placeholder)?="${q}"`).test(allSrc)
+      );
+    });
+    check(
+      "every UI string has a consumer",
+      orphaned.length === 0,
+      `${orphaned.length} unreferenced: ${orphaned.join(", ")}`,
+    );
+  }
+
   const strict = process.env.PACKAGING_STRICT === "1";
   if (strict && skipped.length) {
     check(

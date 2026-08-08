@@ -629,291 +629,136 @@ const ZOOM_CONFIG = {
 };
 
 // ============================================
-// LOCALIZATION
+// UI STRINGS
 // ============================================
-let interfaceLang = localStorage.getItem('interfaceLang') || 'en';
-
+// A single English table. The Turkish and Ukrainian locales, and the language
+// switcher that selected between them, were removed: they arrived from the two
+// upstream forks and neither served this product. The i18n() indirection is
+// deliberately KEPT - it is the one place every piece of user-facing text is
+// declared, it carries the ${param} interpolation ~110 call sites rely on, and
+// the [data-i18n] attributes in index.html already carry the same English
+// inline as their default. Removing the seam would be a large, risky diff for
+// no gain; removing the locales is the actual simplification.
 const UI_STRINGS = {
-  en: {
-    'open': 'Open', 'edit': 'Edit', 'pdf': 'PDF', 'word': 'Word',
-    'file': 'File', 'title.file': 'File',
-    'openFile': 'Open File', 'export': 'Export',
-    'exportPdf': 'Export as PDF', 'exportWord': 'Export as Word',
-    'history': 'History', 'editMode': 'Edit Mode',
-    'allNotes': 'All Notes', 'noNotes': 'No notes found',
-    'view': 'View', 'title.view': 'View',
-    'tools': 'Tools', 'darkMode': 'Dark Mode', 'fullscreen': 'Fullscreen', 'showNotes': 'Show Notes',
-    
-    'save': 'Save', 'reload': 'Reload', 'dismiss': 'Dismiss',
-    'cancel': 'Cancel', 'find': 'Find', 'later': 'Later', 'exit': 'Exit',
-    'title.open': 'Open File (Ctrl+O)', 'title.recent': 'Recent Files',
-    'title.toc': 'Table of Contents', 'title.edit': 'Toggle Edit Mode',
-    'title.exitEdit': 'Exit Edit Mode',
-    'title.pdf': 'Export to PDF', 'title.word': 'Export to Word',
-    'title.zoomOut': 'Zoom Out (Ctrl+-)', 'title.zoomReset': 'Reset Zoom (Ctrl+0)',
-    'title.zoomIn': 'Zoom In (Ctrl++)', 'title.darkMode': 'Toggle Dark Mode',
-    'title.tools': 'Tools', 'title.fullscreen': 'Toggle Fullscreen (F11)',
-    'title.back': 'Back (Left Arrow)', 'title.forward': 'Forward (Right Arrow)',
-    'title.refresh': 'Refresh Document (Ctrl+R)', 'title.save': 'Save (Ctrl+S)',
-    'title.clearRecent': 'Clear All Recent Files',
-    'title.searchPrev': 'Previous (Shift+Enter)', 'title.searchNext': 'Next (Enter)',
-    'title.searchClose': 'Close (Esc)', 'title.removeRecent': 'Remove from recent files',
-    'title.note': 'Title',
-    'recentFiles': 'Recent Files', 'tableOfContents': 'Table of Contents',
-    'rawMarkdown': 'Raw Markdown', 'loading': 'Loading...',
-    'searchPlaceholder': 'Search in document...', 'noRecentFiles': 'No recent files',
-    'noHeaders': 'No headers found', 'unsaved': '● Unsaved',
-    'editorPlaceholder': 'Start typing markdown...',
-    'welcome.title': 'Welcome to Folia',
-    'welcome.subtitle': 'Press Ctrl+O to open a markdown file',
-    'welcome.features': 'Features',
-    'fileUpdated': 'File Updated',
-    'fileModifiedExternally': 'This file has been modified externally',
-    'updateAvailable': 'Update Available', 'newVersionAvailable': 'A new version is available',
-    'downloadUpdate': 'Download Update', 'restartInstall': 'Restart & Install',
-    'ctx.copy': 'Copy', 'ctx.copyPlain': 'Copy as Plain Text',
-    'ctx.bold': 'Bold', 'ctx.italic': 'Italic', 'ctx.code': 'Code Block',
-    'ctx.list': 'Make List', 'ctx.removeFormat': 'Remove Formatting',
-    'ctx.editText': 'Edit Text',
-    'ctx.addNote': 'Add Note', 'ctx.editNote': 'Edit Note',
-    'ctx.deleteNote': 'Delete Note', 'ctx.findNote': 'Find Note',
-    'ctx.insertImage': 'Insert Image', 'ctx.deleteImage': 'Delete Image',
-    'ctx.selectAll': 'Select All',
-    'ctx.openFolder': 'Open Containing Folder', 'ctx.copyPath': 'Copy Path',
-    'ctx.removeRecent': 'Remove from Recent',
-    'addNote': 'Add Note', 'editNote': 'Edit Note',
-    'label': 'Label', 'labelPlaceholder': 'Label name...',
-    'color': 'Color', 'note': 'Note',
-    'noteTitlePlaceholder': 'Note title...', 'notePlaceholder': 'Write your note...',
-    'findNote': 'Find Note', 'idOrTitle': 'ID or Title',
-    'findNotePlaceholder': '#1 or note title...',
-    'searchNotes': 'Search Notes', 'notesSearchPlaceholder': '#ID or title...',
-    'editText': 'Edit Text', 'editTextLabel': 'Edit the selected text:',
-    'notif.textEdited': 'Text updated',
-    'zoom': 'Zoom',
-    'language': 'Language',
-    'notif.sectionNotFound': 'Section not found: ',
-    'notif.fileNotFound': 'File not found: ',
-    'notif.preparingWord': 'Preparing Word export...',
-    'notif.pdfExported': 'PDF exported: ',
-    'notif.wordExported': 'Word exported: ',
-    'notif.copyFailed': 'Failed to copy to clipboard',
-    'notif.fileDeleted': 'Warning: The opened file has been deleted from disk',
-    'notif.fileReloaded': 'File reloaded successfully',
-    'notif.reloadFailed': 'Failed to reload file: ',
-    'notif.noTextSelected': 'No text selected',
-    'notif.copied': 'Copied to clipboard',
-    'notif.copyError': 'Failed to copy: ',
-    'notif.copiedPlain': 'Copied as plain text',
-    'notif.textNotFound': 'Could not find text in source',
-    'notif.boldApplied': 'Applied bold formatting',
-    'notif.italicApplied': 'Applied italic formatting',
-    'notif.codeApplied': 'Applied code formatting',
-    'notif.listApplied': 'Applied list formatting',
-    'notif.formatRemoved': 'Removed formatting',
-    'notif.noteRemoved': 'Note removed',
-    'notif.noteNotFound': 'Could not find note in source',
-    'notif.enterLabel': 'Please enter a label name',
-    'notif.enterTitleOrContent': 'Please enter a title or note content',
-    'notif.noteUpdated': 'Note updated',
-    'notif.noteAdded': 'Note added',
-    'notif.imageNotFound': 'Could not find image in source',
-    'notif.noteAddedToImage': 'Note added to image',
-    'notif.enterNoteId': 'Please enter a note ID or title',
-    'notif.noteSearchNotFound': 'Note "${val}" not found',
-    'notif.openFileFirst': 'Please open a file first',
-    'notif.imageInserted': 'Image inserted',
-    'notif.imageInsertedCompressed': 'Image inserted (${from} → ${to})',
-    'notif.imageFailed': 'Failed to load image: ',
-    'notif.imageProcessFailed': 'Failed to process image',
-    'notif.imageDeleted': 'Image deleted',
-    'notif.pathCopied': 'Path copied to clipboard',
-    'notif.pathCopiedCheck': '✓ Path copied to clipboard',
-    'confirm.unsavedOpen': 'You have unsaved changes. Discard changes and open a new file?',
-    'confirm.unsavedRefresh': 'You have unsaved changes. Discard changes and refresh from disk?',
-    'confirm.unsavedExit': 'You have unsaved changes. Exiting edit mode will DISCARD them. Exit anyway?',
-    'confirm.unsavedOpenFile': 'You have unsaved changes. Discard changes and open "${name}"?',
-    'confirm.clearRecent': 'Are you sure you want to clear all recent files?',
-    'confirm.openExternal': 'This link opens a file with an external application:\n\n${name}\n\nOnly continue if you trust this document. Open it?',
-    'notif.blockedExecutable': 'Blocked: this link points to an executable file (${name}). Markdown documents cannot launch programs.',
-    'notif.blockedNetworkPath': 'Blocked: this link points to a network location, which can leak your credentials.',
-    'alert.openFirst': 'Please open a markdown file first before exporting to PDF.',
-    'alert.openFirstWord': 'Please open a markdown file first before exporting to Word.',
-    'alert.noFileOpen': 'No file is currently open.',
-    'alert.pdfFailed': 'Failed to export PDF: ',
-    'alert.wordFailed': 'Failed to export Word document: ',
-    'alert.saveFailed': 'Failed to save file: ',
-    'alert.wordError': 'Error preparing Word export: ',
-    'update.downloading': 'Downloading Update',
-    'update.ready': 'Update Ready',
-    'update.error': 'Update Error',
-    'update.versionReady': 'Version ${version} is ready to download',
-    'update.versionInstall': 'Version ${version} is ready to install',
-    'update.failed': 'Failed to check for updates',
-    'update.download': 'Download',
-    'update.openDownloadPage': 'Open Download Page',
-    'search.counter': '${current} of ${total}',
-    'search.zero': '0 of 0',
-    'mermaid.error': 'Could not convert diagram to image.',
-  },
-  tr: {
-    'open': 'Aç', 'edit': 'Düzenle', 'pdf': 'PDF', 'word': 'Word',
-    'file': 'Dosya', 'title.file': 'Dosya',
-    'openFile': 'Dosya Aç', 'export': 'Dışa Aktar',
-    'exportPdf': 'PDF Olarak Dışa Aktar', 'exportWord': 'Word Olarak Dışa Aktar',
-    'history': 'Geçmiş', 'editMode': 'Düzenleme Modu',
-    'allNotes': 'Tüm Notlar', 'noNotes': 'Not bulunamadı',
-    'view': 'Görünüm', 'title.view': 'Görünüm',
-    'tools': 'Araçlar', 'darkMode': 'Karanlık Mod', 'fullscreen': 'Tam Ekran', 'showNotes': 'Notları Göster',
-    
-    'save': 'Kaydet', 'reload': 'Yenile', 'dismiss': 'Kapat',
-    'cancel': 'İptal', 'find': 'Bul', 'later': 'Sonra', 'exit': 'Çıkış',
-    'title.open': 'Dosya Aç (Ctrl+O)', 'title.recent': 'Son Dosyalar',
-    'title.toc': 'İçindekiler', 'title.edit': 'Düzenleme Modu',
-    'title.exitEdit': 'Düzenleme Modundan Çık',
-    'title.pdf': 'PDF Olarak Dışa Aktar', 'title.word': 'Word Olarak Dışa Aktar',
-    'title.zoomOut': 'Küçült (Ctrl+-)', 'title.zoomReset': 'Yakınlaştırmayı Sıfırla (Ctrl+0)',
-    'title.zoomIn': 'Büyüt (Ctrl++)', 'title.darkMode': 'Karanlık Mod',
-    'title.tools': 'Araçlar', 'title.fullscreen': 'Tam Ekran (F11)',
-    'title.back': 'Geri (Sol Ok)', 'title.forward': 'İleri (Sağ Ok)',
-    'title.refresh': 'Belgeyi Yenile (Ctrl+R)', 'title.save': 'Kaydet (Ctrl+S)',
-    'title.clearRecent': 'Tüm Son Dosyaları Temizle',
-    'title.searchPrev': 'Önceki (Shift+Enter)', 'title.searchNext': 'Sonraki (Enter)',
-    'title.searchClose': 'Kapat (Esc)', 'title.removeRecent': 'Son dosyalardan kaldır',
-    'title.note': 'Başlık',
-    'recentFiles': 'Son Dosyalar', 'tableOfContents': 'İçindekiler',
-    'rawMarkdown': 'Ham Markdown', 'loading': 'Yükleniyor...',
-    'searchPlaceholder': 'Belgede ara...', 'noRecentFiles': 'Son dosya yok',
-    'noHeaders': 'Başlık bulunamadı', 'unsaved': '● Kaydedilmemiş',
-    'editorPlaceholder': 'Markdown yazmaya başlayın...',
-    'welcome.title': 'Folia\'ya Hoş Geldiniz',
-    'welcome.subtitle': 'Bir markdown dosyası açmak için Ctrl+O tuşlayın',
-    'welcome.features': 'Özellikler',
-    'fileUpdated': 'Dosya Güncellendi',
-    'fileModifiedExternally': 'Bu dosya harici olarak değiştirildi',
-    'updateAvailable': 'Güncelleme Mevcut', 'newVersionAvailable': 'Yeni bir sürüm mevcut',
-    'downloadUpdate': 'Güncellemeyi İndir', 'restartInstall': 'Yeniden Başlat ve Kur',
-    'ctx.copy': 'Kopyala', 'ctx.copyPlain': 'Düz Metin Olarak Kopyala',
-    'ctx.bold': 'Kalın', 'ctx.italic': 'İtalik', 'ctx.code': 'Kod Bloğu',
-    'ctx.list': 'Liste Yap', 'ctx.removeFormat': 'Biçimlendirmeyi Kaldır',
-    'ctx.editText': 'Metni Düzenle',
-    'ctx.addNote': 'Not Ekle', 'ctx.editNote': 'Notu Düzenle',
-    'ctx.deleteNote': 'Notu Sil', 'ctx.findNote': 'Not Bul',
-    'ctx.insertImage': 'Resim Ekle', 'ctx.deleteImage': 'Resmi Sil',
-    'ctx.selectAll': 'Tümünü Seç',
-    'ctx.openFolder': 'Klasörü Aç', 'ctx.copyPath': 'Yolu Kopyala',
-    'ctx.removeRecent': 'Son Dosyalardan Kaldır',
-    'addNote': 'Not Ekle', 'editNote': 'Notu Düzenle',
-    'label': 'Etiket', 'labelPlaceholder': 'Etiket adı...',
-    'color': 'Renk', 'note': 'Not',
-    'noteTitlePlaceholder': 'Not başlığı...', 'notePlaceholder': 'Notunuzu yazın...',
-    'findNote': 'Not Bul', 'idOrTitle': 'ID veya Başlık',
-    'findNotePlaceholder': '#1 veya not başlığı...',
-    'searchNotes': 'Notlarda Ara', 'notesSearchPlaceholder': '#ID veya başlık...',
-    'editText': 'Metni Düzenle', 'editTextLabel': 'Seçili metni düzenleyin:',
-    'notif.textEdited': 'Metin güncellendi',
-    'zoom': 'Yakınlaştır',
-    'language': 'Dil',
-    'notif.sectionNotFound': 'Bölüm bulunamadı: ',
-    'notif.fileNotFound': 'Dosya bulunamadı: ',
-    'notif.preparingWord': 'Word dışa aktarma hazırlanıyor...',
-    'notif.pdfExported': 'PDF dışa aktarıldı: ',
-    'notif.wordExported': 'Word dışa aktarıldı: ',
-    'notif.copyFailed': 'Panoya kopyalama başarısız',
-    'notif.fileDeleted': 'Uyarı: Açılan dosya diskten silinmiş',
-    'notif.fileReloaded': 'Dosya başarıyla yenilendi',
-    'notif.reloadFailed': 'Dosya yenilenemedi: ',
-    'notif.noTextSelected': 'Metin seçilmedi',
-    'notif.copied': 'Panoya kopyalandı',
-    'notif.copyError': 'Kopyalama başarısız: ',
-    'notif.copiedPlain': 'Düz metin olarak kopyalandı',
-    'notif.textNotFound': 'Kaynak metinde bulunamadı',
-    'notif.boldApplied': 'Kalın biçimlendirme uygulandı',
-    'notif.italicApplied': 'İtalik biçimlendirme uygulandı',
-    'notif.codeApplied': 'Kod biçimlendirme uygulandı',
-    'notif.listApplied': 'Liste biçimlendirme uygulandı',
-    'notif.formatRemoved': 'Biçimlendirme kaldırıldı',
-    'notif.noteRemoved': 'Not silindi',
-    'notif.noteNotFound': 'Not kaynakta bulunamadı',
-    'notif.enterLabel': 'Lütfen bir etiket adı girin',
-    'notif.enterTitleOrContent': 'Lütfen bir başlık veya not içeriği girin',
-    'notif.noteUpdated': 'Not güncellendi',
-    'notif.noteAdded': 'Not eklendi',
-    'notif.imageNotFound': 'Resim kaynakta bulunamadı',
-    'notif.noteAddedToImage': 'Resme not eklendi',
-    'notif.enterNoteId': 'Lütfen bir not ID\'si veya başlığı girin',
-    'notif.noteSearchNotFound': '"${val}" notu bulunamadı',
-    'notif.openFileFirst': 'Lütfen önce bir dosya açın',
-    'notif.imageInserted': 'Resim eklendi',
-    'notif.imageInsertedCompressed': 'Resim eklendi (${from} → ${to})',
-    'notif.imageFailed': 'Resim yüklenemedi: ',
-    'notif.imageProcessFailed': 'Resim işlenemedi',
-    'notif.imageDeleted': 'Resim silindi',
-    'notif.pathCopied': 'Yol panoya kopyalandı',
-    'notif.pathCopiedCheck': '✓ Yol panoya kopyalandı',
-    'confirm.unsavedOpen': 'Kaydedilmemiş değişiklikler var. Değişiklikleri silip yeni dosya açılsın mı?',
-    'confirm.unsavedRefresh': 'Kaydedilmemiş değişiklikler var. Değişiklikleri silip diskten yenilensin mi?',
-    'confirm.unsavedExit': 'Kaydedilmemiş değişiklikler var. Düzenleme modundan çıkmak bu değişiklikleri SİLER. Yine de çıkılsın mı?',
-    'confirm.unsavedOpenFile': 'Kaydedilmemiş değişiklikler var. Değişiklikleri silip "${name}" açılsın mı?',
-    'confirm.clearRecent': 'Tüm son dosyalar temizlensin mi?',
-    'alert.openFirst': 'Lütfen PDF\'e aktarmadan önce bir markdown dosyası açın.',
-    'alert.openFirstWord': 'Lütfen Word\'e aktarmadan önce bir markdown dosyası açın.',
-    'alert.noFileOpen': 'Şu anda açık dosya yok.',
-    'alert.pdfFailed': 'PDF dışa aktarma başarısız: ',
-    'alert.wordFailed': 'Word belgesi dışa aktarma başarısız: ',
-    'alert.saveFailed': 'Dosya kaydetme başarısız: ',
-    'alert.wordError': 'Word dışa aktarma hatası: ',
-    'update.downloading': 'Güncelleme İndiriliyor',
-    'update.ready': 'Güncelleme Hazır',
-    'update.error': 'Güncelleme Hatası',
-    'update.versionReady': 'Sürüm ${version} indirmeye hazır',
-    'update.versionInstall': 'Sürüm ${version} kurulmaya hazır',
-    'update.failed': 'Güncellemeler kontrol edilemedi',
-    'update.download': 'İndir',
-    'update.openDownloadPage': 'İndirme Sayfasını Aç',
-    'search.counter': '${current} / ${total}',
-    'search.zero': '0 / 0',
-    'mermaid.error': 'Diyagram resme dönüştürülemedi.',
-  }
+  'file': 'File', 'title.file': 'File',
+  'openFile': 'Open File', 'export': 'Export',
+  'exportPdf': 'Export as PDF', 'exportWord': 'Export as Word',
+  'history': 'History', 'editMode': 'Edit Mode',
+  'allNotes': 'All Notes', 'noNotes': 'No notes found',
+  'view': 'View', 'title.view': 'View',
+  'darkMode': 'Dark Mode', 'fullscreen': 'Fullscreen', 'showNotes': 'Show Notes',
+  'save': 'Save', 'reload': 'Reload', 'dismiss': 'Dismiss',
+  'cancel': 'Cancel', 'find': 'Find', 'later': 'Later', 'exit': 'Exit',
+  'title.exitEdit': 'Exit Edit Mode',
+  'title.zoomOut': 'Zoom Out (Ctrl+-)', 'title.zoomReset': 'Reset Zoom (Ctrl+0)',
+  'title.zoomIn': 'Zoom In (Ctrl++)',
+  'title.back': 'Back (Left Arrow)', 'title.forward': 'Forward (Right Arrow)',
+  'title.refresh': 'Refresh Document (Ctrl+R)', 'title.save': 'Save (Ctrl+S)',
+  'title.searchPrev': 'Previous (Shift+Enter)', 'title.searchNext': 'Next (Enter)',
+  'title.searchClose': 'Close (Esc)',
+  'title.note': 'Title',
+  'tableOfContents': 'Table of Contents',
+  'rawMarkdown': 'Raw Markdown', 'loading': 'Loading...',
+  'searchPlaceholder': 'Search in document...', 'noRecentFiles': 'No recent files',
+  'noHeaders': 'No headers found', 'unsaved': '● Unsaved',
+  'editorPlaceholder': 'Start typing markdown...',
+  'welcome.title': 'Welcome to Folia',
+  'welcome.subtitle': 'Press Ctrl+O to open a markdown file',
+  'fileUpdated': 'File Updated',
+  'fileModifiedExternally': 'This file has been modified externally',
+  'updateAvailable': 'Update Available',
+  'downloadUpdate': 'Download Update', 'restartInstall': 'Restart & Install',
+  'ctx.copy': 'Copy', 'ctx.copyPlain': 'Copy as Plain Text',
+  'ctx.bold': 'Bold', 'ctx.italic': 'Italic', 'ctx.code': 'Code Block',
+  'ctx.list': 'Make List', 'ctx.removeFormat': 'Remove Formatting',
+  'ctx.editText': 'Edit Text',
+  'ctx.addNote': 'Add Note', 'ctx.editNote': 'Edit Note',
+  'ctx.deleteNote': 'Delete Note', 'ctx.findNote': 'Find Note',
+  'ctx.insertImage': 'Insert Image', 'ctx.deleteImage': 'Delete Image',
+  'ctx.selectAll': 'Select All',
+  'ctx.openFolder': 'Open Containing Folder', 'ctx.copyPath': 'Copy Path',
+  'ctx.removeRecent': 'Remove from Recent',
+  'addNote': 'Add Note', 'editNote': 'Edit Note',
+  'label': 'Label', 'labelPlaceholder': 'Label name...',
+  'color': 'Color', 'note': 'Note',
+  'noteTitlePlaceholder': 'Note title...', 'notePlaceholder': 'Write your note...',
+  'findNote': 'Find Note', 'idOrTitle': 'ID or Title',
+  'findNotePlaceholder': '#1 or note title...',
+  'searchNotes': 'Search Notes', 'notesSearchPlaceholder': '#ID or title...',
+  'editText': 'Edit Text', 'editTextLabel': 'Edit the selected text:',
+  'notif.textEdited': 'Text updated',
+  'zoom': 'Zoom',
+  'notif.sectionNotFound': 'Section not found: ',
+  'notif.fileNotFound': 'File not found: ',
+  'notif.preparingWord': 'Preparing Word export...',
+  'notif.pdfExported': 'PDF exported: ',
+  'notif.wordExported': 'Word exported: ',
+  'notif.copyFailed': 'Failed to copy to clipboard',
+  'notif.fileDeleted': 'Warning: The opened file has been deleted from disk',
+  'notif.fileReloaded': 'File reloaded successfully',
+  'notif.reloadFailed': 'Failed to reload file: ',
+  'notif.noTextSelected': 'No text selected',
+  'notif.copied': 'Copied to clipboard',
+  'notif.copyError': 'Failed to copy: ',
+  'notif.copiedPlain': 'Copied as plain text',
+  'notif.textNotFound': 'Could not find text in source',
+  'notif.boldApplied': 'Applied bold formatting',
+  'notif.italicApplied': 'Applied italic formatting',
+  'notif.codeApplied': 'Applied code formatting',
+  'notif.listApplied': 'Applied list formatting',
+  'notif.formatRemoved': 'Removed formatting',
+  'notif.noteRemoved': 'Note removed',
+  'notif.noteNotFound': 'Could not find note in source',
+  'notif.enterLabel': 'Please enter a label name',
+  'notif.enterTitleOrContent': 'Please enter a title or note content',
+  'notif.noteUpdated': 'Note updated',
+  'notif.noteAdded': 'Note added',
+  'notif.imageNotFound': 'Could not find image in source',
+  'notif.noteAddedToImage': 'Note added to image',
+  'notif.enterNoteId': 'Please enter a note ID or title',
+  'notif.noteSearchNotFound': 'Note "${val}" not found',
+  'notif.openFileFirst': 'Please open a file first',
+  'notif.imageInserted': 'Image inserted',
+  'notif.imageInsertedCompressed': 'Image inserted (${from} → ${to})',
+  'notif.imageFailed': 'Failed to load image: ',
+  'notif.imageProcessFailed': 'Failed to process image',
+  'notif.imageDeleted': 'Image deleted',
+  'notif.pathCopied': 'Path copied to clipboard',
+  'notif.pathCopiedCheck': '✓ Path copied to clipboard',
+  'confirm.unsavedOpen': 'You have unsaved changes. Discard changes and open a new file?',
+  'confirm.unsavedRefresh': 'You have unsaved changes. Discard changes and refresh from disk?',
+  'confirm.unsavedExit': 'You have unsaved changes. Exiting edit mode will DISCARD them. Exit anyway?',
+  'confirm.unsavedOpenFile': 'You have unsaved changes. Discard changes and open "${name}"?',
+  'confirm.openExternal': 'This link opens a file with an external application:\n\n${name}\n\nOnly continue if you trust this document. Open it?',
+  'notif.blockedExecutable': 'Blocked: this link points to an executable file (${name}). Markdown documents cannot launch programs.',
+  'notif.blockedNetworkPath': 'Blocked: this link points to a network location, which can leak your credentials.',
+  'alert.openFirst': 'Please open a markdown file first before exporting to PDF.',
+  'alert.openFirstWord': 'Please open a markdown file first before exporting to Word.',
+  'alert.noFileOpen': 'No file is currently open.',
+  'alert.pdfFailed': 'Failed to export PDF: ',
+  'alert.wordFailed': 'Failed to export Word document: ',
+  'alert.saveFailed': 'Failed to save file: ',
+  'alert.wordError': 'Error preparing Word export: ',
+  'update.downloading': 'Downloading Update',
+  'update.ready': 'Update Ready',
+  'update.error': 'Update Error',
+  'update.versionReady': 'Version ${version} is ready to download',
+  'update.versionInstall': 'Version ${version} is ready to install',
+  'update.failed': 'Failed to check for updates',
+  'update.download': 'Download',
+  'search.counter': '${current} of ${total}',
+  'search.zero': '0 of 0',
+  'mermaid.error': 'Could not convert diagram to image.',
 };
 
 function i18n(key, params) {
-  let str = UI_STRINGS[interfaceLang]?.[key] || UI_STRINGS.en[key] || key;
+  let str = UI_STRINGS[key] || key;
   if (params) {
     for (const [k, v] of Object.entries(params)) {
       str = str.replace('${' + k + '}', v);
     }
   }
   return str;
-}
-
-function applyInterfaceLang(lang) {
-  interfaceLang = lang;
-  localStorage.setItem('interfaceLang', lang);
-
-  // Update all data-i18n elements (textContent)
-  document.querySelectorAll('[data-i18n]').forEach(el => {
-    const key = el.getAttribute('data-i18n');
-    const str = UI_STRINGS[lang]?.[key];
-    if (str) el.textContent = str;
-  });
-
-  // Update all data-i18n-title elements (title attribute)
-  document.querySelectorAll('[data-i18n-title]').forEach(el => {
-    const key = el.getAttribute('data-i18n-title');
-    const str = UI_STRINGS[lang]?.[key];
-    if (str) el.title = str;
-  });
-
-  // Update all data-i18n-placeholder elements (placeholder attribute)
-  document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
-    const key = el.getAttribute('data-i18n-placeholder');
-    const str = UI_STRINGS[lang]?.[key];
-    if (str) el.placeholder = str;
-  });
-
-  // Update tools menu state (checkmarks)
-  updateToolsMenuState();
 }
 
 const TIMING = {
@@ -1146,12 +991,6 @@ let navigationHistory = [];
 let navigationIndex = -1;
 let isNavigating = false; // Flag to prevent adding to history during back/forward
 
-// Tools menu. The language submenu it used to host is gone with the document
-// translation feature - see the note above updateToolsMenuState().
-const toolsBtn = document.getElementById('toolsBtn');
-const toolsMenu = document.getElementById('toolsMenu');
-const langSubmenu = document.getElementById('langSubmenu');
-
 // Update file info display
 function updateFileInfo(path) {
   if (!path) {
@@ -1369,17 +1208,12 @@ darkModeToggle.addEventListener('click', (e) => {
 
 });
 
-// The tools menu no longer hosts a document-language section: sending the
-// reader's document to a third-party endpoint to translate it was removed
-// outright rather than made optional. What is left is the interface-language
-// section, which is local.
-function updateToolsMenuState() {
-  langSubmenu
-    .querySelectorAll('.tools-submenu-item[data-section="ui"]')
-    .forEach((item) => {
-      item.classList.toggle('active', item.dataset.lang === interfaceLang);
-    });
-}
+// The Tools menu is gone. It hosted exactly two things over this fork's life:
+// document translation (removed - it POSTed the reader's document to a
+// third-party endpoint) and the interface-language switcher (removed - the
+// only remaining locale is English). An empty dropdown is worse than none, so
+// the button went with them. Zoom, theme, fullscreen and notes live in the
+// View menu and are unaffected.
 
 // The source for the currently displayed document. It used to choose between
 // the original and a cached translation of it; there is now only one, but the
@@ -1458,7 +1292,6 @@ function patchRemoveFormatInDOM() {
 function closeAllDropdowns() {
   fileMenu.classList.remove('visible');
   viewMenu.classList.remove('visible');
-  toolsMenu.classList.remove('visible');
 }
 
 // File menu toggle
@@ -1480,14 +1313,6 @@ viewBtn.addEventListener('click', (e) => {
   if (willOpen) viewMenu.classList.add('visible');
 });
 
-// Tools menu toggle
-toolsBtn.addEventListener('click', (e) => {
-  e.stopPropagation();
-  const willOpen = !toolsMenu.classList.contains('visible');
-  closeAllDropdowns();
-  if (willOpen) toolsMenu.classList.add('visible');
-});
-
 // Close all menus on outside click
 document.addEventListener('click', () => {
   closeAllDropdowns();
@@ -1496,18 +1321,6 @@ document.addEventListener('click', () => {
 // Prevent clicks inside menus from closing them
 fileMenu.addEventListener('click', (e) => { e.stopPropagation(); });
 viewMenu.addEventListener('click', (e) => { e.stopPropagation(); });
-toolsMenu.addEventListener('click', (e) => { e.stopPropagation(); });
-
-// Language submenu item click handlers.
-// Only the interface-language section survives: the document-translation
-// section was removed with the feature (it POSTed the reader's document to a
-// third-party endpoint), so `data-section="doc"` no longer exists in the DOM.
-langSubmenu.querySelectorAll('.tools-submenu-item').forEach(item => {
-  item.addEventListener('click', () => {
-    toolsMenu.classList.remove('visible');
-    if (item.dataset.section === 'ui') applyInterfaceLang(item.dataset.lang);
-  });
-});
 
 // Load dark mode preference on startup.
 // Uses resolveDarkPreference(), the same source as mermaidDesiredDark, so the
@@ -1791,10 +1604,6 @@ async function applyMermaidTheme(isDark) {
 
 // Load dark mode on startup
 loadDarkModePreference();
-
-// Apply saved interface language on startup
-if (interfaceLang !== 'en') applyInterfaceLang(interfaceLang);
-updateToolsMenuState();
 
 // Fullscreen toggle
 fullscreenToggle.addEventListener('click', (e) => {

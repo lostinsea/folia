@@ -127,9 +127,12 @@
     );
   }
 
-  // renderer.js owns the toast DOM and the i18n table. Reuse both when
-  // available so overlay messages match the selected interface language, and
-  // degrade to English rather than throwing if either is missing.
+  // renderer.js owns the toast DOM and the string table. Reuse both when
+  // available so overlay messages come from the same source as the toolbar's
+  // own labels, and fall back to the inline literal rather than throwing if
+  // either is missing. Note for the dead-string sweep in test-packaging.js:
+  // keys reached only through this wrapper are NOT written as i18n('...'),
+  // so the sweep matches t('...') as well.
   function t(key, fallback) {
     return typeof window.i18n === "function" ? window.i18n(key) : fallback;
   }

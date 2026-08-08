@@ -177,9 +177,6 @@ image insert/delete, copy code block, copy image source, select all.
 - **OS-level file watching** - external changes are noticed immediately, without polling
 - Click the file path to copy it
 
-### Localisation
-- Interface language: English or Ukrainian
-
 ---
 
 ## Installation

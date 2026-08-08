@@ -1040,6 +1040,70 @@ async function run(win) {
   // recorded" and "the watcher silently stopped working" are the same result -
   // the exact vacuity this harness exists to eliminate. Both detection paths
   // are checked because they fail independently.
+  // ---------------------------------------------------------------------
+  // Theme submenu selected-state. The Theme submenu shares the .tools-submenu
+  // CSS family with the language menu that was removed, so it is pinned here
+  // to prove the removal did not take its styling with it.
+  //
+  // The oracle deliberately measures the mechanism that ACTUALLY marks the
+  // selection - the ::before checkmark and the icon opacity, both in
+  // custom-styles.css - rather than colour or font-weight. Sampling the wrong
+  // properties reports "no indicator" on a menu that is visibly ticked, which
+  // is precisely the proxy-measurement error this project keeps re-learning.
+  // ---------------------------------------------------------------------
+  const themeState = await exec(`(() => {
+    document.getElementById('viewBtn').click();
+    const item = document.getElementById('customThemeMenuItem');
+    if (item) item.classList.add('theme-open');
+    const opts = [...document.querySelectorAll('.custom-theme-option')];
+    const active = opts.find(o => o.classList.contains('active'));
+    const inactive = opts.find(o => !o.classList.contains('active'));
+    if (!active || !inactive) return JSON.stringify({ error: 'options missing', count: opts.length });
+    const mark = (el) => getComputedStyle(el, '::before').content;
+    const icon = (el) => {
+      const i = el.querySelector('.theme-icon');
+      return i ? getComputedStyle(i).opacity : null;
+    };
+    const sub = getComputedStyle(document.getElementById('customThemeSubmenu'));
+    return JSON.stringify({
+      count: opts.length,
+      activeMode: active.dataset.mode,
+      activeMark: mark(active),
+      inactiveMark: mark(inactive),
+      activeIconOpacity: icon(active),
+      inactiveIconOpacity: icon(inactive),
+      submenuDisplay: sub.display,
+      submenuPosition: sub.position,
+      submenuBackground: sub.backgroundColor,
+      submenuZ: sub.zIndex,
+    });
+  })()`);
+  const theme = JSON.parse(themeState);
+  check(
+    "the Theme submenu still offers all three modes after the language menu was removed",
+    theme.count === 3,
+    themeState,
+  );
+  check(
+    "the Theme submenu still floats over the menu - the shared .tools-submenu rule survived",
+    theme.submenuDisplay === "block" &&
+      theme.submenuPosition === "absolute" &&
+      theme.submenuZ === "1001" &&
+      !/rgba\(0, 0, 0, 0\)/.test(theme.submenuBackground),
+    themeState,
+  );
+  check(
+    "the selected theme carries a checkmark the unselected ones do not",
+    /\u2713/.test(theme.activeMark) && !/\u2713/.test(theme.inactiveMark),
+    themeState,
+  );
+  check(
+    "the selected theme's icon is emphasised relative to the unselected ones",
+    theme.activeIconOpacity !== null &&
+      parseFloat(theme.activeIconOpacity) > parseFloat(theme.inactiveIconOpacity),
+    themeState,
+  );
+
   const alive = await proveSentinelAlive(win, sentinel);
   check(
     "the error sentinel was demonstrably watching both channels",

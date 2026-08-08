@@ -25,6 +25,8 @@ const LICENSE_TXT = path.join(ROOT, "LICENSE.txt");
 const LICENSE_MD = path.join(ROOT, "LICENSE");
 const NOTICES_GEN = path.join(ROOT, "scripts", "generate-notices.js");
 const ATTRS = path.join(ROOT, ".gitattributes");
+const HTML = path.join(ROOT, "index.html");
+const CUSTOM_CSS = path.join(ROOT, "custom-styles.css");
 
 const REVERTS = [
   {
@@ -2035,6 +2037,118 @@ const REVERTS = [
       /SEC-26 legacy slider payload is blocked on the light-format path too/,
     ],
   },
+
+  // ── 8c3: the interface-language switcher and its two non-English locales ──
+  // These five all drive test:packaging, which is a static suite: the failure
+  // mode being defended against is a LEFTOVER, and a leftover is a source
+  // fact. Each revert reintroduces exactly one leftover so the five oracles
+  // are shown to be independent rather than five spellings of one check.
+  {
+    id: "R172",
+    suite: "test:packaging",
+    what: "put a language-selector attribute back into the toolbar markup",
+    file: HTML,
+    from: '            <div class="tools-menu" id="viewMenu">',
+    to:
+      '            <div class="tools-menu" id="viewMenu" data-lang="en">',
+    expect: [/the language switcher is gone from every shipped script/],
+    // The overlay-file and Tools-menu oracles must not notice this: markup
+    // attributes and file registration are separate failure modes.
+    mustPass: [
+      /the Ukrainian overlay file is deleted, not merely unregistered/,
+      /the emptied Tools menu was removed rather than left as a dead button/,
+    ],
+  },
+  {
+    id: "R173",
+    suite: "test:packaging",
+    what: "re-register the deleted Ukrainian overlay in index.html",
+    file: HTML,
+    from: '    <script src="custom-tabs.js"></script>',
+    to:
+      '    <script src="custom-language.js"></script>\n' +
+      '    <script src="custom-tabs.js"></script>',
+    expect: [/the Ukrainian overlay file is deleted, not merely unregistered/],
+    mustPass: [
+      /the language switcher is gone from every shipped script/,
+      /the emptied Tools menu was removed rather than left as a dead button/,
+    ],
+  },
+  {
+    id: "R174",
+    suite: "test:packaging",
+    what: "reintroduce the emptied Tools menu container in the toolbar markup",
+    file: HTML,
+    from: '            <div class="tools-menu" id="viewMenu">',
+    to:
+      '            <div class="tools-menu" id="toolsMenu"></div>\n' +
+      '            <div class="tools-menu" id="viewMenu">',
+    expect: [/the emptied Tools menu was removed rather than left as a dead button/],
+    mustPass: [
+      /the language switcher is gone from every shipped script/,
+      /the Ukrainian overlay file is deleted, not merely unregistered/,
+    ],
+  },
+  {
+    id: "R175",
+    suite: "test:packaging",
+    what: "delete the submenu styling along with the language menu, which would silently unstyle the Theme submenu custom-theme.js injects into the View menu",
+    file: CSS,
+    from: "/* Nested submenu */\n.tools-submenu {",
+    to: "/* Nested submenu */\n.removed-with-the-language-menu {",
+    expect: [
+      /the shared submenu styling the Theme menu depends on survived the removal/,
+    ],
+  },
+  {
+    id: "R176",
+    suite: "test:packaging",
+    what: "let an unreferenced string back into the table - the rot that had already accumulated 19 dead entries unnoticed",
+    file: RENDERER,
+    from: "const UI_STRINGS = {\n  'file': 'File',",
+    to: "const UI_STRINGS = {\n  'title.tools': 'Tools',\n  'file': 'File',",
+    expect: [/every UI string has a consumer/],
+    // The parse itself must stay healthy, or "0 orphaned" would be measuring
+    // an empty set rather than a clean table.
+    mustPass: [
+      /the UI string table really was parsed/,
+      /UI_STRINGS is a flat single-locale table/,
+    ],
+  },
+  {
+    id: "R177",
+    suite: "test:patch",
+    what: "remove the checkmark that marks the selected Theme option, the indicator that survives in custom-styles.css now that the language menu's own .lang-check has gone",
+    file: CUSTOM_CSS,
+    from: '.custom-theme-option.active::before {\n  content: "\u2713";',
+    to: '.custom-theme-option.active::before {\n  content: "";',
+    expect: [/the selected theme carries a checkmark the unselected ones do not/],
+    // The submenu must still be built, populated and OPEN - otherwise "no
+    // checkmark" would just mean "no options were found", and the icon-opacity
+    // assertion must survive so this entry is pinned to the checkmark alone.
+    mustPass: [
+      /the Theme submenu still offers all three modes after the language menu was removed/,
+      /the Theme submenu still floats over the menu - the shared \.tools-submenu rule survived/,
+      /the selected theme's icon is emphasised relative to the unselected ones/,
+    ],
+  },
+  {
+    id: "R178",
+    suite: "test:patch",
+    what: "delete the shared submenu styling - the same neutralisation as R175, but measured on the LIVE Theme submenu rather than on CSS text, since a rule can exist and still resolve to nothing",
+    file: CSS,
+    from: "/* Nested submenu */\n.tools-submenu {",
+    to: "/* Nested submenu */\n.removed-with-the-language-menu {",
+    expect: [
+      /the Theme submenu still floats over the menu - the shared \.tools-submenu rule survived/,
+    ],
+    // The options must still be found and ticked, or "not floating" would just
+    // mean the submenu was never built at all.
+    mustPass: [
+      /the Theme submenu still offers all three modes after the language menu was removed/,
+      /the selected theme carries a checkmark the unselected ones do not/,
+    ],
+  },
 ];
 
 const only = process.argv.slice(2);
@@ -2111,6 +2225,15 @@ for (const r of chosen) {
   const working = new Map(originals);
   let setupFailed = null;
   for (const e of edits) {
+    // `to` is written with plain \n and expanded to the file's own EOL below.
+    // A literal \r\n therefore becomes \r\r\n - a lone CR, which silently marks
+    // the file `-text` in git and defeats EOL normalisation for it. That is the
+    // very defect R156 exists to detect, so a revert must never introduce it by
+    // accident. (A bare \r with no \n is legitimate: that IS R156's payload.)
+    if (/\r\n/.test(e.to) || /\r\n/.test(e.from)) {
+      setupFailed = `revert text contains a literal CRLF; use \\n - the harness expands it to the file's EOL`;
+      break;
+    }
     const text = working.get(e.file);
     const re = anchorRe(e.from);
     const m = re.exec(text);

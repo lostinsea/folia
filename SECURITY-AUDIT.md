@@ -48,7 +48,7 @@ Practically: opening an untrusted markdown file in this application should be tr
 | Info | 2 |
 | **Total** | **26** |
 
-**Provenance:** every Critical and High finding is **inherited from upstream** (`OmniCoreST/omnicore-markdown-viewer`) — `git blame` attributes the vulnerable lines in `renderer.js` and `main.js` to upstream authors (`can.kyq61-droid`, `Can Kaya`). The fork-specific files (`custom-tabs.js`, `custom-theme.js`, `custom-language.js`, `custom-collapse.js`, `custom-performance.js`) contain **no injection sinks** — they use `textContent` or static HTML literals. The fork introduces one Low finding (SEC-24, session persistence amplifier). This does not reduce the risk of publishing: publishing the fork publishes the vulnerabilities.
+**Provenance:** every Critical and High finding is **inherited from upstream** (`OmniCoreST/omnicore-markdown-viewer`) — `git blame` attributes the vulnerable lines in `renderer.js` and `main.js` to upstream authors (`can.kyq61-droid`, `Can Kaya`). The fork-specific files (`custom-tabs.js`, `custom-theme.js`, `custom-language.js`, `custom-collapse.js`, `custom-performance.js`) contain **no injection sinks** — they use `textContent` or static HTML literals. The fork introduces one Low finding (SEC-24, session persistence amplifier). This does not reduce the risk of publishing: publishing the fork publishes the vulnerabilities. *(`custom-language.js` has since been deleted with the interface-language switcher; the statement above describes the tree as audited.)*
 
 ## Remediation status
 
@@ -1548,7 +1548,7 @@ Recorded so a reader knows where the audit's boundaries are.
 
 **Table of contents — safe.** `renderer.js:2296` uses `item.textContent = header.textContent`, not `innerHTML`.
 
-**Tab rendering — safe.** `custom-tabs.js:392-394` uses `textContent` for both the tab title and its tooltip. `custom-tabs.js:399` and `custom-tabs.js:582` assign only static SVG/welcome-screen literals. Same for `custom-theme.js:64` and `custom-language.js:221` (static SVG + a label from a hardcoded string table) and `custom-collapse.js:80,91`.
+**Tab rendering — safe.** `custom-tabs.js:392-394` uses `textContent` for both the tab title and its tooltip. `custom-tabs.js:399` and `custom-tabs.js:582` assign only static SVG/welcome-screen literals. Same for `custom-theme.js:64` and `custom-language.js:221` (static SVG + a label from a hardcoded string table) and `custom-collapse.js:80,91`. *(`custom-language.js` has since been deleted along with the interface-language switcher, so that sink no longer exists at all.)*
 
 **No `eval` / `new Function` in first-party code.** Grepped all root-level `*.js` — zero matches.
 

@@ -105,7 +105,6 @@
       "custom-tabs.js",
       "custom-performance.js",
       "custom-theme.js",
-      "custom-language.js",
       "custom-collapse.js"
     ],
     "win": {

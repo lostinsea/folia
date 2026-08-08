@@ -2651,16 +2651,6 @@ body.dark-mode .context-menu {
   background: var(--bg-secondary);
 }
 
-.tools-submenu-item .lang-check {
-  opacity: 0;
-  font-size: 14px;
-  color: var(--primary-color);
-}
-
-.tools-submenu-item.active .lang-check {
-  opacity: 1;
-}
-
 /* ============================================
    File Dropdown Menu - Additional Styles
    ============================================ */
