@@ -506,7 +506,7 @@ injected a candidate policy at runtime and reported what stopped working:
 | no `'unsafe-eval'` | Measured: mermaid 11 and Prism render without it. |
 | `style-src 'self' 'unsafe-inline'` | Inline `style` attributes are an allowed sanitizer output (SEC-21) and the theme system writes inline styles. |
 | `img-src 'self' file: data: blob: https:` | `https:` kept **deliberately** — remote images in markdown are a real feature. Cleartext `http:` excluded. The read-receipt exposure is recorded here rather than traded away. |
-| `connect-src 'none'` | Originally `'self' https://translate.googleapis.com`, because the translate feature was the only outbound call the app made. It has since been moved into the main process (below), so the renderer now has **no** network destination of any kind. |
+| `connect-src 'none'` | Originally `'self' https://translate.googleapis.com`, because the translate feature was the only outbound call the app made. That feature was first moved into the main process and has since been **removed entirely** (below), so no process in this app now makes an outbound request carrying document content, and the renderer has **no** network destination of any kind. |
 | `default-src 'none'` + no `frame-src` | `frame-src` falls back to `'none'`, which still permits `about:srcdoc` frames (measured) while blocking every remote and local-file frame. |
 | `object-src 'none'`, `base-uri 'none'`, `form-action 'none'` | Complements the `FORBID_TAGS: ['form']` and navigation guards of SEC-11. |
 
@@ -590,12 +590,58 @@ refused" control, which had become exactly backwards:
    deleting the feature, which is not the same fix. Revert-proven (R39):
    removing the IPC handler fails it with `No handler registered`.
 
+*(R38 and R39 were retired with the feature and are no longer in
+`scripts/prove-table-fixes.js`. The live revert for this area is **R168**,
+described below; the IDs above are left as written because this section is a
+record of what was decided at the time.)*
+
 Assertion 2 is hermetic (it exercises language validation and handler presence,
 not the network). The part that cannot be tested hermetically has its own
 opt-in, network-dependent test — `npm run test:translate` — kept out of
 `npm test` on purpose, because a suite that fails when someone is offline
 teaches people to ignore failures. Verified end to end besides: `hello world` →
 `Selam Dünya` in the real UI, screenshot inspected.
+
+### Superseded — the feature was removed outright
+
+Everything above is now history and is kept only because the reasoning is worth
+reading. Document translation has been **deleted** from this fork (see
+`8c1-translation`), so assertion 2 above — "translation must still work" — was
+exactly the assertion that had to be inverted.
+
+What changed, and why the inversion is not a weakening:
+
+- The renderer CSP assertion stands unchanged. `connect-src 'none'` still
+  refuses `translate.googleapis.com`.
+- Its companion now asserts the opposite of what it used to: the
+  `translate-text` IPC route must answer `No handler registered`, **and**
+  `main.js` must contain no live reference to the endpoint. That second oracle
+  is deliberately a source check for a URL inside a string or template rather
+  than a search for the word "translation" — the comment that records this
+  removal names the endpoint in prose, and an oracle its own documentation can
+  break is not an oracle.
+- The IPC route mattered more than the CSP here, and that is the point of
+  keeping both. `connect-src` binds the renderer; it says nothing about the
+  main process, which has no CSP at all. While the handler existed, any script
+  in this `nodeIntegration` renderer could invoke it and post document text out
+  through a more privileged process — the CSP's own stated limitation, in
+  practice. Removing the route closes **that one route**, and nothing more:
+  script in this renderer can still `require('https')` directly and needs no
+  IPC hop at all. SEC-08 is what closes the class; this closes the instance the
+  product itself shipped and pointed at a third party.
+- The oracles are correspondingly narrow, and should not be read as proof that
+  "nothing in this app reaches the network". They catch this exact route
+  returning, by this exact name, to this exact host. A renamed handler, a
+  different endpoint, or a URL assembled from fragments would pass both. That
+  is the honest scope: a regression guard on a removal, not a network policy.
+  The general control would be a main-process request filter
+  (`session.webRequest.onBeforeRequest`), which is separate hardening and is
+  **not** part of this change.
+- `npm run test:translate` and `test-translate-network.js` are deleted with it.
+
+The `img-src https:` trade recorded above is **unchanged**: remote images in
+markdown are still a feature, and that GET-shaped path still exists. Only the
+POST-shaped, document-content-carrying one is gone.
 
 ---
 
@@ -978,8 +1024,8 @@ making the change:
 by the note editor — `data-note-color="${color}"` and `text-decoration-color:${color}`
 at `renderer.js:5793/5833/5859` — so a hostile value re-enters the document as markup on
 save. Sanitize-last keeps that from reaching script execution, but it should never have
-depended on that. Every read path (`extractNoteColor`, the editor's `noteSelectedColor`,
-the post-render styling pass, and `syncNoteAddToOriginal`) now goes through it, and
+depended on that. Every read path (`extractNoteColor`, the editor's `noteSelectedColor`
+and the post-render styling pass) now goes through it, and
 anything that is not `#rgb`/`#rrggbb` collapses to the default.
 
 **Attribute-selector injection** was found in the same area and fixed: four

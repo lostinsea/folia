@@ -19,9 +19,8 @@
       injection.
 
       What it does buy, none of which DOMPurify covers: no remote script, no
-      eval/new Function, no outbound connection except the translation
-      endpoint, no plugins, no <base> retargeting of every relative URL, and no
-      form posts.
+      eval/new Function, no outbound connection at all, no plugins, no <base>
+      retargeting of every relative URL, and no form posts.
 
       `frame-ancestors` is deliberately absent. It is ignored when delivered in
       a <meta> element and Chromium logs an error for it on every launch, so
@@ -242,37 +241,6 @@
                 <span data-i18n="language">Language</span>
                 <span class="submenu-arrow">›</span>
                 <div class="tools-submenu" id="langSubmenu">
-                  <div class="tools-submenu-header" data-i18n="document">
-                    Document
-                  </div>
-                  <div
-                    class="tools-submenu-item active"
-                    data-lang="original"
-                    data-section="doc"
-                  >
-                    <span data-i18n="original">Original</span>
-                    <span class="lang-check">✓</span>
-                  </div>
-                  <div
-                    class="tools-submenu-item"
-                    data-lang="en"
-                    data-section="doc"
-                  >
-                    <span data-i18n="english">English</span>
-                    <span class="lang-check">✓</span>
-                  </div>
-                  <div
-                    class="tools-submenu-item"
-                    data-lang="tr"
-                    data-section="doc"
-                  >
-                    <span data-i18n="turkish">Turkish</span>
-                    <span class="lang-check">✓</span>
-                  </div>
-                  <div class="tools-submenu-separator"></div>
-                  <div class="tools-submenu-header" data-i18n="interface">
-                    Interface
-                  </div>
                   <div
                     class="tools-submenu-item active"
                     data-lang="en"
@@ -640,8 +608,7 @@
                     </div>
                     <h3 class="welcome-slide-title">Export &amp; Share</h3>
                     <p class="welcome-slide-desc">
-                      PDF export · Word (.docx) · Image zoom &amp; export ·
-                      Document translation
+                      PDF export · Word (.docx) · Image zoom &amp; export
                     </p>
                   </div>
 

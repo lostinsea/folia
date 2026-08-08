@@ -2513,6 +2513,17 @@ function configureAutoUpdater(autoUpdater) {
   autoUpdater.autoDownload = false; // Don't download automatically, let user decide
   autoUpdater.autoInstallOnAppQuit = !isPortable; // Pointless for portable builds
 
+  // PRIVACY: electron-updater mints a random UUID, persists it to
+  // userData/.updaterId and sends it as `x-user-staging-id` on EVERY update
+  // check (AppUpdater.js getUpdateInfoAndProvider / getOrCreateStagingUserId).
+  // It exists for staged percentage rollouts, which this project does not use,
+  // and it is a stable pseudonymous identifier: it makes every check from this
+  // machine linkable to every other one, forever. `computeFinalHeaders` merges
+  // `requestHeaders` OVER its own, so overriding it here blanks the value.
+  // Measured: it must be "" and not undefined -- undefined reaches
+  // setHeader() and throws `value` required, which kills the check outright.
+  autoUpdater.requestHeaders = { "x-user-staging-id": "" };
+
   // Auto-updater event handlers
   autoUpdater.on("checking-for-update", () => {
     log("Auto-updater: Checking for updates...");
@@ -2588,50 +2599,14 @@ function configureAutoUpdater(autoUpdater) {
 // Return current app version to renderer
 ipcMain.handle("get-version", () => app.getVersion());
 
-// SEC-09 — translation runs here, not in the renderer.
+// SEC-09 — RESOLVED BY REMOVAL.
 //
-// This was the renderer's ONLY outbound request, and the sole reason its CSP
-// had to name a remote host in connect-src. Performing it in the main process
-// lets the renderer's policy be `connect-src 'none'`: no fetch, XHR, WebSocket,
-// EventSource or sendBeacon destination at all, so injected script has no
-// egress channel of that shape left to reach for.
-//
-// Honesty about what this does and does not buy, so nobody over-reads it: the
-// main window still runs with nodeIntegration (SEC-08), and script running
-// there can `require('https')` and ignore CSP entirely. So this is
-// defence-in-depth and a prerequisite for SEC-08 — not containment on its own.
-// It is worth doing regardless because it costs one IPC hop and permanently
-// removes a remote-origin exception from the policy.
-const TRANSLATE_LANG_RE = /^[a-z]{2,3}(-[A-Za-z]{2,4})?$/;
-const TRANSLATE_MAX_CHARS = 20000;
-
-ipcMain.handle("translate-text", async (event, payload) => {
-  const text = payload && typeof payload.text === "string" ? payload.text : "";
-  const targetLang =
-    payload && typeof payload.targetLang === "string" ? payload.targetLang : "";
-  // The language code goes straight into the URL, so it is validated against a
-  // shape rather than escaped - anything that is not a language tag is a bug or
-  // an injection attempt, and there is no legitimate third case.
-  if (!TRANSLATE_LANG_RE.test(targetLang)) {
-    throw new Error(`Unsupported target language: ${String(targetLang).slice(0, 20)}`);
-  }
-  if (!text.trim()) return text;
-  if (text.length > TRANSLATE_MAX_CHARS) {
-    throw new Error(`Translation payload too large: ${text.length} chars`);
-  }
-
-  const url =
-    "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto" +
-    `&tl=${encodeURIComponent(targetLang)}&dt=t&q=${encodeURIComponent(text)}`;
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`Translation API error: ${response.status}`);
-  const data = await response.json();
-  const segments = data && data[0];
-  // The API has returned something unexpected; the caller's contract is to keep
-  // the original text rather than surface a partial translation.
-  if (!segments || !Array.isArray(segments)) return text;
-  return segments.map((s) => (s && s[0]) || "").join("");
-});
+// This used to be a "translate-text" IPC handler that sent the reader's
+// document, in pieces, to Google's unauthenticated translate_a/single
+// endpoint. It was originally moved into the main process so the renderer's
+// CSP could be connect-src 'none'; the feature has since been removed
+// outright, so no process in this app now makes an outbound request carrying
+// document content.
 
 // Return app root path so renderer can construct paths like README.md
 ipcMain.handle("get-app-path", () => app.getAppPath());

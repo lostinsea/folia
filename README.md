@@ -14,10 +14,14 @@ Folia opens markdown files and renders them the way the author wrote them -
 including embedded HTML, Mermaid diagrams, sortable tables and syntax-highlighted
 code - and lets you annotate, edit and export without leaving the window.
 
-It works **entirely offline**. Every library it renders with is vendored into the
-application at install time; nothing is fetched from a CDN at runtime. The one
-exception is the optional document-translation feature, which is off unless you
-ask for it.
+It works **entirely offline** as a viewer. Every library it renders with is
+vendored into the application at install time; nothing is fetched from a CDN at
+runtime, and no feature sends your document anywhere. Two things do reach the
+network, both stated plainly rather than buried: an update check against this
+project's own releases feed (see [Installation](#installation)), and any image
+your own document points at with an `https:` URL — that one is your document's
+doing, and it is a deliberate trade so that remote images in markdown keep
+working.
 
 ### Provenance
 
@@ -61,7 +65,7 @@ The substantive ones:
 - `<iframe src="https://...">` survived sanitization and silently fetched a remote page on render. Found during review, not in the audit. The `src` is now stripped and subframe loads are blocked as a second layer.
 - Links to local files go through an extension policy: executables and macro-enabled Office documents are refused outright, inert documents open directly, anything else asks first. UNC and protocol-relative paths are rejected **before** the app touches the filesystem, because the existence check was itself an outbound SMB probe that leaked an NTLMv2 challenge/response.
 - Inline CSS in documents is normalised through the browser's own parser before filtering, after a regex-based filter was shown to have three separate bypasses.
-- Document translation no longer runs in the renderer, which allowed `connect-src 'none'`.
+- Document translation has been removed. It sent the text of whatever you were reading, in pieces, to a third-party endpoint; nothing in the app now makes an outbound request carrying document content, and the renderer's `connect-src` is `'none'`.
 
 ### Performance
 
@@ -185,7 +189,6 @@ image insert/delete, copy code block, copy image source, select all.
 
 ### Localisation
 - Interface language: English or Ukrainian
-- Optional document translation to English or Ukrainian, run in the background from the main process
 
 ---
 
@@ -208,7 +211,26 @@ Releases are published at
 > **More info**, then **Run anyway**. The source is in this repository and the
 > installer can be rebuilt from it.
 
-Folia does not check for updates and never contacts a release server.
+Folia checks for updates against this fork's own GitHub releases feed: once a
+few seconds after launch in packaged builds, and on request from the menu. That
+check downloads release *metadata* automatically — it has to, to know whether a
+newer version exists — but it never downloads or installs the update itself
+without asking.
+
+The request is deliberately uninformative. It does not carry the current
+version at all: the published version is fetched and compared locally.
+`electron-updater` would normally attach `x-user-staging-id`, a random
+identifier it persists to disk and reuses forever, which would make every check
+from one machine linkable to every other; Folia blanks that header
+(`configureAutoUpdater` in `main.js`, proven on the wire by `npm run
+test:startup`). What remains is a plain HTTPS GET with a
+`User-Agent: electron-builder` header. No document, no file path, no usage
+data. GitHub necessarily sees the connecting IP address, as it would for any
+download.
+
+This is the only connection Folia opens on its own initiative. There is
+currently no setting to turn it off; unpackaged (development) runs never check
+at all.
 
 ### Build from source
 

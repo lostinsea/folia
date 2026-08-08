@@ -3,7 +3,7 @@
  * - Adds Ukrainian (uk) to the UI_STRINGS table (accessible as a global
  *   since renderer.js is a non-module script sharing the same JS context)
  * - Patches the Language submenu: removes Turkish, adds Ukrainian for both
- *   Document translation and Interface language sections
+ *   Interface language section
  *
  * Overlay file — never touched by upstream merges.
  * Load after renderer.js in index.html.
@@ -122,13 +122,6 @@
     "notif.textEdited": "Текст оновлено",
     zoom: "Масштаб",
     language: "Мова",
-    document: "Документ",
-    interface: "Інтерфейс",
-    original: "Оригінал",
-    english: "Англійська",
-    ukrainian: "Українська",
-    "notif.translationFailed": "Помилка перекладу: ",
-    "notif.translationInProgress": "Переклад виконується...",
     "notif.sectionNotFound": "Розділ не знайдено: ",
     "notif.fileNotFound": "Файл не знайдено: ",
     "notif.preparingWord": "Підготовка Word-файлу...",
@@ -208,7 +201,7 @@
   }
 
   // ── Patch Language submenu DOM ────────────────────────────────────────────
-  // Remove Turkish items, add Ukrainian for both Document and Interface sections.
+  // Remove Turkish items, add Ukrainian to the Interface section.
 
   function makeLangItem(lang, label, section, isActive) {
     const el = document.createElement("div");
@@ -219,21 +212,14 @@
 
     // renderer.js registers click handlers only on items present at startup,
     // so we must attach ours manually using the same top-level functions.
-    el.addEventListener("click", async () => {
+    el.addEventListener("click", () => {
       // Close the tools menu (mirrors renderer.js behaviour)
       const toolsMenu = document.getElementById("toolsMenu");
       if (toolsMenu) toolsMenu.classList.remove("visible");
 
-      if (section === "doc") {
-        // switchToLanguage is a top-level function in renderer.js
-        if (typeof switchToLanguage === "function") {
-          await switchToLanguage(lang);
-        }
-      } else if (section === "ui") {
-        // applyInterfaceLang is a top-level function in renderer.js
-        if (typeof applyInterfaceLang === "function") {
-          applyInterfaceLang(lang);
-        }
+      // applyInterfaceLang is a top-level function in renderer.js
+      if (section === "ui" && typeof applyInterfaceLang === "function") {
+        applyInterfaceLang(lang);
       }
     });
 
@@ -246,22 +232,6 @@
 
     // Remove Turkish items (data-lang="tr")
     submenu.querySelectorAll('[data-lang="tr"]').forEach((el) => el.remove());
-
-    // Update the 'turkish' i18n label in English strings to 'ukrainian'
-    // (the en strings still have 'turkish' key — we add 'ukrainian' instead)
-    if (typeof UI_STRINGS !== "undefined") {
-      UI_STRINGS.en.ukrainian = "Ukrainian";
-      UI_STRINGS.en.ukrainian_doc = "Ukrainian";
-    }
-
-    // Add Ukrainian to Document section (after English doc item)
-    const enDocItem = submenu.querySelector(
-      '[data-lang="en"][data-section="doc"]',
-    );
-    if (enDocItem) {
-      const ukDoc = makeLangItem("uk", "Ukrainian", "doc", false);
-      enDocItem.after(ukDoc);
-    }
 
     // Add Ukrainian to Interface section (after English ui item)
     const enUiItem = submenu.querySelector(

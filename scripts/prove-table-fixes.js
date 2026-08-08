@@ -576,8 +576,8 @@ const REVERTS = [
     suite: "test:tabs",
     what: "resync originalMarkdown from the textarea after every successful save, including view-mode saves",
     file: RENDERER,
-    from: "      if (entry) {\n        originalMarkdown = entry.content;\n        invalidateTranslationCache();\n      } else if (isEditMode) {",
-    to: "      if (false) {\n        originalMarkdown = entry.content;\n        invalidateTranslationCache();\n      } else if (true) {",
+    from: "      if (entry) {\n        originalMarkdown = entry.content;\n      } else if (isEditMode) {",
+    to: "      if (false) {\n        originalMarkdown = entry.content;\n      } else if (true) {",
     expect: [/a successful view-mode save does not overwrite the in-memory document/],
   },
   {
@@ -865,13 +865,11 @@ const REVERTS = [
     mustPass: [
       /13e the invalid diagram really reached the single-diagram error path/,
       /13e2 the real dialog path reached the single-diagram error banner/,
-      // 13e2's two preconditions. Both are ordinary suite assertions already,
-      // but listing them here makes them fail as COLLATERAL during a proof run
-      // rather than only in a normal run: if the scenario ever starts with a
-      // file open (so its invalidateTranslationCache() kicks off real work) or
-      // stops marking the document dirty, this revert's proof is measuring a
+      // 13e2's remaining precondition. It is an ordinary suite assertion
+      // already, but listing it here makes it fail as COLLATERAL during a
+      // proof run rather than only in a normal run: if the scenario stops
+      // marking the document dirty, this revert's proof is measuring a
       // scenario that no longer does what its name claims.
-      /13e2 runs with no file open, so its translation-cache invalidation is inert/,
       /a dialog insert marks the document unsaved even when the diagram fails/,
     ],
   },
@@ -1343,8 +1341,8 @@ const REVERTS = [
     suite: "test:packaging",
     what: "document packages that are not in the shipped app.asar",
     file: NOTICES_GEN,
-    from: "    if (meta.dev || meta.devOptional) continue;",
-    to: "    if (false) continue;",
+    from: "    if ((meta.dev || meta.devOptional) && !vendored.has(key)) continue;",
+    to: "    if (false && !vendored.has(key)) continue;",
     expect: [/notices document nothing that is absent from the built app\.asar/],
     mustPass: [
       /every package inside the built app\.asar has a notice/,
@@ -1931,6 +1929,60 @@ const REVERTS = [
     expect: [
       /a concurrent export cannot re-theme the diagrams the export it overlaps is still reading/,
     ],
+  },
+  {
+    // 8c1 — document translation removed. The property being defended is not
+    // "the feature is gone" (an absence is trivially satisfied by never having
+    // added it) but "the privileged egress route it created is gone". While
+    // `translate-text` was registered, any script in this nodeIntegration
+    // renderer could invoke it and post document text out through the MAIN
+    // process, where connect-src does not apply at all.
+    //
+    // The revert restores a working handler, so it fails BOTH halves of the
+    // assertion at once: the route answers instead of reporting "No handler
+    // registered", and a live endpoint URL reappears in main.js source.
+    id: "R168",
+    suite: "test:security",
+    what: "re-register the translate-text IPC route that sent document text to a third party",
+    file: MAIN,
+    from: "// SEC-09 — RESOLVED BY REMOVAL.",
+    to:
+      'ipcMain.handle("translate-text", async (event, payload) => {\n' +
+      '  const text = payload && payload.text ? payload.text : "";\n' +
+      "  const url =\n" +
+      '    "https://translate.googleapis.com/translate_a/single?client=gtx" +\n' +
+      '    "&sl=auto&tl=fr&dt=t&q=" + encodeURIComponent(text);\n' +
+      "  const response = await fetch(url);\n" +
+      "  const data = await response.json();\n" +
+      '  return (data && data[0] ? data[0] : []).map((s) => (s && s[0]) || "").join("");\n' +
+      "});\n" +
+      "// SEC-09 — RESOLVED BY REMOVAL.",
+    expect: [
+      /the translate-text IPC route and its endpoint are removed from main\.js/,
+    ],
+    // The renderer-side CSP assertion is a SEPARATE property and must survive:
+    // it is about what the renderer may reach, and re-adding a main-process
+    // handler does not change that. If it fails too, this revert is measuring
+    // the CSP rather than the route.
+    mustPass: [
+      /the former translation endpoint is refused \(connect-src 'none'\)/,
+    ],
+  },
+  {
+    // Removing the override lets electron-updater put its persistent UUID back
+    // on the wire. The oracle is the stand-in feed's received headers, so this
+    // fails on the value actually transmitted, not on the source text.
+    id: "R169",
+    suite: "test:startup",
+    what: "restore the persistent x-user-staging-id sent on every update check",
+    file: MAIN,
+    from: '  autoUpdater.requestHeaders = { "x-user-staging-id": "" };',
+    to: "  // reverted by R169",
+    expect: [/no update request carries a staging-id value/],
+    // The request must still be MADE. If this fails too, the revert has broken
+    // the update check outright and the assertion above is passing vacuously
+    // rather than because the identifier reappeared.
+    mustPass: [/the update check really reached the stand-in feed/],
   },
 ];
 

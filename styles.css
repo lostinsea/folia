@@ -2651,22 +2651,6 @@ body.dark-mode .context-menu {
   background: var(--bg-secondary);
 }
 
-.tools-submenu-header {
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  color: var(--text-secondary);
-  padding: 6px 12px 2px;
-  letter-spacing: 0.5px;
-  pointer-events: none;
-}
-
-.tools-submenu-separator {
-  height: 1px;
-  background: var(--border-color);
-  margin: 4px 8px;
-}
-
 .tools-submenu-item .lang-check {
   opacity: 0;
   font-size: 14px;
@@ -2675,24 +2659,6 @@ body.dark-mode .context-menu {
 
 .tools-submenu-item.active .lang-check {
   opacity: 1;
-}
-
-/* Tools button states */
-#toolsBtn.translating {
-  animation: translatePulse 1s ease-in-out infinite;
-  pointer-events: none;
-  opacity: 0.7;
-}
-
-@keyframes translatePulse {
-  0%, 100% { opacity: 0.5; }
-  50% { opacity: 1; }
-}
-
-#toolsBtn.translated {
-  background: var(--primary-color);
-  color: #ffffff;
-  border-color: var(--primary-color);
 }
 
 /* ============================================

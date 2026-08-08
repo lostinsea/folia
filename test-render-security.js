@@ -1847,42 +1847,55 @@ async function run(win) {
     JSON.stringify(await exec(`window.__csp`)),
   );
 
-  // The translation endpoint used to be the one remote host connect-src had to
-  // name. It is now fetched in the main process (SEC-09), so the renderer must
-  // NOT be able to reach it either - the exception is gone, not merely unused.
+  // SEC-09 is now resolved by REMOVAL rather than by relocation. The feature
+  // that sent the reader's document to translate.googleapis.com is gone, so
+  // the property to defend is no longer "the renderer cannot reach it while
+  // the main process can" but "nothing in this app reaches it at all".
+  //
+  // Two independent oracles, because either alone is weak: the renderer's CSP
+  // (a live refusal, but blind to the main process, which has no CSP), and the
+  // shipped main-process source (blind to runtime, but the only place an
+  // outbound request could now be built).
   await exec(`
     fetch('https://translate.googleapis.com/translate_a/single?client=gtx')
       .then(() => {}, () => {});
     null;
   `);
   check(
-    "SEC-09 even the translation endpoint is refused (connect-src 'none')",
+    "SEC-09 the former translation endpoint is refused (connect-src 'none')",
     (await waitForCsp("translate.googleapis.com", "connect-src")) === true,
     JSON.stringify(await exec(`window.__csp`)),
   );
 
-  // ...and the feature it used to serve still has a route, in the main process.
-  // Without this the assertion above could be satisfied by simply deleting
-  // translation, which is not the same fix at all. The language validation is
-  // exercised rather than the network, which is not available here: a bad tag
-  // must be refused before any request is built, and a good one must get past
-  // validation and fail on the network instead.
-  const badLang = await exec(`
-    require('electron').ipcRenderer.invoke('translate-text',
-      { text: 'hello', targetLang: '../../evil' })
-      .then(() => 'resolved', (e) => String(e && e.message))
-  `);
-  const goodLang = await exec(`
+  // The IPC route must be gone, not merely unused: while the handler exists,
+  // any script in the Node-privileged renderer can invoke it and exfiltrate
+  // document text through the main process, where connect-src does not apply.
+  const gone = await exec(`
     require('electron').ipcRenderer.invoke('translate-text',
       { text: 'hello', targetLang: 'fr' })
       .then(() => 'resolved', (e) => String(e && e.message))
   `);
+  const mainSrc = fs.readFileSync(path.join(__dirname, "main.js"), "utf8");
+  // Deliberately matches the host in code, not the word "translation": the
+  // comment recording this removal names the endpoint in prose, and an oracle
+  // that its own documentation can break is not an oracle. A live reference
+  // would be inside a string literal or a template.
+  //
+  // KNOWN SCOPE, so nobody over-trusts it: this half is a change-detector, not
+  // a network policy. It matches an unbroken URL inside one literal, so a
+  // concatenated ("https://translate." + "googleapis.com"), base64-decoded, or
+  // externally-configured endpoint would slip past it, and it reads only
+  // main.js. The half that actually defends the property is the runtime probe
+  // above - a route that answers is a route that can exfiltrate, however its
+  // URL was spelled. The two are ANDed so the assertion is as strong as the
+  // stronger of them.
+  const liveEndpoint = /["'`]https?:\/\/[^"'`]*translate\.googleapis\.com/.test(
+    mainSrc,
+  );
   check(
-    "SEC-09 translation moved to the main process, and validates its language tag",
-    /Unsupported target language/.test(badLang) &&
-      !/Unsupported target language/.test(goodLang) &&
-      !/No handler registered/.test(goodLang),
-    JSON.stringify({ badLang, goodLang }),
+    "SEC-09 the translate-text IPC route and its endpoint are removed from main.js",
+    /No handler registered/.test(gone) && liveEndpoint === false,
+    JSON.stringify({ gone, liveEndpoint }),
   );
 
   // <base> rewrites the resolution of every relative URL already in the

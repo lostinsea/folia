@@ -692,10 +692,7 @@ const UI_STRINGS = {
     'editText': 'Edit Text', 'editTextLabel': 'Edit the selected text:',
     'notif.textEdited': 'Text updated',
     'zoom': 'Zoom',
-    'language': 'Language', 'document': 'Document', 'interface': 'Interface',
-    'original': 'Original', 'english': 'English', 'turkish': 'Turkish',
-    'notif.translationFailed': 'Translation failed: ',
-    'notif.translationInProgress': 'Translation in progress...',
+    'language': 'Language',
     'notif.sectionNotFound': 'Section not found: ',
     'notif.fileNotFound': 'File not found: ',
     'notif.preparingWord': 'Preparing Word export...',
@@ -818,10 +815,7 @@ const UI_STRINGS = {
     'editText': 'Metni Düzenle', 'editTextLabel': 'Seçili metni düzenleyin:',
     'notif.textEdited': 'Metin güncellendi',
     'zoom': 'Yakınlaştır',
-    'language': 'Dil', 'document': 'Belge', 'interface': 'Arayüz',
-    'original': 'Orijinal', 'english': 'İngilizce', 'turkish': 'Türkçe',
-    'notif.translationFailed': 'Çeviri başarısız: ',
-    'notif.translationInProgress': 'Çeviri devam ediyor...',
+    'language': 'Dil',
     'notif.sectionNotFound': 'Bölüm bulunamadı: ',
     'notif.fileNotFound': 'Dosya bulunamadı: ',
     'notif.preparingWord': 'Word dışa aktarma hazırlanıyor...',
@@ -1099,7 +1093,6 @@ function historyUndo() {
     });
   } else {
     originalMarkdown = prevContent;
-    invalidateTranslationCache();
     renderMarkdown(prevContent).then(() => {
       contentWrapper.scrollTop = scrollPos;
       undoRedoRendering = false;
@@ -1126,7 +1119,6 @@ function historyRedo() {
     });
   } else {
     originalMarkdown = nextContent;
-    invalidateTranslationCache();
     renderMarkdown(nextContent).then(() => {
       contentWrapper.scrollTop = scrollPos;
       undoRedoRendering = false;
@@ -1156,17 +1148,11 @@ let navigationHistory = [];
 let navigationIndex = -1;
 let isNavigating = false; // Flag to prevent adding to history during back/forward
 
-// Translation state
+// Tools menu. The language submenu it used to host is gone with the document
+// translation feature - see the note above updateToolsMenuState().
 const toolsBtn = document.getElementById('toolsBtn');
 const toolsMenu = document.getElementById('toolsMenu');
 const langSubmenu = document.getElementById('langSubmenu');
-let translatedMarkdown = null;        // cached translation for current target lang
-let isShowingTranslation = false;     // currently displaying translated version
-let isBackgroundTranslating = false;  // bg translation in progress
-let translationGeneration = 0;        // stale-detection counter
-let translationResolvers = [];        // waiters for bg translation completion
-let translationPieceCache = new Map(); // piece-level cache: original text → translated text
-let translationTargetLang = null;     // current target language ('en', 'tr', etc.) or null
 
 // Update file info display
 function updateFileInfo(path) {
@@ -1385,301 +1371,44 @@ darkModeToggle.addEventListener('click', (e) => {
 
 });
 
-// Translation — background preemptive system
-const TRANSLATE_GLOBE_SVG = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>';
-
+// The tools menu no longer hosts a document-language section: sending the
+// reader's document to a third-party endpoint to translate it was removed
+// outright rather than made optional. What is left is the interface-language
+// section, which is local.
 function updateToolsMenuState() {
-  // Document section checkmarks
-  langSubmenu.querySelectorAll('.tools-submenu-item[data-section="doc"]').forEach(item => {
-    const lang = item.dataset.lang;
-    const isActive = (lang === 'original' && !isShowingTranslation) ||
-                     (lang === translationTargetLang && isShowingTranslation);
-    item.classList.toggle('active', isActive);
-  });
-  // Interface section checkmarks
-  langSubmenu.querySelectorAll('.tools-submenu-item[data-section="ui"]').forEach(item => {
-    item.classList.toggle('active', item.dataset.lang === interfaceLang);
-  });
-  toolsBtn.classList.toggle('translated', isShowingTranslation);
-}
-
-function startBackgroundTranslation(softMode) {
-  if (!translationTargetLang) return; // no target language selected
-  const gen = ++translationGeneration;
-  if (!softMode) translatedMarkdown = null;
-
-  // If already translating, just bump generation — the running translation
-  // will detect staleness on completion and auto-retry with latest content
-  if (isBackgroundTranslating) return;
-
-  isBackgroundTranslating = true;
-  toolsBtn.classList.add('translating');
-
-  translateMarkdownDocument(originalMarkdown, translationTargetLang)
-    .then(result => {
-      isBackgroundTranslating = false;
-      if (gen !== translationGeneration) {
-        // Content changed while translating — auto-retry with latest
-        startBackgroundTranslation(softMode);
-        return;
-      }
-      translatedMarkdown = result;
-      toolsBtn.classList.remove('translating');
-
-      // Resolve any waiters
-      translationResolvers.forEach(r => r());
-      translationResolvers = [];
-
-      // Auto-update view if showing translation
-      if (isShowingTranslation) {
-        const scrollPos = contentWrapper.scrollTop;
-        renderMarkdown(translatedMarkdown).then(() => {
-          contentWrapper.scrollTop = scrollPos;
-          hideLoadingScreen();
-        });
-      }
-    })
-    .catch(err => {
-      isBackgroundTranslating = false;
-      if (gen !== translationGeneration) {
-        // Content changed while translating — auto-retry
-        startBackgroundTranslation(softMode);
-        return;
-      }
-      console.error('Background translation error:', err);
-      toolsBtn.classList.remove('translating');
-      translationResolvers.forEach(r => r());
-      translationResolvers = [];
-      if (!softMode && isShowingTranslation) {
-        isShowingTranslation = false;
-        updateToolsMenuState();
-        hideLoadingScreen();
-        showNotification(i18n('notif.translationFailed') + err.message, 4000);
-      }
+  langSubmenu
+    .querySelectorAll('.tools-submenu-item[data-section="ui"]')
+    .forEach((item) => {
+      item.classList.toggle('active', item.dataset.lang === interfaceLang);
     });
 }
 
-function waitForTranslation() {
-  if (translatedMarkdown) return Promise.resolve();
-  return new Promise(resolve => translationResolvers.push(resolve));
-}
-
-function invalidateTranslationCache() {
-  translatedMarkdown = null;
-  if (currentFilePath && originalMarkdown) {
-    startBackgroundTranslation();
-  }
-}
-
-function resetTranslationState() {
-  translationGeneration++;
-  translatedMarkdown = null;
-  isShowingTranslation = false;
-  isBackgroundTranslating = false;
-  translationTargetLang = null;
-  translationResolvers.forEach(r => r());
-  translationResolvers = [];
-  translationPieceCache.clear();
-  pendingNoteAttrTranslations.clear();
-  toolsBtn.classList.remove('translating');
-  updateToolsMenuState();
-}
-
-// Get the markdown source for the currently active view
+// The source for the currently displayed document. It used to choose between
+// the original and a cached translation of it; there is now only one, but the
+// seam is kept because ~40 call sites read through it and because it is the
+// documented pair of the originalMarkdown bridge (R104).
 function getActiveMarkdown() {
-  return (isShowingTranslation && translatedMarkdown) ? translatedMarkdown : originalMarkdown;
+  return originalMarkdown;
 }
 
-// Reverse-lookup: find original text for a translated text via piece cache
-function findOriginalForTranslated(translatedText) {
-  for (const [original, translated] of translationPieceCache) {
-    if (translated === translatedText) return original;
-    if (translated.trim() === translatedText.trim()) return original;
-  }
-  return null;
-}
-
-// Find note span by data-note-id in source markdown
-function findNoteSpanById(source, noteId) {
-  if (!noteId) return null;
-  const safeId = noteId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const regex = new RegExp(
-    `<span class="(?:noted-text|noted-image|note-label)" data-note-id="${safeId}"[^>]*>([\\s\\S]*?)</span>`
-  );
-  return source.match(regex);
-}
-
-// Sync a note-span addition from translatedMarkdown to originalMarkdown
-function syncNoteAddToOriginal(noteHtml, selectedText, noteId, rawTitle, rawContent, occurrence) {
-  occurrence = occurrence || 0;
-  // Extract note attrs from noteHtml to rebuild for original text
-  const escTitleMatch = noteHtml.match(/data-note-title="([^"]*)"/);
-  const escContentMatch = noteHtml.match(/data-note-content="([^"]*)"/);
-  let colorMatch = noteHtml.match(/data-note-color="([^"]*)"/);
-  if (!colorMatch) colorMatch = noteHtml.match(/style="color:([^"]*)"/);
-  const escT = escTitleMatch ? escTitleMatch[1] : '';
-  const escC = escContentMatch ? escContentMatch[1] : '';
-  const col = normalizeNoteColor(colorMatch ? colorMatch[1] : NOTE_COLOR_DEFAULT);
-
-  function buildOrigNoteHtml(origText) {
-    return wrapWithNoteSpan(origText, noteId, escT, escC, col);
-  }
-
-  // Strategy 1: reverse piece cache lookup (instant, accurate)
-  const origText = findOriginalForTranslated(selectedText);
-  if (origText) {
-    const idx = findNthOccurrence(originalMarkdown, origText, occurrence);
-    if (idx !== -1) {
-      originalMarkdown = originalMarkdown.substring(0, idx) + buildOrigNoteHtml(origText) + originalMarkdown.substring(idx + origText.length);
-      translateNoteAttrsToOriginal(noteId, rawTitle, rawContent);
-      return;
-    }
-  }
-
-  // Strategy 2: substring match in piece cache
-  for (const [original, translated] of translationPieceCache) {
-    if (translated.includes(selectedText) && selectedText.length > 0) {
-      const idx = findNthOccurrence(originalMarkdown, original, occurrence);
-      if (idx !== -1) {
-        originalMarkdown = originalMarkdown.substring(0, idx) + buildOrigNoteHtml(original) + originalMarkdown.substring(idx + original.length);
-        translateNoteAttrsToOriginal(noteId, rawTitle, rawContent);
-        return;
-      }
-    }
-  }
-
-  // Strategy 3: async reverse-translate via Google (fallback)
-  googleTranslate(selectedText, 'tr').then(trText => {
-    if (!trText) throw new Error('Empty reverse translation');
-    const idx = findNthOccurrence(originalMarkdown, trText, occurrence);
-    if (idx !== -1) {
-      originalMarkdown = originalMarkdown.substring(0, idx) + buildOrigNoteHtml(trText) + originalMarkdown.substring(idx + trText.length);
-      translateNoteAttrsToOriginal(noteId, rawTitle, rawContent);
-    } else {
-      throw new Error('Reverse translation not found in original');
-    }
-  }).catch(() => {
-    // Strategy 4: guaranteed fallback — append note to end
-    if (!findNoteSpanById(originalMarkdown, noteId)) {
-      originalMarkdown = originalMarkdown.trimEnd() + '\n\n' + noteHtml + '\n';
-      translateNoteAttrsToOriginal(noteId, rawTitle, rawContent);
-    }
-  });
-}
-
-// Pending note attr translations — noteId -> {rawTitle, rawContent}
-const pendingNoteAttrTranslations = new Map();
-
-// Immediately translate note attrs EN→TR and apply to originalMarkdown; queue as fallback on failure
-async function translateNoteAttrsToOriginal(noteId, rawTitle, rawContent) {
-  if (!noteId || (!rawTitle && !rawContent)) return;
-  try {
-    const [trTitle, trContent] = await Promise.all([
-      rawTitle ? googleTranslate(rawTitle, 'tr') : Promise.resolve(null),
-      rawContent ? googleTranslate(rawContent, 'tr') : Promise.resolve(null)
-    ]);
-
-    const match = findNoteSpanById(originalMarkdown, noteId);
-    if (!match) {
-      // Note span not yet synced to originalMarkdown — queue for later
-      pendingNoteAttrTranslations.set(noteId, { rawTitle, rawContent });
-      return;
-    }
-
-    let updated = match[0];
-    if (trTitle) {
-      const esc = trTitle.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      updated = updated.replace(/data-note-title="[^"]*"/, () => `data-note-title="${esc}"`);
-    }
-    if (trContent) {
-      const esc = trContent.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-      updated = updated.replace(/data-note-content="[^"]*"/, () => `data-note-content="${esc}"`);
-    }
-
-    if (updated !== match[0]) {
-      originalMarkdown = originalMarkdown.substring(0, match.index) + updated + originalMarkdown.substring(match.index + match[0].length);
-    }
-  } catch (e) {
-    // Translation failed — queue for retry on view switch
-    pendingNoteAttrTranslations.set(noteId, { rawTitle, rawContent });
-  }
-}
-
-// Flush: translate all pending note attrs EN→TR and apply to originalMarkdown
-async function flushPendingNoteTranslations() {
-  const entries = [...pendingNoteAttrTranslations.entries()];
-  pendingNoteAttrTranslations.clear();
-  if (!entries.length) return;
-
-  await Promise.all(entries.map(async ([noteId, { rawTitle, rawContent }]) => {
-    try {
-      const [trTitle, trContent] = await Promise.all([
-        rawTitle ? googleTranslate(rawTitle, 'tr') : Promise.resolve(null),
-        rawContent ? googleTranslate(rawContent, 'tr') : Promise.resolve(null)
-      ]);
-
-      const match = findNoteSpanById(originalMarkdown, noteId);
-      if (!match) return;
-
-      let updated = match[0];
-      if (trTitle) {
-        const esc = trTitle.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        updated = updated.replace(/data-note-title="[^"]*"/, () => `data-note-title="${esc}"`);
-      }
-      if (trContent) {
-        const esc = trContent.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-        updated = updated.replace(/data-note-content="[^"]*"/, () => `data-note-content="${esc}"`);
-      }
-
-      if (updated !== match[0]) {
-        originalMarkdown = originalMarkdown.substring(0, match.index) + updated + originalMarkdown.substring(match.index + match[0].length);
-      }
-    } catch (e) {}
-  }));
-}
-
-// Debounced resync timer for EN view edits
-let enViewResyncTimer = null;
-
-// Apply a view-mode content change and keep both markdowns in sync
-function commitViewModeEdit(newContent, scrollPosition, syncFn) {
+// Apply a view-mode content change: update the source, repaint, and put the
+// reader back where they were. This used to fork on whether a translation was
+// on screen and carry a `syncFn` callback to mirror the edit into the other
+// buffer; with document translation gone there is only one buffer, so the
+// mirror had nothing to mirror to and every callback was unreachable.
+function commitViewModeEdit(newContent, scrollPosition) {
   historyPush(originalMarkdown);
-  if (isShowingTranslation && translatedMarkdown) {
-    translatedMarkdown = newContent;
-    if (syncFn) syncFn();
-    renderMarkdown(translatedMarkdown).then(() => {
-      contentWrapper.scrollTop = scrollPosition;
-    });
-    // Debounced resync: re-translate originalMarkdown in background for eventual consistency
-    clearTimeout(enViewResyncTimer);
-    enViewResyncTimer = setTimeout(() => {
-      if (isShowingTranslation && originalMarkdown) startBackgroundTranslation(true);
-    }, 2000);
-  } else {
-    originalMarkdown = newContent;
-    invalidateTranslationCache();
-    renderMarkdown(newContent).then(() => {
-      contentWrapper.scrollTop = scrollPosition;
-    });
-  }
+  originalMarkdown = newContent;
+  renderMarkdown(newContent).then(() => {
+    contentWrapper.scrollTop = scrollPosition;
+  });
   hasUnsavedChanges = true;
 }
 
 // Update markdown source without triggering a full re-render (used when DOM is already patched).
-function replaceSourceSilently(newContent, syncFn) {
+function replaceSourceSilently(newContent) {
   historyPush(originalMarkdown);
-  if (isShowingTranslation && translatedMarkdown) {
-    translatedMarkdown = newContent;
-    if (syncFn) syncFn();
-    clearTimeout(enViewResyncTimer);
-    enViewResyncTimer = setTimeout(() => {
-      if (isShowingTranslation && originalMarkdown) startBackgroundTranslation(true);
-    }, 2000);
-  } else {
-    originalMarkdown = newContent;
-    invalidateTranslationCache();
-    if (syncFn) syncFn();
-  }
+  originalMarkdown = newContent;
   hasUnsavedChanges = true;
   updateUnsavedIndicator();
 }
@@ -1771,61 +1500,14 @@ fileMenu.addEventListener('click', (e) => { e.stopPropagation(); });
 viewMenu.addEventListener('click', (e) => { e.stopPropagation(); });
 toolsMenu.addEventListener('click', (e) => { e.stopPropagation(); });
 
-// Language switch handler
-async function switchToLanguage(targetLang) {
-  if (!originalMarkdown || !currentFilePath) return;
-
-  if (targetLang === 'original') {
-    if (!isShowingTranslation) return;
-    await flushPendingNoteTranslations();
-    isShowingTranslation = false;
-    translationTargetLang = null;
-    const scrollPos = contentWrapper.scrollTop;
-    await renderMarkdown(originalMarkdown);
-    contentWrapper.scrollTop = scrollPos;
-    updateToolsMenuState();
-    return;
-  }
-
-  // Switching to a translation language (en/tr/etc.)
-  const langChanged = translationTargetLang !== targetLang;
-
-  if (langChanged) {
-    translatedMarkdown = null;
-    translationPieceCache.clear();
-    translationTargetLang = targetLang;
-  }
-
-  if (!langChanged && isShowingTranslation) return; // already showing this translation
-
-  isShowingTranslation = true;
-
-  if (translatedMarkdown) {
-    // Cache is valid — instant swap
-    const scrollPos = contentWrapper.scrollTop;
-    await renderMarkdown(translatedMarkdown);
-    contentWrapper.scrollTop = scrollPos;
-  } else {
-    // Non-blocking: start translation in background and let the user keep working.
-    // startBackgroundTranslation will auto-render when done (if isShowingTranslation is still true).
-    if (!isBackgroundTranslating) startBackgroundTranslation();
-    showNotification(i18n('notif.translationInProgress'), 4000);
-  }
-
-  updateToolsMenuState();
-}
-
-// Language submenu item click handlers
+// Language submenu item click handlers.
+// Only the interface-language section survives: the document-translation
+// section was removed with the feature (it POSTed the reader's document to a
+// third-party endpoint), so `data-section="doc"` no longer exists in the DOM.
 langSubmenu.querySelectorAll('.tools-submenu-item').forEach(item => {
-  item.addEventListener('click', async () => {
+  item.addEventListener('click', () => {
     toolsMenu.classList.remove('visible');
-    const section = item.dataset.section;
-    const lang = item.dataset.lang;
-    if (section === 'doc') {
-      await switchToLanguage(lang);
-    } else if (section === 'ui') {
-      applyInterfaceLang(lang);
-    }
+    if (item.dataset.section === 'ui') applyInterfaceLang(item.dataset.lang);
   });
 });
 
@@ -3066,13 +2748,6 @@ toggleEditBtn.addEventListener('click', async () => {
   isEditMode = !isEditMode;
 
   if (isEditMode) {
-    // If showing translation, flush pending note translations and switch to original
-    if (isShowingTranslation) {
-      await flushPendingNoteTranslations();
-      isShowingTranslation = false;
-      updateToolsMenuState();
-      renderMarkdown(originalMarkdown);
-    }
     // Enter edit mode
     contentWrapper.classList.add('split-view');
     // Entering edit mode halves the viewer's width, so any widened table is now
@@ -3260,11 +2935,12 @@ function skipPastCodeBlock(content, insertPos) {
 // seven other places in this file that choose between the two stores already
 // use precisely this expression; saveMarkdownFile was the lone deviation.
 //
-// Also out of scope: while a translation is displayed, commitViewModeEdit
-// (:1499) writes edits to `translatedMarkdown` and leaves `originalMarkdown`
-// holding the pre-edit original, so a save in that state persists the document
-// rather than what is on screen. That is pre-existing and separate; this change
-// does not make it worse, since the alternative was arbitrary textarea bytes.
+// A previous incoherence here is now GONE BY REMOVAL rather than by fix: while
+// a translation was displayed, commitViewModeEdit wrote edits to
+// `translatedMarkdown` and left `originalMarkdown` holding the pre-edit
+// original, so a save in that state persisted the document rather than what was
+// on screen. Document translation has been removed, so there is exactly one
+// store in view mode and the two can no longer disagree.
 // In-flight saves, keyed by the request id echoed back by the main process.
 // A single slot is not enough: writes are asynchronous, several can be in
 // flight at once (Ctrl+S twice, or a save on one tab while the user moves to
@@ -3374,10 +3050,8 @@ ipcRenderer.on('save-markdown-result', (event, data) => {
       // that was never written.
       if (entry) {
         originalMarkdown = entry.content;
-        invalidateTranslationCache();
       } else if (isEditMode) {
         originalMarkdown = markdownEditor.value;
-        invalidateTranslationCache();
       }
       // Typing during the write leaves genuinely unsaved bytes behind;
       // declaring the document clean would lose them at the next exit without
@@ -4209,255 +3883,6 @@ document.addEventListener('wheel', (e) => {
     }
   }
 }, { passive: false });
-
-// ============================================
-// TRANSLATION SYSTEM (Batch + Parallel)
-// ============================================
-
-async function googleTranslate(text, targetLang) {
-  if (!text || !text.trim()) return text;
-  // SEC-09: performed in the main process. The renderer's CSP is
-  // `connect-src 'none'` - it has no network egress of its own by design - so
-  // this is an IPC hop rather than a fetch. Errors still reject, which is what
-  // batchGoogleTranslate's per-piece fallback relies on.
-  return await ipcRenderer.invoke('translate-text', { text, targetLang });
-}
-
-// Parallel batch translator — sends up to CONCURRENCY requests at once.
-// Per-piece fallback: if a single piece fails, it stays in the original language
-// rather than failing the entire translation.
-async function batchGoogleTranslate(pieces, targetLang) {
-  const CONCURRENCY = 6;
-  const results = new Array(pieces.length);
-
-  const todo = [];
-  pieces.forEach((t, i) => {
-    if (t && t.trim()) {
-      todo.push(i);
-    } else {
-      results[i] = t || '';
-    }
-  });
-
-  for (let start = 0; start < todo.length; start += CONCURRENCY) {
-    const batch = todo.slice(start, start + CONCURRENCY);
-    await Promise.all(batch.map(async (i) => {
-      try {
-        results[i] = await googleTranslate(pieces[i], targetLang);
-      } catch (e) {
-        console.warn('Piece translation failed, keeping original:', pieces[i]?.substring(0, 40), e.message);
-        results[i] = pieces[i]; // fallback: keep original text for this piece
-      }
-    }));
-  }
-
-  return results;
-}
-
-function parseMarkdownForTranslation(md) {
-  const segments = [];
-  let i = 0;
-  const len = md.length;
-
-  while (i < len) {
-    // Fenced code block
-    if (md.startsWith('```', i)) {
-      const endFence = md.indexOf('```', i + 3);
-      if (endFence !== -1) {
-        const block = md.slice(i, endFence + 3);
-        segments.push({ type: 'preserve', text: block });
-        i = endFence + 3;
-        continue;
-      }
-    }
-
-    // Note spans: noted-text, noted-image, note-label — translate their data attributes
-    const noteSpanMatch = md.slice(i).match(/^<span\s+class="(?:noted-text|noted-image|note-label)"[^>]*>[\s\S]*?<\/span>/);
-    if (noteSpanMatch) {
-      segments.push({ type: 'note-span', text: noteSpanMatch[0] });
-      i += noteSpanMatch[0].length;
-      continue;
-    }
-
-    // Inline code
-    if (md[i] === '`' && !md.startsWith('```', i)) {
-      const endTick = md.indexOf('`', i + 1);
-      if (endTick !== -1) {
-        segments.push({ type: 'preserve', text: md.slice(i, endTick + 1) });
-        i = endTick + 1;
-        continue;
-      }
-    }
-
-    // Image: ![alt](url)
-    const imgMatch = md.slice(i).match(/^!\[[^\]]*\]\([^)]*\)/);
-    if (imgMatch) {
-      segments.push({ type: 'preserve', text: imgMatch[0] });
-      i += imgMatch[0].length;
-      continue;
-    }
-
-    // Link: [text](url) — preserve URL, translate text
-    const linkMatch = md.slice(i).match(/^\[([^\]]*)\]\(([^)]*)\)/);
-    if (linkMatch) {
-      segments.push({ type: 'link', text: linkMatch[0], linkText: linkMatch[1], linkUrl: linkMatch[2] });
-      i += linkMatch[0].length;
-      continue;
-    }
-
-    // HTML block/tag — preserve entirely
-    const htmlMatch = md.slice(i).match(/^<[^>]+>/);
-    if (htmlMatch) {
-      segments.push({ type: 'preserve', text: htmlMatch[0] });
-      i += htmlMatch[0].length;
-      continue;
-    }
-
-    // Table separator row: |---|---|
-    const tableSepMatch = md.slice(i).match(/^(\|[\s:]*-{2,}[\s:]*)+\|?\s*(\n|$)/);
-    if (tableSepMatch) {
-      segments.push({ type: 'preserve', text: tableSepMatch[0] });
-      i += tableSepMatch[0].length;
-      continue;
-    }
-
-    // Regular text — collect until next special pattern
-    let end = i + 1;
-    while (end < len) {
-      if (md[end] === '`' || md[end] === '<' || md[end] === '!' || md[end] === '[') break;
-      if (md.startsWith('<span', end)) break;
-      end++;
-    }
-    segments.push({ type: 'translate', text: md.slice(i, end) });
-    i = end;
-  }
-
-  return segments;
-}
-
-async function translateMarkdownDocument(md, targetLang) {
-  const segments = parseMarkdownForTranslation(md);
-
-  // Phase 1: Collect all translatable pieces into a flat array
-  const pieces = [];
-  const blueprints = [];
-
-  for (const seg of segments) {
-    if (seg.type === 'preserve') {
-      blueprints.push({ type: 'literal', text: seg.text });
-    }
-    else if (seg.type === 'note-span') {
-      const bp = { type: 'note-span', html: seg.text, titleIdx: -1, contentIdx: -1, innerIdx: -1 };
-      const titleMatch = seg.text.match(/data-note-title="([^"]*)"/);
-      if (titleMatch && titleMatch[1]) { bp.titleIdx = pieces.length; pieces.push(titleMatch[1]); }
-      const contentMatch = seg.text.match(/data-note-content="([^"]*)"/);
-      if (contentMatch && contentMatch[1]) { bp.contentIdx = pieces.length; pieces.push(contentMatch[1]); }
-      const innerMatch = seg.text.match(/>([^<]+)<\/span>$/);
-      if (innerMatch && innerMatch[1]) { bp.innerIdx = pieces.length; pieces.push(innerMatch[1]); }
-      blueprints.push(bp);
-    }
-    else if (seg.type === 'link') {
-      blueprints.push({ type: 'link', url: seg.linkUrl, textIdx: pieces.length });
-      pieces.push(seg.linkText);
-    }
-    else if (seg.type === 'translate') {
-      const lines = seg.text.split('\n');
-      const lineInfos = [];
-      for (const line of lines) {
-        if (!line.trim()) { lineInfos.push({ empty: true, original: line }); continue; }
-        const tableSep = line.match(/^(\|[\s:]*-{2,}[\s:]*)+\|?\s*$/);
-        if (tableSep) { lineInfos.push({ empty: true, original: line }); continue; }
-        const pm = line.match(/^(\s*(?:#{1,6}\s+|[-*+]\s+|\d+\.\s+|>\s*|\|\s*))(.*)/);
-        if (pm && pm[1].trimStart().startsWith('|')) {
-          // Table row — each cell is a separate piece
-          const cells = line.split('|');
-          const cellInfos = cells.map(cell => {
-            if (cell.trim()) {
-              const ci = { hasContent: true, idx: pieces.length };
-              pieces.push(cell.trim());
-              return ci;
-            }
-            return { hasContent: false, original: cell };
-          });
-          lineInfos.push({ isTable: true, cells: cellInfos });
-        } else if (pm && pm[2].trim()) {
-          const isHeading = /^#{1,6}\s+$/.test(pm[1]);
-          lineInfos.push({ prefix: pm[1], idx: pieces.length, isHeading, original: isHeading ? pm[2] : undefined });
-          pieces.push(pm[2]);
-        } else if (line.trim()) {
-          lineInfos.push({ prefix: '', idx: pieces.length });
-          pieces.push(line);
-        } else {
-          lineInfos.push({ empty: true, original: line });
-        }
-      }
-      blueprints.push({ type: 'text', lineInfos });
-    }
-    else {
-      blueprints.push({ type: 'literal', text: seg.text });
-    }
-  }
-
-  // Phase 2: Check piece cache, only translate uncached pieces
-  const translated = new Array(pieces.length);
-  const uncachedIndices = [];
-  const uncachedTexts = [];
-
-  for (let i = 0; i < pieces.length; i++) {
-    const text = pieces[i];
-    if (!text || !text.trim()) {
-      translated[i] = text || '';
-      continue;
-    }
-    const cached = translationPieceCache.get(text);
-    if (cached !== undefined) {
-      translated[i] = cached;
-    } else {
-      uncachedIndices.push(i);
-      uncachedTexts.push(text);
-    }
-  }
-
-  if (uncachedTexts.length > 0) {
-    const newTranslations = await batchGoogleTranslate(uncachedTexts, targetLang);
-    for (let j = 0; j < uncachedIndices.length; j++) {
-      const pi = uncachedIndices[j];
-      translated[pi] = newTranslations[j];
-      translationPieceCache.set(pieces[pi], newTranslations[j]);
-    }
-  }
-
-  // Phase 3: Reconstruct document from blueprints
-  const result = [];
-  for (const bp of blueprints) {
-    switch (bp.type) {
-      case 'literal':
-        result.push(bp.text);
-        break;
-      case 'note-span': {
-        let html = bp.html;
-        if (bp.titleIdx >= 0) html = html.replace(/data-note-title="[^"]*"/, `data-note-title="${translated[bp.titleIdx].replace(/"/g, '&quot;')}"`);
-        if (bp.contentIdx >= 0) html = html.replace(/data-note-content="[^"]*"/, `data-note-content="${translated[bp.contentIdx].replace(/"/g, '&quot;')}"`);
-        if (bp.innerIdx >= 0) html = html.replace(/>([^<]+)<\/span>$/, `>${translated[bp.innerIdx]}</span>`);
-        result.push(html);
-        break;
-      }
-      case 'link':
-        result.push(`[${translated[bp.textIdx]}](${bp.url})`);
-        break;
-      case 'text':
-        result.push(bp.lineInfos.map(li => {
-          if (li.empty) return li.original;
-          if (li.isTable) return li.cells.map(c => c.hasContent ? ' ' + translated[c.idx] + ' ' : c.original).join('|');
-          if (li.isHeading) return li.prefix + translated[li.idx];
-          return li.prefix + translated[li.idx];
-        }).join('\n'));
-        break;
-    }
-  }
-
-  return result.join('');
-}
 
 // ============================================
 // RENDER OPTIMIZATION
@@ -5761,9 +5186,6 @@ function extractTableData(table) {
 
 // Handle file opened
 ipcRenderer.on('file-opened', async (event, data) => {
-  // Reset translation state and start background translation
-  resetTranslationState();
-
   // Clear undo/redo history on new file
   historyClear();
   _lastRenderedContent = null;
@@ -5818,9 +5240,6 @@ ipcRenderer.on('file-opened', async (event, data) => {
     // Fallback for single file (backwards compatibility)
     saveRecentFile(data.path);
   }
-
-  // Start background translation immediately
-  startBackgroundTranslation();
 });
 
 // Handle file changed externally
@@ -5860,8 +5279,6 @@ ipcRenderer.on('file-not-found', (event, data) => {
 // Handle file reload result
 ipcRenderer.on('file-reload-result', async (event, data) => {
   if (data.success) {
-    // Reset translation and store new content
-    resetTranslationState();
     originalMarkdown = data.content;
 
     // If in edit mode, update editor content
@@ -5878,9 +5295,6 @@ ipcRenderer.on('file-reload-result', async (event, data) => {
 
     // Re-render the markdown
     await renderMarkdown(data.content);
-
-    // Start background translation
-    startBackgroundTranslation();
 
     showNotification(i18n('notif.fileReloaded'), 2000);
   } else {
@@ -6413,22 +5827,10 @@ function applyMarkdownFormat(wrapper, multiline = false) {
           savedSelection +
           markdownContent.substring(textIndex + savedSelection.length + wLen);
 
-        const syncFn = () => {
-          const origText = findOriginalForTranslated(savedSelection);
-          const srcText = origText || savedSelection;
-          const oi = findNthOccurrence(originalMarkdown, wrapper + srcText + wrapper, savedSelectionOccurrence);
-          if (oi !== -1) {
-            originalMarkdown =
-              originalMarkdown.substring(0, oi) +
-              srcText +
-              originalMarkdown.substring(oi + wrapper.length + srcText.length + wrapper.length);
-          }
-        };
-
         if (domTag && patchRemoveFormatInDOM()) {
-          replaceSourceSilently(newContent, syncFn);
+          replaceSourceSilently(newContent);
         } else {
-          commitViewModeEdit(newContent, scrollPosition, syncFn);
+          commitViewModeEdit(newContent, scrollPosition);
         }
       } else {
         // ADD formatting
@@ -6441,28 +5843,10 @@ function applyMarkdownFormat(wrapper, multiline = false) {
           formattedText +
           markdownContent.substring(textIndex + savedSelection.length);
 
-        const syncFn = () => {
-          const origText = findOriginalForTranslated(savedSelection);
-          if (origText) {
-            const oi = findNthOccurrence(originalMarkdown, origText, savedSelectionOccurrence);
-            if (oi !== -1) {
-              let origFormatted;
-              if (formattedText.startsWith('- ')) {
-                const lines = origText.split('\n');
-                origFormatted = lines.map(line => line.trim() ? '- ' + line : line).join('\n');
-              } else {
-                const w = formattedText.substring(0, formattedText.indexOf(savedSelection));
-                origFormatted = w + origText + w;
-              }
-              originalMarkdown = originalMarkdown.substring(0, oi) + origFormatted + originalMarkdown.substring(oi + origText.length);
-            }
-          }
-        };
-
         if (domTag && patchInlineFormatInDOM(domTag)) {
-          replaceSourceSilently(newContent, syncFn);
+          replaceSourceSilently(newContent);
         } else {
-          commitViewModeEdit(newContent, scrollPosition, syncFn);
+          commitViewModeEdit(newContent, scrollPosition);
         }
       }
     } else {
@@ -6545,23 +5929,11 @@ ctxCode.addEventListener('click', () => {
         formattedText +
         markdownContent.substring(textIndex + savedSelection.length);
 
-      const syncFn = () => {
-        const origText = findOriginalForTranslated(savedSelection);
-        if (origText) {
-          const oi = findNthOccurrence(originalMarkdown, origText, savedSelectionOccurrence);
-          if (oi !== -1) {
-            const isML = origText.includes('\n');
-            const origFmt = isML ? ('```\n' + origText + '\n```') : ('`' + origText + '`');
-            originalMarkdown = originalMarkdown.substring(0, oi) + origFmt + originalMarkdown.substring(oi + origText.length);
-          }
-        }
-      };
-
       // For single-line (inline) code, try direct DOM patch to avoid full re-render
       if (!isMultiline && patchInlineFormatInDOM('code')) {
-        replaceSourceSilently(newContent, syncFn);
+        replaceSourceSilently(newContent);
       } else {
-        commitViewModeEdit(newContent, scrollPosition, syncFn);
+        commitViewModeEdit(newContent, scrollPosition);
       }
 
       showNotification(i18n('notif.codeApplied'), 1500);
@@ -6662,26 +6034,11 @@ ctxRemoveFormat.addEventListener('click', () => {
         plainText +
         markdownContent.substring(foundIndex + foundPattern.length);
 
-      const syncFn = () => {
-        // Sync to originalMarkdown: remove formatting of corresponding original text
-        const origText = findOriginalForTranslated(plainText);
-        if (origText) {
-          const origPatterns = [`**${origText}**`, `*${origText}*`, `\`${origText}\``, `***${origText}***`];
-          for (const op of origPatterns) {
-            const oi = originalMarkdown.indexOf(op);
-            if (oi !== -1) {
-              originalMarkdown = originalMarkdown.substring(0, oi) + origText + originalMarkdown.substring(oi + op.length);
-              break;
-            }
-          }
-        }
-      };
-
       // Try direct DOM patch to avoid full re-render
       if (patchRemoveFormatInDOM()) {
-        replaceSourceSilently(newContent, syncFn);
+        replaceSourceSilently(newContent);
       } else {
-        commitViewModeEdit(newContent, scrollPosition, syncFn);
+        commitViewModeEdit(newContent, scrollPosition);
       }
 
       showNotification(i18n('notif.formatRemoved'), 1500);
@@ -6956,22 +6313,7 @@ ctxDeleteNote.addEventListener('click', () => {
 
       // Update source silently (no full re-render)
       const nid = noteEl.getAttribute('data-note-id');
-      if (isShowingTranslation && translatedMarkdown) {
-        translatedMarkdown = newContent;
-        // Sync note removal to originalMarkdown
-        const origMatch = nid ? findNoteSpanById(originalMarkdown, nid) : findNoteSpanInSource(originalMarkdown, noteEl);
-        if (origMatch) {
-          const origReplacement = isLabel ? '' : origMatch[1];
-          originalMarkdown = originalMarkdown.substring(0, origMatch.index) + origReplacement + originalMarkdown.substring(origMatch.index + origMatch[0].length);
-        }
-        clearTimeout(enViewResyncTimer);
-        enViewResyncTimer = setTimeout(() => {
-          if (isShowingTranslation && originalMarkdown) startBackgroundTranslation(true);
-        }, 2000);
-      } else {
-        originalMarkdown = newContent;
-        invalidateTranslationCache();
-      }
+      originalMarkdown = newContent;
       hasUnsavedChanges = true;
 
       // DOM patch — preserves mermaid diagrams and avoids full re-render
@@ -7099,35 +6441,7 @@ noteSaveBtn.addEventListener('click', () => {
 
         // Update source silently (no full re-render)
         const nid = editingNoteElement.getAttribute('data-note-id');
-        if (isShowingTranslation && translatedMarkdown) {
-          translatedMarkdown = newContent;
-          // Sync to originalMarkdown
-          const origMatch = nid ? findNoteSpanById(originalMarkdown, nid) : findNoteSpanInSource(originalMarkdown, editingNoteElement);
-          if (origMatch) {
-            const origInner = origMatch[1];
-            let origNewHtml;
-            if (isNoteLabel) {
-              const escLabel2 = labelName.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-              origNewHtml = `<span class="note-label"${noteIdAttr} data-note-title="${escTitle}" data-note-content="${escContent}" style="background-color:${color}${labelPosStyle}">${escLabel2}</span>`;
-            } else if (isNoteImage) {
-              const r2 = parseInt(color.slice(1,3), 16), g2 = parseInt(color.slice(3,5), 16), b2 = parseInt(color.slice(5,7), 16);
-              origNewHtml = `<span class="noted-image"${noteIdAttr} data-note-title="${escTitle}" data-note-content="${escContent}" style="background-color:rgba(${r2},${g2},${b2},0.15)">${origInner}</span>`;
-            } else {
-              const _r3 = parseInt(color.slice(1,3), 16), _g3 = parseInt(color.slice(3,5), 16), _b3 = parseInt(color.slice(5,7), 16);
-              const _ns3 = `background-color:rgba(${_r3},${_g3},${_b3},0.25);text-decoration:underline;text-decoration-color:${color};text-decoration-thickness:2px`;
-              origNewHtml = `<span class="noted-text"${noteIdAttr} data-note-title="${escTitle}" data-note-content="${escContent}" data-note-color="${color}" style="${_ns3}">${origInner}</span>`;
-            }
-            originalMarkdown = originalMarkdown.substring(0, origMatch.index) + origNewHtml + originalMarkdown.substring(origMatch.index + origMatch[0].length);
-            translateNoteAttrsToOriginal(nid, title, content);
-          }
-          clearTimeout(enViewResyncTimer);
-          enViewResyncTimer = setTimeout(() => {
-            if (isShowingTranslation && originalMarkdown) startBackgroundTranslation(true);
-          }, 2000);
-        } else {
-          originalMarkdown = newContent;
-          invalidateTranslationCache();
-        }
+        originalMarkdown = newContent;
         hasUnsavedChanges = true;
 
         // DOM patch — build updates based on note type, preserves mermaid diagrams
@@ -7238,14 +6552,7 @@ noteSaveBtn.addEventListener('click', () => {
           const idx = hit.index;
           const scrollPosition = contentWrapper.scrollTop;
           const newContent = markdownContent.substring(0, idx) + noteHtml + markdownContent.substring(idx + mdImgPattern.length);
-          commitViewModeEdit(newContent, scrollPosition, () => {
-            // Image src same in both — apply to originalMarkdown too. Matched
-            // again rather than reusing `idx`, because originalMarkdown is a
-            // different buffer and the offsets need not line up.
-            const oh = findMarkdownImage(originalMarkdown, imgAlt, imgSrc);
-            if (oh) originalMarkdown = originalMarkdown.substring(0, oh.index) + noteHtml + originalMarkdown.substring(oh.index + oh.pattern.length);
-            translateNoteAttrsToOriginal(noteId, title, content);
-          });
+          commitViewModeEdit(newContent, scrollPosition);
           found = true;
         }
         if (!found) {
@@ -7254,11 +6561,7 @@ noteSaveBtn.addEventListener('click', () => {
           if (match) {
             const scrollPosition = contentWrapper.scrollTop;
             const newContent = markdownContent.replace(match[0], noteHtml);
-            commitViewModeEdit(newContent, scrollPosition, () => {
-              const origMatch = originalMarkdown.match(imgRegex);
-              if (origMatch) originalMarkdown = originalMarkdown.replace(origMatch[0], noteHtml);
-              translateNoteAttrsToOriginal(noteId, title, content);
-            });
+            commitViewModeEdit(newContent, scrollPosition);
             found = true;
           }
         }
@@ -7272,9 +6575,7 @@ noteSaveBtn.addEventListener('click', () => {
         if (textIndex !== -1) {
           const scrollPosition = contentWrapper.scrollTop;
           const newContent = markdownContent.substring(0, textIndex) + noteHtml + markdownContent.substring(textIndex + savedSelection.length);
-          commitViewModeEdit(newContent, scrollPosition, () => {
-            syncNoteAddToOriginal(noteHtml, savedSelection, noteId, title, content, savedSelectionOccurrence);
-          });
+          commitViewModeEdit(newContent, scrollPosition);
           showNotification(i18n('notif.noteAdded'), 1500);
         } else {
           showNotification(i18n('notif.textNotFound'), 2000);
@@ -7317,11 +6618,7 @@ noteSaveBtn.addEventListener('click', () => {
       const scrollPosition = contentWrapper.scrollTop;
       const activeContent = getActiveMarkdown();
       const newContent = activeContent + '\n' + noteHtml;
-      commitViewModeEdit(newContent, scrollPosition, () => {
-        // Also add label to originalMarkdown
-        originalMarkdown = originalMarkdown + '\n' + noteHtml;
-        translateNoteAttrsToOriginal(noteId, title, content);
-      });
+      commitViewModeEdit(newContent, scrollPosition);
 
       showNotification(i18n('notif.noteAdded'), 1500);
     }
@@ -7501,36 +6798,12 @@ function partialDOMReplace(container, oldText, newText, occurrence) {
 // Update markdown source silently (no re-render)
 function updateSourceSilently(oldText, newText, occurrence) {
   historyPush(originalMarkdown);
-  if (isShowingTranslation && translatedMarkdown) {
-    const ti = findNthOccurrence(translatedMarkdown, oldText, occurrence);
-    if (ti !== -1) {
-      translatedMarkdown =
-        translatedMarkdown.substring(0, ti) +
-        newText +
-        translatedMarkdown.substring(ti + oldText.length);
-    }
-    // Sync to originalMarkdown
-    const origText = findOriginalForTranslated(oldText);
-    if (origText) {
-      const oi = findNthOccurrence(originalMarkdown, origText, occurrence);
-      if (oi !== -1) {
-        originalMarkdown = originalMarkdown.substring(0, oi) + newText + originalMarkdown.substring(oi + origText.length);
-      }
-    } else {
-      const oi = findNthOccurrence(originalMarkdown, oldText, occurrence);
-      if (oi !== -1) {
-        originalMarkdown = originalMarkdown.substring(0, oi) + newText + originalMarkdown.substring(oi + oldText.length);
-      }
-    }
-  } else {
-    const ti = findNthOccurrence(originalMarkdown, oldText, occurrence);
-    if (ti !== -1) {
-      originalMarkdown =
-        originalMarkdown.substring(0, ti) +
-        newText +
-        originalMarkdown.substring(ti + oldText.length);
-    }
-    invalidateTranslationCache();
+  const ti = findNthOccurrence(originalMarkdown, oldText, occurrence);
+  if (ti !== -1) {
+    originalMarkdown =
+      originalMarkdown.substring(0, ti) +
+      newText +
+      originalMarkdown.substring(ti + oldText.length);
   }
   hasUnsavedChanges = true;
   updateUnsavedIndicator();
@@ -7589,20 +6862,7 @@ editTextSaveBtn.addEventListener('click', () => {
         newText +
         activeSource.substring(textIndex + editTextOriginal.length);
 
-      commitViewModeEdit(newContent, scrollPosition, () => {
-        const origText = findOriginalForTranslated(editTextOriginal);
-        if (origText) {
-          const oi = findNthOccurrence(originalMarkdown, origText, editTextOccurrence);
-          if (oi !== -1) {
-            originalMarkdown = originalMarkdown.substring(0, oi) + newText + originalMarkdown.substring(oi + origText.length);
-          }
-        } else {
-          const oi = findNthOccurrence(originalMarkdown, editTextOriginal, editTextOccurrence);
-          if (oi !== -1) {
-            originalMarkdown = originalMarkdown.substring(0, oi) + newText + originalMarkdown.substring(oi + editTextOriginal.length);
-          }
-        }
-      });
+      commitViewModeEdit(newContent, scrollPosition);
 
       showNotification(i18n('notif.textEdited'), 1500);
     }
@@ -7999,7 +7259,6 @@ function insertImageMarkdown(imageMarkdown, originalSize, compressedSize) {
               + content.substring(imgEndIdx + 1);
             const scrollPosition = contentWrapper.scrollTop;
             originalMarkdown = newContent;
-            invalidateTranslationCache();
             renderMarkdown(originalMarkdown, 'full').then(() => {
               contentWrapper.scrollTop = scrollPosition;
             });
@@ -8019,13 +7278,7 @@ function insertImageMarkdown(imageMarkdown, originalSize, compressedSize) {
     const after = activeContent.substring(insertPos);
     const newContent = before + '\n' + imageMarkdown + '\n' + after;
 
-    commitViewModeEdit(newContent, scrollPosition, () => {
-      // Also insert image into originalMarkdown at similar position
-      const origInsertPos = Math.min(insertPos, originalMarkdown.length);
-      const origBefore = originalMarkdown.substring(0, origInsertPos);
-      const origAfter = originalMarkdown.substring(origInsertPos);
-      originalMarkdown = origBefore + '\n' + imageMarkdown + '\n' + origAfter;
-    });
+    commitViewModeEdit(newContent, scrollPosition);
   }
 
   if (originalSize && compressedSize) {
@@ -8151,20 +7404,7 @@ ctxDeleteImage.addEventListener('click', () => {
 
     const scrollPosition = contentWrapper.scrollTop;
     const newContent = content.substring(0, removeStart) + content.substring(removeEnd);
-    commitViewModeEdit(newContent, scrollPosition, () => {
-      // Also delete from originalMarkdown (same image pattern)
-      const origStartIdx = originalMarkdown.indexOf(searchStart);
-      if (origStartIdx !== -1) {
-        const origEndIdx = originalMarkdown.indexOf(')', origStartIdx + searchStart.length);
-        if (origEndIdx !== -1) {
-          let oRemoveStart = origStartIdx;
-          let oRemoveEnd = origEndIdx + 1;
-          if (oRemoveStart > 0 && originalMarkdown[oRemoveStart - 1] === '\n') oRemoveStart--;
-          if (oRemoveEnd < originalMarkdown.length && originalMarkdown[oRemoveEnd] === '\n') oRemoveEnd++;
-          originalMarkdown = originalMarkdown.substring(0, oRemoveStart) + originalMarkdown.substring(oRemoveEnd);
-        }
-      }
-    });
+    commitViewModeEdit(newContent, scrollPosition);
   }
 
   showNotification(i18n('notif.imageDeleted'), 1500);
@@ -8319,7 +7559,6 @@ ctxAddToSlider && ctxAddToSlider.addEventListener('click', () => {
   } else {
     const scrollPosition = contentWrapper.scrollTop;
     originalMarkdown = newContent;
-    invalidateTranslationCache();
     renderMarkdown(originalMarkdown, 'full').then(() => {
       contentWrapper.scrollTop = scrollPosition;
     });
@@ -8343,7 +7582,6 @@ function applySliderImageAdd(newImgMd, insertPos) {
   } else {
     const scrollPosition = contentWrapper.scrollTop;
     originalMarkdown = newContent;
-    invalidateTranslationCache();
     renderMarkdown(originalMarkdown, 'full').then(() => {
       contentWrapper.scrollTop = scrollPosition;
     });
@@ -8497,7 +7735,6 @@ function deleteMermaidFromSource(svgTexts, mermaidEl) {
     hasUnsavedChanges = true;
     updateUnsavedIndicator();
   }
-  invalidateTranslationCache();
   syncEditorWithStore();
   showNotification('Mermaid diagram deleted', 1500);
 }
@@ -8580,7 +7817,6 @@ function deleteTableFromSource(tableEl, headers, cellTexts = []) {
     hasUnsavedChanges = true;
     updateUnsavedIndicator();
   }
-  invalidateTranslationCache();
   syncEditorWithStore();
   showNotification('Table deleted', 1500);
 }
@@ -9006,7 +8242,6 @@ async function insertMermaidFromDialog() {
       updateUnsavedIndicator();
     } else {
       originalMarkdown = newContent;
-      invalidateTranslationCache();
       hasUnsavedChanges = true;
     }
     syncEditorWithStore();
@@ -9042,7 +8277,6 @@ async function insertMermaidFromDialog() {
       const newContent = before + mermaidBlock + after;
 
       originalMarkdown = newContent;
-      invalidateTranslationCache();
       hasUnsavedChanges = true;
       syncEditorWithStore();
 
@@ -9208,7 +8442,6 @@ function insertTableFromDialog() {
       updateUnsavedIndicator();
     } else {
       originalMarkdown = newContent;
-      invalidateTranslationCache();
       hasUnsavedChanges = true;
     }
     syncEditorWithStore();
@@ -9243,7 +8476,6 @@ function insertTableFromDialog() {
       const newContent = before + '\n' + md + '\n' + after;
 
       originalMarkdown = newContent;
-      invalidateTranslationCache();
       hasUnsavedChanges = true;
       syncEditorWithStore();
 
@@ -9304,12 +8536,7 @@ function insertContentAtCursor(content) {
     const before = activeContent.substring(0, insertPos);
     const after = activeContent.substring(insertPos);
     const newContent = before + content + after;
-    commitViewModeEdit(newContent, scrollPosition, () => {
-      const origPos = Math.min(insertPos, originalMarkdown.length);
-      const origBefore = originalMarkdown.substring(0, origPos);
-      const origAfter = originalMarkdown.substring(origPos);
-      originalMarkdown = origBefore + content + origAfter;
-    });
+    commitViewModeEdit(newContent, scrollPosition);
   }
   showNotification('Inserted', 1000);
 }
@@ -9537,14 +8764,7 @@ ctxNotesPanelDelete.addEventListener('click', () => {
         replacement +
         activeSource.substring(match.index + match[0].length);
 
-      commitViewModeEdit(newContent, scrollPosition, () => {
-        const nid = noteEl.getAttribute('data-note-id');
-        const origMatch = nid ? findNoteSpanById(originalMarkdown, nid) : findNoteSpanInSource(originalMarkdown, noteEl);
-        if (origMatch) {
-          const origReplacement = isLabel ? '' : origMatch[1];
-          originalMarkdown = originalMarkdown.substring(0, origMatch.index) + origReplacement + originalMarkdown.substring(origMatch.index + origMatch[0].length);
-        }
-      });
+      commitViewModeEdit(newContent, scrollPosition);
 
       showNotification(i18n('notif.noteRemoved'), 1500);
     } else {

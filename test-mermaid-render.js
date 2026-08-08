@@ -2667,14 +2667,6 @@ async function run(win) {
               String.fromCharCode(96, 96, 96) + 'mermaid'
             ) >= 0,
           dirtyAfter,
-          // The insert calls invalidateTranslationCache(), which nulls the
-          // translation cache and - ONLY if currentFilePath is also set - kicks
-          // off a background translation this scenario never restores or awaits.
-          // The two reviewers split on how much that matters, so measure the
-          // precondition instead of arguing it: with no file path there is no
-          // background work to leak, and the assertion below says so out loud
-          // the day a future scenario starts opening a real file here.
-          noFilePath: !window.currentFilePath,
           container: !!container,
           reattached: !!el && el.isConnected && el.parentElement === container,
           labelled: !!el && /Mermaid Rendering Error/.test(el.textContent),
@@ -2731,13 +2723,6 @@ async function run(win) {
     JSON.stringify(dialogRun),
   );
   check(
-    // See noFilePath above: this pins the precondition that makes the
-    // un-restored invalidateTranslationCache() side effect harmless here.
-    "13e2 runs with no file open, so its translation-cache invalidation is inert",
-    dialogRun.noFilePath === true,
-    JSON.stringify(dialogRun),
-  );
-  check(
     "the dialog insert error path renders a hostile message as text, not markup",
     dialogRun.injected === false && dialogRun.textShown === true,
     JSON.stringify(dialogRun),
@@ -2774,17 +2759,7 @@ async function run(win) {
         // property with no setter.
         bridged:
           typeof Object.getOwnPropertyDescriptor(window, 'originalMarkdown')
-            .set === 'function',
-        // PRECONDITION. getActiveMarkdown() returns translatedMarkdown instead
-        // whenever a translation is on screen (renderer.js:1363), so with one
-        // showing this probe would report a broken bridge that is in fact fine.
-        // isShowingTranslation has no window binding either; its observable is
-        // the class updateToolsMenuState() paints (renderer.js:1276). Nothing in
-        // this suite translates, so this should always be true - it is here so
-        // that a future scenario leaving a translation up fails with the reason
-        // attached instead of as a mystery bridge failure.
-        noTranslationShowing:
-          !document.getElementById('toolsBtn').classList.contains('translated')
+            .set === 'function'
       };
     })()
   `);
@@ -2792,8 +2767,7 @@ async function run(win) {
     "window.originalMarkdown really writes through to the renderer's own binding",
     bridge.seen === true &&
       bridge.restored === true &&
-      bridge.bridged === true &&
-      bridge.noTranslationShowing === true,
+      bridge.bridged === true,
     JSON.stringify(bridge),
   );
 

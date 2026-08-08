@@ -17,6 +17,7 @@
 // each one explicitly and checks the shape the call sites actually depend on.
 
 const { app } = require("electron");
+const { ipcMain } = require("electron");
 const fs = require("fs");
 const path = require("path");
 
@@ -127,6 +128,68 @@ app.whenReady().then(async () => {
   require("html-to-docx");
   require("electron-updater");
   results.push(`INFO  warm re-require of both modules: ${Date.now() - t0}ms`);
+
+  // --- 4. The update check must not carry a persistent identifier ----------
+  // electron-updater mints a random UUID, persists it to userData/.updaterId
+  // and sends it as `x-user-staging-id` on every check. It is for staged
+  // rollouts, which this project does not use, and it makes every check from
+  // one machine linkable to every other one. main.js blanks it in
+  // configureAutoUpdater().
+  //
+  // The oracle is the WIRE, not the source and not the configured object: a
+  // real HTTP server stands in for the feed and reports the headers as
+  // received. A source regex would pass the moment the assignment moved, and
+  // reading `requestHeaders` back would only confirm the value was stored,
+  // not that it reached the request. R169 proves it fails when reverted.
+  const http = require("http");
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    seen.push({ ...req.headers });
+    res.writeHead(200, { "content-type": "text/yaml" });
+    res.end("version: 99.0.0\npath: x.exe\nsha512: aaa\nreleaseDate: '2026-01-01'\n");
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+
+  // Drives the real product path: this handler calls getAutoUpdater(), which
+  // is what runs configureAutoUpdater() exactly once.
+  ipcMain.emit("check-for-updates");
+
+  const { autoUpdater } = require("electron-updater");
+  autoUpdater.logger = null;
+  autoUpdater.forceDevUpdateConfig = true; // dev builds have no app-update.yml
+  autoUpdater.setFeedURL({
+    provider: "generic",
+    url: `http://127.0.0.1:${server.address().port}/`,
+  });
+  let checkDetail = "";
+  try {
+    await autoUpdater.checkForUpdates();
+  } catch (e) {
+    checkDetail = e.message.slice(0, 120);
+  }
+  server.close();
+
+  // Vacuity guard: an empty header set proves nothing if no request was made.
+  check(
+    "the update check really reached the stand-in feed",
+    seen.length > 0,
+    `${seen.length} requests; ${checkDetail}`,
+  );
+
+  const stagingIds = seen.map((h) => h["x-user-staging-id"]);
+  check(
+    "no update request carries a staging-id value",
+    seen.length > 0 && stagingIds.every((v) => !v),
+    JSON.stringify(stagingIds),
+  );
+
+  // The identifier is the payload; a bare empty header name is inert. Recorded
+  // rather than asserted absent, because `computeFinalHeaders` can only
+  // override the value and not remove the key.
+  results.push(
+    `INFO  update request headers: user-agent=${seen[0] ? seen[0]["user-agent"] : "n/a"}, ` +
+      `x-user-staging-id present=${seen[0] ? "x-user-staging-id" in seen[0] : "n/a"}`,
+  );
 
   clearTimeout(watchdog);
   finish();
