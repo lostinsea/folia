@@ -3,8 +3,12 @@
 //
 // PERF-AUDIT.md measured require("html-to-docx") at 370.1ms and
 // require("electron-updater") at 174.7ms — 544.8ms of main-thread work before
-// the window can even be created, paid by every launch regardless of whether
-// the session ever exports a DOCX or checks for an update.
+// the window could even be created, paid by every launch regardless of whether
+// the session ever exported a DOCX or checked for an update. html-to-docx has
+// since been removed outright along with Word export, which retires the larger
+// of the two costs by deletion rather than by deferral; electron-updater is now
+// the only production dependency, and the lazy-load property still has to hold
+// for it.
 //
 // This harness IS the Electron main script. It requires ./main.js, so main.js
 // runs in this very process and shares this process's module registry. That
@@ -12,9 +16,11 @@
 // — not a grep over source text, which would pass the moment someone moved the
 // require behind an alias.
 //
-// Both modules must remain genuinely loadable, otherwise "not in the cache"
-// would be trivially satisfiable by deleting the dependency. Section 2 loads
-// each one explicitly and checks the shape the call sites actually depend on.
+// The module must remain genuinely loadable, otherwise "not in the cache" would
+// be trivially satisfiable by deleting the dependency — which is exactly what
+// happened to html-to-docx, and is why that pair of assertions was removed
+// together rather than leaving a load check standing over a deleted package.
+// Section 2 loads it explicitly and checks the shape the call sites depend on.
 
 const { app } = require("electron");
 const { ipcMain } = require("electron");
@@ -60,14 +66,7 @@ app.whenReady().then(async () => {
   // loading electron-updater eagerly in dev, it would have done so by now.
   await new Promise((r) => setTimeout(r, 3000));
 
-  // --- 1. Neither heavy module is loaded by startup ------------------------
-  const docxCached = cachedModulePaths("html-to-docx");
-  check(
-    "html-to-docx is not required during startup",
-    docxCached.length === 0,
-    JSON.stringify(docxCached.slice(0, 3)),
-  );
-
+  // --- 1. The heavy module is not loaded by startup ------------------------
   const updaterCached = cachedModulePaths("electron-updater");
   check(
     "electron-updater is not required during startup",
@@ -84,20 +83,8 @@ app.whenReady().then(async () => {
     String(Object.keys(require.cache).length),
   );
 
-  // --- 2. Both modules are still loadable and still the right shape --------
+  // --- 2. The module is still loadable and still the right shape -----------
   // Guards against "optimising" startup by breaking the feature outright.
-  let docxOk = false;
-  let docxDetail = "";
-  try {
-    const HTMLtoDOCX = require("html-to-docx");
-    // Call sites do: await HTMLtoDOCX(html, null, options)
-    docxOk = typeof HTMLtoDOCX === "function";
-    docxDetail = typeof HTMLtoDOCX;
-  } catch (e) {
-    docxDetail = e.message;
-  }
-  check("html-to-docx still loads and is callable", docxOk, docxDetail);
-
   let updaterOk = false;
   let updaterDetail = "";
   try {
@@ -119,15 +106,14 @@ app.whenReady().then(async () => {
     updaterDetail,
   );
 
-  // --- 3. Requiring them really is expensive ------------------------------
+  // --- 3. Requiring it really is expensive --------------------------------
   // Not an optimisation check — it is the evidence that section 1 is worth
-  // asserting at all. Both are in the cache now, so this measures a warm
+  // asserting at all. It is in the cache now, so this measures a warm
   // re-require and is deliberately NOT compared against a threshold; the
   // number is recorded for the reader.
   const t0 = Date.now();
-  require("html-to-docx");
   require("electron-updater");
-  results.push(`INFO  warm re-require of both modules: ${Date.now() - t0}ms`);
+  results.push(`INFO  warm re-require of electron-updater: ${Date.now() - t0}ms`);
 
   // --- 4. The update check must not carry a persistent identifier ----------
   // electron-updater mints a random UUID, persists it to userData/.updaterId

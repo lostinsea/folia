@@ -77,6 +77,15 @@ app.whenReady().then(async () => {
 > **Status: fixed** (commit `2416fc3`). `html-to-docx` and `electron-updater` are now
 > loaded through `getHTMLtoDOCX()` / `getAutoUpdater()` on first use. Guarded by
 > `test-startup-perf.js`, which reads the real `require.cache`.
+>
+> **Superseded in part.** Word export and `html-to-docx` were later removed from
+> the product entirely, which retires the larger half of this finding by deletion
+> rather than by deferral: the 370.1ms is no longer merely deferred to first
+> export, it cannot be paid at all. `electron-updater` is now the only production
+> dependency and is still lazy-loaded, so the assertion that survives in
+> `test-startup-perf.js` covers it alone. The measurements below are left as
+> recorded — they were taken when both modules were present, and rewriting them
+> would falsify the audit rather than update it.
 
 - **File:line:** `main.js:49-50`, `main.js:66`
 - **Code:**
@@ -92,7 +101,7 @@ app.whenReady().then(async () => {
   - `require("electron-updater")`: **174.7ms**
   - Combined avoidable startup blocking: **544.8ms**
   - Window first paint after `loadFile()`: **594ms**
-- **Specific proposed alternative:** lazy-load `html-to-docx` inside the export handler, and lazy-load `electron-updater` only when packaged and after the first window is shown (or on first manual update check).
+- **Specific proposed alternative:** lazy-load `html-to-docx` inside the export handler, and lazy-load `electron-updater` only when packaged and after the first window is shown (or on first manual update check). *(The `html-to-docx` half is no longer applicable — the package was uninstalled with the Word export feature, so its 370.1ms is not deferred but gone. Only the `electron-updater` half of this proposal is still live, and it is implemented.)*
 - **Estimated gain:** roughly **0.5s off cold startup**.
 
 ### PERF-02 — Search does full-document DOM surgery on every input event

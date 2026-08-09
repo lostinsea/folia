@@ -123,7 +123,6 @@ scaling and font settings.
 - **Inline editing** - right-click any selected text to edit it in place
 - **Undo / redo** across view-mode edits
 - **PDF export** - forced to light colours so output is printer-friendly regardless of theme
-- **Word export** - `.docx`, with Mermaid diagrams rasterised
 - Unsaved-changes indicator and confirmation prompts
 
 ### Mermaid and table dialogs

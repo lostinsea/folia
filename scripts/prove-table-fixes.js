@@ -1705,57 +1705,44 @@ const REVERTS = [
     to: "## Modifying Customizations\r",
     expect: [/no tracked source file contains a lone CR/],
   },
-  {
-    id: "R157",
-    suite: "test:mermaid",
-    // The export used to size the raster from getBoundingClientRect(), which
-    // reports VIEWPORT pixels and therefore scales with the app's CSS zoom.
-    // Measured on one diagram: the rect read 63.1 / 126.2 / 189.2 at 50% /
-    // 100% / 150% while the SVG's own viewBox stayed 126.2 throughout. So the
-    // resolution of an exported diagram depended on how the reader happened to
-    // have zoomed the window - a property of the reader leaking into the
-    // document. Every other assertion in the section passes under this revert,
-    // because a wrongly-sized raster still decodes and still draws its labels.
-    what: "size the export raster from the on-screen rect again, so the zoom level leaks into the exported file",
-    file: RENDERER,
-    from: "  const box = svg.viewBox && svg.viewBox.baseVal;",
-    to: "  const box = svg.getBoundingClientRect();",
-    expect: [/the exported diagram is the same size whatever the reader's zoom/],
-  },
+  // R157 pinned the export rasteriser's use of the SVG's own viewBox rather
+  // than getBoundingClientRect(), so that an exported diagram's resolution did
+  // not depend on how the reader had zoomed the window. Both the entry and the
+  // function it guarded (mermaidToPngDataUrl) were removed with Word export:
+  // that handler was its only caller, and the image-zoom popup rasterises an
+  // <img> in its own window without going near it. Recorded rather than left
+  // silent, because the measurement behind it - viewBox 126.2 at every zoom
+  // level against a rect reading 63.1 / 126.2 / 189.2 - is the reason to reach
+  // for viewBox again if diagram-to-image export ever comes back.
   {
     id: "R158",
     suite: "test:mermaid",
     // mermaid BAKES its colours into the emitted SVG, so dropping the
     // .dark-mode class is not enough - the diagram has to be re-rendered under
-    // the light theme. The PDF path has done this for a long time; the Word
-    // path never did, and exported dark diagrams onto white Word pages. On a
-    // gantt chart that meant a light grey title and date axis on white.
-    what: "export to Word without re-theming, so a reader in dark mode gets dark diagrams on a white page",
+    // the light theme, or a reader in dark mode gets dark diagrams on a white
+    // page. On a gantt chart that meant a light grey title and date axis on
+    // white.
+    //
+    // This entry used to pin the Word export handler, which was the path that
+    // had the defect. Word export was removed with html-to-docx, and no revert
+    // covered the identical call in the PDF handler - the assertion below was
+    // green but unpinned, so a regression there would have shipped. Re-pointed
+    // rather than deleted.
+    what: "export to PDF without re-theming, so a reader in dark mode gets dark diagrams on a white page",
     file: RENDERER,
-    // The anchor carries the preceding comment line, because
-    // `await setExportTheme(false);` alone is not unique - the PDF handler
-    // makes the identical call - and a non-unique anchor is rejected by this
-    // harness rather than silently patching the wrong site. The revert
-    // reproduces the historical defect exactly: drop the body class and leave
-    // the diagrams underneath it baked in the reader's dark theme.
+    // The anchor carries beginExportThemeHold() because
+    // `await setExportTheme(false);` is a whole line that could plausibly
+    // recur; pinning it to the hold makes the site unambiguous.
     from:
       "  beginExportThemeHold();\n" +
-      "  try {\n" +
-      "    await setExportTheme(false);",
+      "  await setExportTheme(false);",
     to:
       "  beginExportThemeHold();\n" +
-      "  try {\n" +
-      "    document.body.classList.remove('dark-mode');",
-    expect: [
-      /the Word export renders diagrams in the light theme, not the reader's dark one/,
-      // The mid-export assertion fails for the same root cause: with no
-      // re-theme at all, whatever the diagrams happen to be wearing when the
-      // rasteriser reaches them is what lands in the document. Listed rather
-      // than tolerated silently, so the pair is a recorded relationship. This
-      // list is what MUST fail, not an exhaustive one - section 8e's overlap
-      // assertions read the same diagrams and go down with it too.
-      /a theme change made during a Word export cannot re-theme the diagrams it is exporting/,
-    ],
+      "  document.body.classList.remove('dark-mode');",
+    expect: [/PDF export re-themes the diagrams to match the light page/],
+    // The body class must still go light, or this would be proving nothing
+    // more than "the export broke".
+    mustPass: [/PDF export drops dark mode on the body/],
   },
   {
     id: "R161",
@@ -1815,31 +1802,33 @@ const REVERTS = [
     // the toggle, so it reads as the toggle itself having failed. The
     // preference is the source of truth, and setExportTheme deliberately never
     // writes it, so it is unaffected by the export's own light-mode forcing.
-    what: "restore the theme after a Word export from a stale snapshot instead of the reader's current preference",
+    what: "restore the theme after a PDF export from a stale snapshot instead of the reader's current preference",
     file: RENDERER,
+    // Re-pointed from the Word handler to the PDF handler when Word export was
+    // removed. The two handlers ran identical restore logic, so the property is
+    // unchanged - only the site that carries it is. Indentation is two spaces
+    // here rather than the Word path's four.
     from:
-      "      const restoreDark = resolveDarkPreference();\n" +
-      "      if (restoreDark !== document.body.classList.contains('dark-mode')) {\n" +
-      "        await setExportTheme(restoreDark);\n" +
-      "      }\n" +
-      "    }",
+      "    const restoreDark = resolveDarkPreference();\n" +
+      "    if (restoreDark !== document.body.classList.contains('dark-mode')) {\n" +
+      "      await setExportTheme(restoreDark);\n" +
+      "    }\n" +
+      "  }",
     to:
-      "      if (document.body.dataset.wasDark === '1') await setExportTheme(true);\n" +
-      "    }",
+      "    if (document.body.dataset.wasDark === '1') await setExportTheme(true);\n" +
+      "  }",
     // The paired edit takes the snapshot, where the removed one was taken.
     also: {
       from:
         "  beginExportThemeHold();\n" +
-        "  try {\n" +
-        "    await setExportTheme(false);",
+        "  await setExportTheme(false);",
       to:
         "  beginExportThemeHold();\n" +
-        "  try {\n" +
-        "    document.body.dataset.wasDark = document.body.classList.contains('dark-mode') ? '1' : '0';\n" +
-        "    await setExportTheme(false);",
+        "  document.body.dataset.wasDark = document.body.classList.contains('dark-mode') ? '1' : '0';\n" +
+        "  await setExportTheme(false);",
     },
     expect: [
-      /a theme change made during a Word export is not undone when it finishes/,
+      /a theme change made during a PDF export is not undone when it finishes/,
     ],
   },
   {
@@ -1849,9 +1838,12 @@ const REVERTS = [
     // every diagram. A theme change made from the menu inside that window does
     // NOT go through a preference write alone - custom-theme.js clicks the
     // real toggle, which re-renders every mermaid SVG under the new theme,
-    // underneath an export that is still reading them. Measured on a Word
+    // underneath an export that is still reading them. Measured on a PDF
     // export interrupted by picking Dark: the exported PNG came out closer to
-    // the DARK reference (21.07) than the light one (21.54).
+    // the DARK reference (21.07) than the light one (21.54). That measurement
+    // was originally taken on the Word path, which has since been removed; the
+    // fix being reverted here is in the darkModeToggle handler and was never
+    // Word-specific, so only the export driving the test changed.
     //
     // Neither the settle wait (R161) nor the preference-based restore (R162)
     // catches this. Both are about what the export does with the theme; this
@@ -1863,7 +1855,7 @@ const REVERTS = [
     from: "  if (exportThemeHold > 0) {",
     to: "  if (false) {",
     expect: [
-      /a theme change made during a Word export cannot re-theme the diagrams it is exporting/,
+      /a theme change made during a PDF export cannot re-theme the diagrams it is exporting/,
     ],
   },
   {
@@ -1887,47 +1879,100 @@ const REVERTS = [
     expect: [/choosing Follow Desktop survives the toggle it delegates to/],
   },
   {
-    id: "R165",
+    id: "R166",
     suite: "test:mermaid",
-    // Two exports can overlap - start a Word export, reopen the File menu and
-    // choose Export as PDF - and both read the document for seconds. If every
+    // Nothing serialises exports: ipcMain.on('export-pdf') has no re-entrancy
+    // guard and the renderer stays responsive while main runs printToPDF, so a
+    // reader can start a second export on top of one that is still
+    // rasterising, and both then read the document for seconds. If every
     // release restores the reader's theme rather than only the last one out,
-    // the PDF's restore puts the document back into dark UNDERNEATH a Word
-    // export that is still rasterising, and the diagrams it has not reached
-    // yet are baked in the reader's theme. Found in independent review;
-    // reproduced only after the fixture was scrolled to the BOTTOM, because
-    // PERF-07 re-themes what the reader can see and at the top the export loop
-    // is always ahead of the damage. Measured on 30 diagrams: the worst one in
-    // the finished Word file sat 2.55 from the DARK reference and 99.17 from
-    // the light one.
+    // the finishing export puts the document back into dark UNDERNEATH the one
+    // still capturing, and the diagrams it has not reached yet bake in the
+    // reader's theme rather than the light export theme.
+    //
+    // Found in independent review; reproduced only after the fixture was
+    // scrolled to the BOTTOM, because PERF-07 re-themes what the reader can
+    // see and at the top the export loop is always ahead of the damage.
+    // Measured on 30 diagrams: the worst diagram in the finished export sat
+    // 2.55 from the DARK reference and 99.17 from the light one.
+    //
+    // This was originally a PAIR of reverts, one per export path - R165 gated
+    // the Word result handler and R166 the PDF one. Word export was removed
+    // with html-to-docx, leaving a single gate, so R165 was deleted rather
+    // than left pointing at code that no longer exists. The overlap it proved
+    // is still reachable, because two PDF exports can overlap each other.
     what: "restore the reader's theme on every export release instead of only the last one out",
     file: RENDERER,
-    from: "    if (endExportThemeHold() === 0) {",
-    to: "    if ((endExportThemeHold(), true)) {",
+    // Now that the Word handler's four-space copy is gone this two-space
+    // anchor is unique on its own, so it no longer needs the preceding comment
+    // line to disambiguate it.
+    from: "  if (endExportThemeHold() === 0) {",
+    to: "  if ((endExportThemeHold(), true)) {",
     expect: [
-      /an export that finishes cannot restore the theme while a PDF export is still capturing/,
+      /a concurrent export cannot re-theme the diagrams the export it overlaps is still reading/,
+    ],
+    // The overlapping export must genuinely have run, or "no damage" would
+    // just mean "nothing happened".
+    mustPass: [/the overlapping PDF export really ran to completion/],
+  },
+  {
+    id: "R166b",
+    suite: "test:mermaid",
+    // R166's partner, and it exists because of a gap found in independent
+    // review AFTER R165 was deleted. R166 proves the gate must not fire EARLY.
+    // Nothing proved it must fire AT ALL: under R166's revert both "the
+    // reader's theme comes back once the last export has finished" and "two
+    // overlapping exports leave no theme hold behind" still passed, because a
+    // premature restore still restores. R165 used to be the entry that failed
+    // when a release stopped acting, and removing Word took it away.
+    //
+    // So this one makes the gate unreachable instead of over-reachable. The
+    // counter still decrements - the hold assertions must keep passing, which
+    // is what separates "the gate never fires" from "the release is gone".
+    what: "make the export release never restore the reader's theme at all",
+    file: RENDERER,
+    from: "  if (endExportThemeHold() === 0) {",
+    to: "  if (endExportThemeHold() === -1) {",
+    expect: [
+      /the reader's theme comes back once the last export has finished/,
+      /the theme the reader picked during the export is applied once it finishes/,
+    ],
+    // The release must still RUN and still decrement; only its restore is
+    // gated out. If these fail too, the revert has removed the release rather
+    // than its effect and proves something weaker than it claims.
+    mustPass: [
+      /two overlapping exports leave no theme hold behind/,
+      /a completed PDF export leaves no theme hold behind/,
     ],
   },
   {
-    id: "R166",
+    id: "R167",
     suite: "test:mermaid",
-    // The same gate on the PDF side, which is the half that actually fires in
-    // the overlap: the Word export is the one still rasterising, so it is the
-    // PDF result handler whose restore has to stand down. Reviewed as a gap -
-    // the Word path had a revert and the identical PDF reconciliation had
-    // none, so a regression there would have shipped green.
-    what: "let a finishing PDF export restore the theme while another export is still reading the document",
+    // Found by independent review of the Word-export removal, then confirmed
+    // by reading applyMermaidTheme: it has no "already this theme" early
+    // return, so it clears mermaidSvgCache and re-runs every visible diagram
+    // even when asked for the theme those diagrams are already drawn in. A
+    // second export starting on top of a first asks for exactly that, and
+    // renderMermaidBatch writes data-mermaid-src back SYNCHRONOUSLY before it
+    // awaits mermaid.run - so the diagrams go to raw source text with no <svg>
+    // while main may still be running printToPDF over the live page.
+    //
+    // The old section 8f measured that wipe as unobservable FROM A RENDERER
+    // TASK and was deleted with the Word rasteriser. Its conclusion never
+    // transferred to this case: printToPDF runs in main and captures painted
+    // output. Rather than chase a paint-timing window, the guard removes the
+    // redundant work entirely and the assertion pins its absence.
+    what: "re-theme mermaid on every export prepare, even when the diagrams are already in that theme",
     file: RENDERER,
-    // Two spaces of indent is a SUBSTRING of the Word path's four, which the
-    // harness would reject as a non-unique anchor, so this carries the
-    // preceding comment line to pin it to the PDF handler.
-    from:
-      "  // back while the Word export is still rasterising.\n" +
-      "  if (endExportThemeHold() === 0) {",
-    to:
-      "  // back while the Word export is still rasterising.\n" +
-      "  if ((endExportThemeHold(), true)) {",
+    from: "    if (mermaidDesiredDark !== dark) {",
+    to: "    if (true) {",
     expect: [
+      /does not re-render diagrams that are already in the export theme/,
+    ],
+    // The measurement is only meaningful while the FIRST prepare still has
+    // real work to do, and while the export theme itself still lands.
+    mustPass: [
+      /the first export really did have diagrams to re-theme/,
       /a concurrent export cannot re-theme the diagrams the export it overlaps is still reading/,
     ],
   },

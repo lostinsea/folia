@@ -833,8 +833,8 @@ async function run(win) {
     JSON.stringify(rel),
   );
   // A fragment-only src names no image. Resolving it would write the
-  // document's own absolute path into the attribute, and from there into
-  // exported HTML and DOCX, for nothing.
+  // document's own absolute path into the attribute, and from there into the
+  // exported PDF, for nothing.
   check(
     "FEATURE a fragment-only image src is not resolved to the document's own path",
     !!rel.frag && rel.frag.attr === "#nope" && !rel.frag.authored,

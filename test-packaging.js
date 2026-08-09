@@ -1705,14 +1705,7 @@ function main() {
         // shortest-filename tiebreak, so the two agreed only by coincidence.
         // These assert the body actually matches the election.
         const elections = [
-          {
-            heading: "dompurify",
-            spdx: "(MPL-2.0 OR Apache-2.0)",
-            elected: "Apache-2.0",
-            body: /Apache License/,
-            rejected: /Mozilla Public License/,
-          },
-          { heading: "jszip", spdx: "(MIT OR GPL-3.0-or-later)", elected: "MIT", body: /MIT License/ },
+          { heading: "dompurify", spdx: "(MPL-2.0 OR Apache-2.0)", elected: "Apache-2.0", body: /Apache License/, rejected: /Mozilla Public License/ },
         ];
         // Checked against the REGENERATED text, not the committed copy. A
         // generator regression shows up in what it produces now; the committed
@@ -1767,11 +1760,18 @@ function main() {
             }
           }
         }
-        check(
-          "the tree still contains the conjunctively-licensed package these assertions are about",
-          conjunctive.some((c) => c.name === "pako"),
-          `conjunctive entries found: ${conjunctive.map((c) => c.name).join(", ") || "none"}`,
-        );
+        // NO REAL CONJUNCTIVE PACKAGE REMAINS. pako - `(MIT AND Zlib)` - was
+        // the only one, and it left with html-to-docx's 70-package closure,
+        // taking jszip's `(MIT OR GPL-3.0-or-later)` dual election with it.
+        // The vacuity guard that asserted pako's presence was removed with it
+        // rather than retargeted, because there is nothing to retarget it to.
+        //
+        // That costs less than it looks. The loop below still runs for any
+        // conjunctive package that arrives later, and the machinery itself is
+        // covered by the SYNTHETIC sensitivity probe further down - which was
+        // written that way on purpose, precisely so this coverage would not
+        // depend on a particular package staying in the tree. The election
+        // assertions above are still driven by a real package (dompurify).
         for (const c of conjunctive) {
           check(
             `${c.name} does not claim an election it cannot make`,
@@ -1803,10 +1803,14 @@ function main() {
         // shown to fire rather than assumed to. Driving it with a synthetic
         // component is deliberate: waiting for a real conjunctive package to
         // lose its extra block would make this assertion permanently vacuous.
+        // Since pako left the tree, this probe is the ONLY thing covering the
+        // conjunctive path, which is exactly the case it was designed for. The
+        // name is deliberately not a real package, so nobody greps for it and
+        // concludes the dependency is still installed.
         let guardFired = false;
         try {
           gen.assertConjunctiveCovered([
-            { name: "pako", version: "0.0.0", spdx: "(MIT AND Zlib)", extraLicences: [] },
+            { name: "synthetic-conjunctive-fixture", version: "0.0.0", spdx: "(MIT AND Zlib)", extraLicences: [] },
           ]);
         } catch (err) {
           guardFired = /Conjunctive/.test(err.message);
@@ -2303,6 +2307,102 @@ function main() {
       "every UI string has a consumer",
       orphaned.length === 0,
       `${orphaned.length} unreferenced: ${orphaned.join(", ")}`,
+    );
+  }
+
+  // ── Word export removal ──────────────────────────────────────────────────
+  // Export to Word was removed with its html-to-docx dependency. The removal
+  // is worth pinning for two reasons that pull in different directions:
+  //
+  //  - html-to-docx was one of only two production dependencies, and its
+  //    closure was 70 packages / 13.00 MB that nothing else in the tree
+  //    shared. A re-added `dependencies` entry ships that to every user again
+  //    whether or not any code calls it, which is the R159 failure mode.
+  //  - The renderer-side rasteriser (mermaidToPngDataUrl) was left with NO
+  //    caller once the Word handler went, so it was removed too. Dead code
+  //    that is still tested reads as live code to the next maintainer.
+  //
+  // Static oracles, because a leftover is a source fact.
+  {
+    const shippedScripts = pkg.build.files.filter(
+      (f) => /^[^!*]+\.js$/.test(f) && fs.existsSync(path.join(ROOT, f)),
+    );
+    const htmlSrc = fs.readFileSync(path.join(ROOT, "index.html"), "utf8");
+    const allSrc =
+      htmlSrc +
+      "\n" +
+      shippedScripts
+        .map((f) => fs.readFileSync(path.join(ROOT, f), "utf8"))
+        .join("\n");
+
+    check(
+      "html-to-docx is gone from the manifest, the lockfile and node_modules",
+      !Object.prototype.hasOwnProperty.call(pkg.dependencies || {}, "html-to-docx") &&
+        !Object.prototype.hasOwnProperty.call(
+          pkg.devDependencies || {},
+          "html-to-docx",
+        ) &&
+        !fs.existsSync(path.join(ROOT, "node_modules", "html-to-docx")) &&
+        !fs
+          .readFileSync(path.join(ROOT, "package-lock.json"), "utf8")
+          .includes("html-to-docx"),
+      "a surviving entry in any of the four reinstalls the whole 70-package closure",
+    );
+
+    // Stated as a bound rather than an exact set so that adding a dependency
+    // is a deliberate act with a visible cost, not a silent one.
+    check(
+      "the tree still declares exactly one production dependency",
+      Object.keys(pkg.dependencies || {}).length === 1 &&
+        Object.prototype.hasOwnProperty.call(
+          pkg.dependencies || {},
+          "electron-updater",
+        ),
+      JSON.stringify(Object.keys(pkg.dependencies || {})),
+    );
+
+    check(
+      "the Word export path is gone from every shipped script",
+      !/exportWord|export-word|word-export|HTMLtoDOCX|html-to-docx/.test(allSrc),
+      (
+        allSrc.match(
+          /exportWord|export-word|word-export|HTMLtoDOCX|html-to-docx/g,
+        ) || []
+      ).join(", "),
+    );
+
+    check(
+      "the Word menu item was removed rather than left hidden",
+      !/id="exportWord"/.test(htmlSrc) && !/\.docx/.test(allSrc),
+      "an #exportWord element or a .docx mention survives in the shipped source",
+    );
+
+    // The name of the format is not the only way it can come back. The Word
+    // MIME types are what a save dialog filter and a Blob type are written
+    // with, and neither contains the string "docx" or "word-export", so the
+    // sweeps above would both pass while a half-restored export path sat in
+    // the tree. Cheap to state, and it costs nothing while the feature is gone.
+    check(
+      "no Word document MIME type survives in any shipped script",
+      !/wordprocessingml|application\/msword/i.test(allSrc),
+      (allSrc.match(/wordprocessingml|application\/msword/gi) || []).join(", "),
+    );
+
+    // Dead UI strings are already swept generally, a few assertions above
+    // ("every UI string has a consumer"), and that sweep is strictly stronger
+    // than a Word-specific one: it requires each key to appear in a CALL
+    // position rather than merely somewhere in the file. It is what caught the
+    // orphaned 'mermaid.error' string this removal left behind, so the six
+    // labels the Word menu item owned need no separate assertion here.
+
+    // The rasteriser existed only to embed diagrams into the DOCX. Leaving it
+    // behind would keep ~120 lines of renderer parsed on every launch, plus
+    // the two test sections that measured it, for a feature that no longer
+    // exists. The image-zoom popup does its own rasterising in its own window.
+    check(
+      "the orphaned export rasteriser was removed with its only caller",
+      !/mermaidToPngDataUrl/.test(allSrc),
+      "mermaidToPngDataUrl survives with no caller",
     );
   }
 
