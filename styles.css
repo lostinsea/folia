@@ -455,6 +455,27 @@ body.dark-mode .nav-btn:hover:not(:disabled) {
   transition: margin-right 0.3s ease;
 }
 
+/* Drag-and-drop file-open overlay. The label comes from the string table via
+   data-drop-label rather than being hardcoded here, so every piece of UI text
+   still has exactly one home. pointer-events:none matters - without it the
+   overlay swallows the drop it is advertising. */
+body.drop-active::after {
+  content: attr(data-drop-label);
+  position: fixed;
+  inset: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--primary-color);
+  background: rgba(39, 158, 167, 0.08);
+  border: 3px dashed var(--primary-color);
+  border-radius: 12px;
+  pointer-events: none;
+  z-index: 99999;
+}
+
 /* Split-view mode */
 .content-wrapper.split-view {
   display: flex;
@@ -468,7 +489,13 @@ body.dark-mode .nav-btn:hover:not(:disabled) {
 
 .content-wrapper.split-view #viewer {
   max-width: none;
-  width: 50%;
+  /* `width: 50%` here plus `width: 50%` on the editor panel totalled the whole
+     row, so inserting a 6px splitter overflowed .content-wrapper - which is
+     `overflow: hidden` - and clipped 6px off the viewer. Letting the viewer
+     take whatever is left makes the editor panel's width authoritative, which
+     is what the splitter drags. */
+  flex: 1 1 0;
+  min-width: 0;
   border-left: 1px solid var(--border-color);
   /* Same reading gap as .content-wrapper, repeated because in split view THIS
      is the scroll container and scroll-padding only applies to the scroller. */
@@ -489,8 +516,43 @@ body.dark-mode .nav-btn:hover:not(:disabled) {
   display: none;
   flex-direction: column;
   width: 50%;
+  /* The splitter drags this width, so it must not be flex-adjusted afterwards. */
+  flex: 0 0 auto;
   background: var(--bg-secondary);
   border-right: 1px solid var(--border-color);
+}
+
+/* Draggable divider between the editor and the viewer. Only laid out in split
+   view - outside it the editor panel is display:none and there is nothing to
+   divide. */
+.editor-splitter {
+  display: none;
+  flex: 0 0 6px;
+  width: 6px;
+  cursor: col-resize;
+  background: var(--border-color);
+  user-select: none;
+  transition: background 0.15s ease;
+}
+
+.content-wrapper.split-view .editor-splitter {
+  display: block;
+}
+
+.editor-splitter:hover,
+.editor-splitter.dragging {
+  background: var(--primary-color);
+}
+
+/* During a drag the pointer leaves the 6px strip constantly, so the cursor and
+   the selection suppression have to be owned by the document, not the handle. */
+body.splitter-dragging {
+  cursor: col-resize !important;
+  user-select: none;
+}
+
+body.splitter-dragging * {
+  user-select: none !important;
 }
 
 .editor-header {
@@ -2762,9 +2824,37 @@ body.dark-mode .context-menu {
    MERMAID TEMPLATE DIALOG
    ============================================ */
 
+/* Ported from upstream ef81474, both halves, because they only work together.
+   MEASURED defect this fixes: the overlay is position:fixed with overflow
+   visible and centres its child, so a dialog taller than the viewport spills
+   off BOTH edges with nothing to scroll. At a 390px viewport the mermaid
+   template dialog measured 492px tall, top -51 (header off screen) and its
+   Insert button at bottom 441 - unreachable, so the dialog could be opened but
+   not used. max-height + a scrollable body is the fix.
+   resize:both is then safe to offer: without the cap, a reader could drag the
+   dialog taller than the screen and recreate exactly that trap. */
 .mermaid-template-dialog {
-  max-width: 960px;
-  width: 92vw;
+  width: 960px;
+  /* max-width: 90vw is inherited from .note-dialog and still clamps this. */
+  max-height: 95vh;
+  /* Upstream ships flat px minimums here, which DEFEAT the cap above: CSS
+     applies min-* last, so min-height: 420px beats max-height: 95vh and the
+     dialog stays 420px tall on a 390px viewport - measured at top: -15, header
+     off screen, i.e. the exact defect the cap was added to fix. Same on the
+     width axis against the 90vw inherited from .note-dialog. Clamping the
+     minimums to the viewport keeps the floor without letting it win. */
+  min-width: min(480px, 90vw);
+  min-height: min(420px, 95vh);
+  resize: both;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.mermaid-template-dialog .note-dialog-body {
+  flex: 1 1 auto;
+  overflow: auto;
+  min-height: 0;
 }
 
 .mermaid-template-grid {
@@ -2797,12 +2887,20 @@ body.dark-mode .context-menu {
 .mermaid-template-split {
   display: flex;
   gap: 14px;
-  align-items: flex-start;
+  /* flex-start here meant the two panes sized to their own content and the row
+     itself never grew, so enlarging the dialog produced dead space under them
+     rather than a bigger preview - measured: preview 220px before and after a
+     +220px drag. Stretching also lines the two panes up with each other, which
+     flex-start did not. */
+  align-items: stretch;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .mermaid-template-editor {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
@@ -2810,13 +2908,20 @@ body.dark-mode .context-menu {
 .mermaid-template-preview-col {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
 
 .mermaid-template-preview {
+  flex: 1 1 auto;
   min-height: 220px;
-  max-height: 340px;
+  /* The 340px cap this replaces existed only because the dialog had no height
+     limit of its own, so a tall diagram would have pushed the footer off the
+     screen. max-height: 95vh on the dialog now owns that, which frees the
+     preview to use whatever height the reader gives the dialog - the whole
+     point of making it resizable. */
+  max-height: none;
   border: 1px solid var(--border-color);
   border-radius: 6px;
   background: var(--bg-secondary);
@@ -2847,15 +2952,42 @@ body.dark-mode .context-menu {
   font-family: 'Fira Code Local', 'Fira Code', monospace;
   font-size: 12px;
   line-height: 1.5;
+  /* Grows with the dialog alongside the preview, so enlarging it buys more of
+     both panes rather than more of one. */
+  flex: 1 1 auto;
+  min-height: 120px;
 }
 
 /* ============================================
    TABLE INSERT DIALOG
    ============================================ */
 
+/* See the note on .mermaid-template-dialog above - same reasoning, same pair of
+   changes. This dialog measured 398px tall against a 390px viewport, so its
+   header was already off screen. */
 .table-insert-dialog {
-  max-width: 540px;
-  width: 90vw;
+  width: 540px;
+  /* max-width: 90vw is inherited from .note-dialog and still clamps this. */
+  max-height: 95vh;
+  /* Clamped to the viewport for the reason recorded above. */
+  min-width: min(360px, 90vw);
+  min-height: min(320px, 95vh);
+  resize: both;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.table-insert-dialog .note-dialog-body {
+  flex: 1 1 auto;
+  overflow: auto;
+  min-height: 0;
+}
+
+/* The markdown box is what a reader enlarges this dialog to see more of. */
+.table-insert-dialog #tableInsertMarkdown {
+  flex: 1 1 auto;
+  min-height: 80px;
 }
 
 .table-dialog-controls {

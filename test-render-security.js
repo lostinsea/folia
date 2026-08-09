@@ -2093,6 +2093,232 @@ async function run(win) {
     JSON.stringify({ errs, errsAfter }),
   );
 
+  // ── Drag-and-drop file open ────────────────────────────────────────────
+  // Ported from upstream ef81474. It reuses the open-file-path IPC that
+  // markdown links already use (section 12), so it grants nothing new - the
+  // renderer runs with nodeIntegration and could read any file itself. What is
+  // new is the ease of pointing it at something that is not a document:
+  // openFile() applies no extension or size check, so without a guard here a
+  // dropped video is read into memory as UTF-8 and rendered.
+  {
+    await exec(`
+      (() => {
+        const { ipcRenderer, webUtils } = require('electron');
+        window.__drop = { ipc: [], notes: [] };
+        window.__dropRestore = {
+          send: ipcRenderer.send,
+          notify: window.showNotification,
+          getPath: webUtils.getPathForFile,
+        };
+        window.__dropConfirm = true;
+        ipcRenderer.send = function (channel, ...args) {
+          if (channel === 'open-file-path') { window.__drop.ipc.push(String(args[0])); return; }
+          return window.__dropRestore.send.call(ipcRenderer, channel, ...args);
+        };
+        window.showNotification = (m) => { window.__drop.notes.push(String(m)); };
+        window.confirm = () => window.__dropConfirm === true;
+        // A synthetic File never came from a real drag, so the real resolver
+        // returns an empty string. Stubbing it is what makes the ACCEPT path
+        // observable at all; the reject path is decided before it is reached.
+        webUtils.getPathForFile = (f) => 'C:\\\\dropped\\\\' + f.name;
+        window.__fireDrag = (type, names) => {
+          const dt = new DataTransfer();
+          (names || []).forEach((n) => dt.items.add(new File(['# hi'], n)));
+          const ev = new DragEvent(type, { dataTransfer: dt, bubbles: true, cancelable: true });
+          window.dispatchEvent(ev);
+          return ev;
+        };
+        return true;
+      })()
+    `);
+
+    const dropReset = () => exec(`(() => { window.__drop.ipc.length = 0; window.__drop.notes.length = 0; document.body.classList.remove('drop-active'); return null; })()`);
+
+    // The overlay, and where its text comes from.
+    const enter = await exec(`(() => {
+      window.__fireDrag('dragenter', ['a.md']);
+      return { active: document.body.classList.contains('drop-active'),
+               label: document.body.dataset.dropLabel };
+    })()`);
+    check(
+      "dragging a file over the window shows the drop overlay",
+      enter.active === true,
+      JSON.stringify(enter),
+    );
+    check(
+      "the drop overlay's label comes from the string table, not the stylesheet",
+      enter.label === (await exec(`i18n('drop.hint')`)) && !!enter.label,
+      JSON.stringify(enter),
+    );
+
+    // dragenter/dragleave bubble from every child, so the overlay has to be
+    // reference-counted or it flickers off the moment the pointer crosses an
+    // element boundary mid-drag.
+    //
+    // Seeded with an explicit dragend (which zeroes the counter) and then TWO
+    // enters, rather than borrowing the single enter the previous test left
+    // behind: depending on that residue meant reordering or resetting anything
+    // above would break this test while the product stayed correct.
+    const counted = await exec(`(() => {
+      window.__fireDrag('dragend', []);
+      window.__fireDrag('dragenter', ['a.md']);
+      window.__fireDrag('dragenter', ['a.md']);
+      const bothIn = document.body.classList.contains('drop-active');
+      window.__fireDrag('dragleave', ['a.md']);
+      const stillUp = document.body.classList.contains('drop-active');
+      window.__fireDrag('dragleave', ['a.md']);
+      return { bothIn, stillUp, downAfterLast: !document.body.classList.contains('drop-active') };
+    })()`);
+    check(
+      "the drop overlay survives a dragleave from a child element",
+      counted.bothIn === true && counted.stillUp === true,
+      JSON.stringify(counted),
+    );
+    check(
+      "the drop overlay goes away once the drag really has left",
+      counted.downAfterLast === true,
+      JSON.stringify(counted),
+    );
+
+    await dropReset();
+    const accepted = await exec(`(() => {
+      window.__fireDrag('drop', ['notes.md']);
+      return { ipc: window.__drop.ipc.slice(), notes: window.__drop.notes.slice(),
+               overlay: document.body.classList.contains('drop-active') };
+    })()`);
+    check(
+      "dropping a markdown file asks the main process to open exactly that path",
+      accepted.ipc.length === 1 && /notes\.md$/.test(accepted.ipc[0]),
+      JSON.stringify(accepted),
+    );
+    check(
+      "dropping a file clears the overlay",
+      accepted.overlay === false,
+      JSON.stringify(accepted),
+    );
+
+    // The guard. Each of these would otherwise be read whole into a string and
+    // handed to the markdown renderer.
+    for (const [label, name] of [
+      ["an executable", "payload.exe"],
+      ["a video", "holiday.mp4"],
+      ["a file with no extension at all", "Makefile"],
+      ["something merely markdown-ish", "notes.md.exe"],
+    ]) {
+      await dropReset();
+      const rejected = await exec(`(() => {
+        window.__fireDrag('drop', [${JSON.stringify(name)}]);
+        return { ipc: window.__drop.ipc.slice(), notes: window.__drop.notes.slice() };
+      })()`);
+      check(
+        `dropping ${label} is refused rather than opened`,
+        rejected.ipc.length === 0,
+        JSON.stringify(rejected),
+      );
+      check(
+        `dropping ${label} tells the reader why`,
+        rejected.notes.length === 1 && rejected.notes[0].includes(name),
+        JSON.stringify(rejected),
+      );
+    }
+
+    // A file name is not a safe replacement string. `String.prototype.replace`
+    // expands `$&`, "$`", `$'` and `$$` found in the REPLACEMENT, so a file the
+    // reader did not name themselves can garble its own error message.
+    await dropReset();
+    const dollarName = "a$'$&x.exe";
+    const dollar = await exec(`(() => {
+      window.__fireDrag('drop', [${JSON.stringify(dollarName)}]);
+      return { ipc: window.__drop.ipc.slice(), notes: window.__drop.notes.slice() };
+    })()`);
+    check(
+      "a rejected file name is reported literally, not as a replacement pattern",
+      dollar.ipc.length === 0 &&
+        dollar.notes.length === 1 &&
+        dollar.notes[0].includes(dollarName),
+      JSON.stringify(dollar),
+    );
+
+    // Synthetic dispatch bypasses the browser's default-action gate, so no
+    // amount of drop testing proves a REAL drop is ever delivered. Only
+    // dragover being cancelled does: uncancelled, the window navigates to the
+    // dropped file instead of opening it.
+    await dropReset();
+    const overCancelled = await exec(`(() => {
+      const ev = window.__fireDrag('dragover', ['a.md']);
+      return { cancelable: ev.cancelable, prevented: ev.defaultPrevented };
+    })()`);
+    check(
+      "a drag over the window is cancelled, so a real drop is delivered to us",
+      overCancelled.cancelable === true && overCancelled.prevented === true,
+      JSON.stringify(overCancelled),
+    );
+
+    // Every extension the Open File dialog offers must also be droppable, or
+    // the two routes into the same function disagree about what a document is.
+    await dropReset();
+    const allAccepted = await exec(`(() => {
+      ['a.md','a.markdown','a.mdown','a.mkd','a.mkdn','a.mmd','a.mermaid','A.MD'].forEach(n => window.__fireDrag('drop', [n]));
+      return window.__drop.ipc.length;
+    })()`);
+    check(
+      "every extension the Open File dialog accepts can also be dropped, case-insensitively",
+      allAccepted === 8,
+      `${allAccepted} of 8 accepted`,
+    );
+
+    // Unsaved work must not be discarded by a hand movement.
+    await dropReset();
+    const guarded = await exec(`(() => {
+      const wasEdit = isEditMode, wasDirty = hasUnsavedChanges;
+      isEditMode = true; hasUnsavedChanges = true;
+      window.__dropConfirm = false;
+      window.__fireDrag('drop', ['other.md']);
+      const declined = window.__drop.ipc.length;
+      window.__dropConfirm = true;
+      window.__fireDrag('drop', ['other.md']);
+      const accepted = window.__drop.ipc.length;
+      isEditMode = wasEdit; hasUnsavedChanges = wasDirty;
+      return { declined, accepted };
+    })()`);
+    check(
+      "dropping a file onto unsaved work does nothing if the reader says no",
+      guarded.declined === 0,
+      JSON.stringify(guarded),
+    );
+    check(
+      "dropping a file onto unsaved work proceeds once the reader agrees",
+      guarded.accepted === 1,
+      JSON.stringify(guarded),
+    );
+
+    // A drag that leaves the window entirely can fire no drop and, on some
+    // window managers, no final dragleave - stranding the overlay over a
+    // document the reader can no longer read.
+    const stranded = await exec(`(() => {
+      window.__fireDrag('dragenter', ['a.md']);
+      const up = document.body.classList.contains('drop-active');
+      window.dispatchEvent(new Event('blur'));
+      return { up, cleared: !document.body.classList.contains('drop-active') };
+    })()`);
+    check(
+      "an abandoned drag cannot strand the overlay over the document",
+      stranded.up === true && stranded.cleared === true,
+      JSON.stringify(stranded),
+    );
+
+    await exec(`
+      (() => {
+        const { ipcRenderer, webUtils } = require('electron');
+        ipcRenderer.send = window.__dropRestore.send;
+        window.showNotification = window.__dropRestore.notify;
+        webUtils.getPathForFile = window.__dropRestore.getPath;
+        document.body.classList.remove('drop-active');
+        return true;
+      })()
+    `);
+  }
+
   // __e2eErrors only sees what window.onerror sees. The sentinel additionally
   // watches the renderer console and the rendered document, which is where a
   // CSP misconfiguration or a mermaid error graphic shows up.

@@ -1977,6 +1977,337 @@ const REVERTS = [
     ],
   },
   {
+    id: "R179",
+    suite: "test:patch",
+    // Ported from upstream ef81474. The reader selects RENDERED text, so a
+    // selection crossing inline formatting yields a string that exists nowhere
+    // in the source - "one two three" is not in `one *two* three`. The exact
+    // search returned -1 and Edit Text refused the edit with "text not found",
+    // which reads as a bug in the editor rather than a limitation of the
+    // search. Removing the projection fallback restores that behaviour.
+    what: "locate an Edit Text selection by exact source search only, with no marker-tolerant fallback",
+    file: RENDERER,
+    from: "  if (exact !== -1) return { index: exact, length: plainText.length };",
+    to: "  return exact === -1 ? null : { index: exact, length: plainText.length };",
+    expect: [
+      /Edit Text finds the source for: a selection spanning an italic span/,
+      /editing a selection that spans formatting rewrites the source/,
+    ],
+    // The ordinary exact path must survive, or this proves only that the
+    // function was broken outright rather than that the fallback is load-bearing.
+    mustPass: [
+      /Edit Text finds the source for: plain text with no formatting at all/,
+      /editing a selection that needs no projection still works/,
+    ],
+  },
+  {
+    id: "R180",
+    suite: "test:patch",
+    // The correction made to ef81474 while porting it. Upstream never extends
+    // the run backwards, so a selection that begins INSIDE a span orphans the
+    // span's opening marker: on `*hello* world`, selecting the rendered
+    // "hello world" replaces `hello* world` and leaves `*newText` behind. That
+    // is not valid markdown - the stray `*` silently changes how the rest of
+    // the document renders - and it is written to the file.
+    what: "leave the opening marker behind when an Edit Text selection starts inside a formatted span",
+    file: RENDERER,
+    from: "  while (start > 0 && isMarker(source[start - 1])) start--;",
+    to: "  while (false && isMarker(source[start - 1])) start--;",
+    expect: [
+      /a selection starting inside a span takes its opening marker too/,
+      /a selection ending inside a span takes its closing marker too/,
+      /replacing a selection that spans formatting leaves no unbalanced marker/,
+    ],
+    // The fallback itself must still work: this revert removes only the
+    // backward walk, not the projection search that finds the run at all.
+    // Note the "ending inside a span" row is an EXPECTED failure, not a
+    // surviving one - `one *two* three` with "two three" selected starts at the
+    // `t` inside the span, so recovering its opening `*` is the backward walk's
+    // job too. Listing it as mustPass is what the COLLATERAL check caught.
+    mustPass: [
+      /Edit Text finds the source for: a selection spanning an italic span/,
+      /Edit Text finds the source for: plain text with no formatting at all/,
+    ],
+  },
+  {
+    id: "R181",
+    suite: "test:security",
+    // The one thing this fork ADDS to upstream's drag-and-drop. openFile()
+    // (main.js) applies no extension check and no size check - it reads the
+    // whole file as a UTF-8 string and renders it - and a drop is a hand
+    // movement, not a considered choice. Without the allowlist, dropping an
+    // executable or a video onto the window reads it into memory and paints
+    // the mojibake as a document.
+    what: "open whatever file is dropped on the window, with no extension check",
+    file: RENDERER,
+    from: "    if (!file.name.includes('.') || DROPPABLE_EXTENSIONS.indexOf(ext) === -1) {",
+    to: "    if (false) {",
+    expect: [
+      /dropping an executable is refused rather than opened/,
+      /dropping an executable tells the reader why/,
+      /dropping a video is refused rather than opened/,
+      /dropping a video tells the reader why/,
+      /dropping a file with no extension at all is refused rather than opened/,
+      /dropping a file with no extension at all tells the reader why/,
+      /dropping something merely markdown-ish is refused rather than opened/,
+      /dropping something merely markdown-ish tells the reader why/,
+    ],
+    // Dropping a real document must still work, or this proves only that the
+    // drop handler was broken outright.
+    mustPass: [
+      /dropping a markdown file asks the main process to open exactly that path/,
+      /every extension the Open File dialog accepts can also be dropped/,
+    ],
+  },
+  {
+    id: "R182",
+    suite: "test:security",
+    // dragenter/dragleave bubble from every element the pointer crosses, so a
+    // plain boolean (or a counter that resets on the first leave) makes the
+    // overlay strobe on and off while the reader is still dragging.
+    what: "drop the drag overlay on the first dragleave, ignoring nesting",
+    file: RENDERER,
+    from: "    dragCounter = Math.max(0, dragCounter - 1);",
+    to: "    dragCounter = 0;",
+    expect: [/the drop overlay survives a dragleave from a child element/],
+    // The overlay must still come down at the end of a real drag: a revert that
+    // also broke that would be pinning nothing in particular.
+    mustPass: [
+      /the drop overlay goes away once the drag really has left/,
+      /dropping a file clears the overlay/,
+    ],
+  },
+  {
+    id: "R183",
+    suite: "test:security",
+    // A drag abandoned outside the window fires no drop, and on some window
+    // managers no final dragleave either. The overlay is a full-window layer,
+    // so stranding it leaves the reader looking at their document through it
+    // with no way to dismiss it short of restarting.
+    what: "leave the drag overlay up when a drag is abandoned outside the window",
+    file: RENDERER,
+    from: "  window.addEventListener('blur', clearDropState);",
+    to: "  void clearDropState;",
+    expect: [/an abandoned drag cannot strand the overlay over the document/],
+    mustPass: [/dragging a file over the window shows the drop overlay/],
+  },
+  {
+    id: "R184",
+    suite: "test:tables",
+    // The half of upstream ef81474 that is a bug fix rather than a feature.
+    // .note-dialog-overlay is position:fixed with overflow visible and centres
+    // its child, so a dialog taller than the viewport spills off BOTH edges
+    // with nothing to scroll. Measured before the fix at a 390px viewport: the
+    // mermaid template dialog was 492px tall, top -51, Insert at bottom 441 -
+    // the dialog could be opened but not used and not closed by its own button.
+    what: "let a dialog grow taller than the window with nothing to scroll",
+    file: CSS,
+    from: "  max-height: 95vh;\n  /* Upstream ships flat px minimums here, which DEFEAT the cap above: CSS",
+    to: "  max-height: none;\n  /* Upstream ships flat px minimums here, which DEFEAT the cap above: CSS",
+    expect: [
+      /the mermaid template dialog fits inside a short window instead of spilling off it/,
+      /the mermaid template dialog's title bar is still on screen in a short window/,
+      /the mermaid template dialog's primary button can actually be pressed in a short window/,
+    ],
+    // The dialog must still be resizable and still lay out correctly; this
+    // revert removes the cap only.
+    mustPass: [
+      /the mermaid template dialog offers a corner grab handle/,
+      /an enlarged dialog keeps its footer buttons inside itself/,
+    ],
+  },
+  {
+    id: "R185",
+    suite: "test:tables",
+    // The defect found IN upstream's own hunk while porting it. CSS applies
+    // min-* last, so a flat `min-height: 420px` beats the `max-height: 95vh`
+    // shipped beside it and the dialog stays 420px tall on a 390px viewport -
+    // measured at top: -15, header off screen. Taking upstream's values
+    // verbatim would have left the bug it was meant to fix.
+    what: "take upstream's flat pixel minimums, which override the viewport cap they ship with",
+    file: CSS,
+    from: "  min-height: min(420px, 95vh);",
+    to: "  min-height: 420px;",
+    expect: [
+      /the mermaid template dialog fits inside a short window instead of spilling off it/,
+      /the mermaid template dialog's title bar is still on screen in a short window/,
+    ],
+    // Narrow by construction: the insert-table dialog has its own smaller
+    // minimum and must be unaffected, or this is catching R184's defect instead.
+    mustPass: [
+      /the insert-table dialog fits inside a short window instead of spilling off it/,
+      /the insert-table dialog's title bar is still on screen in a short window/,
+      /the mermaid template dialog's primary button can actually be pressed in a short window/,
+    ],
+  },
+  {
+    id: "R186",
+    suite: "test:tables",
+    // Making the dialog resizable without this plumbing gives the reader a grab
+    // handle that changes the box and nothing else: the panes sized to their own
+    // content, so the extra height became dead space under them. Measured before
+    // the fix: preview 220px before a +220px drag and 220px after.
+    what: "size the mermaid dialog's panes to their content so enlarging it adds only dead space",
+    file: CSS,
+    from: "  align-items: stretch;\n  flex: 1 1 auto;\n  min-height: 0;\n}",
+    to: "  align-items: flex-start;\n}",
+    expect: [/enlarging the mermaid dialog enlarges the diagram preview with it/],
+    // The dialog itself must still resize and still hold its footer, or this
+    // proves only that the layout was broken outright.
+    mustPass: [
+      /enlarging a dialog really does enlarge it/,
+      /an enlarged dialog keeps its footer buttons inside itself/,
+      /an enlarged dialog gives the extra room to its content, not to dead space/,
+    ],
+  },
+  {
+    id: "R187",
+    suite: "test:tables",
+    // The change upstream ef81474 had to make once a 6px handle was inserted
+    // between the two panes, and the one that fails silently: `width: 50%` on
+    // each pane totals the whole row, so the handle pushes the viewer past the
+    // edge of .content-wrapper - which is `overflow: hidden`, so nothing is
+    // reported and the right-hand 6px of the document is simply gone.
+    what: "size the split-view viewer at a fixed 50% so the splitter overflows the row",
+    file: CSS,
+    from: "  flex: 1 1 0;",
+    to: "  width: 50%;",
+    expect: [/inserting the splitter does not push the viewer out of the window/],
+    // The splitter must still be there and still work, or this is proving that
+    // split view was broken outright rather than that the sizing is wrong.
+    mustPass: [
+      /the splitter is laid out in split view and nowhere else/,
+      /dragging the splitter really resizes the editor pane/,
+    ],
+  },
+  {
+    id: "R188",
+    suite: "test:tables",
+    // Upstream's arithmetic: the ratio is taken against the container width
+    // MINUS the handle, then written back as a percentage OF the container. The
+    // two denominators disagree by the handle's width, so the handle drifts
+    // away from the pointer in proportion to the travel - measured at 1.81px on
+    // a 1588px container at 30%, and approaching the full 6px near the end.
+    what: "take the split ratio against a different width from the one it is written back to",
+    file: RENDERER,
+    from: "        (ev.clientX - containerRect.left) / containerRect.width",
+    to: "        (ev.clientX - containerRect.left) / (containerRect.width - editorSplitter.getBoundingClientRect().width)",
+    expect: [/the splitter lands under the pointer rather than near it/],
+    // Deliberately narrow: the drag itself still works, the panes still fit and
+    // the ratio is still stored. Only the tracking is wrong.
+    mustPass: [
+      /dragging the splitter really resizes the editor pane/,
+      /inserting the splitter does not push the viewer out of the window/,
+      /the split ratio is remembered/,
+    ],
+  },
+  {
+    id: "R189",
+    suite: "test:tables",
+    // Without persistence the splitter is a per-session toy: every restart
+    // throws the reader's chosen split away and returns to 50/50.
+    what: "forget the split ratio instead of remembering it",
+    file: RENDERER,
+    from: "    localStorage.setItem(SPLIT_RATIO_KEY, String(ratio));",
+    to: "    void ratio;",
+    expect: [
+      /the split ratio is remembered/,
+      /double-clicking the splitter restores an even split, and remembers it/,
+    ],
+    // The drag and the double-click must still change the layout; only the
+    // memory of it is removed.
+    mustPass: [
+      /dragging the splitter really resizes the editor pane/,
+      /a remembered ratio is in force the moment split view opens/,
+    ],
+  },
+  {
+    id: "R190",
+    suite: "test:tables",
+    // Without the clamp a drag to either edge collapses a pane to nothing, and
+    // the collapsed state is then PERSISTED - so the next launch opens edit mode
+    // with no editor (or no preview) and no handle wide enough to find.
+    what: "let the splitter collapse either pane to nothing",
+    file: RENDERER,
+    from: "  const clamped = Math.max(SPLITTER_MIN_RATIO, Math.min(SPLITTER_MAX_RATIO, ratio));",
+    to: "  const clamped = ratio;",
+    expect: [/neither pane can be dragged away to nothing/],
+    mustPass: [
+      /dragging the splitter really resizes the editor pane/,
+      /double-clicking the splitter restores an even split, and remembers it/,
+    ],
+  },
+  {
+    id: "R191",
+    suite: "test:tables",
+    // The whole point of the departure from upstream. Bound to mousedown, the
+    // handler receives a MouseEvent, whose pointerId is undefined - so the
+    // capture call is never made and the "capture keeps the drag tracking"
+    // rationale is dead code that merely LOOKS like a robustness measure. Two
+    // independent reviewers caught this; the assertion is what stops it coming
+    // back.
+    what: "bind the splitter to mousedown, where there is no pointer to capture",
+    file: RENDERER,
+    from: "  editorSplitter.addEventListener('pointerdown', (e) => {",
+    to: "  editorSplitter.addEventListener('mousedown', (e) => {",
+    expect: [
+      /the splitter really asks for pointer capture rather than only appearing to/,
+    ],
+  },
+  {
+    id: "R192",
+    suite: "test:tables",
+    // A pointerup this window never saw - released outside the frame - would
+    // otherwise leave the drag live for ever: the splitter keeps tracking the
+    // bare cursor and resizing the pane with no button held.
+    what: "keep dragging after a pointerup the window never received",
+    file: RENDERER,
+    from: "      if (ev.buttons === 0) {",
+    to: "      if (ev.buttons === 999) {",
+    expect: [
+      /a drag whose pointerup went missing ends itself instead of resizing for ever/,
+    ],
+    mustPass: [/dragging the splitter really resizes the editor pane/],
+  },
+  {
+    id: "R195",
+    suite: "test:tables",
+    // Enlarging the Insert Table dialog has to give the extra room to the
+    // markdown box the reader is actually typing into. Without this the dialog
+    // grows and the textarea stays put, so the resize buys dead space.
+    what: "let the insert-table dialog grow without growing its markdown box",
+    file: CSS,
+    from: ".table-insert-dialog #tableInsertMarkdown {\n  flex: 1 1 auto;",
+    to: ".table-insert-dialog #tableInsertMarkdown {\n  flex: 0 0 auto;",
+    expect: [/enlarging the insert-table dialog enlarges the markdown box with it/],
+  },
+  {
+    id: "R193",
+    suite: "test:security",
+    // `String.prototype.replace` with a STRING replacement expands `$&`, "$`",
+    // `$'` and `$$` found in that string. The interpolated values include file
+    // names, whose shape the user does not control, so a rejected drop of a
+    // file called `a$'.md` would garble its own error message.
+    what: "interpolate i18n values as replacement patterns rather than literally",
+    file: RENDERER,
+    from: "      str = str.replace('${' + k + '}', () => String(v));",
+    to: "      str = str.replace('${' + k + '}', v);",
+    expect: [/a rejected file name is reported literally, not as a replacement pattern/],
+  },
+  {
+    id: "R194",
+    suite: "test:security",
+    // Without preventDefault on dragover the drop is never delivered: the
+    // browser takes the default action and NAVIGATES the window to the dropped
+    // file. Synthetic dispatch bypasses the default-action gate, so only an
+    // explicit assertion that dragover is cancelled can catch this.
+    what: "stop cancelling dragover, so a real drop navigates instead of opening",
+    file: RENDERER,
+    from: "  window.addEventListener('dragover', (e) => {",
+    to: "  window.addEventListener('dragover-disabled', (e) => {",
+    expect: [/a drag over the window is cancelled, so a real drop is delivered to us/],
+  },
+  {
     // 8c1 — document translation removed. The property being defended is not
     // "the feature is gone" (an absence is trivially satisfied by never having
     // added it) but "the privileged egress route it created is gone". While

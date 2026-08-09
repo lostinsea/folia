@@ -1104,9 +1104,172 @@ async function run(win) {
     themeState,
   );
 
-  const alive = await proveSentinelAlive(win, sentinel);
-  check(
-    "the error sentinel was demonstrably watching both channels",
+  // ---------------------------------------------------------------------
+  // Edit Text: locating a DOM selection that spans markdown markers
+  //
+  // The reader selects RENDERED text. When that selection crosses inline
+  // formatting, the string it yields does not exist anywhere in the source -
+  // "one two three" is nowhere in `one *two* three` - so the exact search the
+  // save path used simply failed and the edit was refused with "text not
+  // found". Ported from upstream ef81474.
+  //
+  // Tested against the real renderer function rather than a copy, table-driven
+  // because the interesting behaviour is entirely about index arithmetic and
+  // every row is a boundary someone could get wrong. Each row states the source
+  // it EXPECTS to be replaced, so a wrong offset shows up as the wrong text
+  // rather than as a number nobody can interpret.
+  // ---------------------------------------------------------------------
+  {
+    const rows = [
+      // [label, source, selection, occurrence, expected replaced substring]
+      ["plain text with no formatting at all", "one two three", "two", 0, "two"],
+      ["an exact match is preferred over the projection", "a *b* a b", "a", 0, "a"],
+      ["the occurrence index still selects the right exact match", "cat dog cat", "cat", 1, "cat"],
+      ["a selection spanning an italic span", "one *two* three", "one two three", 0, "one *two* three"],
+      ["a selection spanning bold", "say **loud** now", "say loud now", 0, "say **loud** now"],
+      ["a selection spanning a code span", "run `cmd` now", "run cmd now", 0, "run `cmd` now"],
+      ["a selection spanning a strikethrough", "was ~~old~~ new", "was old new", 0, "was ~~old~~ new"],
+      ["a selection spanning an underscore span", "an _em_ word", "an em word", 0, "an _em_ word"],
+      ["formatting in the middle, plain text on both sides", "one *two* three four", "one two three", 0, "one *two* three"],
+      // The correction over upstream. The selection begins AFTER the opening
+      // marker, so a range that starts at the letter leaves that marker
+      // stranded: upstream produced `*newText`, which is not valid markdown and
+      // silently italicises the rest of the document.
+      ["a selection starting inside a span takes its opening marker too", "*hello* world", "hello world", 0, "*hello* world"],
+      ["a selection ending inside a span takes its closing marker too", "one *two* three", "two three", 0, "*two* three"],
+      ["text that is genuinely absent is reported as absent", "one two three", "nowhere", 0, null],
+      // A LIMITATION, pinned deliberately rather than left as an omission.
+      // GPT-5.4's review of this port found it. The projection strips `*_`~`
+      // everywhere, including where those characters are literal CONTENT
+      // inside a code span, so the rendered text still contains a character
+      // the projection has removed and no match is possible.
+      //
+      // Measured against the pre-6e1 code: `findNthOccurrence` returned -1 for
+      // these too, so this is an UNFIXED case, not a regression - 6e1 turns
+      // four previously-unfindable cases into found ones and breaks none. The
+      // property that matters is that it degrades to "not found", which leaves
+      // the document untouched, rather than guessing a span and silently
+      // corrupting it.
+      ["literal markers inside a code span are not found - safely, not wrongly", "use `snake_case` now", "use snake_case now", 0, null],
+      ["a literal asterisk inside a code span is not found - safely, not wrongly", "run `a*b` now", "run a*b now", 0, null],
+    ];
+
+    const found = await exec(`
+      (() => (${JSON.stringify(rows)}).map(([label, source, sel, occ]) => {
+        const r = findPlainTextInSource(source, sel, occ);
+        return r === null ? null : source.substr(r.index, r.length);
+      }))()
+    `);
+
+    rows.forEach(([label, source, sel, occ, expected], i) => {
+      check(
+        `Edit Text finds the source for: ${label}`,
+        found[i] === expected,
+        `source=${JSON.stringify(source)} selection=${JSON.stringify(sel)} expected=${JSON.stringify(expected)} got=${JSON.stringify(found[i])}`,
+      );
+    });
+
+    // Vacuity guard. Every row above asserts on the value of a replaced
+    // substring, so a function that always returned null would fail loudly -
+    // but a function that was never CALLED (renamed, or not yet defined at this
+    // point in the file) would throw and take the suite down instead of
+    // reporting. Prove the symbol is the real one.
+    check(
+      "Edit Text's source locator is a real renderer function, not a test copy",
+      (await exec(`typeof findPlainTextInSource === 'function' && findPlainTextInSource.length === 3`)) === true,
+      "findPlainTextInSource must be defined in renderer.js and take (source, plainText, occurrence)",
+    );
+
+    // The whole point of replacing a WIDER span than the reader selected is
+    // that what is left behind is still valid markdown. Assert that directly,
+    // on the case that used to break, rather than trusting the offsets above.
+    const balanced = await exec(`
+      (() => {
+        const src = '*hello* world';
+        const r = findPlainTextInSource(src, 'hello world', 0);
+        if (!r) return 'not found';
+        const out = src.substring(0, r.index) + 'REPLACED' + src.substring(r.index + r.length);
+        return out;
+      })()
+    `);
+    check(
+      "replacing a selection that spans formatting leaves no unbalanced marker",
+      balanced === "REPLACED" && !/[*_\`~]/.test(balanced),
+      `result=${JSON.stringify(balanced)}`,
+    );
+  }
+
+  // ---------------------------------------------------------------------
+  // Edit Text end to end, through the real dialog.
+  //
+  // The table above measures the locator in isolation. This drives the actual
+  // product path - set the saved selection, open the dialog, type, click Save -
+  // because the guard added alongside the locator lives in the SAVE handler,
+  // not in the locator: partialDOMReplace rewrites one text node in place, so
+  // it is only valid when the source matched exactly. A match that spanned
+  // formatting covers more source than the node holds, and letting the fast
+  // path take it would leave the DOM saying one thing and the source another -
+  // a divergence that survives until the next full render and then silently
+  // reverts the reader's edit.
+  // ---------------------------------------------------------------------
+  {
+    const editTextEndToEnd = async (source, selection, replacement) => {
+      await exec(`
+        (async () => {
+          isEditMode = false;
+          originalMarkdown = ${JSON.stringify(source)};
+          await renderMarkdown(${JSON.stringify(source)});
+          savedSelection = ${JSON.stringify(selection)};
+          savedSelectionOccurrence = 0;
+          openEditTextDialog();
+          editTextArea.value = ${JSON.stringify(replacement)};
+          editTextSaveBtn.click();
+          return true;
+        })()
+      `);
+      await waitFor(exec, "the edited document to settle", RENDER_SETTLED);
+      return exec(`({
+        source: originalMarkdown,
+        text: viewer.textContent.replace(/\\s+/g, ' ').trim(),
+        dialogOpen: editTextOverlay.classList.contains('visible'),
+      })`);
+    };
+
+    // The case that could not be edited at all before this port: the selection
+    // is real on screen but appears nowhere in the source.
+    const spanned = await editTextEndToEnd("one *two* three", "one two three", "REPLACED");
+    check(
+      "editing a selection that spans formatting rewrites the source",
+      spanned.source === "REPLACED",
+      JSON.stringify(spanned),
+    );
+    check(
+      "editing a selection that spans formatting leaves the document readable",
+      spanned.text === "REPLACED",
+      JSON.stringify(spanned),
+    );
+    check(
+      "the rendered document and the source agree after a spanning edit",
+      spanned.text === spanned.source,
+      `source=${JSON.stringify(spanned.source)} rendered=${JSON.stringify(spanned.text)}`,
+    );
+    check(
+      "the Edit Text dialog closes after a spanning edit",
+      spanned.dialogOpen === false,
+      JSON.stringify(spanned),
+    );
+
+    // The ordinary case must keep working - this path is shared, and the fast
+    // partial-DOM route is the one it takes.
+    const plain = await editTextEndToEnd("alpha bravo charlie", "bravo", "DELTA");
+    check(
+      "editing a selection that needs no projection still works",
+      plain.source === "alpha DELTA charlie" && plain.text === "alpha DELTA charlie",
+      JSON.stringify(plain),
+    );
+  }
+
+  const alive = await proveSentinelAlive(win, sentinel);  check(    "the error sentinel was demonstrably watching both channels",
     alive.console === true && alive.dom === true,
     JSON.stringify(alive),
   );

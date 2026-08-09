@@ -650,6 +650,7 @@ const UI_STRINGS = {
   'save': 'Save', 'reload': 'Reload', 'dismiss': 'Dismiss',
   'cancel': 'Cancel', 'find': 'Find', 'later': 'Later', 'exit': 'Exit',
   'title.exitEdit': 'Exit Edit Mode',
+  'title.splitter': 'Drag to resize, double-click to reset',
   'title.zoomOut': 'Zoom Out (Ctrl+-)', 'title.zoomReset': 'Reset Zoom (Ctrl+0)',
   'title.zoomIn': 'Zoom In (Ctrl++)',
   'title.back': 'Back (Left Arrow)', 'title.forward': 'Forward (Right Arrow)',
@@ -724,7 +725,8 @@ const UI_STRINGS = {
   'notif.pathCopied': 'Path copied to clipboard',
   'notif.pathCopiedCheck': '✓ Path copied to clipboard',
   'confirm.unsavedOpen': 'You have unsaved changes. Discard changes and open a new file?',
-  'confirm.unsavedRefresh': 'You have unsaved changes. Discard changes and refresh from disk?',
+  'drop.hint': 'Drop file to open',
+  'drop.rejected': '${name} is not a markdown file',  'confirm.unsavedRefresh': 'You have unsaved changes. Discard changes and refresh from disk?',
   'confirm.unsavedExit': 'You have unsaved changes. Exiting edit mode will DISCARD them. Exit anyway?',
   'confirm.unsavedOpenFile': 'You have unsaved changes. Discard changes and open "${name}"?',
   'confirm.openExternal': 'This link opens a file with an external application:\n\n${name}\n\nOnly continue if you trust this document. Open it?',
@@ -749,7 +751,11 @@ function i18n(key, params) {
   let str = UI_STRINGS[key] || key;
   if (params) {
     for (const [k, v] of Object.entries(params)) {
-      str = str.replace('${' + k + '}', v);
+      // Function replacement, not a string: as a string, `$&`, `$\``, `$'` and
+      // `$$` inside the VALUE are replacement patterns and get expanded. Values
+      // include file names, which the user does not control the shape of, so a
+      // file called `a$'.md` would otherwise garble its own error message.
+      str = str.replace('${' + k + '}', () => String(v));
     }
   }
   return str;
@@ -824,6 +830,7 @@ const saveButton = document.getElementById('saveButton');
 const exitEditBtn = document.getElementById('exitEditBtn');
 const unsavedIndicator = document.getElementById('unsavedIndicator');
 const contentWrapper = document.querySelector('.content-wrapper');
+const editorSplitter = document.getElementById('editorSplitter');
 const loadingScreen = document.getElementById('loadingScreen');
 const darkModeToggle = document.getElementById('darkModeToggle');
 
@@ -1945,6 +1952,93 @@ viewer.addEventListener('click', (e) => {
   }
 });
 
+// Drag-and-drop: dropping a file anywhere in the window opens it.
+// Ported from upstream ef81474, with two changes.
+//
+// 1. An extension allowlist, which upstream has not got. open-file-path leads
+//    to openFile(), which reads the whole file into a string and renders it
+//    with no check on type or size. That was already reachable from a markdown
+//    link, so this adds no privilege - the renderer runs with nodeIntegration
+//    and could read any file directly regardless - but a link is something the
+//    document author chose, whereas a drop is a hand movement. Dropping a video
+//    onto the window should say no, not read it into memory as UTF-8.
+//    The list is the one openFileDialog() already offers (main.js).
+// 2. `file.path` is gone: Electron removed it in v32 and this fork is on 43, so
+//    webUtils.getPathForFile() is the only route. Upstream keeps a `file.path`
+//    branch first, which here would be permanently dead.
+const DROPPABLE_EXTENSIONS = ['md', 'markdown', 'mdown', 'mkd', 'mkdn', 'mmd', 'mermaid'];
+
+(function setupFileDrop() {
+  // enter/leave bubble from every child element, so a plain boolean flickers
+  // as the pointer crosses the document. Counting keeps the overlay stable.
+  let dragCounter = 0;
+  const isFileDrag = (e) =>
+    !!(e.dataTransfer && e.dataTransfer.types &&
+       Array.from(e.dataTransfer.types).indexOf('Files') !== -1);
+
+  const clearDropState = () => {
+    dragCounter = 0;
+    document.body.classList.remove('drop-active');
+  };
+
+  window.addEventListener('dragenter', (e) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    dragCounter++;
+    // Sourced from the string table rather than hardcoded in the stylesheet, so
+    // the label lives with every other piece of UI text.
+    document.body.dataset.dropLabel = i18n('drop.hint');
+    document.body.classList.add('drop-active');
+  });
+
+  window.addEventListener('dragover', (e) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+  });
+
+  window.addEventListener('dragleave', (e) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    dragCounter = Math.max(0, dragCounter - 1);
+    if (dragCounter === 0) document.body.classList.remove('drop-active');
+  });
+
+  window.addEventListener('drop', (e) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    clearDropState();
+
+    const files = e.dataTransfer && e.dataTransfer.files;
+    if (!files || files.length === 0) return;
+    const file = files[0];
+
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    if (!file.name.includes('.') || DROPPABLE_EXTENSIONS.indexOf(ext) === -1) {
+      showNotification(i18n('drop.rejected', { name: file.name }), 3000);
+      return;
+    }
+
+    let filePath = null;
+    try {
+      const { webUtils } = require('electron');
+      if (webUtils) filePath = webUtils.getPathForFile(file);
+    } catch (err) {
+      console.warn('Could not resolve the dropped file path:', err);
+    }
+    if (!filePath) return;
+
+    if (isEditMode && hasUnsavedChanges && !confirm(i18n('confirm.unsavedOpen'))) return;
+    ipcRenderer.send('open-file-path', filePath);
+  });
+
+  // A drag that ends outside the window fires no drop, and on some window
+  // managers no final dragleave either, which would strand the overlay over a
+  // document the reader can no longer see past.
+  window.addEventListener('dragend', clearDropState);
+  window.addEventListener('blur', clearDropState);
+})();
+
 // Open file button (toolbar)
 openFileBtn.addEventListener('click', () => {
   // Check for unsaved changes before opening file dialog
@@ -2373,6 +2467,115 @@ toggleEditBtn.addEventListener('click', async () => {
 exitEditBtn.addEventListener('click', () => {
   if (isEditMode) toggleEditBtn.click();
 });
+
+// Editor/viewer splitter - drag to resize the two panes in split view, and
+// double-click to reset to an even split. The ratio is the editor panel's width
+// as a fraction of .content-wrapper, persisted so the choice survives a restart.
+//
+// Two deliberate departures from upstream ef81474:
+// 1. The ratio is taken against the container's FULL width, not against
+//    `width - splitterWidth`. Upstream divides by the smaller number and then
+//    writes the result as a percentage of the larger one, so the handle drifts
+//    away from the cursor in proportion to how far the drag has travelled.
+//    Measured against upstream's own arithmetic on a 1588px container: 1.81px
+//    of drift at 30% travel, approaching the splitter's full 6px at the far
+//    end. Small, but the correct denominator is also the simpler one - it
+//    measured -0.49px, which is just the sub-pixel rounding of a percentage.
+// 2. Pointer capture on pointerdown (see below for why not mousedown), plus a
+//    `buttons === 0` bail-out in the move handler, so a fast drag - or one that
+//    ends over the textarea or outside the window - still tracks and still
+//    stops.
+const SPLITTER_MIN_RATIO = 0.15;
+const SPLITTER_MAX_RATIO = 0.85;
+const SPLIT_RATIO_KEY = 'editorSplitRatio';
+
+function applyEditorSplitRatio(ratio) {
+  const clamped = Math.max(SPLITTER_MIN_RATIO, Math.min(SPLITTER_MAX_RATIO, ratio));
+  editorPanel.style.width = (clamped * 100).toFixed(2) + '%';
+  return clamped;
+}
+
+function storeEditorSplitRatio(ratio) {
+  try {
+    localStorage.setItem(SPLIT_RATIO_KEY, String(ratio));
+  } catch (err) {
+    /* localStorage unavailable - the split is still applied for this session */
+  }
+}
+
+(function restoreEditorSplitRatio() {
+  let saved = NaN;
+  try {
+    saved = parseFloat(localStorage.getItem(SPLIT_RATIO_KEY));
+  } catch (err) {
+    /* localStorage unavailable */
+  }
+  // isFinite rather than !isNaN: a stored Infinity parses fine and would be
+  // clamped to the maximum, silently pinning the editor to 85% for good.
+  if (isFinite(saved)) applyEditorSplitRatio(saved);
+})();
+
+if (editorSplitter) {
+  // pointerdown, NOT mousedown: a mousedown handler receives a MouseEvent,
+  // which has no pointerId, so every setPointerCapture guard below would be
+  // permanently false and the capture would be dead code that merely LOOKS
+  // like a robustness measure. Measured in this Electron build: mousedown ->
+  // MouseEvent, pointerId undefined; pointerdown -> PointerEvent, pointerId 1.
+  editorSplitter.addEventListener('pointerdown', (e) => {
+    if (!contentWrapper.classList.contains('split-view')) return;
+    if (e.button !== 0) return;
+    e.preventDefault();
+
+    // Read once: .content-wrapper cannot change width during the drag (the
+    // panes divide it), and re-reading per pointermove would cost a forced
+    // layout on every frame.
+    const containerRect = contentWrapper.getBoundingClientRect();
+    if (containerRect.width <= 0) return;
+
+    editorSplitter.classList.add('dragging');
+    document.body.classList.add('splitter-dragging');
+    let currentRatio = null;
+
+    const onMove = (ev) => {
+      // Safety net for a pointerup this window never saw - released outside
+      // the frame, or swallowed by a native drag. Capture covers the common
+      // case; this covers the case capture cannot, and unlike capture it is
+      // observable with synthetic events, so it is actually under test.
+      if (ev.buttons === 0) {
+        onUp();
+        return;
+      }
+      currentRatio = applyEditorSplitRatio(
+        (ev.clientX - containerRect.left) / containerRect.width
+      );
+    };
+
+    function onUp() {
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onUp);
+      editorSplitter.classList.remove('dragging');
+      document.body.classList.remove('splitter-dragging');
+      if (editorSplitter.hasPointerCapture(e.pointerId)) {
+        editorSplitter.releasePointerCapture(e.pointerId);
+      }
+      if (currentRatio !== null) storeEditorSplitRatio(currentRatio);
+    }
+
+    try {
+      editorSplitter.setPointerCapture(e.pointerId);
+    } catch (err) {
+      /* capture unavailable - the document listeners below still track */
+    }
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onUp);
+  });
+
+  editorSplitter.addEventListener('dblclick', () => {
+    storeEditorSplitRatio(applyEditorSplitRatio(0.5));
+  });
+}
 
 // Tab key → insert 2 spaces (prevent focus change)
 markdownEditor.addEventListener('keydown', (e) => {
@@ -5516,6 +5719,65 @@ function findNthOccurrence(source, searchStr, n) {
   return pos;
 }
 
+// Find a DOM-selected plain-text run inside the markdown source, tolerating
+// inline formatting markers (`*`, `_`, `` ` ``, `~`) that exist in the source
+// but not in the rendered text the reader selected. Selecting across an italic
+// span yields "one two three" from `one *two* three`, which no exact search can
+// find. Returns { index, length } into source, or null.
+//
+// Ported from upstream ef81474 WITH A CORRECTION, and the correction is not
+// the one it first looked like. Upstream ends the run at `source.length`
+// whenever the match reaches the end of the projection, which looks like it
+// would swallow trailing markers - but that branch only fires when the last
+// surviving character has been matched, so everything after it IS a marker and
+// the result is the same. That half is fine.
+//
+// The real defect is at the other end: nothing extends the run backwards, so a
+// selection that begins INSIDE a span orphans its opening marker. On the source
+// `*hello* world`, selecting the rendered "hello world" starts at `h`, and
+// upstream replaces `hello* world` - leaving `*newText`, an unbalanced marker
+// that corrupts the rendering of everything after it. Reaching this fallback at
+// all means the selection spans formatting and its markers are being lost
+// either way; losing them symmetrically is the only outcome that leaves valid
+// markdown behind.
+function findPlainTextInSource(source, plainText, occurrence) {
+  const exact = findNthOccurrence(source, plainText, occurrence);
+  if (exact !== -1) return { index: exact, length: plainText.length };
+
+  // Projection of the source with inline markers removed, plus a map back to
+  // the original index of every character that survived.
+  let projection = '';
+  const map = [];
+  for (let i = 0; i < source.length; i++) {
+    const ch = source[i];
+    if (ch === '*' || ch === '_' || ch === '`' || ch === '~') continue;
+    map.push(i);
+    projection += ch;
+  }
+
+  let pos = -1;
+  for (let i = 0; i <= occurrence; i++) {
+    pos = projection.indexOf(plainText, pos + 1);
+    if (pos === -1) return null;
+  }
+  if (plainText.length === 0) return null;
+
+  const startInSource = map[pos];
+  const afterPos = pos + plainText.length;
+  // One past the LAST character matched. Equivalent to upstream's two branches
+  // once the marker walk below runs, and it needs no special case for the end
+  // of the source.
+  let start = startInSource;
+  let end = map[afterPos - 1] + 1;
+
+  // Swallow markers immediately bordering the run, on BOTH sides - see above.
+  const isMarker = (ch) => ch === '*' || ch === '_' || ch === '`' || ch === '~';
+  while (start > 0 && isMarker(source[start - 1])) start--;
+  while (end < source.length && isMarker(source[end])) end++;
+
+  return { index: start, length: end - start };
+}
+
 function getNextNoteId(source) {
   let maxId = 0;
   const idMatches = source.matchAll(/data-note-id="(\d+)"/g);
@@ -6254,8 +6516,8 @@ editTextSaveBtn.addEventListener('click', () => {
   } else {
     // View mode — try partial render first, then fall back to full re-render
     const activeSource = getActiveMarkdown();
-    const textIndex = findNthOccurrence(activeSource, editTextOriginal, editTextOccurrence);
-    if (textIndex === -1) {
+    const found = findPlainTextInSource(activeSource, editTextOriginal, editTextOccurrence);
+    if (!found) {
       showNotification(i18n('notif.textNotFound'), 2000);
       closeEditTextDialog();
       return;
@@ -6264,7 +6526,27 @@ editTextSaveBtn.addEventListener('click', () => {
     // Check if structural markdown change (newlines changed) — needs full re-render
     const structuralChange = newText.includes('\n') !== editTextOriginal.includes('\n');
 
-    if (!structuralChange && partialDOMReplace(viewer, editTextOriginal, newText, editTextOccurrence)) {
+    // partialDOMReplace rewrites a single text node in place, so it is only
+    // valid when the source matched EXACTLY. A match that spanned formatting
+    // markers covers more source than the text node holds, and patching the
+    // node would leave the DOM and the source disagreeing.
+    //
+    // MEASURED UNREACHABLE, and kept deliberately. For the exact search to
+    // fail, the parser must have consumed the markers - which means it also
+    // created elements, which means the run is split across text nodes and
+    // partialDOMReplace declines on its own. Probed on six spanning shapes
+    // (em, strong, code, del, underscore, span-at-start): the fast path
+    // returned false for every one, so this guard never changed an outcome.
+    // The converse case - markers the parser leaves as literal text - leaves
+    // them in the DOM too, so the reader's selection contains them and the
+    // exact search succeeds instead. It stays because it is the condition the
+    // fast path actually depends on, and the day partialDOMReplace learns to
+    // span nodes it becomes load-bearing with no warning. Deliberately given
+    // NO revert entry: it cannot be made to fail, and an entry that cannot
+    // fail is worse than none (the R110b precedent).
+    const isExactSourceMatch = found.length === editTextOriginal.length;
+
+    if (!structuralChange && isExactSourceMatch && partialDOMReplace(viewer, editTextOriginal, newText, editTextOccurrence)) {
       // Partial render succeeded — update source silently without re-rendering
       updateSourceSilently(editTextOriginal, newText, editTextOccurrence);
       showNotification(i18n('notif.textEdited'), 1500);
@@ -6272,9 +6554,9 @@ editTextSaveBtn.addEventListener('click', () => {
       // Fall back to full re-render
       const scrollPosition = contentWrapper.scrollTop;
       const newContent =
-        activeSource.substring(0, textIndex) +
+        activeSource.substring(0, found.index) +
         newText +
-        activeSource.substring(textIndex + editTextOriginal.length);
+        activeSource.substring(found.index + found.length);
 
       commitViewModeEdit(newContent, scrollPosition);
 

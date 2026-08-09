@@ -1976,6 +1976,512 @@ async function run(win) {
   await sleep(600);
   await captureScreenshot(win, "table-display-prose-wide");
 
+  // --- 16. Dialogs must stay usable in a short window ---------------------
+  // Ported from upstream ef81474 (corner-resizable dialogs), taken only after
+  // measuring that this fork has the defect the other half of that change
+  // fixes. `.note-dialog-overlay` is position:fixed with overflow visible and
+  // centres its child, so a dialog taller than the viewport spills off BOTH
+  // edges with nothing to scroll: measured at a 390px viewport, the mermaid
+  // template dialog was 492px tall, top -51, and its Insert button sat at
+  // bottom 441 - openable but unusable.
+  // resize:both is the ergonomic half, and it is only safe BECAUSE of the cap:
+  // without one, a reader could drag the dialog past the screen edge and
+  // recreate the same trap by hand.
+  {
+    const dialogBounds = win.getBounds();
+    const openDialog = (overlayId) => `
+      (async () => {
+        const overlay = document.getElementById(${JSON.stringify(overlayId)});
+        const dlg = overlay.querySelector('.note-dialog');
+        dlg.style.width = ''; dlg.style.height = '';
+        overlay.classList.add('visible');
+        await new Promise(r => setTimeout(r, 400));
+        const r = dlg.getBoundingClientRect();
+        const hdr = dlg.querySelector('.note-dialog-header').getBoundingClientRect();
+        const btn = dlg.querySelector('.note-dialog-btn.primary');
+        const br = btn.getBoundingClientRect();
+        const hitEl = document.elementFromPoint(br.left + br.width / 2, br.top + br.height / 2);
+        const body = dlg.querySelector('.note-dialog-body');
+        const out = {
+          viewportH: window.innerHeight,
+          dialogH: Math.round(r.height),
+          top: Math.round(r.top),
+          bottom: Math.round(r.bottom),
+          headerReachable: hdr.top >= 0,
+          primaryReachable: br.top >= 0 && br.bottom <= window.innerHeight,
+          primaryHit: !!(hitEl && (hitEl === btn || btn.contains(hitEl))),
+          bodyCanScroll: getComputedStyle(body).overflowY === 'auto' || getComputedStyle(body).overflowY === 'scroll',
+          resize: getComputedStyle(dlg).resize,
+          // The resize grabber is drawn in the bottom-right corner of the
+          // dialog's own box. If a footer button reaches into that corner the
+          // reader cannot press it without starting a resize.
+          grabberClearOfButtons: Array.from(dlg.querySelectorAll('.note-dialog-btn')).every((b) => {
+            const q = b.getBoundingClientRect();
+            return !(q.right > r.right - 17 && q.bottom > r.bottom - 17);
+          }),
+        };
+        overlay.classList.remove('visible');
+        return JSON.stringify(out);
+      })()
+    `;
+
+    // 420px outer is a window a reader can produce by dragging an edge - there
+    // is no minHeight on the BrowserWindow - and it is under every dialog's
+    // natural height, which is what makes it the interesting size.
+    await resizeWindow({ ...dialogBounds, width: 1200, height: 420 });
+    for (const [name, id] of [
+      ["the mermaid template dialog", "mermaidTemplateOverlay"],
+      ["the insert-table dialog", "tableInsertOverlay"],
+    ]) {
+      const d = JSON.parse(await exec(openDialog(id)));
+      check(
+        `${name} fits inside a short window instead of spilling off it`,
+        d.top >= 0 && d.bottom <= d.viewportH,
+        JSON.stringify(d),
+      );
+      check(
+        `${name}'s title bar is still on screen in a short window`,
+        d.headerReachable === true,
+        JSON.stringify(d),
+      );
+      check(
+        `${name}'s primary button can actually be pressed in a short window`,
+        d.primaryReachable === true && d.primaryHit === true,
+        JSON.stringify(d),
+      );
+      check(
+        `${name} scrolls its own body rather than hiding content off screen`,
+        d.bodyCanScroll === true,
+        JSON.stringify(d),
+      );
+      // Vacuity guard: if the window were not actually short, every assertion
+      // above would pass on a dialog that never needed clamping.
+      check(
+        `${name} was measured in a window shorter than its natural height`,
+        d.viewportH < 400,
+        JSON.stringify(d),
+      );
+    }
+
+    await resizeWindow({ ...dialogBounds, width: 1400, height: 1000 });
+    for (const [name, id] of [
+      ["the mermaid template dialog", "mermaidTemplateOverlay"],
+      ["the insert-table dialog", "tableInsertOverlay"],
+    ]) {
+      const d = JSON.parse(await exec(openDialog(id)));
+      check(
+        `${name} offers a corner grab handle`,
+        d.resize === "both",
+        JSON.stringify(d),
+      );
+      check(
+        `${name}'s grab handle does not sit on top of its own buttons`,
+        d.grabberClearOfButtons === true,
+        JSON.stringify(d),
+      );
+    }
+
+    // Dragging the corner must move the layout, not just the box: the footer
+    // has to stay pinned inside the dialog and the body has to absorb the
+    // change. Without `display:flex; flex-direction:column` on the dialog and
+    // `flex: 1 1 auto; min-height: 0` on the body, the footer overflows the
+    // resized box and the buttons hang outside it.
+    const resized = JSON.parse(
+      await exec(`
+        (async () => {
+          const overlay = document.getElementById('mermaidTemplateOverlay');
+          const dlg = overlay.querySelector('.note-dialog');
+          overlay.classList.add('visible');
+          await new Promise(r => setTimeout(r, 300));
+          const before = dlg.getBoundingClientRect().height;
+          const bodyBefore = dlg.querySelector('.note-dialog-body').getBoundingClientRect().height;
+          dlg.style.height = Math.round(before + 200) + 'px';
+          dlg.style.width = '760px';
+          await new Promise(r => setTimeout(r, 300));
+          const r = dlg.getBoundingClientRect();
+          const fr = dlg.querySelector('.note-dialog-footer').getBoundingClientRect();
+          const bodyAfter = dlg.querySelector('.note-dialog-body').getBoundingClientRect().height;
+          const out = {
+            before: Math.round(before),
+            after: Math.round(r.height),
+            grew: r.height > before + 100,
+            footerInside: fr.bottom <= r.bottom + 1 && fr.top >= r.top,
+            bodyBefore: Math.round(bodyBefore),
+            bodyAfter: Math.round(bodyAfter),
+            bodyAbsorbed: bodyAfter > bodyBefore + 100,
+            stillOnScreen: r.top >= 0 && r.bottom <= window.innerHeight,
+          };
+          dlg.style.width = ''; dlg.style.height = '';
+          overlay.classList.remove('visible');
+          return JSON.stringify(out);
+        })()
+      `),
+    );
+    check(
+      "enlarging a dialog really does enlarge it",
+      resized.grew === true,
+      JSON.stringify(resized),
+    );
+    check(
+      "an enlarged dialog keeps its footer buttons inside itself",
+      resized.footerInside === true,
+      JSON.stringify(resized),
+    );
+    check(
+      "an enlarged dialog gives the extra room to its content, not to dead space",
+      resized.bodyAbsorbed === true,
+      JSON.stringify(resized),
+    );
+
+    // The reason the mermaid preview's fixed 340px cap was dropped: it existed
+    // only as a stand-in for a dialog height limit, and with one in place it
+    // would have made the dialog resizable without making the preview - the
+    // thing a reader enlarges it to see - any bigger.
+    const preview = JSON.parse(
+      await exec(`
+        (async () => {
+          const overlay = document.getElementById('mermaidTemplateOverlay');
+          const dlg = overlay.querySelector('.note-dialog');
+          overlay.classList.add('visible');
+          await new Promise(r => setTimeout(r, 300));
+          const pv = dlg.querySelector('.mermaid-template-preview');
+          const before = pv.getBoundingClientRect().height;
+          dlg.style.height = Math.round(dlg.getBoundingClientRect().height + 220) + 'px';
+          await new Promise(r => setTimeout(r, 300));
+          const after = pv.getBoundingClientRect().height;
+          const out = {
+            before: Math.round(before),
+            after: Math.round(after),
+            maxHeight: getComputedStyle(pv).maxHeight,
+            grew: after > before + 100,
+          };
+          dlg.style.height = '';
+          overlay.classList.remove('visible');
+          return JSON.stringify(out);
+        })()
+      `),
+    );
+    check(
+      "enlarging the mermaid dialog enlarges the diagram preview with it",
+      preview.grew === true,
+      JSON.stringify(preview),
+    );
+
+    // Same property for the other resizable dialog. GPT-5.4's review caught
+    // that the table dialog's textarea plumbing was not pinned by anything:
+    // the dialog could grow while the markdown box the reader types into
+    // stayed put, so the resize bought nothing but dead space.
+    const tableGrow = JSON.parse(
+      await exec(`
+        (async () => {
+          const overlay = document.getElementById('tableInsertOverlay');
+          const dlg = overlay.querySelector('.note-dialog');
+          overlay.classList.add('visible');
+          await new Promise(r => setTimeout(r, 300));
+          const ta = document.getElementById('tableInsertMarkdown');
+          const before = ta.getBoundingClientRect().height;
+          dlg.style.height = Math.round(dlg.getBoundingClientRect().height + 220) + 'px';
+          await new Promise(r => setTimeout(r, 300));
+          const after = ta.getBoundingClientRect().height;
+          const out = {
+            before: Math.round(before),
+            after: Math.round(after),
+            grew: after > before + 100,
+          };
+          dlg.style.height = '';
+          overlay.classList.remove('visible');
+          return JSON.stringify(out);
+        })()
+      `),
+    );
+    check(
+      "enlarging the insert-table dialog enlarges the markdown box with it",
+      tableGrow.grew === true,
+      JSON.stringify(tableGrow),
+    );
+
+    // Measurements say the dialogs fit and resize; only a picture says they
+    // read correctly. Captured with a dialog actually open and a template
+    // selected - the earlier version of this capture fired after every overlay
+    // had been closed again, which would have been an artifact of nothing.
+    await exec(`
+      (async () => {
+        const overlay = document.getElementById('mermaidTemplateOverlay');
+        const dlg = overlay.querySelector('.note-dialog');
+        overlay.classList.add('visible');
+        const btn = document.querySelector('.mermaid-tpl-btn');
+        if (btn) btn.click();
+        await new Promise(r => setTimeout(r, 1200));
+        dlg.style.width = '820px';
+        dlg.style.height = Math.round(dlg.getBoundingClientRect().height + 160) + 'px';
+        return null;
+      })()
+    `);
+    await sleep(900);
+    await captureScreenshot(win, "dialog-resizable");
+    await exec(`
+      (() => {
+        const overlay = document.getElementById('mermaidTemplateOverlay');
+        const dlg = overlay.querySelector('.note-dialog');
+        dlg.style.width = ''; dlg.style.height = '';
+        overlay.classList.remove('visible');
+        return null;
+      })()
+    `);
+
+    // The short window is the case the whole section exists for, so it gets a
+    // picture too.
+    await resizeWindow({ ...dialogBounds, width: 1200, height: 420 });
+    await exec(`
+      (async () => {
+        document.getElementById('tableInsertOverlay').classList.add('visible');
+        await new Promise(r => setTimeout(r, 400));
+        return null;
+      })()
+    `);
+    await sleep(600);
+    await captureScreenshot(win, "dialog-short-window");
+    await exec(
+      `(() => { document.getElementById('tableInsertOverlay').classList.remove('visible'); return null; })()`,
+    );
+    await resizeWindow(dialogBounds);
+  }
+
+  // --- 17. The editor/viewer splitter -------------------------------------
+  // Ported from upstream ef81474. The geometry matters here for the same reason
+  // the rest of this suite exists: .content-wrapper is `overflow: hidden`, so a
+  // row whose parts add up to more than its width silently clips the viewer
+  // rather than reporting anything. Upstream's own change had to move #viewer
+  // off `width: 50%` for exactly that reason once a 6px handle was inserted.
+  {
+    const splitBounds = win.getBounds();
+    await resizeWindow({ ...splitBounds, width: 1600, height: 1000 });
+    const s = JSON.parse(
+      await exec(`
+        (async () => {
+          const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+          const res = {};
+          // Seed the ratio rather than inheriting whatever the last run left in
+          // localStorage. Without this the "did the drag shrink the pane"
+          // assertion depends on where a previous run happened to stop - the
+          // same "geometric assertions pass or fail on history" defect this
+          // suite already fixed for window bounds, and it produced a spurious
+          // COLLATERAL verdict on R190 before it was fixed here.
+          // Seeded to 0.65, deliberately NOT 0.5: 0.5 is the value a
+          // double-click is supposed to STORE, so seeding 0.5 makes the
+          // "double-click remembers an even split" assertion pass on the seed
+          // alone. That is exactly how it went vacuous and turned R189 into a
+          // WRONG-GUARD - the guard was reading its own setup.
+          localStorage.setItem('editorSplitRatio', '0.65');
+          applyEditorSplitRatio(0.65);
+          if (!isEditMode) toggleEditBtn.click();
+          await sleep(800);
+          // Re-applied after the mode switch as well, so the seed cannot be
+          // undone by anything the transition does to the panel's width.
+          applyEditorSplitRatio(0.65);
+          await sleep(80);
+          const wrap = document.querySelector('.content-wrapper');
+          const sp = document.getElementById('editorSplitter');
+          const ep = document.getElementById('editorPanel');
+          const vw = document.getElementById('viewer');
+          const wr = wrap.getBoundingClientRect();
+          const sum = () => {
+            const a = ep.getBoundingClientRect(), b = sp.getBoundingClientRect(), c = vw.getBoundingClientRect();
+            return { total: a.width + b.width + c.width, wrap: wr.width, panel: a.width };
+          };
+          res.splitterVisible = getComputedStyle(sp).display !== 'none';
+          const before = sum();
+          res.fitsBefore = Math.abs(before.total - before.wrap) <= 1;
+          res.seededPanelRatio = before.panel / before.wrap;
+          res.seededStore = localStorage.getItem('editorSplitRatio');
+          // Real PointerEvents: the handler binds pointerdown, and a MouseEvent
+          // carries no pointerId, so dispatching MouseEvents here would not
+          // reach it at all - and previously hid that the capture branch was
+          // dead code.
+          let pid = 20;
+          const fire = (el, type, x, buttons) => el.dispatchEvent(new PointerEvent(type, {
+            bubbles: true, cancelable: true, clientX: x, clientY: wr.top + 200,
+            button: 0, buttons: buttons === undefined ? 1 : buttons,
+            pointerId: pid, pointerType: 'mouse',
+          }));
+          const targetX = wr.left + wr.width * 0.30;
+          // Capture cannot be OBSERVED with synthetic events: the pointer is
+          // not real, so Chromium accepts setPointerCapture without promoting
+          // it and hasPointerCapture stays false (measured). What IS observable
+          // - and what was actually broken - is whether the code ASKS for
+          // capture with a real pointerId at all. Binding mousedown meant
+          // e.pointerId was undefined and the call never happened. Spying the
+          // DOM method is an oracle at the boundary, not the implementation's
+          // own helper.
+          const realCapture = sp.setPointerCapture.bind(sp);
+          let captureArg = 'never-called';
+          sp.setPointerCapture = (id) => { captureArg = id; try { realCapture(id); } catch (e) {} };
+          fire(sp, 'pointerdown', wr.left + before.panel);
+          res.captureRequestedWith = captureArg;
+          res.captureRequestedCorrectId = captureArg === pid;
+          sp.setPointerCapture = realCapture;
+          fire(document, 'pointermove', targetX);
+          await sleep(120);
+          res.dragging = document.body.classList.contains('splitter-dragging') && sp.classList.contains('dragging');
+          res.handleTrackingErrorPx = Math.round((sp.getBoundingClientRect().left - targetX) * 100) / 100;
+          fire(document, 'pointerup', targetX, 0);
+          await sleep(120);
+          res.dragClassesCleared = !document.body.classList.contains('splitter-dragging') && !sp.classList.contains('dragging');
+          const after = sum();
+          res.fitsAfter = Math.abs(after.total - after.wrap) <= 1;
+          res.panelShrank = after.panel < before.panel - 100;
+          res.stored = parseFloat(localStorage.getItem('editorSplitRatio'));
+          // A drag whose pointerup this window never saw - released outside the
+          // frame. The next move arrives with no buttons held; the drag must
+          // end itself rather than resize for ever.
+          pid++;
+          const preLost = ep.getBoundingClientRect().width;
+          fire(sp, 'pointerdown', wr.left + preLost);
+          fire(document, 'pointermove', wr.left + wr.width * 0.40);
+          await sleep(80);
+          res.lostUpWasDragging = document.body.classList.contains('splitter-dragging');
+          fire(document, 'pointermove', wr.left + wr.width * 0.70, 0);
+          await sleep(80);
+          res.lostUpEndedDrag = !document.body.classList.contains('splitter-dragging') && !sp.classList.contains('dragging');
+          const strandedWidth = ep.getBoundingClientRect().width;
+          fire(document, 'pointermove', wr.left + wr.width * 0.20, 0);
+          await sleep(80);
+          res.lostUpStopsResizing = Math.abs(ep.getBoundingClientRect().width - strandedWidth) < 1;
+          // The viewer is its own scroller in split view (R61/R63). Changing it
+          // from width:50% to flex must not cost that.
+          vw.scrollTop = vw.scrollHeight;
+          await sleep(150);
+          // Vacuity guard: on a document that already fits, scrollTop stays 0
+          // and "reaches the bottom" would be measuring nothing.
+          res.viewerCanScroll = vw.scrollHeight > vw.clientHeight + 100;
+          res.viewerReachesBottom = vw.scrollTop > 0 &&
+            Math.abs(vw.scrollTop + vw.clientHeight - vw.scrollHeight) <= 2;
+          vw.scrollTop = 0;
+          // Clamps: dragging past either edge must not collapse a pane.
+          pid++;
+          fire(sp, 'pointerdown', wr.left + ep.getBoundingClientRect().width);
+          fire(document, 'pointermove', wr.left - 800);
+          await sleep(80);
+          res.minRatio = ep.getBoundingClientRect().width / wr.width;
+          fire(document, 'pointermove', wr.right + 800);
+          await sleep(80);
+          res.maxRatio = ep.getBoundingClientRect().width / wr.width;
+          fire(document, 'pointerup', wr.right + 800, 0);
+          await sleep(80);
+          res.storedBeforeDblClick = localStorage.getItem('editorSplitRatio');
+          sp.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+          await sleep(150);
+          res.afterDblClick = ep.getBoundingClientRect().width / wr.width;
+          res.storedAfterDblClick = localStorage.getItem('editorSplitRatio');
+          toggleEditBtn.click();
+          await sleep(700);
+          res.hiddenOutsideSplitView = getComputedStyle(sp).display === 'none';
+          return JSON.stringify(res);
+        })()
+      `),
+    );
+    check(
+      "the splitter is laid out in split view and nowhere else",
+      s.splitterVisible === true && s.hiddenOutsideSplitView === true,
+      JSON.stringify(s),
+    );
+    check(
+      "inserting the splitter does not push the viewer out of the window",
+      s.fitsBefore === true && s.fitsAfter === true,
+      JSON.stringify(s),
+    );
+    check(
+      "dragging the splitter really resizes the editor pane",
+      s.dragging === true &&
+        s.panelShrank === true &&
+        // Vacuity guard: the drag has to have started from the seeded ratio, or
+        // "it shrank" could be measuring where a previous run left the pane.
+        Math.abs(s.seededPanelRatio - 0.65) < 0.01,
+      JSON.stringify(s),
+    );
+    // The handle has to land where the pointer is, not near it. Upstream's
+    // denominator (container width minus the handle) is off by a fraction of
+    // the handle width that grows with the travel - measured at 1.81px here.
+    check(
+      "the splitter lands under the pointer rather than near it",
+      Math.abs(s.handleTrackingErrorPx) <= 1,
+      JSON.stringify(s),
+    );
+    check(
+      "a finished drag leaves no drag state behind",
+      s.dragClassesCleared === true,
+      JSON.stringify(s),
+    );
+    check(
+      "the split ratio is remembered",
+      s.stored > 0.25 && s.stored < 0.35,
+      JSON.stringify(s),
+    );
+    check(
+      "the viewer can still be scrolled to the bottom in split view",
+      s.viewerCanScroll === true && s.viewerReachesBottom === true,
+      JSON.stringify(s),
+    );
+    check(
+      "the splitter really asks for pointer capture rather than only appearing to",
+      s.captureRequestedCorrectId === true &&
+        typeof s.captureRequestedWith === "number",
+      JSON.stringify(s),
+    );
+    check(
+      "a drag whose pointerup went missing ends itself instead of resizing for ever",
+      s.lostUpWasDragging === true &&
+        s.lostUpEndedDrag === true &&
+        s.lostUpStopsResizing === true,
+      JSON.stringify(s),
+    );
+    check(
+      "neither pane can be dragged away to nothing",
+      Math.abs(s.minRatio - 0.15) < 0.01 && Math.abs(s.maxRatio - 0.85) < 0.01,
+      JSON.stringify(s),
+    );
+    check(
+      "double-clicking the splitter restores an even split, and remembers it",
+      Math.abs(s.afterDblClick - 0.5) < 0.01 &&
+        s.storedAfterDblClick === "0.5" &&
+        // Vacuity guard: "0.5 is stored" means nothing unless something else
+        // was stored a moment earlier. Seeding 0.5 is what made this pass on
+        // its own setup and turned R189 into a WRONG-GUARD.
+        s.storedBeforeDblClick !== "0.5",
+      JSON.stringify(s),
+    );
+
+    // A stored ratio has to survive a restart, and it has to be applied to a
+    // pane that is not visible yet - the editor panel is display:none until
+    // split view is entered, so a ratio applied at load must still be in force
+    // when the panel appears.
+    const restored = JSON.parse(
+      await exec(`
+        (async () => {
+          const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+          localStorage.setItem('editorSplitRatio', '0.25');
+          applyEditorSplitRatio(0.25);
+          if (!isEditMode) toggleEditBtn.click();
+          await sleep(800);
+          const wrap = document.querySelector('.content-wrapper').getBoundingClientRect();
+          const ratio = document.getElementById('editorPanel').getBoundingClientRect().width / wrap.width;
+          toggleEditBtn.click();
+          await sleep(700);
+          localStorage.setItem('editorSplitRatio', '0.5');
+          applyEditorSplitRatio(0.5);
+          return JSON.stringify({ ratio });
+        })()
+      `),
+    );
+    check(
+      "a remembered ratio is in force the moment split view opens",
+      Math.abs(restored.ratio - 0.25) < 0.01,
+      JSON.stringify(restored),
+    );
+
+    await resizeWindow(splitBounds);
+  }
+
   // Without this the sentinel reporting nothing and the sentinel having quietly
   // stopped watching are indistinguishable - the vacuity this harness exists to
   // rule out. Both channels are proven because they fail independently.
