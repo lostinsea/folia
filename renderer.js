@@ -890,6 +890,23 @@ let redoHistory = [];   // future states (string[])
 let undoRedoRendering = false; // suppress loading screen & scrollTop reset during undo/redo
 
 function historyPush(content) {
+  // NOT gated on isEditMode, and that is a decision rather than an omission.
+  // A reviewer proposed `if (!isEditMode) return;` here, arguing that since
+  // Ctrl+Z/Ctrl+Y are now edit-mode only, a view-mode push strands an entry
+  // that the FIRST Ctrl+Z of a later edit session then pops, replacing the
+  // editor with a pre-note baseline. Rejected on two grounds:
+  //  (1) it does not fix the stated symptom. Undo history survives the end of
+  //      an edit session (only a DISCARD restores a snapshot - see
+  //      historySnapshot), so with the guard in place the first Ctrl+Z of a
+  //      later session pops the previous SESSION's last entry instead. The
+  //      entry it lands on is then strictly OLDER, i.e. worse.
+  //  (2) an edit-mode undo is visible and non-persistent: it lights the unsaved
+  //      indicator, is reversible with Ctrl+Y, and nothing writes it to disk
+  //      (autoSaveViewModeNote() refuses in edit mode). That is categorically
+  //      different from the view-mode undo hazard that WAS fixed, where the
+  //      next note auto-save silently committed the reverted document.
+  // Cross-document contamination is separately prevented: file-opened calls
+  // historyClear().
   if (undoHistory.length > 0 && undoHistory[undoHistory.length - 1] === content) return;
   undoHistory.push(content);
   if (undoHistory.length > MAX_UNDO_HISTORY) undoHistory.shift();
@@ -983,6 +1000,34 @@ let fileUpdateDismissTimeout = null;
 // Editor state
 let isEditMode = false;
 let hasUnsavedChanges = false;
+// The paths whose last write FAILED, so their content exists in memory and
+// nowhere else. A successful auto-save clears the dirty flag on the save reply,
+// so a view-mode document is normally never dirty for long enough to matter;
+// this is what distinguishes "briefly dirty, write in flight" from "dirty
+// because the write did not happen".
+//
+// KEYED BY PATH, not a single flag, because documents are per-tab and a bare
+// boolean is a cross-tab data-loss bug that BOTH reviewers found independently:
+// tab A's note fails to save, the user switches to tab B and saves there, and
+// that success clears the global - so returning to tab A, whose dirty flag
+// custom-tabs faithfully restores, finds the guards disarmed and the next
+// Refresh discards the note. The mirror image is just as bad: the global stays
+// set and clean tab B starts claiming unsaved changes it does not have.
+const failedSaves = new Set();
+
+function saveFailedFor(p) {
+  return !!p && failedSaves.has(p);
+}
+
+// The guards on open/refresh/close asked `isEditMode && hasUnsavedChanges`,
+// which was complete while edit mode was the only way to have unsaved bytes.
+// A failed view-mode note auto-save breaks that assumption: the bytes are
+// unsaved and the user is not in edit mode, so every one of those guards waved
+// the reload straight through and the note died silently right after the alert
+// said it had not been written.
+function hasUnsavedWork() {
+  return hasUnsavedChanges && (isEditMode || saveFailedFor(currentFilePath));
+}
 let originalMarkdown = '';
 let previewDebounceTimer = null;
 
@@ -1235,6 +1280,42 @@ function commitViewModeEdit(newContent, scrollPosition) {
     contentWrapper.scrollTop = scrollPosition;
   });
   hasUnsavedChanges = true;
+  // replaceSourceSilently() has always repainted the indicator here and this
+  // one did not, so a view-mode edit left the dirty flag set with no sign of
+  // it on screen. Same state, same display.
+  updateUnsavedIndicator();
+}
+
+// Commit a view-mode NOTE change: the same content update as any other
+// view-mode edit, plus the write to disk that notes - and only notes - get.
+//
+// This exists as its own seam because notes are the one editing surface left in
+// view mode, and their persistence must be wired at EVERY commit site or the
+// note is silently lost. There are seven such sites across three files' worth
+// of handlers, and two of them (the viewer context menu and the notes panel)
+// are separate hand-rolled implementations of the same delete; wiring was
+// already missed once. One helper means one place to get right, one place to
+// test, and one place a future note surface has to find.
+//
+// Deliberately NOT folded into commitViewModeEdit(): that is called from 14
+// sites, and the other eight are the edit-only actions this phase just gated.
+// Auto-saving those would extend implicit persistence to exactly the surface
+// the user asked to make explicit-save-only.
+function commitViewModeNote(newContent, scrollPosition) {
+  commitViewModeEdit(newContent, scrollPosition);
+  return autoSaveViewModeNote();
+}
+
+// The same contract for the two note paths that patch the DOM themselves and so
+// must NOT re-render: the viewer's Delete Note and the note-edit dialog. Both
+// already push history of their own before computing the replacement, so this
+// deliberately does not push - unlike replaceSourceSilently(), which is
+// otherwise its twin.
+function commitViewModeNoteSilently(newContent) {
+  originalMarkdown = newContent;
+  hasUnsavedChanges = true;
+  updateUnsavedIndicator();
+  return autoSaveViewModeNote();
 }
 
 // Update markdown source without triggering a full re-render (used when DOM is already patched).
@@ -2028,7 +2109,7 @@ const DROPPABLE_EXTENSIONS = ['md', 'markdown', 'mdown', 'mkd', 'mkdn', 'mmd', '
     }
     if (!filePath) return;
 
-    if (isEditMode && hasUnsavedChanges && !confirm(i18n('confirm.unsavedOpen'))) return;
+    if (hasUnsavedWork() && !confirm(i18n('confirm.unsavedOpen'))) return;
     ipcRenderer.send('open-file-path', filePath);
   });
 
@@ -2042,7 +2123,7 @@ const DROPPABLE_EXTENSIONS = ['md', 'markdown', 'mdown', 'mkd', 'mkdn', 'mmd', '
 // Open file button (toolbar)
 openFileBtn.addEventListener('click', () => {
   // Check for unsaved changes before opening file dialog
-  if (isEditMode && hasUnsavedChanges) {
+  if (hasUnsavedWork()) {
     if (!confirm(i18n('confirm.unsavedOpen'))) {
       return; // User canceled, don't open file dialog
     }
@@ -2080,7 +2161,7 @@ refreshBtn.addEventListener('click', () => {
   }
 
   // Check for unsaved changes before refreshing
-  if (isEditMode && hasUnsavedChanges) {
+  if (hasUnsavedWork()) {
     if (!confirm(i18n('confirm.unsavedRefresh'))) {
       return;
     }
@@ -2398,7 +2479,23 @@ toggleEditBtn.addEventListener('click', async () => {
     // than unconditionally declaring it clean.
     captureEditSessionBaseline(true);
     markdownEditor.value = originalMarkdown;
-    hasUnsavedChanges = false;
+    // Do NOT unconditionally declare the document clean. Since notes auto-save,
+    // there are exactly two ways view mode carries a dirty flag into edit mode,
+    // and both mean the bytes on screen are not the bytes on disk:
+    //   (1) the auto-save FAILED (read-only file, deleted file, disk error) and
+    //       the note exists only in memory;
+    //   (2) a write is still IN FLIGHT and has not been answered yet - which is
+    //       reachable through the stale-reply path, where an older success
+    //       already set the flag to say "the store moved past what was written".
+    // Zeroing the flag here threw away the one cue that the content was unsaved,
+    // and with it the close/refresh prompt - so the retry the alert asks the
+    // user to perform was itself what destroyed the note. Edit mode is where
+    // Ctrl+S and the Save button live, so carrying the flag in is exactly what
+    // makes recovery possible. It is ANDed with the incoming flag so a clean
+    // document is never made to look dirty.
+    hasUnsavedChanges =
+      hasUnsavedChanges &&
+      (saveFailedFor(currentFilePath) || hasPendingSaveFor(currentFilePath));
     updateUnsavedIndicator();
     toggleEditBtn.style.background = 'var(--primary-color)';
     toggleEditBtn.style.color = '#ffffff';
@@ -2713,6 +2810,18 @@ function pendingSaveFor(path) {
   return waits.length ? Promise.all(waits) : null;
 }
 
+// True while at least one write for `path` is still unanswered. Distinct from
+// pendingSaveFor(), which hands back something to await; callers that only need
+// to decide "is this document's latest content known to be on disk?" must not
+// have to await anything to find out.
+function hasPendingSaveFor(path) {
+  let pending = false;
+  pendingSaves.forEach((entry) => {
+    if (entry.path === path) pending = true;
+  });
+  return pending;
+}
+
 function saveMarkdownFile() {
   if (!currentFilePath) {
     alert(i18n('alert.noFileOpen'));
@@ -2736,8 +2845,45 @@ function saveMarkdownFile() {
 // Save button click
 saveButton.addEventListener('click', saveMarkdownFile);
 
-// Ctrl+Z (Undo) and Ctrl+Y (Redo) shortcuts
+// Notes are the one editing feature that stays available in view mode, and
+// view mode has no way to reach a Save. Without this every note the reader
+// added was discarded by the next reload, silently. Called only from the note
+// commit paths - the rest of the view-mode editing surface is gated to edit
+// mode by applyEditModeMenuGating().
+//
+// DELIBERATELY NOT DEBOUNCED. A note edit is a discrete dialog confirmation,
+// not a keystroke stream, so there is no burst to coalesce; and a debounce
+// window is exactly the interval in which a close or a reload loses the note,
+// which is the bug being fixed. Concurrent writes to one path are already
+// serialised in the main process by queueSave(), and main.js re-stats the file
+// after its own write, so this does not trip the external-change watcher.
+function autoSaveViewModeNote() {
+  if (isEditMode) return false;   // edit mode keeps explicit-save semantics
+  if (!currentFilePath) return false;
+  saveMarkdownFile();
+  return true;
+}
+
+// Ctrl+Z (Undo) and Ctrl+Y (Redo) shortcuts - EDIT MODE ONLY.
+//
+// Both reviewers found this independently, and it is the same disease this
+// whole project started with: a document silently reverting to an older
+// version. In view mode historyUndo() reassigns `originalMarkdown` WITHOUT
+// setting hasUnsavedChanges, so the store diverged from the file with no
+// indicator and no prompt. That was survivable while view mode never wrote to
+// disk. Now that notes auto-save, the next note commit writes the whole
+// reverted document out, so two Ctrl+Z presses followed by one note silently
+// destroy every note saved before them - and an undo that crosses back into
+// content from a previous edit-mode session would roll the FILE back to it.
+//
+// Auto-saving the undo instead was rejected: it would make an undo keystroke
+// rewrite the file with no explicit save, which is precisely the behaviour the
+// user reported as the original bug. Undo is a document-editing action, and
+// the user's rule is that every document-editing action except notes belongs
+// to edit mode. A note added by mistake is still removable in view mode via
+// right-click > Delete Note, so no capability is lost.
 document.addEventListener('keydown', (e) => {
+  if (!isEditMode) return;
   if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'z') {
     e.preventDefault();
     historyUndo();
@@ -2761,7 +2907,7 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     if (currentFilePath) {
       // Check for unsaved changes
-      if (isEditMode && hasUnsavedChanges) {
+      if (hasUnsavedWork()) {
         if (confirm(i18n('confirm.unsavedRefresh'))) {
           reloadCurrentFile();
         }
@@ -2796,9 +2942,18 @@ ipcRenderer.on('save-markdown-result', (event, data) => {
       // write was in flight, and in that case the textarea is NOT what is on
       // disk - adopting it would leave `originalMarkdown` describing a document
       // that was never written.
-      if (entry) {
+      // In VIEW mode the store IS the document, and it can move while a write
+      // is in flight - a second note confirmed before the first note's reply
+      // arrives. Adopting the in-flight payload then would drop the newer note
+      // from the store while the newer note's own write still lands on disk,
+      // leaving store and file describing different documents; the next note
+      // would write the stale one back out. If the store has moved, leave it
+      // alone and let the newer write's own reply reconcile it.
+      const storeMovedDuringWrite =
+        !isEditMode && !!entry && originalMarkdown !== entry.content;
+      if (entry && !storeMovedDuringWrite) {
         originalMarkdown = entry.content;
-      } else if (isEditMode) {
+      } else if (!entry && isEditMode) {
         originalMarkdown = markdownEditor.value;
       }
       // Typing during the write leaves genuinely unsaved bytes behind;
@@ -2806,9 +2961,15 @@ ipcRenderer.on('save-markdown-result', (event, data) => {
       // a warning.
       hasUnsavedChanges = isEditMode
         ? markdownEditor.value !== originalMarkdown
-        : false;
+        : storeMovedDuringWrite;
       updateUnsavedIndicator();
     }
+    // A successful write resolves any earlier failure recorded for THAT path -
+    // not for whichever document happens to be on screen now. Deliberately
+    // OUTSIDE the isForCurrent/ordering block above: those conditions decide
+    // whether the on-screen stores may be touched, but "this path is now on
+    // disk" is a fact about the path and is just as true for a background tab.
+    if (data.success && savedPath) failedSaves.delete(savedPath);
     console.log('File saved successfully');
 
     // Resume file tracking after save
@@ -2818,6 +2979,24 @@ ipcRenderer.on('save-markdown-result', (event, data) => {
     }
   } else {
     console.error('Save failed:', data.error);
+    // A failed write means that document's latest bytes live only in memory.
+    // Recording the PATH keeps the dirty flag alive through hasUnsavedWork(),
+    // so the reload/open guards prompt instead of discarding, and toggling into
+    // edit mode preserves rather than clears the flag - which is where the user
+    // can actually retry, since view mode has no Save affordance at all
+    // (Ctrl+S is gated on edit mode; the Save button lives in the editor panel).
+    //
+    // Recorded regardless of the CURRENT mode. Gating this on !isEditMode was a
+    // real hole: a view-mode note's write can still be in flight when the user
+    // enters edit mode to retry a previous failure, and the reply that then
+    // arrives describes bytes that never reached disk. Which mode the user
+    // happens to be in when the reply lands says nothing about whether the
+    // write succeeded.
+    if (savedPath) failedSaves.add(savedPath);
+    if (isForCurrent) {
+      hasUnsavedChanges = true;
+      updateUnsavedIndicator();
+    }
     alert(i18n('alert.saveFailed') + data.error);
   }
   // Always settle, including for background documents and failures: something
@@ -2901,7 +3080,7 @@ function updateFileMenuRecent() {
 
     item.addEventListener('click', () => {
       // Check for unsaved changes before opening
-      if (isEditMode && hasUnsavedChanges) {
+      if (hasUnsavedWork()) {
         if (!confirm(i18n('confirm.unsavedOpenFile', {name: file.name}))) {
           return;
         }
@@ -4810,7 +4989,15 @@ ipcRenderer.on('file-opened', async (event, data) => {
 
   // Store original markdown for editor
   originalMarkdown = data.content;
-
+  // This document has just been re-read from disk, so any earlier failed write
+  // against THIS path describes content that no longer exists. Scoped to the
+  // path: a failure recorded for another tab's document is still true and must
+  // survive, which a single global flag could not express.
+  if (data.filePath) failedSaves.delete(data.filePath);
+  if (!isEditMode) {
+    hasUnsavedChanges = false;
+    updateUnsavedIndicator();
+  }
   // If in edit mode, update editor content
   if (isEditMode) {
     markdownEditor.value = originalMarkdown;
@@ -4898,7 +5085,13 @@ ipcRenderer.on('file-not-found', (event, data) => {
 ipcRenderer.on('file-reload-result', async (event, data) => {
   if (data.success) {
     originalMarkdown = data.content;
-
+    // The document was just re-read from disk, so whatever the last write did
+    // or failed to do is no longer what is on screen - for THIS path only.
+    if (currentFilePath) failedSaves.delete(currentFilePath);
+    if (!isEditMode) {
+      hasUnsavedChanges = false;
+      updateUnsavedIndicator();
+    }
     // If in edit mode, update editor content
     if (isEditMode) {
       markdownEditor.value = originalMarkdown;
@@ -4925,7 +5118,7 @@ ipcRenderer.on('external-file-open-request', (event, data) => {
   const { filePath } = data;
 
   // Check for unsaved changes
-  if (isEditMode && hasUnsavedChanges) {
+  if (hasUnsavedWork()) {
     if (!confirm(i18n('confirm.unsavedOpenFile', {name: filePath.split(/[\\/]/).pop()}))) {
       return; // User canceled, don't open the new file
     }
@@ -5219,8 +5412,85 @@ function showContextMenu(x, y) {
   // Update new context menu items visibility (mermaid, table, code, etc.)
   updateNewContextMenuItems();
 
+  // Everything above decides visibility from the CLICK TARGET. This last pass
+  // decides it from the MODE, and it runs last on purpose so it cannot be
+  // undone by one of those branches.
+  //
+  // Only notes are a view-mode editing feature. Every other editing item
+  // mutates originalMarkdown, and view mode has no route to disk at all - the
+  // Save button lives inside the hidden editor panel and Ctrl+S is gated on
+  // isEditMode - so in view mode those edits were silently discarded on the
+  // next reload. They are not removed, only deferred: the viewer is still on
+  // screen in split view, so every one of them still works in edit mode.
+  applyEditModeMenuGating();
+
+  // Hiding a whole run of items leaves the separators that framed it behind,
+  // which reads as an empty section. Collapse them from the CURRENT visibility
+  // rather than from a hard-coded grouping, so this survives menu edits.
+  tidyContextMenuSeparators();
+
   // Use helper for positioning (handles screen edge adjustment)
   positionContextMenu(contextMenu, x, y);
+}
+
+// Items that change the document and are NOT notes. Kept as one list so the
+// rule is stated in a single place rather than spread over the branches above.
+//
+// The split matters. ALWAYS_VISIBLE items are ones no other code gives a
+// `display` to, so gating owns their visibility outright and must restore them
+// when edit mode comes back. TARGET_DECIDED items already had their display
+// set by the click-target branches above, so gating may only ever take
+// visibility AWAY from them - restoring them here would show "Delete Table"
+// on a paragraph.
+function editOnlyAlwaysVisibleItems() {
+  return [
+    ctxBold, ctxItalic, ctxCode, ctxList, ctxRemoveFormat,
+    ctxInsertImage, ctxInsertMermaid, ctxInsertTable,
+  ];
+}
+
+function editOnlyTargetDecidedItems() {
+  return [
+    ctxEditText,
+    ctxDeleteImage,
+    ctxEditMermaid, ctxDeleteMermaid,
+    ctxEditTable, ctxDeleteTable,
+  ];
+}
+
+function applyEditModeMenuGating() {
+  const display = isEditMode ? '' : 'none';
+  editOnlyAlwaysVisibleItems().forEach((el) => {
+    if (el) el.style.display = display;
+  });
+  if (isEditMode) return;
+  editOnlyTargetDecidedItems().forEach((el) => {
+    if (el) el.style.display = 'none';
+  });
+}
+
+function tidyContextMenuSeparators() {
+  const children = Array.from(contextMenu.children);
+  let itemSinceSeparator = false;
+  const shown = [];
+  children.forEach((el) => {
+    if (el.classList.contains('context-menu-separator')) {
+      // A separator earns its place only if a visible item precedes it.
+      if (itemSinceSeparator) {
+        el.style.display = '';
+        shown.push(el);
+      } else {
+        el.style.display = 'none';
+      }
+      itemSinceSeparator = false;
+    } else if (el.style.display !== 'none') {
+      itemSinceSeparator = true;
+    }
+  });
+  // Nothing followed the last surviving separator, so it frames nothing.
+  if (!itemSinceSeparator && shown.length) {
+    shown[shown.length - 1].style.display = 'none';
+  }
 }
 
 function hideContextMenu() {
@@ -5989,8 +6259,11 @@ ctxDeleteNote.addEventListener('click', () => {
 
       // Update source silently (no full re-render)
       const nid = noteEl.getAttribute('data-note-id');
-      originalMarkdown = newContent;
-      hasUnsavedChanges = true;
+      // There are TWO delete surfaces - this one on the viewer's context menu
+      // and ctxNotesPanelDelete on the notes panel - and they do NOT share an
+      // implementation. Wiring only the other one left the viewer's own Delete
+      // Note as the single note action that still vanished on reload.
+      commitViewModeNoteSilently(newContent);
 
       // DOM patch — preserves mermaid diagrams and avoids full re-render
       if (nid) {
@@ -6117,8 +6390,11 @@ noteSaveBtn.addEventListener('click', () => {
 
         // Update source silently (no full re-render)
         const nid = editingNoteElement.getAttribute('data-note-id');
-        originalMarkdown = newContent;
-        hasUnsavedChanges = true;
+        // This path hand-rolls the store update instead of going through
+        // commitViewModeEdit()/replaceSourceSilently(), and had picked up
+        // neither the indicator repaint nor - once notes started persisting -
+        // the write. Both belong here for the same reason they belong there.
+        commitViewModeNoteSilently(newContent);
 
         // DOM patch — build updates based on note type, preserves mermaid diagrams
         const domUpdates = { title, content };
@@ -6228,7 +6504,7 @@ noteSaveBtn.addEventListener('click', () => {
           const idx = hit.index;
           const scrollPosition = contentWrapper.scrollTop;
           const newContent = markdownContent.substring(0, idx) + noteHtml + markdownContent.substring(idx + mdImgPattern.length);
-          commitViewModeEdit(newContent, scrollPosition);
+          commitViewModeNote(newContent, scrollPosition);
           found = true;
         }
         if (!found) {
@@ -6237,7 +6513,7 @@ noteSaveBtn.addEventListener('click', () => {
           if (match) {
             const scrollPosition = contentWrapper.scrollTop;
             const newContent = markdownContent.replace(match[0], noteHtml);
-            commitViewModeEdit(newContent, scrollPosition);
+            commitViewModeNote(newContent, scrollPosition);
             found = true;
           }
         }
@@ -6251,7 +6527,7 @@ noteSaveBtn.addEventListener('click', () => {
         if (textIndex !== -1) {
           const scrollPosition = contentWrapper.scrollTop;
           const newContent = markdownContent.substring(0, textIndex) + noteHtml + markdownContent.substring(textIndex + savedSelection.length);
-          commitViewModeEdit(newContent, scrollPosition);
+          commitViewModeNote(newContent, scrollPosition);
           showNotification(i18n('notif.noteAdded'), 1500);
         } else {
           showNotification(i18n('notif.textNotFound'), 2000);
@@ -6294,7 +6570,7 @@ noteSaveBtn.addEventListener('click', () => {
       const scrollPosition = contentWrapper.scrollTop;
       const activeContent = getActiveMarkdown();
       const newContent = activeContent + '\n' + noteHtml;
-      commitViewModeEdit(newContent, scrollPosition);
+      commitViewModeNote(newContent, scrollPosition);
 
       showNotification(i18n('notif.noteAdded'), 1500);
     }
@@ -8256,7 +8532,7 @@ ctxNotesPanelDelete.addEventListener('click', () => {
         replacement +
         activeSource.substring(match.index + match[0].length);
 
-      commitViewModeEdit(newContent, scrollPosition);
+      commitViewModeNote(newContent, scrollPosition);
 
       showNotification(i18n('notif.noteRemoved'), 1500);
     } else {

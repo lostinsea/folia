@@ -2525,6 +2525,343 @@ const REVERTS = [
       /the selected theme carries a checkmark the unselected ones do not/,
     ],
   },
+
+  // ---------------------------------------------------------------------
+  // View-mode editing: gated to edit mode, except notes, which auto-save.
+  // ---------------------------------------------------------------------
+  {
+    id: "R196",
+    suite: "test:patch",
+    // Neutralising the CALL rather than the function body, so the entry cannot
+    // rot when the gating is restructured - the same anti-rot shape as R53.
+    what: "stop gating the viewer context menu, so view mode again offers a dozen edits it cannot save",
+    file: RENDERER,
+    from: "  applyEditModeMenuGating();",
+    to: "  /* gating removed by revert */;",
+    expect: [
+      /no document-editing item is offered in view mode/,
+      /table edit and delete are not offered on a table in view mode/,
+    ],
+    // If the probe itself failed, "the items are visible" would just mean the
+    // menu never opened.
+    mustPass: [
+      /the view-mode context-menu probe rendered its sample document/,
+      /notes stay reachable in view mode/,
+      /the read-only items are untouched in view mode/,
+    ],
+  },
+  {
+    id: "R197",
+    suite: "test:patch",
+    // The bug this pins was WRITTEN and caught by the test, not hypothesised:
+    // gating that only ever sets display:none hides the formatting items
+    // permanently, because nothing else in the codebase gives them a display.
+    what: "make the gating one-way, so an item hidden in view mode never comes back in edit mode",
+    file: RENDERER,
+    from: "  const display = isEditMode ? '' : 'none';",
+    to: "  const display = 'none';\n  if (isEditMode) return;",
+    expect: [/entering edit mode restores every editing item the gating hid/],
+    mustPass: [
+      /no document-editing item is offered in view mode/,
+      /table edit and delete come back on a table in edit mode/,
+    ],
+  },
+  {
+    id: "R198",
+    suite: "test:patch",
+    what: "stop collapsing the separators that framed the hidden items, leaving empty sections in the menu",
+    file: RENDERER,
+    from: "  tidyContextMenuSeparators();",
+    to: "  /* separator tidy removed by revert */;",
+    expect: [/hiding a run of items leaves no stray separator behind/],
+    mustPass: [/no document-editing item is offered in view mode/],
+  },
+  {
+    id: "R199",
+    suite: "test:patch",
+    // The original defect, in its most common form: the reader annotates a
+    // document in view mode and the note is gone after the next reload.
+    what: "stop persisting a note added in view mode",
+    file: RENDERER,
+    from:
+      "          const newContent = markdownContent.substring(0, textIndex) + noteHtml + markdownContent.substring(textIndex + savedSelection.length);\n" +
+      "          commitViewModeNote(newContent, scrollPosition);",
+    to:
+      "          const newContent = markdownContent.substring(0, textIndex) + noteHtml + markdownContent.substring(textIndex + savedSelection.length);\n" +
+      "          commitViewModeEdit(newContent, scrollPosition);",
+    expect: [/a note added in view mode is written to disk without any save action/],
+    mustPass: [/the Add Note dialog reached its Save button/],
+  },
+  {
+    id: "R200",
+    suite: "test:patch",
+    // A separate entry from R199 on purpose: the edit path does NOT share an
+    // implementation with the add path - it hand-rolls its own store update -
+    // so one call site being wired says nothing about the other.
+    what: "stop persisting an EDIT to an existing note in view mode",
+    file: RENDERER,
+    from: "        commitViewModeNoteSilently(newContent);",
+    to:
+      "        originalMarkdown = newContent;\n" +
+      "        hasUnsavedChanges = true;\n" +
+      "        updateUnsavedIndicator();",
+    expect: [/editing a note in view mode is written to disk/],
+    mustPass: [/the Edit Note dialog reached its Save button/],
+  },
+  {
+    id: "R201",
+    suite: "test:patch",
+    // There are TWO delete surfaces with two implementations. The first pass
+    // of this work wired only the notes-panel one and left the viewer's own
+    // Delete Note unsaved; the suite caught it. This is that trap, kept.
+    what: "stop persisting a note deleted from the VIEWER's context menu (the notes panel has its own, separate handler)",
+    file: RENDERER,
+    from:
+      "      // Note as the single note action that still vanished on reload.\n" +
+      "      commitViewModeNoteSilently(newContent);",
+    to:
+      "      // Note as the single note action that still vanished on reload.\n" +
+      "      originalMarkdown = newContent;\n" +
+      "      hasUnsavedChanges = true;\n" +
+      "      updateUnsavedIndicator();",
+    expect: [/deleting a note in view mode is written to disk/],
+    mustPass: [/the Delete Note handler ran/],
+  },
+  {
+    id: "R202",
+    suite: "test:patch",
+    // The other direction. Auto-save is scoped to view mode deliberately:
+    // edit mode has an explicit Save and an unsaved-changes contract built on
+    // top of it, and silently writing behind that contract would break the
+    // discard-on-exit behaviour 6d exists to provide.
+    what: "auto-save notes in EDIT mode too, breaking the explicit-save contract the editor is built on",
+    file: RENDERER,
+    from: "  if (isEditMode) return false;   // edit mode keeps explicit-save semantics",
+    to: "  // edit-mode guard removed by revert",
+    expect: [
+      /autoSaveViewModeNote\(\) refuses to write while edit mode is on/,
+      /nothing reached the disk when the edit-mode guard refused/,
+    ],
+    // No CURRENT call site reaches this function in edit mode - the edit-mode
+    // branches of the note handlers simply do not call it - so the end-to-end
+    // assertion below passes structurally either way and cannot pin the guard.
+    // It is listed here so that a future wiring change which DOES make it
+    // reachable reports as COLLATERAL rather than quietly widening this proof.
+    mustPass: [
+      /the edit-mode Add Note dialog reached its Save button/,
+      /the edit-mode note really was added, in memory/,
+      /a note added in edit mode is NOT auto-saved/,
+      /the guarded document really did have unsaved content to write/,
+    ],
+  },
+
+  // ---------------------------------------------------------------------
+  // Second round: what two independent reviewers found in the above.
+  //
+  // Three of the seven auto-save call sites had no probe reaching them, so
+  // deleting the write from any of them left the suite green. All seven now go
+  // through one of two helpers, which turns "did this site remember to save?"
+  // into "does this site call the note helper or the plain one?" - and that is
+  // what these entries perturb, one site at a time.
+  // ---------------------------------------------------------------------
+  {
+    id: "R203",
+    suite: "test:patch",
+    what: "leave a note added to a MARKDOWN IMAGE unsaved, the way an unwired site silently is",
+    file: RENDERER,
+    from:
+      "          const newContent = markdownContent.substring(0, idx) + noteHtml + markdownContent.substring(idx + mdImgPattern.length);\n" +
+      "          commitViewModeNote(newContent, scrollPosition);",
+    to:
+      "          const newContent = markdownContent.substring(0, idx) + noteHtml + markdownContent.substring(idx + mdImgPattern.length);\n" +
+      "          commitViewModeEdit(newContent, scrollPosition);",
+    expect: [/a note on a markdown image is written to disk in view mode/],
+    // If the dialog never ran, "not on disk" would say nothing about saving.
+    mustPass: [/the Add Note dialog ran against a markdown image/],
+  },
+  {
+    id: "R204",
+    suite: "test:patch",
+    // A different branch from R203: the markdown-image lookup misses on a raw
+    // <img> and a regex fallback does the replacement instead.
+    what: "leave a note added to a RAW <img> unsaved",
+    file: RENDERER,
+    from:
+      "            const newContent = markdownContent.replace(match[0], noteHtml);\n" +
+      "            commitViewModeNote(newContent, scrollPosition);",
+    to:
+      "            const newContent = markdownContent.replace(match[0], noteHtml);\n" +
+      "            commitViewModeEdit(newContent, scrollPosition);",
+    expect: [/a note on a raw <img> is written to disk in view mode/],
+    mustPass: [/the Add Note dialog ran against a raw <img>/],
+  },
+  {
+    id: "R205",
+    suite: "test:patch",
+    what: "leave a LABEL BADGE unsaved - the no-selection branch, which nothing drove before",
+    file: RENDERER,
+    from:
+      "      const newContent = activeContent + '\\n' + noteHtml;\n" +
+      "      commitViewModeNote(newContent, scrollPosition);",
+    to:
+      "      const newContent = activeContent + '\\n' + noteHtml;\n" +
+      "      commitViewModeEdit(newContent, scrollPosition);",
+    expect: [/a label badge added in view mode is written to disk/],
+    mustPass: [/the Add Note dialog ran with no selection/],
+  },
+  {
+    id: "R206",
+    suite: "test:patch",
+    // The trap from the first round, in its other half: the notes panel and
+    // the viewer context menu are SEPARATE hand-rolled deletes. R201 pins the
+    // viewer one; this pins the panel one.
+    what: "leave a delete made from the NOTES PANEL unsaved",
+    file: RENDERER,
+    from:
+      "        activeSource.substring(match.index + match[0].length);\n\n" +
+      "      commitViewModeNote(newContent, scrollPosition);",
+    to:
+      "        activeSource.substring(match.index + match[0].length);\n\n" +
+      "      commitViewModeEdit(newContent, scrollPosition);",
+    expect: [/deleting a note from the NOTES PANEL is written to disk in view mode/],
+    mustPass: [/the notes-panel Delete handler ran/],
+  },
+  {
+    id: "R207",
+    suite: "test:patch",
+    // Both reviewers found this independently, and it is the original disease:
+    // a document silently reverting. View-mode undo reassigned the store
+    // without marking it dirty, and the next note wrote that reverted document
+    // over the file.
+    what: "let Ctrl+Z mutate the document in VIEW mode, so the next note auto-saves the reverted text",
+    file: RENDERER,
+    from: "document.addEventListener('keydown', (e) => {\n  if (!isEditMode) return;\n  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'z') {",
+    to: "document.addEventListener('keydown', (e) => {\n  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'z') {",
+    expect: [
+      /Ctrl\+Z does not alter the document in view mode/,
+      /the store and the file still agree after a view-mode Ctrl\+Z/,
+    ],
+    // The undo must have had something to undo, and edit mode must still have
+    // its undo, or this would pass for the wrong reasons.
+    mustPass: [
+      /a note exists on disk before the undo keystroke/,
+      /Ctrl\+Z still undoes in edit mode/,
+    ],
+  },
+  {
+    id: "R208",
+    suite: "test:patch",
+    // The retry the failure alert asks for was itself what destroyed the note.
+    what: "clear the dirty flag when entering edit mode, discarding a note whose auto-save failed",
+    file: RENDERER,
+    from:
+      "    hasUnsavedChanges =\n      hasUnsavedChanges &&\n      (saveFailedFor(currentFilePath) || hasPendingSaveFor(currentFilePath));",
+    to: "    hasUnsavedChanges = false;",
+    expect: [
+      /entering edit mode after a failed auto-save preserves the unsaved state/,
+      /entering edit mode with a write still unanswered keeps the document marked unsaved/,
+    ],
+    mustPass: [
+      /a failed view-mode auto-save records the failure and keeps the document dirty/,
+      /the provoked save failure really did reach the console/,
+    ],
+  },
+  {
+    id: "R209",
+    suite: "test:patch",
+    // The guards asked `isEditMode && hasUnsavedChanges`, which was complete
+    // only while edit mode was the only way to hold unsaved bytes.
+    what: "leave the reload/open guards keyed on edit mode, so a failed view-mode note is discarded silently",
+    file: RENDERER,
+    from: "  return hasUnsavedChanges && (isEditMode || saveFailedFor(currentFilePath));",
+    to: "  return hasUnsavedChanges && isEditMode;",
+    expect: [/a failed view-mode auto-save arms the reload\/open guards/],
+    mustPass: [/a failed view-mode auto-save records the failure and keeps the document dirty/],
+  },
+  {
+    id: "R210",
+    suite: "test:patch",
+    what: "stop recording a failed view-mode write, so nothing downstream knows the note is only in memory",
+    file: RENDERER,
+    from: "    if (savedPath) failedSaves.add(savedPath);\n    if (isForCurrent) {\n      hasUnsavedChanges = true;",
+    to: "    if (savedPath) failedSaves.delete(savedPath);\n    if (isForCurrent) {\n      hasUnsavedChanges = false;",
+    expect: [
+      /a failed view-mode auto-save records the failure and keeps the document dirty/,
+      /a failed view-mode auto-save arms the reload\/open guards/,
+      /entering edit mode after a failed auto-save preserves the unsaved state/,
+      /a save failure arriving after the user entered edit mode is still recorded/,
+      /a successful save of one document does not clear another document's recorded failure/,
+      /returning to the document whose save failed finds its reload guard still armed/,
+    ],
+    mustPass: [/the provoked save failure really did reach the console/],
+  },
+  {
+    id: "R212",
+    suite: "test:patch",
+    // BOTH independent reviewers found this one, from opposite ends: documents
+    // are per-tab, custom-tabs.js restores `hasUnsavedChanges` per tab, and it
+    // has no hook for a renderer-global. A single boolean loses A's failure the
+    // moment B saves successfully.
+    what: "make the failed-save record a single global flag again instead of a per-path set",
+    file: RENDERER,
+    from: "    if (data.success && savedPath) failedSaves.delete(savedPath);",
+    to: "    if (data.success) failedSaves.clear();",
+    expect: [
+      /a successful save of one document does not clear another document's recorded failure/,
+      /returning to the document whose save failed finds its reload guard still armed/,
+    ],
+    mustPass: [
+      /a failed view-mode auto-save records the failure and keeps the document dirty/,
+      /a failure recorded for another document does not make the on-screen document look unsaved/,
+    ],
+  },
+  {
+    id: "R213",
+    suite: "test:patch",
+    // The failure branch used to ignore any reply that landed while the user
+    // had entered edit mode - which is precisely what the retry advice tells
+    // them to do while the note's own write is still unanswered.
+    what: "ignore a save failure that arrives once the user has entered edit mode",
+    file: RENDERER,
+    from: "    if (savedPath) failedSaves.add(savedPath);\n    if (isForCurrent) {",
+    to: "    if (savedPath && !isEditMode) failedSaves.add(savedPath);\n    if (isForCurrent && !isEditMode) {",
+    expect: [/a save failure arriving after the user entered edit mode is still recorded/],
+    mustPass: [
+      /a failed view-mode auto-save records the failure and keeps the document dirty/,
+      /entering edit mode with a write still unanswered keeps the document marked unsaved/,
+    ],
+  },
+  {
+    id: "R214",
+    suite: "test:patch",
+    // Not keeping the moved store is only half the fix: the newer note has no
+    // write of its own yet, so declaring the document clean loses it at the
+    // next reload with no prompt.
+    what: "declare the document clean after a reply whose store had already moved on",
+    file: RENDERER,
+    from: "        : storeMovedDuringWrite;",
+    to: "        : false;",
+    expect: [/a store that moved mid-write is left marked unsaved, not clean/],
+    mustPass: [
+      /a save reply does not overwrite a view-mode store that moved while the write was in flight/,
+    ],
+  },
+  {
+    id: "R211",
+    suite: "test:patch",
+    // Unreachable before this phase - view mode never wrote - and reachable on
+    // every note now. The store is the document in view mode, so adopting a
+    // stale in-flight payload silently drops the newer note.
+    what: "adopt the in-flight payload unconditionally, dropping a note confirmed while the write was still out",
+    file: RENDERER,
+    from: "      if (entry && !storeMovedDuringWrite) {",
+    to: "      if (entry) {",
+    expect: [/a save reply does not overwrite a view-mode store that moved while the write was in flight/],
+    mustPass: [
+      /a note added in view mode is written to disk without any save action/,
+      /the document is not left looking unsaved after a note auto-save/,
+    ],
+  },
 ];
 
 const only = process.argv.slice(2);
