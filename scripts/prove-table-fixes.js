@@ -127,7 +127,25 @@ const REVERTS = [
         "    }\n" +
         "  });",
     },
-    expect: [/breakout survives repeated recalculation/],
+    expect: [
+      /breakout survives repeated recalculation/,
+      // The sharper of the two oracles, and the reason this entry stopped
+      // being parity-dependent: "still broken at the end" says at least one
+      // sample landed wrong, while this says the three samples DISAGREE, which
+      // is what oscillation actually is. Named explicitly so the pin cannot be
+      // weakened without the prover noticing.
+      /every recalculation lands on the same width, not just the last one/,
+    ],
+    // Positive evidence that this revert oscillates rather than breaking
+    // breakout outright. The candidate proposed in review - "a table too wide
+    // for the reading column is widened" - was MEASURED and rejected: it is
+    // itself parity-dependent under R57 (it passed when R57 ran alone and
+    // failed in a three-revert batch), so it turned a real proof into
+    // COLLATERAL at random. What is parity-independent is a table that is
+    // never widened in the first place: the removing else-branch only fires on
+    // a container that already fits, so on such a container it is a no-op and
+    // no oscillation can start.
+    mustPass: [/a table that fits is not widened beyond the reading column/],
   },
   {
     id: "R55",
@@ -139,7 +157,28 @@ const REVERTS = [
     // column is not in effect there, and #viewer must be its own scroller so a
     // breakout could only be clipped). Skipping the recalculation therefore
     // leaves the full-window width in place, overlapping the editor pane.
-    expect: [/stood down in split view/, /never overlaps the editor pane in split view/],
+    // This revert was VACUOUS against the settled assertions, and the reason is
+    // worth keeping: a ResizeObserver on .content-wrapper (added later, for the
+    // ToC drawer) schedules the same 120ms debounce, so the backstop repairs the
+    // layout ~140ms after the transition - well inside the 500ms those
+    // assertions settle for. MEASURED twice: a stack-traced applyTableBreakout
+    // showed entering fires at t+1ms from the handler and again at t+141ms from
+    // a timer with no caller frames, and a second probe attributed that timer by
+    // instrumenting both schedulers - the ResizeObserver fired with
+    // contentRect.width moving 1972 <-> 1988, window resize fired zero times.
+    // The explicit call is therefore what the USER sees, and it is pinned by an
+    // assertion that reads the DOM synchronously after the click, before any
+    // task boundary, where the debounce provably cannot have run.
+    expect: [/entering split view stands the breakout down at the transition/],
+    // The backstop must still be intact: if the settled assertions fail too,
+    // the revert has broken breakout outright rather than merely delaying it.
+    // The vacuity guard is listed too - "not widened after the click" is
+    // satisfied for free by a scenario in which the table was never widened.
+    mustPass: [
+      /stood down in split view/,
+      /never overlaps the editor pane in split view/,
+      /the split-view scenario starts from a widened table/,
+    ],
   },
   {
     id: "R56",
@@ -147,7 +186,11 @@ const REVERTS = [
     file: RENDERER,
     from: "    applyTableBreakout();\n    toggleEditBtn.style.background = '';",
     to: "    toggleEditBtn.style.background = '';",
-    expect: [/leaving split view restores the full widened width/],
+    // Vacuous against the settled assertion for the same reason as R55: the
+    // ResizeObserver backstop restores the width ~140ms later and the settled
+    // assertion waits 500ms. Pinned synchronously instead.
+    expect: [/leaving split view restores the widened width at the transition/],
+    mustPass: [/leaving split view restores the full widened width/],
   },
   {
     id: "R58",

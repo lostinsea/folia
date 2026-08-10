@@ -835,19 +835,47 @@ async function run(win) {
   // that is no longer wanted nor resize one whose budget has changed.
   const repeat = JSON.parse(
     await exec(`(() => {
-      applyTableBreakout();
-      applyTableBreakout();
-      applyTableBreakout();
       const c = document.querySelectorAll('#viewer .table-container')[2];
+      // Sampled after EVERY call, not only after the last.
+      //
+      // Reading just the end state makes the result depend on the PARITY of
+      // the number of recalculations: an implementation that oscillates
+      // (add, remove, add, ...) lands on a correct-looking final state whenever
+      // the count happens to be odd. That is not a hypothetical - R57, the
+      // revert that installs exactly that oscillation, flipped between PROVEN
+      // and WRONG-GUARD between two runs of this suite, because a debounced
+      // ResizeObserver recalculation landed at a different moment and changed
+      // the parity. Idempotence is the property actually being claimed here, so
+      // measure every step of it.
+      //
+      // Sampling every step does not merely tolerate that flake, it removes the
+      // dependency: the samples alternate whatever the starting state is, so a
+      // single add/remove flip fails the assertion regardless of how many
+      // recalculations happened to precede it.
+      const seq = [];
+      for (let i = 0; i < 3; i++) {
+        applyTableBreakout();
+        seq.push({
+          broken: c.classList.contains('table-breakout'),
+          width: c.getBoundingClientRect().width,
+        });
+      }
       return JSON.stringify({
-        stillBroken: c.classList.contains('table-breakout'),
-        width: c.getBoundingClientRect().width,
+        seq,
+        stillBroken: seq.every(s => s.broken),
+        sameWidth: seq.every(s => Math.abs(s.width - seq[0].width) < 2),
+        width: seq[seq.length - 1].width,
       });
     })()`),
   );
   check(
     "breakout survives repeated recalculation",
     repeat.stillBroken === true,
+    JSON.stringify(repeat),
+  );
+  check(
+    "every recalculation lands on the same width, not just the last one",
+    repeat.sameWidth === true,
     JSON.stringify(repeat),
   );
   check(
@@ -881,7 +909,31 @@ async function run(win) {
         });
       });
       mo.observe(c, { attributes: true, attributeFilter: ['class', 'style'] });
+      // Vacuity guard for the two synchronous reads below: the table must be
+      // widened BEFORE the click, or "not widened after it" is satisfied by a
+      // scenario in which nothing ever happened.
+      const preEnter = {
+        broken: c.classList.contains('table-breakout'),
+        width: c.getBoundingClientRect().width,
+      };
       document.getElementById('toggleEdit').click();
+      // Read SYNCHRONOUSLY, before yielding. No task boundary has occurred, so
+      // the 120ms debounce provably cannot have run: whatever is true here was
+      // done by the transition handler itself. getBoundingClientRect() forces
+      // layout, and nothing in the split-view rules transitions, so this is the
+      // final geometry rather than a frame mid-animation.
+      //
+      // PRECONDITION, and it is worth knowing before editing the handler: this
+      // oracle depends on toggleEditBtn's click handler reaching
+      // applyTableBreakout() before its FIRST await. It has one today, guarded
+      // on an in-flight save (renderer.js), which this scenario never has. If
+      // an await is ever added ahead of the recalculation, click() will return
+      // before it runs and these two assertions fail on healthy code - loudly,
+      // on the clean tree, not silently.
+      const syncEnter = {
+        broken: c.classList.contains('table-breakout'),
+        width: c.getBoundingClientRect().width,
+      };
       await new Promise(r => setTimeout(r, 500));
       const inSplitView = w.classList.contains('split-view');
       const tr = c.getBoundingClientRect();
@@ -913,11 +965,15 @@ async function run(win) {
           && c.closest('.collapsible-section').classList.contains('collapsed'),
       };
       document.getElementById('toggleEdit').click();
+      const syncExitWidth = c.getBoundingClientRect().width;
       await new Promise(r => setTimeout(r, 500));
       const restored = c.getBoundingClientRect().width;
       mo.disconnect();
       return JSON.stringify({
         inSplitView,
+        preEnter,
+        syncEnter,
+        syncExitWidth,
         inSplit: tr.width,
         editorWidth: er.width,
         // The invariant that actually matters, measured independently of how
@@ -967,6 +1023,60 @@ async function run(win) {
     "leaving split view restores the full widened width",
     Math.abs(split.restored - huge.containerWidth) < 2,
     JSON.stringify(split) + ` expected ${Math.round(huge.containerWidth)}`,
+  );
+
+  // --- 8a0. The transition recalculates AT the transition, not 120ms later --
+  //
+  // MEASURED, because reverting the two explicit applyTableBreakout() calls in
+  // the edit-mode handlers left every assertion above green - which would have
+  // made them look like dead code. Instrumenting applyTableBreakout with a
+  // stack trace across a real toggle showed what actually happens:
+  //   enter: t+1ms   from renderer.js (the transition handler)
+  //          t+141ms from a timer, no caller frames
+  //   exit:  t+1225ms from renderer.js
+  //          t+1364ms from a timer, no caller frames
+  // The timer is the 120ms debounce, and the thing that schedules it is the
+  // ResizeObserver on .content-wrapper - added later, for the ToC drawer. That
+  // attribution is MEASURED, not inferred from "what else could it be": a
+  // second probe attached its own ResizeObserver to .content-wrapper and a
+  // listener to window resize across the same toggle. The observer fired with
+  // contentRect.width changing 1972 <-> 1988, and window resize fired ZERO
+  // times. #viewer becomes its own scroller in split view, so .content-wrapper
+  // loses its 16px scrollbar. Note the BORDER-BOX width never moves at all,
+  // which is why this had to be measured rather than reasoned about - reading
+  // the code, or even getBoundingClientRect(), says nothing changed.
+  //
+  // So the explicit calls are not redundant, and the observer is not useless:
+  // the observer is a backstop that arrives ~140ms late, and the explicit call
+  // is what stops the user seeing a table at the wrong width for that long -
+  // widened tables clipped inside the half-width pane on the way in, and a
+  // narrow table in a full-width window on the way out.
+  //
+  // The assertions above could not see any of this because they settle for
+  // 500ms first, by which time the backstop has cleaned up. These two read the
+  // state synchronously, before any task boundary, where only the transition
+  // handler can have acted.
+  check(
+    "the split-view scenario starts from a widened table",
+    split.preEnter.broken === true && split.preEnter.width > split.inSplit + 1,
+    JSON.stringify(split.preEnter) + ` vs inSplit ${Math.round(split.inSplit)}`,
+  );
+  check(
+    "entering split view stands the breakout down at the transition, not 140ms later when the observer catches up",
+    split.syncEnter.broken === false,
+    JSON.stringify(split.syncEnter),
+  );
+  check(
+    // Baselined against this scenario's OWN settled width rather than against
+    // huge.containerWidth, which was captured before section 6d resized the
+    // window to 1000 and back. Two independent resize/re-measure cycles can
+    // differ by more than the 2px tolerance on a different DPI without
+    // anything being wrong. What is claimed here is that the transition lands
+    // on the final width immediately; that the final width is CORRECT is the
+    // separate settled assertion above, which R56 lists in mustPass.
+    "leaving split view restores the widened width at the transition, not 140ms later",
+    Math.abs(split.syncExitWidth - split.restored) < 2,
+    `${Math.round(split.syncExitWidth)} at the transition vs ${Math.round(split.restored)} once settled`,
   );
 
   // --- 8b0. The per-call cap memo must actually memoise -------------------
