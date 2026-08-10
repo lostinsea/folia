@@ -1297,23 +1297,101 @@ const REVERTS = [
     ],
   },
   {
-    // Proves the coverage oracle is live rather than decorative. NOTE: since
-    // the generator was changed to read package-lock.json directly, this
-    // oracle shares a source with it and so checks the walk and the rendering
-    // rather than the source. The asar oracle (R135) is the independent one.
+    // Proves the VENDORED-coverage oracle is live rather than decorative, and
+    // it has to perturb the GENERATOR rather than the committed file: that
+    // oracle reads `documentedNames(regenerated)`, so editing
+    // THIRD-PARTY-NOTICES.md by hand cannot reach it. R131 used to try exactly
+    // that (it removed dompurify's heading from the committed file) and could
+    // only ever fail the staleness check - it named an assertion it was
+    // structurally incapable of breaking.
+    //
+    // Dropping prismjs from VENDORED_ROOTS reproduces the 8b defect exactly.
+    // prismjs is the right subject and that was MEASURED by driving the
+    // generator's own closure - each root removed in turn, then collect() and
+    // render() compared against the baseline. The four roots behave in three
+    // different ways, and only one of them reaches the coverage oracle:
+    //
+    //   drop dompurify -> 0 names lost, rendered text BYTE-IDENTICAL. mermaid
+    //     declares `dompurify ^3.3.3` and there is no nested copy, so the
+    //     top-level package is reachable from mermaid regardless of this list.
+    //     Fully vacuous, and the first attempt at this entry used it.
+    //   drop marked -> 0 names lost, but `marked 9.1.6` lost. mermaid resolves
+    //     to its OWN nested marked 16.4.2, so the top-level 9.1.6 really is
+    //     held here alone - but the coverage oracle strips versions, so the
+    //     name stays documented by the nested copy and only the staleness
+    //     check would fire. A half-subject: it cannot prove the assertion this
+    //     entry exists for.
+    //   drop mermaid -> 109 headings lost. It collapses the whole closure
+    //     (marked and dompurify with it), so the failure would not identify
+    //     what broke.
+    //   drop prismjs -> exactly one name and one heading lost.
+    //
+    // prismjs is reachable from nothing, is a devDependency so the lockfile's
+    // non-dev walk never sees it, and is COMMITTED under libs/prismjs/ rather
+    // than copied by vendor-libs.js, so this list is the only thing putting it
+    // in the notices while its code goes on shipping.
+    //
+    // The marked case is the one worth keeping: an earlier version of this
+    // comment claimed marked was "reachable transitively" from mermaid, which
+    // is FALSE - it was derived from a name-keyed BFS instead of npm's
+    // nearest-node_modules rule, i.e. the exact mistake resolveLockKey() exists
+    // to prevent. Measure the closure with the closure code, never with a
+    // hand-rolled walk beside it.
+    //
+    // It also exercises the deliberately MONOTONIC scope: the oracle unions the
+    // generator's list with the one discovered from libs/ and vendor-libs.js,
+    // so shrinking VENDORED_ROOTS shrinks what is documented without shrinking
+    // what is checked, which is the whole point of that union.
     id: "R131",
+    suite: "test:packaging",
+    what: "drop a vendored library from the generator's roots while its code still ships",
+    file: path.join(ROOT, "scripts", "generate-notices.js"),
+    from: '  "prismjs",\n',
+    to: "",
+    expect: [
+      /every library vendored into libs\/ has a notice/,
+      /committed notices file is not stale/,
+    ],
+    mustPass: [
+      /the vendoring oracle is policing the libraries that actually ship/,
+      /vendored Tabulator is documented/,
+      /Fira Code is documented/,
+    ],
+  },
+  {
+    // The sibling oracle, and it needs its own subject. R131 used to name this
+    // assertion too and could never fail it: it removes dompurify's heading,
+    // and dompurify has not been a production dependency since 8b. The pin read
+    // as sound for as long as nobody re-ran it - a revert that names an
+    // assertion it cannot break is the same class of defect as a vacuous test.
+    //
+    // lazy-val is a real transitive production dependency (electron-updater ->
+    // builder-util-runtime -> lazy-val), it is not vendored, and no other
+    // assertion names it, so the failure is unambiguous.
+    //
+    // That chain is what makes the anchor stable, so it is also what would rot
+    // it: if electron-updater ever leaves the tree, this pin needs retargeting
+    // at whatever non-dev package survives. It fails LOUD when that happens -
+    // a missing anchor is SETUP-FAILED, not a silent pass - but the signal only
+    // arrives when the harness is next run, so retarget it in the same change
+    // rather than waiting to be told.
+    //
+    // The version is deliberately left OFF the anchor. The coverage oracle's
+    // heading regex strips a trailing version, so `### (removed-prod) 1.0.5`
+    // documents a package called "(removed-prod)" and the assertion fires - and
+    // an upgrade of lazy-val cannot rot the anchor.
+    id: "R131b",
     suite: "test:packaging",
     what: "ship notices with a production dependency missing from them",
     file: NOTICES,
-    from: "### dompurify 3.4.12",
-    to: "### (removed)",
+    from: "### lazy-val",
+    to: "### (removed-prod)",
     expect: [
       /every production dependency in package-lock\.json has a notice/,
       /committed notices file is not stale/,
     ],
     mustPass: [
-      /vendored Tabulator is documented/,
-      /Fira Code is documented/,
+      /every library vendored into libs\/ has a notice/,
       /dompurify's reproduced licence text is the one elected/,
     ],
   },
@@ -1491,45 +1569,58 @@ const REVERTS = [
     ],
   },
   {
-    // The pako defect this defends was NOT that a licence was missing from the
-    // tree - pako's MIT text was reproduced correctly all along, and the entry
-    // read as complete. `(MIT AND Zlib)` was silently treated as if it were one
-    // of the `OR` expressions, so the second, equally binding limb was dropped.
-    // Neutralising the CONJUNCTIVE table restores exactly that state, which is
-    // why the assertion this is aimed at looks for Zlib's OWN operative clauses
-    // rather than for the presence of a second block: a block could be there
-    // and still say the wrong thing.
+    // R141 IS DELETED, and the deletion is the finding. It neutralised the
+    // pako entry in the CONJUNCTIVE table and expected the generator to refuse
+    // to emit. That stopped being possible the moment Word export went: pako
+    // left with html-to-docx's 70-package closure, no conjunctive package
+    // remains, and the table is therefore inert - so nothing the revert did
+    // could make `assertConjunctiveCovered` fire. It was VACUOUS and reported
+    // itself as such.
     //
-    // The generator's own guard throws when it sees this state, so the reverted
-    // run fails at generation. That is the intended behaviour and the reason
-    // `the notices generator runs` is NOT in mustPass - a fail-loud generator
-    // is the fix, not collateral damage.
-    id: "R141",
-    suite: "test:packaging",
-    what: "treat a conjunctive (AND) licence as if one limb were enough",
-    file: path.join(ROOT, "scripts", "generate-notices.js"),
-    from: "const CONJUNCTIVE = {\n  pako: {",
-    to: "const CONJUNCTIVE = {\n  __disabled_pako: {",
-    expect: [/the notices generator runs/],
-  },
-  {
-    // R141 and R142 are deliberately NOT the same proof, and the split is the
-    // point. R141 shows the GUARD is load-bearing: drop the table and the
-    // generator refuses to emit at all. R142 shows the guard is not SUFFICIENT:
-    // `collect()` still populates `extraLicences`, so the guard is satisfied
-    // and the generator runs happily - while the rendered notices silently lose
-    // the Zlib text. That second state is the dangerous one, because it is the
-    // one that looks fine, and only an assertion on the reproduced TEXT catches
-    // it. Without this entry, a refactor of `render()` could re-open the
-    // original defect with every guard still green.
+    // Retargeting it was considered and rejected on a structural ground: the
+    // table is only ever read by `collect()`, keyed on a package name found on
+    // disk, so it cannot be exercised at all without a real conjunctive
+    // dependency installed. A revert cannot supply one. Project precedent for a
+    // permanently vacuous entry is deletion (R110b), not a weakened assertion
+    // that reads as coverage.
+    //
+    // Nothing is left unguarded by the deletion, and that is the reason it is
+    // safe rather than merely tidy. The property R141 was aimed at - the guard
+    // rejects an entry that drops a limb - is covered by the SYNTHETIC guard
+    // probe in test-packaging.js, which drives `assertConjunctiveCovered`
+    // directly and so is immune to which packages happen to be installed. The
+    // pako entry itself is removed from the table with this: it was data for a
+    // package that is not in the tree, nothing reads it, and no test could
+    // notice it rotting.
+    //
+    // R142 survives because its subject - the RENDER loop - CAN be driven
+    // synthetically, and now is.
     id: "R142",
     suite: "test:packaging",
     what: "collect a conjunctive licence's extra terms but never render them",
     file: path.join(ROOT, "scripts", "generate-notices.js"),
     from: "for (const e of c.extraLicences || []) {",
     to: "for (const e of []) {",
-    expect: [/reproduces the operative terms of every limb/],
-    mustPass: [/the notices generator runs/],
+    // The guard being SATISFIED while the output is wrong is the dangerous
+    // state, because it is the one that looks fine: `collect()` populates
+    // `extraLicences`, `assertConjunctiveCovered` is happy, the generator runs,
+    // and a binding limb is silently missing from the notices. Only an
+    // assertion on the reproduced TEXT catches it.
+    expect: [
+      /a conjunctive entry reproduces the operative terms of every limb/,
+      /a conjunctive entry states which part of the package the extra terms cover/,
+    ],
+    mustPass: [
+      /the notices generator runs/,
+      // The guard must stay green, or this is proving the guard rather than
+      // the renderer - which is the distinction the whole entry exists for.
+      /the conjunctive-licence guard really rejects an entry that drops a limb/,
+      /the conjunctive guard accepts a fully described conjunctive licence/,
+      /a conjunctive entry says plainly that no election is made, and claims none/,
+      // Narrows the verdict to "the EXTRA limbs were lost". Without this the
+      // same two failures would be consistent with the entry collapsing whole.
+      /a conjunctive entry still reproduces the primary licence text/,
+    ],
   },
   {
     // README.md is not repository prose, it is a SHIPPED surface: extraResources

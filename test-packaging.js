@@ -1831,6 +1831,113 @@ function main() {
         }
         check("the conjunctive-licence guard does not fire on single licences", !falsePositive);
 
+        // The guard has four clauses and the two probes above reach only the
+        // first (`!entry`). The rest are reachable only with a POPULATED table,
+        // which the tree cannot supply while CONJUNCTIVE is legitimately empty -
+        // so the table itself is the fixture. Restored in `finally`, because a
+        // leaked entry would silently weaken every later assertion in this
+        // process rather than failing one.
+        const probeName = "synthetic-conjunctive-fixture";
+        const realEntry = Object.prototype.hasOwnProperty.call(gen.CONJUNCTIVE, probeName)
+          ? gen.CONJUNCTIVE[probeName]
+          : undefined;
+        const throwsWith = (entry, extraLicences, spdx) => {
+          gen.CONJUNCTIVE[probeName] = entry;
+          try {
+            gen.assertConjunctiveCovered([
+              { name: probeName, version: "0.0.0", spdx, extraLicences },
+            ]);
+            return false;
+          } catch (err) {
+            return /Conjunctive/.test(err.message);
+          }
+        };
+        try {
+          const limb = [{ file: "lib/zlib/README", spdx: "Zlib", covers: "lib/zlib/", text: "x" }];
+          check(
+            "the conjunctive guard fires when a table entry exists but no extra limb was collected",
+            throwsWith({ spdx: "(MIT AND Zlib)" }, [], "(MIT AND Zlib)"),
+          );
+          check(
+            "the conjunctive guard fires when the table entry describes a different expression",
+            throwsWith({ spdx: "(MIT AND ISC)" }, limb, "(MIT AND Zlib)"),
+          );
+          // POSITIVE CONTROL, and it is the load-bearing one: without it every
+          // assertion above is satisfied by a guard that throws unconditionally,
+          // which would fail the build on the first real conjunctive dependency
+          // and get deleted as noise - the precise outcome the guard exists to
+          // avoid.
+          check(
+            "the conjunctive guard accepts a fully described conjunctive licence",
+            !throwsWith({ spdx: "(MIT AND Zlib)" }, limb, "(MIT AND Zlib)"),
+          );
+        } finally {
+          if (realEntry === undefined) delete gen.CONJUNCTIVE[probeName];
+          else gen.CONJUNCTIVE[probeName] = realEntry;
+        }
+
+        // RENDER-level sensitivity probe, and it is NOT a stricter version of
+        // the guard probe above. The guard only asks whether `extraLicences`
+        // was POPULATED; it says nothing about whether the renderer emits it.
+        // Those are two different failure modes and the second is the more
+        // dangerous one - the guard is satisfied, the generator runs happily,
+        // and the notices silently lose a binding limb.
+        //
+        // Synthetic for the same reason as the guard probe: pako left with
+        // html-to-docx's closure and no conjunctive package remains, so a probe
+        // driven by the real tree would be permanently vacuous. That is exactly
+        // what happened to R141/R142, which named these properties and could
+        // not break either of them.
+        const conjRendered = gen.render([
+          {
+            name: "synthetic-conjunctive-fixture",
+            version: "0.0.0",
+            spdx: "(MIT AND Zlib)",
+            licenseText: "MIT BODY, first limb only.",
+            extraLicences: [
+              {
+                file: "lib/zlib/README",
+                spdx: "Zlib",
+                covers: "lib/zlib/",
+                why: "Fixture: the package states that this folder carries the second limb.",
+                // Zlib's clause 1 and clause 3, which appear in no other
+                // licence family here - so the assertion cannot be satisfied by
+                // the MIT text already present in the same entry.
+                text:
+                  "The origin of this software must not be misrepresented. " +
+                  "This notice may not be removed or altered from any source distribution.",
+              },
+            ],
+          },
+        ]);
+        check(
+          "a conjunctive entry reproduces the operative terms of every limb, not just the first",
+          /origin of this software must not be misrepresented/i.test(conjRendered) &&
+            /may not be removed or altered/i.test(conjRendered),
+          conjRendered.slice(0, 200),
+        );
+        check(
+          "a conjunctive entry states which part of the package the extra terms cover",
+          /Additional terms for `lib\/zlib\/` \(Zlib\)/.test(conjRendered),
+          conjRendered.slice(0, 200),
+        );
+        check(
+          "a conjunctive entry says plainly that no election is made, and claims none",
+          /No election is made or possible/.test(conjRendered) &&
+            !/elects \*\*/.test(conjRendered),
+          conjRendered.slice(0, 200),
+        );
+        // Sensitivity in the other direction: the probe above would still pass
+        // if render() dropped the PRIMARY licence text and emitted only the
+        // extra limbs. Named separately so R142 can list it in mustPass, which
+        // is what makes that revert say "the extra limbs were lost" rather than
+        // "conjunctive rendering broke somehow".
+        check(
+          "a conjunctive entry still reproduces the primary licence text",
+          /MIT BODY, first limb only\./.test(conjRendered),
+          conjRendered.slice(0, 200),
+        );
+
         // core.autocrlf=true is set on this repo and LICENSE is already
         // `i/lf w/crlf`. If the notices file were not pinned to LF in
         // .gitattributes, a fresh clone would hold CRLF while the generator

@@ -187,31 +187,35 @@ const DUAL_ELECTION = {
 // forget".
 //
 // Keyed by package name, because the SCOPE of the second licence is a fact
-// about the package's own layout, not about the expression. pako's own README
-// states the split ("MIT - all files, except /lib/zlib folder" / "ZLIB -
-// /lib/zlib content"), and lib/zlib/README is the package's self-contained
-// statement of those scoped terms - it names the folder it covers, names the
-// copyright holders, and reproduces the whole Zlib licence. Reproducing that
-// file verbatim keeps this block in the same provenance class as every other
-// licence block in this file: copied from the package, not reconstructed.
-const CONJUNCTIVE = {
-  pako: {
-    spdx: "(MIT AND Zlib)",
-    extra: [
-      {
-        rel: "lib/zlib/README",
-        spdx: "Zlib",
-        covers: "lib/zlib/",
-        why:
-          "pako's own README states the split: MIT covers every file except " +
-          "`lib/zlib/`, and the Zlib licence covers `lib/zlib/` content. The " +
-          "`AND` in the SPDX expression means both apply - neither is an " +
-          "alternative the redistributor may elect between - so the Zlib " +
-          "terms are reproduced here alongside the MIT text above.",
-      },
-    ],
-  },
-};
+// about the package's own layout, not about the expression. The worked example
+// is pako, which used to be here: its README states the split ("MIT - all
+// files, except /lib/zlib folder" / "ZLIB - /lib/zlib content"), and
+// lib/zlib/README is the package's self-contained statement of those scoped
+// terms - it names the folder it covers, names the copyright holders, and
+// reproduces the whole Zlib licence. Reproducing that file verbatim keeps such
+// a block in the same provenance class as every other licence block in this
+// file: copied from the package, not reconstructed.
+//
+// THE TABLE IS EMPTY, DELIBERATELY, AND THAT IS NOT THE SAME AS UNUSED. pako
+// left the tree with html-to-docx's closure when Word export was removed, and
+// no dependency here declares a conjunctive licence today. An entry for a
+// package that is not installed is data nothing reads and no test can notice
+// rotting - the `rel` path cannot even be checked - so it was removed rather
+// than kept as decoration. `assertConjunctiveCovered` below is driven by the
+// SPDX expression rather than by this table precisely so that the next
+// conjunctive dependency to arrive trips it and gets an entry written against
+// a real package on disk. Its sensitivity is proven synthetically in
+// test-packaging.js, so that coverage does not depend on which packages happen
+// to be installed.
+//
+// COROLLARY, for whoever reads `{}` and reaches for the delete key: the guard
+// is NOT dead code that this empty table made redundant. It is the only thing
+// enforcing the emptiness. `assertConjunctiveCovered` throws on any AND
+// expression it finds on disk whether or not this table has entries, so an
+// empty table plus a live guard is a build that fails loudly on the next
+// conjunctive dependency; an empty table with the guard removed is one that
+// silently ships half a licence.
+const CONJUNCTIVE = {};
 
 function readLicenseText(dir, prefer) {
   let entries;
