@@ -246,6 +246,65 @@ async function run(win) {
   );
 
   // ==========================================================================
+  // @@@html FENCE TOLERANCE - a fence that fails to match is a silent failure
+  // ==========================================================================
+  // Measured on the original expression: a single TRAILING SPACE after the
+  // opening fence made it not match. Nothing in an editor shows that space and
+  // nothing reports the miss - the raw HTML simply went down the ordinary
+  // marked + DOMPurify path instead of into its sandboxed frame, arriving with
+  // its scripts stripped and its layout mangled.
+  //
+  // Both render paths are checked for every variant, because they parse the
+  // fence separately and silently diverging is a recurring defect class in this
+  // file. They now share one RAW_HTML_FENCE, which is what makes that cheap.
+  const fenceProbe = async (md, mode) => {
+    await render(md, mode, 1200);
+    return exec(`
+      (() => {
+        const frames = document.querySelectorAll('iframe.raw-html-block');
+        const f = frames[0];
+        const sd = f ? (f.getAttribute('srcdoc') || '') : '';
+        return {
+          frames: frames.length,
+          carriesPayload: sd.includes('FENCE-BODY'),
+          // If the fence did not match, the block's text is left in the
+          // document. That is the observable symptom the user actually reports.
+          leakedAsProse: (document.getElementById('viewer').textContent || '').includes('@@@'),
+        };
+      })()
+    `);
+  };
+  const fenceCases = [
+    ["a trailing space after the opening fence", "# D\n\n@@@html \n<p>FENCE-BODY</p>\n@@@\n"],
+    ["a trailing tab after the opening fence", "# D\n\n@@@html\t\n<p>FENCE-BODY</p>\n@@@\n"],
+    ["an indented closing fence", "# D\n\n@@@html\n<p>FENCE-BODY</p>\n   @@@\n"],
+    // Accepted and IGNORED: upstream carries a per-block zoom here, which is a
+    // feature this fork has not taken. Refusing the syntax outright would dump
+    // the raw HTML into the page as prose, which is the worse failure.
+    ["an upstream parameter list", "# D\n\n@@@html(zoom:50%)\n<p>FENCE-BODY</p>\n@@@\n"],
+    ["the plain fence", "# D\n\n@@@html\n<p>FENCE-BODY</p>\n@@@\n"],
+  ];
+  for (const [label, md] of fenceCases) {
+    for (const mode of ["full", "light-format"]) {
+      const r = await fenceProbe(md, mode);
+      check(
+        `FENCE ${label} still produces a sandboxed @@@html frame (${mode})`,
+        r.frames === 1 && r.carriesPayload === true && r.leakedAsProse === false,
+        JSON.stringify(r),
+      );
+    }
+  }
+  // The tolerance must not become "anything starting with @@@html". A word
+  // glued to the fence is not a fence, and treating it as one would hand the
+  // sandbox-bypassing raw path to text the author never marked as a block.
+  const notAFence = await fenceProbe("# D\n\n@@@htmlish\n<p>FENCE-BODY</p>\n@@@\n", "full");
+  check(
+    "FENCE a word glued to the opening fence is NOT treated as an @@@html block",
+    notAFence.frames === 0,
+    JSON.stringify(notAFence),
+  );
+
+  // ==========================================================================
   // Feature preservation - the remedy must not break what it protects
   // ==========================================================================
 

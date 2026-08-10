@@ -526,7 +526,32 @@ function sanitizeHtml(html) {
   return DOMPurify.sanitize(html, SANITIZE_CONFIG);
 }
 
-// @@@html blocks are the one place the app intentionally renders unsanitized
+// The @@@html fence, in ONE place because the light-format and full render
+// paths both parse it and silently diverging is a recurring defect class here.
+//
+// The tolerances are not cosmetic. The original `@@@html[\r\n]+` required the
+// opening fence to be the last thing on its line, so a single trailing SPACE -
+// which nothing in the editor shows and no error reports - made the block fail
+// to match. The raw HTML then went through marked and DOMPurify as ordinary
+// inline markup instead of into its sandboxed frame: scripts stripped, layout
+// mangled, and no diagnostic anywhere. Measured on the real regex: 'plain' and
+// CRLF matched, 'trailing space', 'trailing tab' and an indented closing fence
+// all did not.
+//
+// The optional (...) group is ACCEPTED AND IGNORED deliberately. Upstream uses
+// it to carry a per-block zoom, which is a feature decision this fork has not
+// taken; but refusing to parse the syntax at all means such a document dumps
+// its raw HTML into the page as prose, which is strictly the worse failure.
+// Matching it costs nothing and contains the blast radius to "the zoom hint was
+// not honoured" rather than "the document is wrecked".
+const RAW_HTML_FENCE = /@@@html(?:\([^)\r\n]*\))?[ \t]*[\r\n]+([\s\S]*?)[\r\n][ \t]*@@@[ \t]*/g;
+
+function eachRawHtmlBlock(content, replacer) {
+  RAW_HTML_FENCE.lastIndex = 0;
+  return content.replace(RAW_HTML_FENCE, (match, code) => replacer(code));
+}
+
+
 // author HTML, and DOMPurify will not carry it: it drops a `srcdoc` attribute
 // whose value contains a <script>, which ours always does (the resize
 // notifier). Rather than sanitize the block - which would defeat the feature -
@@ -4091,7 +4116,7 @@ function renderLightFormat(content, generation) {
 
   // Extract @@@html blocks
   const rawHtmlBlocksLF = [];
-  content = content.replace(/@@@html[\r\n]+([\s\S]*?)[\r\n]@@@/g, (match, code) => {
+  content = eachRawHtmlBlock(content, (code) => {
     const ph = `RAWHTML_PH_${rawHtmlBlocksLF.length}`;
     rawHtmlBlocksLF.push({ ph, code });
     return ph;
@@ -4208,7 +4233,7 @@ async function renderMarkdownFull(content, generation) {
     // Extract @@@html blocks and replace with placeholders (bypasses DOMPurify)
     const rawHtmlBlocks = [];
     let rawHtmlIndex = 0;
-    content = content.replace(/@@@html[\r\n]+([\s\S]*?)[\r\n]@@@/g, (match, code) => {
+    content = eachRawHtmlBlock(content, (code) => {
       const placeholder = `RAWHTML_PLACEHOLDER_${rawHtmlIndex}`;
       rawHtmlBlocks.push({ placeholder, code });
       rawHtmlIndex++;

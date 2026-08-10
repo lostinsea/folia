@@ -2862,6 +2862,36 @@ const REVERTS = [
       /the document is not left looking unsaved after a note auto-save/,
     ],
   },
+  {
+    id: "R215",
+    suite: "test:security",
+    // Measured, not inferred: on the original expression a single trailing
+    // space after the opening fence made it not match, and the raw HTML went
+    // down the ordinary sanitized path with no diagnostic anywhere.
+    what: "restore the intolerant @@@html fence, so a trailing space silently un-blocks the raw HTML",
+    file: RENDERER,
+    from: "const RAW_HTML_FENCE = /@@@html(?:\\([^)\\r\\n]*\\))?[ \\t]*[\\r\\n]+([\\s\\S]*?)[\\r\\n][ \\t]*@@@[ \\t]*/g;",
+    to: "const RAW_HTML_FENCE = /@@@html[\\r\\n]+([\\s\\S]*?)[\\r\\n]@@@/g;",
+    expect: [
+      /FENCE a trailing space after the opening fence still produces a sandboxed @@@html frame \(full\)/,
+      /FENCE a trailing space after the opening fence still produces a sandboxed @@@html frame \(light-format\)/,
+      /FENCE a trailing tab after the opening fence still produces a sandboxed @@@html frame \(full\)/,
+      /FENCE a trailing tab after the opening fence still produces a sandboxed @@@html frame \(light-format\)/,
+      /FENCE an indented closing fence still produces a sandboxed @@@html frame \(full\)/,
+      /FENCE an indented closing fence still produces a sandboxed @@@html frame \(light-format\)/,
+      /FENCE an upstream parameter list still produces a sandboxed @@@html frame \(full\)/,
+      /FENCE an upstream parameter list still produces a sandboxed @@@html frame \(light-format\)/,
+    ],
+    // The plain fence and the not-a-fence guard must survive the revert. If
+    // they fail too, the revert has broken @@@html outright rather than
+    // demonstrating the tolerance, and the proof would mean nothing.
+    mustPass: [
+      /FENCE the plain fence still produces a sandboxed @@@html frame \(full\)/,
+      /FENCE the plain fence still produces a sandboxed @@@html frame \(light-format\)/,
+      /FENCE a word glued to the opening fence is NOT treated as an @@@html block/,
+      /SEC-01 @@@html iframe cannot reach window\.parent \(full render\)/,
+    ],
+  },
 ];
 
 const only = process.argv.slice(2);
