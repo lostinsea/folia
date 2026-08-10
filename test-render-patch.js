@@ -1005,12 +1005,21 @@ async function run(win) {
   //     elsewhere replaced an untouched image on every render. Removing them
   //     from _BLOCK_WRAPPER_CLASSES drops imgKept to 0.
   // ---------------------------------------------------------------------
-  // A real file, not a placeholder: this block is compared by DOM identity, and
-  // a src that 404s renders a broken-image icon that the error sentinel (quite
-  // rightly) fails the run for. Using an image that actually loads also makes
-  // the check stronger - the reused node is one that really painted.
+  // A self-contained data: URI, deliberately. This block is compared by DOM
+  // identity and a src that 404s renders a broken-image icon that the error
+  // sentinel (quite rightly) fails the run for - so the image has to really
+  // paint. It used to be a RELATIVE src="app-icon.png", which resolves against
+  // whatever document happens to be open, i.e. against inherited session state.
+  // That was green for months and then failed for real: a stray probe left a
+  // temp directory as the restored session, the src resolved into it, and the
+  // suite failed on a broken image that had nothing to do with the diff. Same
+  // disease as the window bounds and the splitter ratio, both already fixed
+  // here - a test that measures state it did not set measures history.
+  const PROBE_PNG =
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ" +
+    "AAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
   const IMGDOC =
-    '# Images\n\nintro paragraph\n\n<img src="app-icon.png" alt="one">\n\ntail paragraph\n';
+    '# Images\n\nintro paragraph\n\n<img src="' + PROBE_PNG + '" alt="one">\n\ntail paragraph\n';
   await render(exec, IMGDOC, "full");
   await exec(TAG_ALL);
   await render(exec, IMGDOC.replace("intro paragraph", "intro paragraph edited"), "full");
@@ -1022,6 +1031,10 @@ async function run(win) {
         return JSON.stringify({
           imgBlocks: wrapped.length,
           imgKept: wrapped.filter(el => el.__probeTag !== undefined).length,
+          painted: wrapped.filter(el => {
+            const im = el.querySelector('img');
+            return im && im.complete && im.naturalWidth > 0;
+          }).length,
           tailKept: tops.filter(el => el.__probeTag !== undefined &&
             el.textContent.trim() === 'tail paragraph').length
         });
@@ -1030,6 +1043,9 @@ async function run(win) {
   );
   check("an untouched top-level image block is reused when an unrelated block changes", imgs.imgBlocks === 1 && imgs.imgKept === 1, JSON.stringify(imgs));
   check("the block after the image is reused too", imgs.tailKept === 1, JSON.stringify(imgs));
+  // The reuse assertions above are satisfied by a wrapper around an image that
+  // never loaded, so without this they would not notice the src breaking.
+  check("the reused image really painted, so reuse is measured on a live node", imgs.painted === 1, JSON.stringify(imgs));
 
   // ---------------------------------------------------------------------
   // 15. Collapsed state must not leak between documents.
