@@ -33,7 +33,7 @@ const path = require("path");
 
 require("./main.js");
 
-const { captureScreenshot, startErrorSentinel, proveSentinelAlive } = require("./test-visual-utils");
+const { captureScreenshot, startErrorSentinel, proveSentinelAlive, trapExternalOpens } = require("./test-visual-utils");
 
 const results = [];
 function check(name, ok, detail) {
@@ -229,6 +229,8 @@ const MEASURE = `
 async function run(win) {
   const sentinel = startErrorSentinel(win, { label: "tables" });
   const exec = (c) => win.webContents.executeJavaScript(c, true);
+  // No suite may reach the user's browser. See trapExternalOpens().
+  await trapExternalOpens(win);
 
   // A geometric suite must never GUESS when a resize has landed.
   //

@@ -14,7 +14,7 @@ const { app, BrowserWindow, ipcMain, session } = require("electron");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { startErrorSentinel, captureScreenshot } = require("./test-visual-utils");
+const { startErrorSentinel, captureScreenshot, trapExternalOpens } = require("./test-visual-utils");
 
 // One watcher per popup window, collected as they are opened and drained at the
 // end of the run. Keyed by window id so a section that deliberately provokes an
@@ -175,6 +175,11 @@ async function closeAll() {
 async function run() {
   await sleep(2500);
   hostWindow = BrowserWindow.getAllWindows()[0];
+  // The host window is the real app, with Node, so it can reach the OS shell -
+  // and unlike the other suites this one never starts a sentinel on it, so it
+  // gets no backstop install either. Trapped explicitly. See
+  // trapExternalOpens() in test-visual-utils.js.
+  await trapExternalOpens(hostWindow);
   installNetSentinel();
 
   // ==========================================================================

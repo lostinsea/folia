@@ -33,6 +33,7 @@ const {
   startErrorSentinel,
   proveSentinelAlive,
   captureScreenshot,
+  trapExternalOpens,
 } = require("./test-visual-utils");
 
 async function run(win) {
@@ -65,6 +66,14 @@ async function run(win) {
     // would be a real defect.
     ignoreKinds: ["broken-image"],
   });
+
+  // This suite fires hostile documents at the app and clicks the results, so
+  // it is the most likely of all of them to reach shell.openExternal. Trapped
+  // before the first render. See trapExternalOpens() in test-visual-utils.js.
+  // The <area> section below installs its own recorder on top of this one and
+  // restores it afterwards, which puts the trap back rather than the real
+  // opener.
+  await trapExternalOpens(win);
 
   // Render `md` through the chosen pipeline and report whether any payload
   // managed to run. `settle` covers mermaid/iframe work that lands after the

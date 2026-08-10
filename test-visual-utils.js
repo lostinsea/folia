@@ -668,6 +668,22 @@ function startErrorSentinel(win, opts) {
   };
   win.webContents.on("console-message", onConsole);
 
+  // Backstop for the external-open trap.
+  //
+  // Every windowed suite installs it explicitly, and should keep doing so:
+  // that call is AWAITED, so it is deterministic, and a suite that clicks a
+  // link needs the trap armed before the click rather than a moment later.
+  // This is the safety net for the suite nobody has written yet. Arming it
+  // here as well costs one IPC round trip and means a new windowed suite
+  // cannot leak simply by forgetting a line.
+  //
+  // Fire-and-forget but TRACKED, so stop() waits for it rather than leaving an
+  // executeJavaScript in flight against a window that is being torn down.
+  // Popups (nodeIntegration: false) have no require(), so the trap reports
+  // false there and nothing is patched - correct, since a realm with no Node
+  // cannot reach the shell at all.
+  track(trapExternalOpens(win).catch(() => {}));
+
   // One scan at a time, chained rather than overlapped. setInterval with an
   // async callback fires again whether or not the previous scan finished, so a
   // slow executeJavaScript (or a screenshot) used to let scans pile up and
@@ -838,11 +854,165 @@ async function proveSentinelAlive(win, sentinel) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Keep the suite inside its own window.
+//
+// The app hands external links to the operating system: renderer.js does
+// `shell.openExternal(url)` for any http(s) anchor, and again for the logo. A
+// suite that dispatches a REAL click on a REAL anchor - which is exactly what
+// this project's rules demand, since asserting on source text proves nothing -
+// therefore launches the user's default browser.
+//
+// REPORTED BY THE USER, not theorised: every `npm run test:patch` opened
+// https://example.invalid/x in whatever browser they were working in, stealing
+// focus from the page they were on, and the tabs accumulated - one per suite
+// run, and a full revert-proof chain runs the suite dozens of times.
+//
+// Two properties matter here beyond politeness:
+//   * a harness that reaches OUT of its process is not hermetic. The run's
+//     result now depends on a browser, a default-handler registration and a
+//     network stack that no assertion describes.
+//   * the leak was SILENT. Nothing failed, so it survived until a human
+//     noticed their tab bar.
+//
+// So the trap is installed centrally rather than at the one call site known to
+// leak today. The renderer copy is what has to be patched: `shell.openExternal`
+// in a nodeIntegration renderer is a proxy that reaches the browser process
+// over internal IPC, so patching the main process's own `shell` module does
+// NOT intercept it (measured - main.js never calls openExternal at all, and
+// the leak still happened).
+//
+// `shell.openPath` is trapped for the same reason, and it is the WORSE of the
+// two: it hands a path to the OS shell, which launches the registered
+// application - a PDF viewer, Explorer, an editor. renderer.js reaches it from
+// the local-file branch of the same anchor handler, so a future test that
+// clicks a link resolving to a .txt or a folder would start launching
+// applications on the user's desktop. Only the security suite stubbed it, and
+// only locally.
+//
+// A RELOAD DROPS THE TRAP, AND THAT WAS MEASURED, NOT ASSUMED.
+// test-mermaid-render.js reloads the window mid-suite to get a clean JS realm.
+// A probe across that reload reported:
+//   before  { flag: true,  openExternalPatched: true  }
+//   after   { flag: false, openExternalPatched: false }
+// - both the marker and the patched function are gone, because the realm and
+// its `require('electron')` module instance are rebuilt. Every assertion after
+// that point ran with the real opener live again. A one-shot install is
+// therefore not enough: the trap re-arms itself on every `did-finish-load`, so
+// no suite has to remember to re-apply it after a reload or a navigation.
+//
+// Suites that want to ASSERT an external open read `readExternalOpens(win)`.
+// That is strictly better than the alternative of letting the real call
+// through: the assertion gets the exact URL instead of inferring the open from
+// a side effect it cannot see.
+// ---------------------------------------------------------------------------
+const EXTERNAL_TRAP_SOURCE = `
+  (() => {
+    // Popups run with nodeIntegration disabled, so there is no require() and
+    // nothing in that realm can reach the shell in the first place. Report
+    // false rather than throwing, so a caller can arm every window it owns
+    // without knowing which ones have Node.
+    if (typeof require !== 'function') return false;
+    const { shell } = require('electron');
+    // The bucket is created by the recorder itself rather than only here. A
+    // suite that clears window state (or a realm that survives while the page
+    // does not) would otherwise make the recorder throw INSIDE the shell proxy,
+    // where nothing awaits it: the URL would go unrecorded, no assertion would
+    // trip, and the tab would already be open. Failing open like that is the
+    // one outcome this trap exists to prevent.
+    const rec = (name, value) => {
+      const bucket = window[name] || (window[name] = []);
+      bucket.push(String(value));
+    };
+    if (!window.__externalTrapInstalled) {
+      window.__externalTrapInstalled = true;
+      shell.openExternal = (url) => { rec('__externalOpens', url); return Promise.resolve(); };
+      // openPath resolves to an error STRING ('' means success), not to void.
+      shell.openPath = (p) => { rec('__shellOpens', p); return Promise.resolve(''); };
+    }
+    if (!window.__externalOpens) window.__externalOpens = [];
+    if (!window.__shellOpens) window.__shellOpens = [];
+    return window.__externalTrapInstalled === true;
+  })()
+`;
+
+// webContents that already re-arm themselves. A WeakSet rather than a flag on
+// the object: the harness must not add properties to Electron's own objects,
+// and this drops the entry when the window is collected.
+const trapRearmed = new WeakSet();
+
+async function trapExternalOpens(win) {
+  const wc = win.webContents;
+  if (!trapRearmed.has(wc)) {
+    trapRearmed.add(wc);
+    // Not `once`: a suite may reload more than once, and a navigation is the
+    // only moment at which the trap can silently disappear.
+    wc.on("did-finish-load", () => {
+      wc.executeJavaScript(EXTERNAL_TRAP_SOURCE, true).catch(() => {
+        /* window went away mid-navigation; nothing left to protect */
+      });
+    });
+  }
+  return wc.executeJavaScript(EXTERNAL_TRAP_SOURCE, true);
+}
+
+async function readExternalOpens(win) {
+  return win.webContents.executeJavaScript(`(window.__externalOpens || []).slice()`, true);
+}
+
+async function readShellOpens(win) {
+  return win.webContents.executeJavaScript(`(window.__shellOpens || []).slice()`, true);
+}
+
+async function clearExternalOpens(win) {
+  return win.webContents.executeJavaScript(
+    `(() => {
+       if (window.__externalOpens) window.__externalOpens.length = 0;
+       if (window.__shellOpens) window.__shellOpens.length = 0;
+       return true;
+     })()`,
+    true,
+  );
+}
+
+/**
+ * Wait for the trap to be armed, without asserting.
+ *
+ * The re-arm after a reload is asynchronous with respect to the
+ * `did-finish-load` the SUITE is awaiting - both listeners fire on the same
+ * event, and ours has an IPC round trip to make. A suite that wants to assert
+ * the trap survived a reload must therefore poll rather than read once, or it
+ * is asserting on a race. Returns a boolean instead of throwing so the caller
+ * can report it as an ordinary failed assertion.
+ */
+async function waitForExternalTrap(win, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    let armed = false;
+    try {
+      armed = await win.webContents.executeJavaScript(
+        `window.__externalTrapInstalled === true`,
+        true,
+      );
+    } catch (e) {
+      /* mid-navigation */
+    }
+    if (armed) return true;
+    if (Date.now() > deadline) return false;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+}
+
 module.exports = {
   VISUAL_PROBE_SOURCE,
   inspectVisual,
   captureScreenshot,
   startErrorSentinel,
+  trapExternalOpens,
+  readExternalOpens,
+  readShellOpens,
+  clearExternalOpens,
+  waitForExternalTrap,
   proveSentinelAlive,
   LIVENESS_MUTE_REASON,
   SHOT_DIR,

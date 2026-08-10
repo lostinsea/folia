@@ -19,7 +19,7 @@ const { app, BrowserWindow } = require("electron");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { inspectVisual, captureScreenshot, startErrorSentinel, proveSentinelAlive } = require("./test-visual-utils");
+const { inspectVisual, captureScreenshot, startErrorSentinel, proveSentinelAlive, trapExternalOpens } = require("./test-visual-utils");
 
 require("./main.js");
 
@@ -129,6 +129,8 @@ const COUNTS = `
 async function run(win) {
   const exec = (code) => win.webContents.executeJavaScript(code, true);
   const sentinel = startErrorSentinel(win, { label: "search" });
+  // No suite may reach the user's browser. See trapExternalOpens().
+  await trapExternalOpens(win);
 
   fs.writeFileSync(file, DOC, "utf8");
 

@@ -2863,6 +2863,66 @@ const REVERTS = [
     ],
   },
   {
+    id: "R217",
+    suite: "test:mermaid",
+    // Found by BOTH independent reviewers, and measured before being fixed: a
+    // webContents.reload() rebuilds the JS realm and its require('electron')
+    // module instance, so a one-shot trap install is destroyed by it.
+    //   before { flag: true,  openExternalPatched: true  }
+    //   after  { flag: false, openExternalPatched: false }
+    // The mermaid suite reloads mid-run to observe lazy loading from a clean
+    // realm, so every assertion after that point used to run with the real
+    // opener live - one clicked http link away from the leak this whole phase
+    // exists to close. The trap therefore re-arms on did-finish-load, and this
+    // revert removes that re-arm.
+    what: "install the external-open trap only once, so a mid-suite reload silently un-traps the harness",
+    file: VISUAL,
+    from: "  if (!trapRearmed.has(wc)) {",
+    to: "  if (false) {",
+    expect: [
+      /the external-open trap re-arms itself after a reload, so the rest of the suite still cannot reach the browser/,
+      /the re-armed trap really replaced the shell functions, not just its own marker/,
+    ],
+    // The reload itself, and the lazy-loading assertions it exists to serve,
+    // must be untouched - otherwise the revert has broken the suite rather
+    // than exposing the hole.
+    mustPass: [/mermaid is not loaded at startup/, /the lazy loader is present to fetch it later/],
+  },
+  {
+    id: "R216",
+    suite: "test:patch",
+    // REPORTED BY THE USER, not found by a reviewer: the suite dispatched a
+    // real click on a real http anchor, so renderer.js handed it to
+    // shell.openExternal and the OS opened it in whatever browser they were
+    // working in - stealing focus, and leaving one dead tab per suite run
+    // (a full revert chain runs the suite dozens of times). Nothing failed,
+    // which is why it survived until a human noticed their tab bar.
+    //
+    // The revert neutralises the install for EVERY suite at once, which is the
+    // right blast radius: the trap is a property of the harness, not of one
+    // test. Note what it does NOT do: it never clears a flag that was set. It
+    // makes the install block unreachable, so the marker and the two shell
+    // mutations disappear TOGETHER - and that pairing is what keeps the proof
+    // free. The patch suite refuses to dispatch the click unless the marker is
+    // set, so a revert that broke the mutation while leaving the marker true
+    // would prove the same point by performing the very leak it documents.
+    what: "stop trapping shell.openExternal in the harness, letting a clicked link reach the real browser",
+    file: VISUAL,
+    from: "    if (!window.__externalTrapInstalled) {",
+    to: "    if (false) {",
+    expect: [
+      /external opens are trapped before any link is clicked, so the suite cannot reach the real browser/,
+      /clicking a link inside a heading does not collapse the section/,
+      /clicking a link inside a heading hands the URL to the external opener/,
+    ],
+    // The suite must otherwise be intact: if these fail too, the revert has
+    // broken the harness rather than demonstrating the leak.
+    mustPass: [
+      /heading ids are slugs derived from the heading text/,
+      /an in-document anchor target resolves by slug/,
+    ],
+  },
+  {
     id: "R215",
     suite: "test:security",
     // Measured, not inferred: on the original expression a single trailing

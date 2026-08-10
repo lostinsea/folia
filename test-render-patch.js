@@ -133,8 +133,11 @@ const TOP_BLOCKS = `
 `;
 
 async function run(win) {
-  const { startErrorSentinel, proveSentinelAlive, captureScreenshot } = require("./test-visual-utils");
+  const { startErrorSentinel, proveSentinelAlive, captureScreenshot, trapExternalOpens, readExternalOpens, clearExternalOpens } = require("./test-visual-utils");
   const sentinel = startErrorSentinel(win, { label: "patch" });
+  // Before ANY click: this suite dispatches real anchor clicks, and an http
+  // anchor would otherwise launch the user's browser. See trapExternalOpens().
+  await trapExternalOpens(win);
   const exec = (c) => win.webContents.executeJavaScript(c, true);
 
   await exec(`localStorage.clear(); null`);
@@ -717,9 +720,28 @@ async function run(win) {
   }
 
   // A link inside a heading must navigate, not collapse the section.
+  //
+  // "Navigate" was previously only half-asserted: the old check said the
+  // section did not collapse, which a link whose handler never ran at all would
+  // also satisfy. The external-open trap makes the other half observable, and
+  // asserting on it is also what PINS the trap - delete it and the real
+  // shell.openExternal fires, nothing is recorded, and this fails rather than
+  // silently going back to opening a browser tab on the user's desktop.
   await render(exec, "# Plain\n\nbody\n\n# [Linked](https://example.invalid/x)\n\nmore body\n", "full");
+  await clearExternalOpens(win);
+  // Checked BEFORE the click, and the click itself refuses to fire without it.
+  // Ordering is the whole point: an assertion placed after the dispatch would
+  // report the missing trap only once the browser tab had already opened, so
+  // proving this guard would cost the user the exact thing it prevents.
+  const trapReady = await exec(`window.__externalTrapInstalled === true`);
+  check(
+    "external opens are trapped before any link is clicked, so the suite cannot reach the real browser",
+    trapReady === true,
+    String(trapReady),
+  );
   const linkGuard = await exec(`
     (() => {
+      if (window.__externalTrapInstalled !== true) return 'trap-missing';
       const a = viewer.querySelector('h1 a');
       if (!a) return 'no link in heading';
       const h = a.closest('h1');
@@ -730,6 +752,12 @@ async function run(win) {
     })()
   `);
   check("clicking a link inside a heading does not collapse the section", linkGuard === "ok", linkGuard);
+  const headingLinkOpens = await readExternalOpens(win);
+  check(
+    "clicking a link inside a heading hands the URL to the external opener",
+    headingLinkOpens.length === 1 && headingLinkOpens[0] === "https://example.invalid/x",
+    JSON.stringify(headingLinkOpens),
+  );
 
   // ---------------------------------------------------------------------
   // 7. Wrapping is idempotent.

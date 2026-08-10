@@ -13,6 +13,7 @@ const {
   captureScreenshot,
   startErrorSentinel,
   proveSentinelAlive,
+  trapExternalOpens,
 } = require("./test-visual-utils");
 
 require("./main.js");
@@ -57,6 +58,8 @@ function write(file, content) {
 async function run(win) {
   const exec = (code) => win.webContents.executeJavaScript(code, true);
   const sentinel = startErrorSentinel(win, { label: "tabs" });
+  // No suite may reach the user's browser. See trapExternalOpens().
+  await trapExternalOpens(win);
 
   write(fileA, "# Alpha\n\nALPHA_V1\n");
   write(fileB, "# Beta\n\nBETA_V1\n");
