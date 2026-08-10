@@ -590,6 +590,213 @@ function main() {
     }
   }
 
+  // The README describes a POLICY - editing is edit-mode only, notes are the
+  // one exception and save themselves - and a policy described in prose rots
+  // the moment the mechanism behind it moves. This is the same defect class as
+  // the Electron version claims above, with a worse failure: a reader who is
+  // told the document is read-only in view mode, and is wrong, edits a file
+  // they believed they were only reading.
+  //
+  // WHAT THIS PAIR IS, HONESTLY. The behavioural oracle for all three policies
+  // already exists and is not here: test-render-patch.js dispatches real
+  // contextmenu events in both modes and measures OBSERVED visibility, and
+  // drives the real note dialogs with disk bytes as the oracle. This suite is
+  // not windowed, so it cannot do that. What it adds is the LINK between the
+  // shipped prose and the mechanism named in it - the axis the behavioural
+  // suite cannot see, because a test that drives the product is blind to the
+  // README drifting away from it.
+  //
+  // THE MECHANISM HALVES ARE STRUCTURAL, NOT SUBSTRING MATCHES, and that
+  // distinction was earned: a reviewer measured the first version and found two
+  // of the three could not fail. `/autoSaveViewModeNote\(\)/` matched four
+  // lines, of which one was a COMMENT and one the function's own definition, so
+  // deleting both call sites - i.e. actually breaking auto-save - left it
+  // green. `/function editOnlyAlwaysVisibleItems\(\)/` matched the definition
+  // alone, so emptying the returned list left it green. Each mechanism half now
+  // parses the function it names and asserts something the disabled version
+  // could not satisfy: the gate call must be a live statement inside
+  // showContextMenu (not commented out, not a stray reference elsewhere), the
+  // gate's item list must actually name the eight controls the README
+  // enumerates, and auto-save must have at least two live call sites.
+  //
+  // A reworded or deleted claim is a FAILURE, not a skip - otherwise rewriting
+  // the section silently switches the check off, which is exactly what happened
+  // to three of the four Electron claims.
+  {
+    const readme = read("README.md");
+    const rendererSrc = read("renderer.js");
+    // Brace-matched body extraction. Substring searches over a 9000-line file
+    // cannot distinguish a definition from a call from a mention in a comment,
+    // which is the whole reason the first version of these oracles was weak.
+    const bodyOf = (src, signature) => {
+      const start = src.indexOf(signature);
+      if (start < 0) return null;
+      let i = src.indexOf("{", start);
+      if (i < 0) return null;
+      let depth = 0;
+      for (let j = i; j < src.length; j++) {
+        if (src[j] === "{") depth++;
+        else if (src[j] === "}") {
+          depth--;
+          if (depth === 0) return src.slice(i + 1, j);
+        }
+      }
+      return null;
+    };
+    // Lines that are entirely a `//` comment are not mechanism.
+    const liveLines = (body) =>
+      String(body || "")
+        .split(/\r?\n/)
+        .filter((l) => !/^\s*(\/\/|\*)/.test(l));
+
+    const gateCallIsLive = (src) => {
+      const body = bodyOf(src, "function showContextMenu(");
+      return liveLines(body).some((l) => /^\s*applyEditModeMenuGating\(\);\s*$/.test(l));
+    };
+    // Exactly the controls the README bullet enumerates, so the prose and the
+    // list close the loop on each other.
+    const GATED_ITEMS = [
+      "ctxBold", "ctxItalic", "ctxCode", "ctxList",
+      "ctxRemoveFormat", "ctxInsertImage", "ctxInsertMermaid", "ctxInsertTable",
+    ];
+    const gateOwnsTheItems = (src) => {
+      const body = liveLines(bodyOf(src, "function editOnlyAlwaysVisibleItems(")).join("\n");
+      return GATED_ITEMS.every((id) => body.includes(id));
+    };
+    const autoSaveIsWired = (src) => {
+      const defStart = src.indexOf("function autoSaveViewModeNote(");
+      const calls = liveLines(src).filter(
+        (l) => /autoSaveViewModeNote\(\)/.test(l) && !/^\s*function /.test(l),
+      );
+      return defStart >= 0 && calls.length >= 2;
+    };
+
+    const claims = [
+      [
+        "states that document editing is confined to edit mode",
+        /In view mode the document is read-only/,
+        "the context menu is gated on edit mode",
+        gateCallIsLive,
+      ],
+      [
+        "names the inline formatting commands as edit-mode only",
+        /\*\*Edit mode only\*\*[^\n]*inline formatting/,
+        "the gate owns those items and restores them in edit mode",
+        gateOwnsTheItems,
+      ],
+      [
+        "promises a view-mode note is written to the file immediately",
+        /a note made in view mode is written to the file as soon as you confirm it/,
+        "the note commit helpers auto-save",
+        autoSaveIsWired,
+      ],
+    ];
+    for (const [what, readmeRe, mechanism, mechanismFn] of claims) {
+      check(
+        `the README ${what}`,
+        readmeRe.test(readme),
+        `no match for ${readmeRe} - claim removed or reworded, so it is no longer checked`,
+      );
+      check(
+        `...and ${mechanism}, so that claim is still true`,
+        mechanismFn(rendererSrc) === true,
+        `the mechanism named by this claim is no longer live in renderer.js`,
+      );
+    }
+  }
+
+  // Three README claims about things that live in package.json and index.html
+  // rather than in renderer.js, all three of which were WRONG when a reviewer
+  // measured them against the build configuration:
+  //
+  //  - the file-associations sentence promised the installer registers all
+  //    seven supported extensions; it registers three;
+  //  - the download table listed three artefacts out of five, silently hiding
+  //    the Windows portable build and the macOS dmg that release.yml publishes;
+  //  - the right-click bullet offered "insert / edit / delete ... images", and
+  //    there is no image-edit control anywhere in the app.
+  //
+  // All three are the same shape: prose describing a MACHINE-READABLE fact that
+  // nothing compared it against. So the oracle is the build config itself,
+  // never a second copy of the sentence.
+  {
+    const readme = read("README.md");
+    const indexSrc = read("index.html");
+
+    const winAssoc = ((pkg.build.win || {}).fileAssociations || []).map((a) => a.ext).sort();
+    check(
+      "the build declares the file associations the README's claim is checked against",
+      winAssoc.length > 0,
+      JSON.stringify(winAssoc),
+    );
+    // The README names them inline, so the comparison is against the sentence a
+    // reader actually reads rather than against a list maintained beside it.
+    const claimed = (readme.match(/The installer registers Folia as a handler for ([^\n]+?)\n/) || [])[1] || "";
+    const claimedExts = [...claimed.matchAll(/`\.([a-z]+)`/g)].map((m) => m[1]).sort();
+    check(
+      "the README names exactly the extensions the installer actually registers",
+      claimedExts.length === winAssoc.length
+        && claimedExts.every((e, i) => e === winAssoc[i]),
+      JSON.stringify({ readme: claimedExts, build: winAssoc }),
+    );
+
+    // Every artefact the release workflow publishes has to appear in the
+    // download table, or a reader concludes their platform is unsupported.
+    const targets = []
+      .concat((pkg.build.win || {}).target || [])
+      .concat((pkg.build.mac || {}).target || [])
+      .concat((pkg.build.linux || {}).target || [])
+      .map((t) => (typeof t === "string" ? t : t.target));
+    const TABLE_EVIDENCE = {
+      nsis: /Folia-Setup-X\.X\.X\.exe/,
+      portable: /\| Windows \| `Folia X\.X\.X\.exe`/,
+      dmg: /Folia-X\.X\.X\.dmg/,
+      AppImage: /Folia-X\.X\.X\.AppImage/,
+      deb: /folia_X\.X\.X_amd64\.deb/,
+    };
+    check(
+      "every build target is one the download-table check knows how to look for",
+      targets.every((t) => TABLE_EVIDENCE[t]),
+      JSON.stringify(targets),
+    );
+    const missingRows = targets.filter((t) => TABLE_EVIDENCE[t] && !TABLE_EVIDENCE[t].test(readme));
+    check(
+      "the README's download table lists every artefact the release publishes",
+      missingRows.length === 0,
+      JSON.stringify({ missing: missingRows, targets }),
+    );
+
+    // The image half of the right-click bullet. There is an insert control and
+    // a delete control and no edit control, so the day someone adds one this
+    // fires and the bullet gets updated in the same change - which is the only
+    // moment anybody would remember to.
+    check(
+      "the app still has no image-edit control, as the right-click bullet now says",
+      !/ctxEditImage/.test(indexSrc) && /ctxDeleteImage/.test(indexSrc) && /ctxInsertImage/.test(indexSrc),
+      "an image control was added or removed without the README bullet moving with it",
+    );
+
+    // "The Mermaid and table dialogs are resizable" - named rather than
+    // generalised, because the note, find-note and edit-text dialogs are NOT.
+    // Asserted as an exact set so widening the CSS without widening the prose
+    // fails, and so does the reverse.
+    const resizable = [...read("styles.css").matchAll(/([^\n{}]+)\{[^}]*resize:\s*both[^}]*\}/g)]
+      .map((m) => m[1].trim())
+      .sort();
+    check(
+      "exactly the two dialogs the README names are the resizable ones",
+      resizable.length === 2
+        && resizable[0] === ".mermaid-template-dialog"
+        && resizable[1] === ".table-insert-dialog",
+      JSON.stringify(resizable),
+    );
+    check(
+      "the README names those two dialogs rather than claiming all dialogs resize",
+      /The Mermaid and table dialogs are resizable/.test(readme),
+      "the dialog-resize claim was reworded, so it is no longer checked",
+    );
+  }
+
   // ==========================================================================
   // PRODUCT IDENTITY
   // ==========================================================================

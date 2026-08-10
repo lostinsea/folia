@@ -3086,6 +3086,231 @@ const REVERTS = [
       /SEC-01 @@@html iframe cannot reach window\.parent \(full render\)/,
     ],
   },
+  {
+    id: "R218",
+    suite: "test:packaging",
+    // The README is a SHIPPED surface (extraResources puts it in the installer
+    // and the in-app welcome button opens it), and it now describes a POLICY
+    // rather than just a feature list: the document is read-only in view mode.
+    // Prose describing a mechanism rots when the mechanism moves, and this one
+    // rots dangerously - a reader told the document cannot change under a
+    // right-click, who is wrong, edits a file they meant only to read.
+    //
+    // So the claim is paired with the code that makes it true. This revert
+    // removes the gate call and leaves the prose alone, which is precisely the
+    // drift the pairing exists to catch: the README goes on promising a
+    // read-only view mode that the product no longer has.
+    what: "unwire the edit-mode context-menu gate while the README still promises a read-only view mode",
+    file: RENDERER,
+    from: "  applyEditModeMenuGating();",
+    to: "  ;",
+    expect: [/\.\.\.and the context menu is gated on edit mode, so that claim is still true/],
+    // The prose half must survive: if the README assertions fail too, the
+    // revert has perturbed both sides at once and demonstrates nothing about
+    // the pairing.
+    mustPass: [
+      /the README states that document editing is confined to edit mode/,
+      /the README names the inline formatting commands as edit-mode only/,
+      /the README promises a view-mode note is written to the file immediately/,
+    ],
+  },
+  {
+    id: "R219",
+    suite: "test:packaging",
+    // The mirror of R218, and it is a separate entry because it fails from the
+    // other side. R218 proves the code half is live; this proves the prose half
+    // is. A single revert covering both would not distinguish "the claim is
+    // checked" from "the mechanism is checked", and the whole value of the
+    // pairing is that either one moving on its own is reported.
+    //
+    // The rewrite here is the plausible one - someone relaxing the policy and
+    // updating the README to match, without noticing the gate is still in
+    // place. That direction matters: it is how the prose and the product drift
+    // apart in the harmless-looking direction, and it is the one a reviewer
+    // reading only the diff would wave through.
+    what: "reword the README's read-only claim so the shipped prose no longer describes the product",
+    file: path.join(ROOT, "README.md"),
+    from: "In view mode the document is read-only",
+    to: "In view mode the document is fully editable",
+    expect: [/the README states that document editing is confined to edit mode/],
+    // The mechanism half must survive, or this is R218 wearing a different hat.
+    mustPass: [
+      /\.\.\.and the context menu is gated on edit mode, so that claim is still true/,
+      /\.\.\.and the note commit helpers auto-save, so that claim is still true/,
+      // The README's other shipped-surface guards must be untouched: this
+      // reverts prose, and prose is exactly what those sweep.
+      /vendor branding in the README is confined to the provenance section/,
+      /the shipped README fetches no images over the network when the app opens it/,
+    ],
+  },
+  {
+    id: "R220",
+    suite: "test:patch",
+    // The defect this pins was LIVE and shipped: the README's keyboard table
+    // claimed Ctrl+B / Ctrl+I / Ctrl+` (bold, italic, code) and Ctrl+D (dark
+    // mode), and not one of the four had a handler anywhere in the app - no
+    // renderer listener, no before-input-event branch, and this app registers
+    // no Electron menu accelerators at all. A shortcut table is the part of a
+    // README a reader tests within seconds, so a false row is discovered by
+    // every user and reported by none of them.
+    //
+    // The revert restores ONE of the four, which is the honest reproduction:
+    // documentation rots a row at a time, not a table at a time. It has to
+    // fail two different assertions - the classification sweep (the row is not
+    // measurable, main-process or element-scoped) and the explicit absence
+    // check - because those are the two independent ways a false row can be
+    // caught, and a guard that only had one of them would be pinned here by
+    // accident rather than on purpose.
+    what: "put the never-implemented Ctrl+D dark-mode row back into the README's shortcut table",
+    file: path.join(ROOT, "README.md"),
+    from: "| `Ctrl+F` | Search |\n",
+    to: "| `Ctrl+F` | Search |\n| `Ctrl+D` | Toggle dark mode |\n",
+    expect: [
+      /every documented shortcut is classified, so none can be skipped by omission/,
+      /the README no longer claims the four shortcuts that were never implemented/,
+    ],
+    // The measurement side must survive untouched. If the dispatch probe also
+    // fails, this revert is reporting a broken harness rather than a false
+    // claim - and the positive control is what says which.
+    mustPass: [
+      /every shortcut the README documents at document level is actually bound/,
+      /the dispatch probe can observe a handled key, so an unhandled result means something/,
+      /the four shortcuts the README used to claim really are unimplemented/,
+    ],
+  },
+  {
+    id: "R221",
+    suite: "test:patch",
+    // The mirror of R220, from the code side. Ctrl+R is the refresh shortcut,
+    // which is the single most-used affordance in this fork - the whole
+    // project started from "I refresh a file and another tab reverts" - and it
+    // was MISSING from the README until this change. Documenting it is only
+    // worth anything if the documentation is checked against the binding, so
+    // this neutralises the binding and requires the suite to notice.
+    //
+    // Anchored at the condition rather than at the body: a future refactor may
+    // move reloadCurrentFile() or add an unsaved-work branch, and neither
+    // should rot the pin. Killing the condition kills the shortcut however its
+    // body is written.
+    what: "neutralise the Ctrl+R refresh binding while the README goes on documenting it",
+    file: RENDERER,
+    from: "  if ((e.ctrlKey || e.metaKey) && e.key === 'r') {",
+    to: "  if (false) {",
+    expect: [/every shortcut the README documents at document level is actually bound/],
+    // The positive control must still hold: if the probe can no longer observe
+    // ANY handled key then this is measuring a broken dispatch, not a missing
+    // shortcut, and the failure above would be worthless.
+    mustPass: [
+      /the dispatch probe can observe a handled key, so an unhandled result means something/,
+      /the four shortcuts the README used to claim really are unimplemented/,
+      /every documented shortcut is classified, so none can be skipped by omission/,
+    ],
+  },
+  {
+    id: "R222",
+    suite: "test:packaging",
+    // THE PROOF THAT THE TIGHTENING WAS LOAD-BEARING. Both independent
+    // reviewers, separately, called the first version of these mechanism
+    // oracles a source-text grep that could pass with the behaviour broken.
+    // This revert is the demonstration: commenting the call out disables the
+    // gate completely, and the ORIGINAL regex (/applyEditModeMenuGating\(\);/)
+    // would have gone on matching the commented line and reported green. The
+    // structural oracle parses showContextMenu's body and ignores comment
+    // lines, so it fails.
+    //
+    // Kept distinct from R218, which DELETES the call. Deletion is the easy
+    // case that any substring check catches; disabling-in-place is the case
+    // that separates a real oracle from a grep, and it is also the more likely
+    // accident - it is what a developer does while bisecting.
+    what: "comment out the context-menu gate call, leaving the identifier in place for a grep to find",
+    file: RENDERER,
+    from: "  applyEditModeMenuGating();",
+    to: "  // applyEditModeMenuGating();",
+    expect: [/\.\.\.and the context menu is gated on edit mode, so that claim is still true/],
+    mustPass: [
+      /the README states that document editing is confined to edit mode/,
+      /\.\.\.and the gate owns those items and restores them in edit mode, so that claim is still true/,
+      /\.\.\.and the note commit helpers auto-save, so that claim is still true/,
+    ],
+  },
+  {
+    id: "R223",
+    suite: "test:packaging",
+    // The same demonstration for the auto-save half, which was the weakest of
+    // the three: the original regex matched FOUR lines, one of them a comment
+    // and one the function's own definition, so deleting BOTH call sites - i.e.
+    // breaking view-mode note auto-save outright - left two matches behind and
+    // the assertion green. Removing one call site here drops the live count
+    // below the required two.
+    what: "unwire one of the two view-mode note auto-save call sites",
+    file: RENDERER,
+    // The call line on its own appears twice, once per commit helper, so the
+    // anchor needs the preceding line for uniqueness. \n is correct here: the
+    // harness expands it to the file's own EOL (renderer.js is CRLF).
+    from: "  commitViewModeEdit(newContent, scrollPosition);\n  return autoSaveViewModeNote();",
+    to: "  commitViewModeEdit(newContent, scrollPosition);\n  return false;",
+    expect: [/\.\.\.and the note commit helpers auto-save, so that claim is still true/],
+    mustPass: [
+      /the README promises a view-mode note is written to the file immediately/,
+      /\.\.\.and the context menu is gated on edit mode, so that claim is still true/,
+    ],
+  },
+  {
+    id: "R224",
+    suite: "test:packaging",
+    // And for the third: the original regex matched only the function's
+    // SIGNATURE, so emptying the returned list - which makes every inline
+    // formatting command visible in view mode, the exact policy violation the
+    // README describes - could not fail it. The oracle now requires the body to
+    // name all eight controls the README bullet enumerates, so prose and list
+    // close the loop on each other.
+    what: "drop one control from the edit-mode gate's list while the README goes on enumerating it",
+    file: RENDERER,
+    from: "    ctxBold, ctxItalic, ctxCode, ctxList, ctxRemoveFormat,",
+    to: "    ctxItalic, ctxCode, ctxList, ctxRemoveFormat,",
+    expect: [/\.\.\.and the gate owns those items and restores them in edit mode, so that claim is still true/],
+    mustPass: [
+      /the README names the inline formatting commands as edit-mode only/,
+      /\.\.\.and the context menu is gated on edit mode, so that claim is still true/,
+    ],
+  },
+  {
+    id: "R225",
+    suite: "test:packaging",
+    // The shipped README claimed the installer registers all seven supported
+    // extensions. It registers three. A reader who believes it right-clicks a
+    // .markdown file, finds no Folia entry under Open with, and concludes the
+    // install is broken. Measured against package.json's own fileAssociations,
+    // so the sentence cannot drift from the build again in either direction.
+    what: "claim an extension the installer does not actually register",
+    file: path.join(ROOT, "README.md"),
+    from: "handler for `.md`, `.mmd` and `.mermaid`",
+    to: "handler for `.md`, `.mmd`, `.mermaid` and `.markdown`",
+    expect: [/the README names exactly the extensions the installer actually registers/],
+    mustPass: [
+      /the build declares the file associations the README's claim is checked against/,
+      /the README's download table lists every artefact the release publishes/,
+    ],
+  },
+  {
+    id: "R226",
+    suite: "test:packaging",
+    // The download table listed three of the five artefacts release.yml
+    // publishes, so a macOS reader - and anyone wanting the portable build -
+    // was told their platform did not exist. The check is driven from
+    // build.win/mac/linux targets, so adding a target without a row fails, and
+    // the "every target is one the check knows how to look for" assertion stops
+    // a NEW target from being silently unchecked rather than reported missing.
+    what: "drop the Windows portable row from the README's download table",
+    file: path.join(ROOT, "README.md"),
+    from: "| Windows | `Folia X.X.X.exe` | Portable, no installation |\n",
+    to: "",
+    expect: [/the README's download table lists every artefact the release publishes/],
+    mustPass: [
+      /every build target is one the download-table check knows how to look for/,
+      /the README names exactly the extensions the installer actually registers/,
+    ],
+  },
 ];
 
 const only = process.argv.slice(2);

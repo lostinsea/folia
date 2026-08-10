@@ -2224,6 +2224,186 @@ async function run(win) {
     );
   }
 
+  // ---------------------------------------------------------------------
+  // 19. Every keyboard shortcut the README documents is real, and the ones it
+  //     no longer documents really are absent.
+  //
+  // Found by auditing the README against the code: the shipped table claimed
+  // `Ctrl+B` / `Ctrl+I` / `Ctrl+\`` (bold, italic, code) and `Ctrl+D` (dark
+  // mode). NONE of those four had a handler anywhere - not in renderer.js, not
+  // in main.js's before-input-event hook, and there are no Electron menu
+  // accelerators in this app at all. Meanwhile `Ctrl+R`, the refresh shortcut
+  // that is central to this fork, was not documented. A shortcut table is the
+  // one part of a README a reader tests immediately, so a false row is found
+  // by every user and fixed by none of them.
+  //
+  // THE ORACLE IS BEHAVIOURAL, NOT TEXTUAL. Grepping renderer.js for `'b'`
+  // would prove nothing (this project's recurring anti-pattern): it cannot see
+  // a listener that is registered but unreachable, and it cannot see one that
+  // lives in a file the grep did not think to open. Instead a real cancelable
+  // KeyboardEvent is dispatched at `document` and `defaultPrevented` is read
+  // back. Every genuine Ctrl shortcut in this app calls e.preventDefault()
+  // unconditionally inside its own branch, so that single property is a
+  // uniform yes/no answer across the whole table with no per-row special
+  // casing - and it is the real listener chain answering, not a copy of it.
+  //
+  // The classification is exhaustive BY CONSTRUCTION: every row parsed out of
+  // the README's Keyboard table must fall into exactly one of measured /
+  // main-process / element-scoped, and an unrecognised row FAILS. So a future
+  // row added to the docs cannot be undocumented-by-omission here - either it
+  // is measured, or somebody has to say in this file why it cannot be.
+  // ---------------------------------------------------------------------
+  {
+    const readmeText = fs.readFileSync(path.join(__dirname, "README.md"), "utf8");
+    // Bounded at the next heading. An unbounded split runs on into the
+    // provenance table much further down the file and silently classifies
+    // "Electron" and "Fira Code" as undocumented keyboard shortcuts - caught
+    // on the first run, and a reminder that a parser with no end marker
+    // reports on text nobody claimed it was reading.
+    const kbSection = (readmeText.split(/^### Keyboard$/m)[1] || "").split(/^#{1,6} /m)[0];
+    const kbRows = kbSection
+      .split(/\r?\n/)
+      .filter((l) => /^\|/.test(l) && !/^\|\s*-+/.test(l) && !/^\|\s*Shortcut/.test(l))
+      .map((l) => l.split("|")[1].trim());
+    const documented = [];
+    for (const cell of kbRows) {
+      for (const tok of cell.split("/")) {
+        const t = tok.trim().replace(/^`|`$/g, "").trim();
+        if (t) documented.push(t);
+      }
+    }
+    check(
+      "the README's keyboard table was found and parsed",
+      documented.length >= 10,
+      JSON.stringify(documented),
+    );
+
+    // Handled in the MAIN process via webContents before-input-event, which is
+    // fed by real OS input. A renderer-side dispatchEvent structurally cannot
+    // reach it, so these are named rather than measured - see main.js:607.
+    const MAIN_PROCESS = ["Ctrl+O", "F11"];
+    // Bound to a specific element (a dialog overlay, the search box, the
+    // editor textarea) rather than to `document`, so "did document's listener
+    // chain cancel it" is the wrong question for them.
+    const ELEMENT_SCOPED = ["Ctrl+Enter", "Enter", "Shift+Enter", "Escape", "Tab"];
+    // key = the KeyboardEvent.key the handler actually tests for; mode = the
+    // mode the README row claims it works in.
+    const MEASURED = {
+      "Ctrl+R": { key: "r", edit: false },
+      "Ctrl+S": { key: "s", edit: true },
+      "Ctrl+Z": { key: "z", edit: true },
+      "Ctrl+Y": { key: "y", edit: true },
+      "Ctrl+F": { key: "f", edit: false },
+      "Ctrl++": { key: "+", edit: false },
+      "Ctrl+-": { key: "-", edit: false },
+      "Ctrl+0": { key: "0", edit: false },
+    };
+    const unclassified = documented.filter(
+      (d) => !MAIN_PROCESS.includes(d) && !ELEMENT_SCOPED.includes(d) && !MEASURED[d],
+    );
+    check(
+      "every documented shortcut is classified, so none can be skipped by omission",
+      unclassified.length === 0,
+      JSON.stringify(unclassified),
+    );
+
+    // Removed from the README by this change. Asserted absent so the false
+    // rows cannot quietly return - and so that implementing any of them forces
+    // the table to be updated in the same commit.
+    const ABSENT = { "Ctrl+B": "b", "Ctrl+I": "i", "Ctrl+`": "`", "Ctrl+D": "d" };
+    check(
+      "the README no longer claims the four shortcuts that were never implemented",
+      Object.keys(ABSENT).every((k) => !documented.includes(k)),
+      JSON.stringify(documented),
+    );
+
+    const kbFile = path.join(dir, "shortcuts.md");
+    fs.writeFileSync(kbFile, "# Shortcuts\n\nbody\n", "utf8");
+    await exec(`ipcRenderer.send('open-file-path', ${JSON.stringify(kbFile)}); null`);
+    await waitFor(
+      exec,
+      "the shortcut probe document to open",
+      `currentFilePath === ${JSON.stringify(kbFile)} ? 'ok' : false`,
+      20000,
+    );
+
+    // Undo/redo run against an EMPTY history on purpose: both handlers
+    // preventDefault before historyUndo/historyRedo return early, so the
+    // binding is measured without moving the document underneath the rest of
+    // the suite. Ctrl+S is likewise pointed at unmodified content.
+    const probe = await exec(`
+      (async () => {
+        const fire = (key) => {
+          const ev = new KeyboardEvent('keydown', {
+            key, ctrlKey: true, bubbles: true, cancelable: true,
+          });
+          document.dispatchEvent(ev);
+          return ev.defaultPrevented;
+        };
+        const zoomBefore = zoomLevel;
+        const searchWasOpen = searchPanel.classList.contains('active');
+        historyClear();
+        const handled = {};
+        const spec = ${JSON.stringify(MEASURED)};
+        for (const [label, s] of Object.entries(spec)) {
+          if (s.edit) {
+            isEditMode = true;
+            markdownEditor.value = originalMarkdown;
+            hasUnsavedChanges = false;
+          } else {
+            isEditMode = false;
+          }
+          handled[label] = fire(s.key);
+        }
+        const absent = {};
+        isEditMode = false;
+        for (const [label, key] of Object.entries(${JSON.stringify(ABSENT)})) {
+          absent[label] = fire(key);
+        }
+        // Put back everything the sweep was allowed to move.
+        zoomLevel = zoomBefore;
+        updateZoom();
+        if (searchPanel.classList.contains('active') !== searchWasOpen) toggleSearchPanel();
+        isEditMode = false;
+        contentWrapper.classList.remove('split-view');
+        hasUnsavedChanges = false;
+        updateUnsavedIndicator();
+        historyClear();
+        return { handled, absent, zoom: zoomLevel };
+      })()
+    `);
+    // Ctrl+R really does reload, and Ctrl+S really does write; let both land
+    // before the suite's closing sentinel checks read the page.
+    await sleep(1200);
+
+    const unhandled = Object.keys(MEASURED).filter((k) => probe.handled[k] !== true);
+    check(
+      "every shortcut the README documents at document level is actually bound",
+      unhandled.length === 0,
+      JSON.stringify(probe.handled),
+    );
+    // THE POSITIVE CONTROL. Without it, a dispatch built the wrong way - wrong
+    // event type, non-cancelable, aimed at the wrong node - reports "not
+    // handled" for everything, and the four absence assertions below all pass
+    // for the worst possible reason.
+    check(
+      "the dispatch probe can observe a handled key, so an unhandled result means something",
+      probe.handled["Ctrl+F"] === true && probe.handled["Ctrl+0"] === true,
+      JSON.stringify(probe.handled),
+    );
+    const stillLive = Object.keys(ABSENT).filter((k) => probe.absent[k] !== false);
+    check(
+      "the four shortcuts the README used to claim really are unimplemented",
+      stillLive.length === 0,
+      JSON.stringify(probe.absent),
+    );
+    check(
+      "the shortcut sweep left the zoom level where it found it",
+      probe.zoom === (await exec(`ZOOM_CONFIG.level`)),
+      JSON.stringify({ after: probe.zoom }),
+    );
+  }
+
   const alive = await proveSentinelAlive(win, sentinel);
   check(
     "the error sentinel was demonstrably watching both channels",
