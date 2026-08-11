@@ -28,10 +28,11 @@
 //
 // The corpus is a SET of single-construct profiles rather than one blended
 // document, and that is load-bearing rather than tidiness. Isolating constructs
-// is what showed that marked v9's block lexer is quadratic in tables, lists and
-// headings but linear in prose and code. A single blended document averages
-// that signal away into "rendering is slow" and hides which construct - and
-// which library - is responsible.
+// is what showed that marked v9's block lexer was quadratic in tables, lists and
+// headings but linear in prose and code - and, later, that the effect was far
+// worse than that above 1 MB, which is what justified the 9 -> 18 upgrade. A
+// single blended document averages that signal away into "rendering is slow"
+// and hides which construct - and which library - is responsible.
 "use strict";
 
 // A 32-bit linear congruential generator (Numerical Recipes constants). The
@@ -74,7 +75,7 @@ const BUILDERS = {
     out.push([sentence(rand, i), sentence(rand, i), sentence(rand, i)].join(" "));
   },
 
-  // Heading-dominated. Quadratic in marked v9's block lexer.
+  // Heading-dominated. Was quadratic in marked v9's block lexer; linear under 18.
   headings(rand, i, out) {
     out.push("#".repeat(1 + (i % 5)) + " " + words(rand, 4) + " " + i);
     out.push(sentence(rand, i));
@@ -93,7 +94,8 @@ const BUILDERS = {
     out.push(rows.join("\n"));
   },
 
-  // Nested bullet and ordered lists. Quadratic in marked v9's block lexer.
+  // Nested bullet and ordered lists. Was quadratic in marked v9's block lexer;
+  // linear under 18.
   lists(rand, i, out) {
     out.push(
       [
@@ -315,23 +317,25 @@ function lexTokens(text) {
 // different amount of rendering. Sharing loadMarked() is what stops the lexed
 // pins and the rendered pins from ever being statements about two parsers.
 // RENDER THE WAY THE APP RENDERS. renderer.js calls marked.setOptions with a
-// four-option block; marked applies PER-CALL options INSTEAD OF the globals,
+// two-option block; marked applies PER-CALL options INSTEAD OF the globals,
 // and this module deliberately never calls setOptions (it must not mutate a
 // parser other code shares), so every option the app sets has to be repeated
 // here or the corpus is parsed with library defaults.
 //
 // `breaks: true` is the fork decision from item 6c (hard-wrapped agent-written
 // documents keep their line structure), pinned by R85; marked's default is
-// false. `mangle: false` is the one that actually differed from the default.
+// false. `gfm: true` is marked's default and is stated rather than assumed,
+// because it is the option the table pins depend on entirely.
 //
-// MEASURED, not assumed: rendering all six profiles with the full set is
-// byte-identical to rendering them with `breaks` alone, and so is an
-// autolink/email probe, so mangle and headerIds are inert in this vendored
-// marked 9 build. That makes this a no-op TODAY - the manifest does not move -
-// and it is pinned anyway because "inert today" is exactly the state `breaks`
-// was in before a builder change would have activated it. verify.js asserts
-// this set against renderer.js's own block, so the two cannot silently drift.
-const RENDER_OPTIONS = { breaks: true, gfm: true, headerIds: true, mangle: false };
+// `headerIds: true` and `mangle: false` were here until the marked 9 -> 18
+// upgrade. The argument for pinning them was that "inert today" is exactly the
+// state `breaks` was in before a builder change would have activated it - a
+// good argument for a merely-unused option, but the wrong one for these two:
+// they were removed from marked's CORE in v8/v9 and no builder change can bring
+// them back, so they could never become live. They were deleted from
+// renderer.js at the same time; verify.js asserts this set against renderer.js's
+// own block, so the two cannot silently drift.
+const RENDER_OPTIONS = { breaks: true, gfm: true };
 function renderHtml(text) {
   return loadMarked().marked.parse(text, RENDER_OPTIONS);
 }

@@ -1018,11 +1018,14 @@ sets match exactly, failing loud if the block is missing or holds a value it
 cannot parse. Without that, `RENDER_OPTIONS` is a hard-coded copy of another
 file's setting: correct the day it is written, silently wrong afterwards.
 
-Measured: the full option set renders byte-identically to `breaks` alone across
-all six profiles and on an autolink/email probe, so `mangle` and `headerIds` are
-inert in this marked 9 build. They are pinned anyway, because "inert today" is
-exactly the state `breaks` was in before a builder change would have activated
-it - and the 9 -> 18 upgrade is where this will stop being inert.
+Measured: the full option set rendered byte-identically to `breaks` alone across
+all six profiles and on an autolink/email probe, so `mangle` and `headerIds`
+were inert in the marked 9 build. They were pinned anyway on the argument that
+"inert today" is exactly the state `breaks` was in before a builder change would
+have activated it. The 9 -> 18 upgrade retired that argument rather than
+confirming it: both options were removed from marked's *core* in v8/v9, so no
+builder change could ever have activated them, and they are now deleted from
+`renderer.js` and `RENDER_OPTIONS` alike. The set is `breaks` and `gfm`.
 
 ### Regenerating the manifest is gated
 
@@ -1516,4 +1519,96 @@ against `wide` refuses documents that would have opened instantly; set where
 `prose` is comfortable, it does not fire until `wide` has already cost tens of
 seconds. Whatever the guard ends up being, it has to see structure, and a pipe
 count is O(n) and cheap.
+
+## The marked 9 -> 18 upgrade
+
+Taken on the strength of the capture above. The prediction it was taken to test
+was that the cost lived in the TOKENISER - lex and parse degraded together and
+by the same factor - so marked 18's tokeniser rewrite should move it. It did.
+
+Both parsers loaded in one process, same machine, same moment, median of
+2 runs x 3 reps, gc between reps:
+
+| profile | size | marked 9 | marked 18 | speed-up |
+|---|---:|---:|---:|---:|
+| wide | 512 KB | 175 ms | 84 ms | 2.1x |
+| wide | 1 MB | 547 ms | 158 ms | 3.5x |
+| wide | 1.5 MB | 2303 ms | 223 ms | 10.4x |
+| wide | 2 MB | 13373 ms | 339 ms | **39.4x** |
+| wide | 2.5 MB | 34339 ms | **397 ms** | **86.6x** |
+| tables | 2.5 MB | 12861 ms | 356 ms | 36.2x |
+| prose | 2.5 MB | 92 ms | 93 ms | 1.0x |
+
+`prose` is unchanged at 1.00x. That is the control working: this is not a
+general speed-up, it is specifically the superlinear path being removed. Under
+18, `wide` goes 84 -> 397 ms across a 5x size increase, which is linear.
+
+Note that marked 9 measures WORSE here than in the capture (13.4 s against 6.3 s
+at 2 MB) purely because this process holds two parsers and two corpora. Its
+cliff is sensitive to heap pressure, so its real in-app cost - in a process also
+holding tabs, the DOM and Prism - was worse than the capture suggested.
+
+### The upgrade is byte-safe, and that is measured rather than hoped
+
+- All seven corpus profiles render **byte-identical** HTML under 9.1.6 and
+  18.0.9, so not one digest, token, render-census or class-census pin moved.
+  `verify.js` passes 267/267 unchanged.
+- Of 42 hand-written edge cases - tables with escaped pipes and ragged rows,
+  the `@@@html` fence, setext headings, task lists, autolinks, reference links,
+  nested lists, entities, CRLF - **41 are byte-identical**. The one difference is
+  whitespace inside a raw HTML block: `<div>\n\n<p>` became `<div><p>`.
+- `npm test`: 12 suites, 0 failures.
+
+### What it did to the end-to-end numbers
+
+`marked.parse` on `wide`, per-phase medians at 256/512/1024 KB: **37 / 71 /
+141 ms**, ratios **1.92 and 1.99**. Under marked 9 the same phase was the
+harness's worst legitimate offender at 2.61-2.85. Its share of `wide`@1 MB
+render fell from roughly 12% to **4.1%**.
+
+The SUSPICIOUS band - ratios above 2.89 that are reported loudly but not
+refused - is now **empty**. It never was before; `marked.parse` was a permanent
+resident, documented in the report text as expected. That text has been updated,
+because a reader told to expect an entry that can no longer appear learns to
+ignore the list.
+
+`wide` render at 1 MB went 4347 -> 3397 ms, about 22%, and every profile's
+settle ratio stayed linear (1.87-2.06).
+
+**The next target is now unambiguous.** With marked linear, `applyTableBreakout`
+is 2595-2686 ms of `wide`@1 MB's 3439 ms render - **76%** - and is the phase
+closest to the nonlinear bound on most runs. It is where the remaining
+large-document cost is.
+
+### The harness caught the upgrade breaking its own instrumentation
+
+The first full run after re-vendoring refused with `PHASE_NEVER_CALLED:
+marked.parse`, and the cause was not in the product at all.
+
+marked 18 is bundled by esbuild, whose export helper defines every export as a
+**getter-only, non-configurable** accessor:
+
+```js
+for (var k in all) Object.defineProperty(target, k, { get: all[k], enumerable: true })
+```
+
+marked 9's exports were plain writable data properties, so the instrumentation's
+`window.marked.parse = wrapped` worked. Under 18 that same line is a **silent
+no-op** - sloppy-mode assignment to an accessor with no setter throws nothing -
+and `Object.defineProperty` raises `Cannot redefine property`. Both measured
+directly against the vendored bundle.
+
+So the wrap reported success while the original parse kept being called and the
+phase recorded 0 ms, which reads in the table exactly like a phase that costs
+nothing. Two changes:
+
+1. The whole `window.marked` namespace is replaced with a shim that forwards
+   every key by getter and carries the wrapped `parse`. The global binding is an
+   ordinary writable property, so this works where patching the member cannot.
+2. **The wrap now asserts its own post-condition.** It previously checked only
+   that `marked.parse` was a function *before* assigning, and then trusted the
+   assignment. It now re-reads the property afterwards and requires it to be the
+   wrapper, so an export shape this code cannot patch is reported at boot as
+   `PHASE_NOT_WRAPPED` - naming the real cause - instead of surfacing eleven
+   minutes later as a phase that mysteriously never ran.
 

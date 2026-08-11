@@ -1131,6 +1131,23 @@ A DOMPurify sanitizer bypass in this application is not "an XSS" — given SEC-0
 
 **Fix.** Load from `node_modules` (SEC-10) and bump `dompurify` to `^3.2.4+`, `mermaid` to `^11.15.0` (or `^10.9.6`), `marked` to a current major.
 
+### FIXED
+
+All four parts. `scripts/vendor-libs.js` copies the installed builds into `libs/vendor/` on
+`postinstall` and `index.html` loads those, so the executing versions are the audited ones and
+`npm audit` now sees what actually runs. The vendored set is DOMPurify 3.4.12 (above the 3.1.3
+fix line for CVE-2024-45801 and CVE-2024-47875), Mermaid 11.16.0 (above 11.15.0) and
+marked 18.0.9.
+
+`libs/vendor/VERSIONS.json` is written by the same script from the resolved `package.json` of
+each package, so the recorded versions cannot drift from the copied bytes, and
+`test-packaging.js` fails if `THIRD-PARTY-NOTICES.md` no longer matches the installed tree.
+
+The marked bump was taken on performance grounds as well as currency, and is measured rather
+than assumed byte-safe: all seven benchmark corpus profiles render byte-identically under 9.1.6
+and 18.0.9, all 267 corpus verification axes pass unchanged, and of 42 hand-written edge cases
+only one differs (whitespace inside a raw HTML block). See `bench/BASELINE.md`.
+
 ---
 
 ## SEC-17 — Electron 37 has 17 published high-severity advisories
@@ -1495,7 +1512,7 @@ marked.setOptions({
 });
 ```
 
-`sanitize` was deprecated in marked v0.7 and **removed in v5**; the app runs marked 9.1.6, so this key is silently ignored. The good news: it is set to `false`, meaning the code is *not* relying on it — DOMPurify is the actual control. Flagged only because a reader (or a future maintainer) may believe a sanitizer setting is in force here when none is. Setting it to `true` would not help either — it would still be ignored.
+`sanitize` was deprecated in marked v0.7 and **removed in v5**; the app was running marked 9.1.6 when this was found, so this key was silently ignored. The good news: it is set to `false`, meaning the code is *not* relying on it — DOMPurify is the actual control. Flagged only because a reader (or a future maintainer) may believe a sanitizer setting is in force here when none is. Setting it to `true` would not help either — it would still be ignored.
 
 **Fix.** Delete the dead option and add a comment stating that DOMPurify is the sole sanitization boundary.
 

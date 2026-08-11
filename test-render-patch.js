@@ -17,7 +17,8 @@
 // collapsed-state map is keyed by them, so inserting a heading migrated every
 // section's collapsed state onto its neighbour. Ids are now content-derived
 // slugs, which also makes in-document anchor links work for the first time
-// (marked 9 ignores the `headerIds: true` option still passed to setOptions).
+// (marked has had no `headerIds` option in core since v8/v9; the one this app
+// used to pass was silently ignored, and was deleted in the 18 upgrade).
 //
 // Consequence 2: nothing downstream could ever reuse a node, which hid the fact
 // that the full render path called Prism.highlightAll() - a whole-document

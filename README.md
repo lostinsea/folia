@@ -353,9 +353,9 @@ Click a diagram's pop-out button to pan and zoom it in its own window.
 | Component | Version | Role |
 |-----------|---------|------|
 | Electron | 43.2.0 | Desktop runtime |
-| marked | 9.1.6 | Markdown parser |
+| marked | 18.0.9 | Markdown parser |
 | Mermaid | 11.16.0 | Diagram rendering |
-| DOMPurify | 3.0.6 | HTML sanitization |
+| DOMPurify | 3.4.12 | HTML sanitization |
 | Tabulator | 6.2.5 | Interactive tables |
 | PrismJS | 1.30.0 | Syntax highlighting |
 | Fira Code | - | Application typeface |

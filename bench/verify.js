@@ -559,10 +559,14 @@ for (const [profile, want] of Object.entries(ATTRIBUTES)) {
 //
 // This checks the WHOLE option block, not one key. The first version compared
 // only `breaks` and a reviewer correctly pointed out that marked applies
-// per-call options INSTEAD OF the globals, so the other three were silently
-// coming from library defaults - `mangle` genuinely differed (renderer.js sets
-// false, the default is true). Measured inert in this marked 9 build, but the
-// point of the assertion is that it will not stay inert through the 9 -> 18
+// per-call options INSTEAD OF the globals, so the others were silently coming
+// from library defaults - `mangle` genuinely differed (renderer.js set false,
+// the default is true).
+//
+// The 9 -> 18 upgrade resolved that: `mangle` and `headerIds` were deleted from
+// both sides, because they had been removed from marked's CORE in v8/v9 and so
+// could never have become live again. The block is now `breaks` and `gfm`, and
+// this assertion is what stops the two copies drifting apart on the next
 // upgrade.
 //
 // FAIL-LOUD ON ANYTHING IT CANNOT PARSE. If the block cannot be found, or holds

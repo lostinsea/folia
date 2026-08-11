@@ -87,16 +87,22 @@ function ensureMermaid() {
 }
 
 // Configure marked.
-// SEC-25: `sanitize` was deprecated in marked 0.7 and REMOVED in v5; this app
-// runs marked 9, so passing it here does nothing at all. It is deleted rather
-// than left as a false reassurance - DOMPurify (SANITIZE_CONFIG below) is the
-// sole sanitization boundary in this pipeline, and setting `sanitize: true`
-// here would not add one.
+// SEC-25: `sanitize` was deprecated in marked 0.7 and REMOVED in v5, so passing
+// it here would do nothing at all. It is deleted rather than left as a false
+// reassurance - DOMPurify (SANITIZE_CONFIG below) is the sole sanitization
+// boundary in this pipeline, and setting `sanitize: true` here would not add one.
+//
+// `headerIds: true` and `mangle: false` used to be in this block and were
+// removed with the marked 9 -> 18 upgrade. They were already inert: both were
+// taken out of marked's core in v8/v9 (they live in marked-gfm-heading-id and
+// marked-mangle now), so the vendored 9 build silently ignored them, and 18
+// ignores them too - measured, it does not throw. They are deleted because a
+// dead option that looks live is worse than no option: this one had already
+// misled a reader into believing marked was generating heading slugs. It is
+// not, and assignHeadingIds() below does that job.
 marked.setOptions({
   breaks: true,
-  gfm: true,
-  headerIds: true,
-  mangle: false
+  gfm: true
 });
 
 // ============================================
@@ -3369,12 +3375,13 @@ searchCloseBtn.addEventListener('click', toggleSearchPanel);
 // app specifically, because documents are expected to be rewritten underneath
 // the reader and re-rendered.
 //
-// marked does not supply ids of its own here: `headerIds: true` is still passed
-// in the options at the top of this file, but that option was removed from
-// marked's core in v8/v9 (it lives in marked-gfm-heading-id now) and is silently
-// ignored by the vendored 9.1.6 build, so nothing was generating slugs. In-page
-// anchor links like [see](#some-heading) therefore never resolved either; they
-// do now.
+// marked does not supply ids of its own here, and never did in this app: the
+// `headerIds: true` option that used to be passed at the top of this file was
+// removed from marked's core in v8/v9 (it lives in marked-gfm-heading-id now)
+// and was silently ignored, so nothing was generating slugs. That dead option
+// was deleted with the marked 9 -> 18 upgrade; marked 18 has no such option
+// either. In-page anchor links like [see](#some-heading) never resolved before
+// this function existed; they do now.
 function slugifyHeading(text) {
   return String(text)
     .toLowerCase()

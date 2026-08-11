@@ -54,7 +54,7 @@
     "dompurify": "^3.0.6",
     "electron": "^43.2.0",
     "electron-builder": "^26.15.3",
-    "marked": "^9.1.6",
+    "marked": "^18.0.9",
     "mermaid": "^11.16.0",
     "png-to-ico": "^3.0.1",
     "prismjs": "^1.30.0"
