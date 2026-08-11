@@ -391,12 +391,22 @@ process.on("uncaughtException", (err) => bail("uncaught exception", err));
 // referenced before their module-scope declaration ran.
 let statusSuffix = "";
 
-function finish(code) {
+function finish(code, reason) {
   // A MACHINE-READABLE VERDICT ON THE FIRST LINE. The REJECTED banner is prose
   // at the bottom of a 50-line report, so anything that reads the file rather
   // than the exit code - a later comparison script, a human skimming for the
   // table - cannot tell a rejected run from a good one. It can now.
-  const status = code === 0 ? `STATUS: OK${statusSuffix}` : `STATUS: FAILED (exit ${code})`;
+  //
+  // AND THE VERDICT NAMES THE KIND, because the exit code alone does not.
+  // Every refusal in this file exits 3, so a run rejected for machine noise and
+  // a run rejected for a suspected quadratic wrote the SAME first line - and
+  // they call for opposite responses: re-run on an idle machine, versus stop
+  // and diagnose. A reviewer's point, and it applies to every existing refusal
+  // rather than only to the retry that prompted it.
+  const status =
+    code === 0
+      ? `STATUS: OK${statusSuffix}`
+      : `STATUS: FAILED (exit ${code}${reason ? `: ${reason}` : ""})`;
   const text = [status, ...lines].join("\n") + "\n";
   // Electron drops buffered stdout on app.exit() when redirected, so the file
   // is the authoritative record - the same reason test-startup-perf.js writes
@@ -489,6 +499,22 @@ if (unverifiedSizes.length) {
       `(${DIGEST_SIZES.join(", ")}). The corpus at those sizes is NOT pinned by\n` +
       "bench: any oracle, so treat the rows as exploratory and do not record them as a baseline.",
   );
+}
+// A NARROWED RUN IS NOT A BASELINE, AND THE ARTIFACT MUST SAY SO. Same
+// argument as the unverified-sizes marker above, and it is the one gap that
+// marker left: `--profiles=wide` measures three cells out of twenty-one, writes
+// them over bench-results.txt, and - because every cell it did measure was
+// fine - stamps `STATUS: OK` on top. Weeks later that file is indistinguishable
+// from a full run except by counting rows, and it is the file that gets quoted.
+//
+// Narrowed runs are deliberately still ALLOWED to write: they are how a single
+// suspicious cell gets investigated, and forcing an eleven-minute full run to
+// look at one profile would just push people to read stdout instead, which is
+// the thing this marker exists to stop relying on.
+if (profiles.length !== PROFILES.length || sizes.length !== BENCH_DEFAULT_SIZES.length) {
+  statusSuffix +=
+    ` (PARTIAL: ${profiles.length}/${PROFILES.length} profiles, ` +
+    `${sizes.length}/${BENCH_DEFAULT_SIZES.length} sizes - not a baseline)`;
 }
 // THE FINISHED DOCUMENT, PINNED BY HAND, per (profile, size) the benchmark
 // reports. See the census check at the bottom of this file for why this exists
@@ -726,20 +752,20 @@ app.whenReady().then(async () => {
   let where = "startup";
   const watchdog = setTimeout(() => {
     say(`=== timed out after 900s while: ${where} ===`);
-    finish(1);
+    finish(1, "WATCHDOG");
   }, 900000);
 
   const drift = verifyCorpus();
   if (drift) {
     say(`ABORT: ${drift}`);
     clearTimeout(watchdog);
-    return finish(1);
+    return finish(1, "CORPUS_DRIFT");
   }
 
   if (!BrowserWindow.getAllWindows().length) {
     say("ABORT: no window at ready - another instance is probably holding the single-instance lock");
     clearTimeout(watchdog);
-    return finish(1);
+    return finish(1, "NO_WINDOW");
   }
   const win = BrowserWindow.getAllWindows()[0];
   const exec = (c) => win.webContents.executeJavaScript(c, true);
@@ -788,7 +814,7 @@ app.whenReady().then(async () => {
     say("ABORT: the renderer did not load the application.");
     say("  Run `npm run bench` (or `electron bench.js`) from the repo root, not `electron bench/run.js`.");
     clearTimeout(watchdog);
-    return finish(1);
+    return finish(1, "RENDERER_NOT_READY");
   }
 
   // The gc switch is verified in the RENDERER, which is the process whose heap
@@ -805,7 +831,7 @@ app.whenReady().then(async () => {
     say("  app.commandLine.appendSwitch('js-flags', '--expose-gc') still reaches");
     say("  the renderer process on this Electron version.");
     clearTimeout(watchdog);
-    return finish(1);
+    return finish(1, "NO_GC");
   }
 
   const SETTLE_CAP_MS = 30000;
@@ -851,7 +877,7 @@ app.whenReady().then(async () => {
     }
     return Number(m[1]);
   })();
-  if (idleDeadlineMs === null) return finish(3);
+  if (idleDeadlineMs === null) return finish(3, "REGIME_UNREADABLE");
 
   const regimeFailures = [];
   const regimeRequire = (ok, what) => {
@@ -956,7 +982,7 @@ app.whenReady().then(async () => {
     say("  property the dial must have rather than the value it must hold, so a");
     say("  legitimate re-tune passes silently and only an un-tune reaches here.");
     clearTimeout(watchdog);
-    return finish(3);
+    return finish(3, "REGIME");
   }
 
   // The pipeline is timed from INSIDE the renderer. executeJavaScript queues on
@@ -1054,7 +1080,7 @@ app.whenReady().then(async () => {
     say("  that costs nothing. Either the function was renamed, or it stopped being a");
     say("  top-level declaration in renderer.js and must be measured another way.");
     clearTimeout(watchdog);
-    return finish(1);
+    return finish(1, "PHASE_NOT_WRAPPED");
   }
 
   // EVERY MEASUREMENT STARTS FROM AN EMPTY VIEWER, and this is not tidiness.
@@ -1338,7 +1364,7 @@ app.whenReady().then(async () => {
   } catch (e) {
     say(`ABORT: warm-up render failed: ${String((e && e.message) || e)}`);
     clearTimeout(watchdog);
-    return finish(1);
+    return finish(1, "WARMUP_FAILED");
   }
 
   // THE SETTLE LOOP IS THE ONE MEASUREMENT NOTHING ELSE CAN CHECK. Every other
@@ -1410,7 +1436,7 @@ app.whenReady().then(async () => {
     say("  still have been being built. This is the defect that once reported");
     say("  dense@1MB at 38,740 nodes against a true ~57,000.");
     clearTimeout(watchdog);
-    return finish(3);
+    return finish(3, "SETTLE_CONTROL");
   }
   say(
     `settle-loop control: a mutation at ${PROBE_DELAY_MS}ms was observed at ` +
@@ -1440,7 +1466,7 @@ app.whenReady().then(async () => {
     say("  the table exactly like a phase that costs nothing. Either the render path no");
     say("  longer calls it, or the work moved to a helper the wrap cannot see.");
     clearTimeout(watchdog);
-    return finish(1);
+    return finish(1, "PHASE_NEVER_CALLED");
   }
 
   // ONE CELL, MEASURED. Extracted from the loop below so that the per-phase
@@ -1660,7 +1686,7 @@ app.whenReady().then(async () => {
       );
     }
     say("  Re-run on an idle machine. Do NOT compare these figures to bench/BASELINE.md.");
-    return finish(3);
+    return finish(3, "SPREAD");
   }
 
   // --- shape-of-the-result invariants ---------------------------------------
@@ -1800,7 +1826,7 @@ app.whenReady().then(async () => {
     // leaving the process wedged with the table already printed.
     const retryDog = setTimeout(() => {
       say(`=== timed out after 900s during re-measurement while: ${where} ===`);
-      finish(1);
+      finish(1, "WATCHDOG_RETRY");
     }, 900000);
     const remeasured = new Map();
     for (const c of need.values()) {
@@ -1823,7 +1849,7 @@ app.whenReady().then(async () => {
       }
       say("  The retry exists to give a second INDEPENDENT observation of a suspicious ratio.");
       say("  A noisy retry cannot clear one or condemn one. Re-run on an idle machine.");
-      return finish(3);
+      return finish(3, "INCONCLUSIVE_AFTER_RETRY");
     }
     const before = new Map(observations.map((o) => [`${o.profile}|${o.what}`, o.ratio]));
     observations = ratiosFor(rows2);
@@ -1923,7 +1949,7 @@ app.whenReady().then(async () => {
         say(`    ${n.profile} ${n.what}  ${n.first.toFixed(2)} -> ${n.second.toFixed(2)}`);
       }
     }
-    return finish(3);
+    return finish(3, nonlinear.length ? "NONLINEAR_RATIO" : "TWO_STAGE_COLLAPSED");
   }
 
   // THE SUSPICIOUS BAND IS REPORTED LOUDLY ON A PASSING RUN. A ratio between
@@ -2058,7 +2084,7 @@ app.whenReady().then(async () => {
       say("    },");
     }
     say("  };");
-    return finish(4);
+    return finish(4, "RENDER_CENSUS");
   }
 
   // --- class census ---------------------------------------------------------
@@ -2134,7 +2160,7 @@ app.whenReady().then(async () => {
       say("    },");
     }
     say("  };");
-    return finish(4);
+    return finish(4, "CLASS_CENSUS");
   }
 
   finish(0);
