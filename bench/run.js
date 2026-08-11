@@ -1842,9 +1842,19 @@ app.whenReady().then(async () => {
     if (dirty.length) {
       say("");
       for (const r of dirty) {
+        // NAME THE RATIO THE RETRY WAS OPENED FOR. A reviewer's point: without
+        // it the rejection reads as a plain spread failure - "busy machine, try
+        // again" - and the reader loses the fact that a SUSPICIOUS ratio is
+        // still unresolved. The triggering figure is printed above too, but a
+        // rejection line that needs the reader to scroll is a rejection line
+        // that gets skimmed.
+        const trigger = suspicious.find((o) => o.cells.some((c) => cellKey(c) === cellKey(r)));
         say(
           `REJECTED: re-measurement of ${r.profile}@${r.kb.toFixed(0)}KB was itself contaminated ` +
-            `(spread ${((r.spread / r.settle) * 100).toFixed(0)}%, ${r.spread.toFixed(0)}ms)`,
+            `(spread ${((r.spread / r.settle) * 100).toFixed(0)}%, ${r.spread.toFixed(0)}ms)` +
+            (trigger
+              ? `, so ${trigger.what} at ${trigger.ratio.toFixed(2)} is neither cleared nor confirmed`
+              : ""),
         );
       }
       say("  The retry exists to give a second INDEPENDENT observation of a suspicious ratio.");
@@ -1949,7 +1959,21 @@ app.whenReady().then(async () => {
         say(`    ${n.profile} ${n.what}  ${n.first.toFixed(2)} -> ${n.second.toFixed(2)}`);
       }
     }
-    return finish(3, nonlinear.length ? "NONLINEAR_RATIO" : "TWO_STAGE_COLLAPSED");
+    // TWO INDEPENDENT FAILURES MUST NOT COLLAPSE TO ONE NAME. A reviewer's
+    // attack on the reason labels, and it lands here: `nonlinear` and
+    // `twoStageBad` are unrelated defects that this one block refuses on, so a
+    // single-valued reason would silently shadow whichever lost. A reader who
+    // fixed the named one and saw the next run pass - because the other was in
+    // a cell that did not fire again - would conclude "one bug, fixed".
+    //
+    // The other pairings really are exclusive and are left alone: CORPUS_DRIFT
+    // returns at startup before a cell is measured, and SPREAD returns above
+    // this block DELIBERATELY, because a nonlinear ratio computed from
+    // contaminated timings is not a claim worth making.
+    const reasons = [];
+    if (nonlinear.length) reasons.push("NONLINEAR_RATIO");
+    if (twoStageBad.length) reasons.push("TWO_STAGE_COLLAPSED");
+    return finish(3, reasons.join("+"));
   }
 
   // THE SUSPICIOUS BAND IS REPORTED LOUDLY ON A PASSING RUN. A ratio between
