@@ -28,7 +28,9 @@
     "test:startup": "electron test-startup-perf.js",
     "test:search": "electron test-search.js",
     "test:patch": "electron test-render-patch.js",
-    "test": "npm run test:packaging && npm run test:migration && npm run test:startup && npm run test:tabs && npm run test:security && npm run test:popups && npm run test:visual && npm run test:search && npm run test:mermaid && npm run test:patch && npm run test:tables",
+    "test:corpus": "node bench/verify.js",
+    "bench": "electron bench.js",
+    "test": "npm run test:packaging && npm run test:migration && npm run test:corpus && npm run test:startup && npm run test:tabs && npm run test:security && npm run test:popups && npm run test:visual && npm run test:search && npm run test:mermaid && npm run test:patch && npm run test:tables",
     "test:tables": "node --check test-table-display.js && electron test-table-display.js"
   },
   "keywords": [

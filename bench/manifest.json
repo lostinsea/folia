@@ -1,0 +1,122 @@
+{
+  "profiles": {
+    "prose": {
+      "65536": {
+        "bytes": 65619,
+        "blocks": 191,
+        "sha256": "bac1fbc5773fa6e43c29bdcafc270e2576f0bce33b430bf2f3cdb7c33ba1b214",
+        "tokens": {
+          "paragraph": 191
+        }
+      },
+      "1048576": {
+        "bytes": 1048824,
+        "blocks": 2994,
+        "sha256": "eb719cbc8ef53757d5d6ba2c6fa1562a3f30db93691ca9f2e7fa77089d504203",
+        "tokens": {
+          "paragraph": 2994
+        }
+      }
+    },
+    "headings": {
+      "65536": {
+        "bytes": 65618,
+        "blocks": 818,
+        "sha256": "100aad026ac7c283ed7c6b6d4df92b4dc9cbd8505e06b080d3bdbed17c316b7d",
+        "tokens": {
+          "heading": 409,
+          "paragraph": 409
+        }
+      },
+      "1048576": {
+        "bytes": 1048599,
+        "blocks": 12852,
+        "sha256": "4d26ab3c5af43a393b76241fc9fc2872ea9a40e73d73969d0023ba87d465e915",
+        "tokens": {
+          "heading": 6426,
+          "paragraph": 6426
+        }
+      }
+    },
+    "tables": {
+      "65536": {
+        "bytes": 65815,
+        "blocks": 128,
+        "sha256": "095ee6ce45d695360252b56b3e8ffe59342e294e361763a169d1fe0eadff34a6",
+        "tokens": {
+          "table": 128
+        }
+      },
+      "1048576": {
+        "bytes": 1048794,
+        "blocks": 1991,
+        "sha256": "f989218a6777e2f48c31ba3323940e8b588f08991db0d034cd762625bbade3d4",
+        "tokens": {
+          "table": 1991
+        }
+      }
+    },
+    "lists": {
+      "65536": {
+        "bytes": 65572,
+        "blocks": 242,
+        "sha256": "fdf83f75c5d3896b096761dea8929b7433590c6b6335b7346b4aa263a7771143",
+        "tokens": {
+          "list": 484
+        }
+      },
+      "1048576": {
+        "bytes": 1048674,
+        "blocks": 3855,
+        "sha256": "14e289cc3dbbf495acf141cd00b527fc94553c593ee3288805ef6ec2ef3db29e",
+        "tokens": {
+          "list": 7710
+        }
+      }
+    },
+    "code": {
+      "65536": {
+        "bytes": 65620,
+        "blocks": 626,
+        "sha256": "c6547282166c871dc8406fa6eae9db0be31f438715901943c4d68dfa5c8c89cd",
+        "tokens": {
+          "code": 626
+        }
+      },
+      "1048576": {
+        "bytes": 1048582,
+        "blocks": 9604,
+        "sha256": "5eaee1027db8be5b48ad866b2205f347313bbbb820aee4aa0a88ec4dc5c4f542",
+        "tokens": {
+          "code": 9604
+        }
+      }
+    },
+    "dense": {
+      "65536": {
+        "bytes": 66664,
+        "blocks": 288,
+        "sha256": "c4c6dd2b4db99266676056671399f1edaf68e46347eee1b369c031ef9d296ed2",
+        "tokens": {
+          "heading": 48,
+          "paragraph": 96,
+          "list": 96,
+          "table": 48,
+          "code": 48
+        }
+      },
+      "1048576": {
+        "bytes": 1049279,
+        "blocks": 4470,
+        "sha256": "8e78e73f8bd06e5bb51cbc944778147d8f078cd3b069039a1dc0ea330ec15c48",
+        "tokens": {
+          "heading": 745,
+          "paragraph": 1490,
+          "list": 1490,
+          "table": 745,
+          "code": 745
+        }
+      }
+    }
+  }
+}
