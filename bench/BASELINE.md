@@ -1736,3 +1736,74 @@ defect rather than a tidy-up:
    biting 452 times. **The measurement was right and the reasoning was wrong**,
    which is the whole basis on which this harness was built.
 
+
+
+## Byte count is the wrong trigger for the size guard, measured
+
+The guard that was designed to refuse very large files was specified in bytes,
+because bytes are what you have before you parse. This asks whether bytes
+actually predict cost. Measured on the current tree (marked 18, all cells
+linear, spreads 2-11%), render ms at exactly 1 MB:
+
+| profile  | lines | fenced | pipes | render ms | us/KB |
+|----------|------:|-------:|------:|----------:|------:|
+| prose    |  5987 |      0 |     0 |       260 |   254 |
+| headings | 25703 |      0 |     0 |      1111 |  1085 |
+| tables   | 15927 |      0 | 69685 |      2426 |  2369 |
+| lists    | 26984 |      0 |     0 |      1278 |  1248 |
+| code     | 48019 |  38415 |     0 |       639 |   624 |
+| dense    | 19369 |   2979 | 26075 |      1543 |  1506 |
+| wide     |  9351 |      0 | 90013 |      3353 |  3274 |
+
+**At an IDENTICAL byte count the cost varies 12.9x.** A byte threshold set
+where `wide` becomes painful refuses `prose` documents that render in a
+quarter of a second; set where `prose` is fine, it lets `wide` through at ten
+seconds. Bytes are not a proxy for work, they are a proxy for how much text
+was typed.
+
+Candidate triggers, scored by FLATNESS - the spread of cost-per-unit across
+all seven profiles. A perfect predictor scores 1.0, and the score is the
+factor by which a threshold must be wrong for some profile:
+
+| candidate                      | flatness |
+|--------------------------------|---------:|
+| bytes (the current design)      |    12.9x |
+| lines alone                     |    26.9x |
+| lines + pipes                   |     3.6x |
+| (lines - fenced) + pipes        |     2.3x |
+| (lines - 0.8 x fenced) + pipes  |     1.7x |
+
+Three findings worth keeping.
+
+1. **Counting lines is WORSE than counting bytes** (26.9x vs 12.9x). It is the
+   obvious first idea and it is actively harmful, because `code` and `wide`
+   sit at opposite extremes: 48019 cheap lines against 9351 expensive ones.
+   A plausible-sounding signal was measured before it was adopted, and it lost
+   to the thing it was meant to replace.
+
+2. **Pipes carry most of the signal.** Adding them takes 26.9x to 3.6x,
+   because a table cell is a node and nodes are what cost. This is the same
+   finding as `applyTableBreakout` dominating the `wide` render, arrived at
+   from the opposite direction.
+
+3. **The first fit was overfit, and holding data back caught it.** Fitting on
+   the three profiles measured first gave 1.3x for `lines + pipes`, which
+   looked like an excellent predictor. Scoring the same formula against the
+   four profiles it had never seen gave 3.6x. The honest number for the chosen
+   signal is 1.7x, not the 1.3x the first run advertised. Nothing about the
+   first result was wrong except the population it was computed over.
+
+`code` is why the fence term exists: 38415 of its 48019 lines are inside
+fenced blocks, which skip inline parsing entirely and cost about a fifth of a
+normal line. Weighting them out takes 3.6x to 1.7x. The weight 0.8 is fitted,
+and therefore the one number here that should be re-derived rather than
+trusted if the renderer's handling of code blocks changes.
+
+The scan is a single O(n) character pass costing **3.5-6.9 ms per MB**, which
+is 0.2% of the render it is deciding whether to attempt, and it tracks fence
+state so pipes inside code blocks are not counted as table cells.
+
+Cost model: about **47 us per unit** at the conservative end (`lists`, the
+worst of the seven). Predicted against measurement, this over-estimates
+`wide`@1MB by 1.4x and `code`@1MB by 1.3x - it errs toward warning early,
+which is the correct direction for a guard.
