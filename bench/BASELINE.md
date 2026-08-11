@@ -1430,3 +1430,90 @@ configuration where it returns early.
 The ratios (2.00 / 1.97) say the widening pass is linear in table count, so the
 layout-thrash fix holds on the path that actually exercises it. That was
 previously an inference from a profile where the pass did no work.
+
+## What marked 9 costs, recorded before it is replaced
+
+Captured by `bench/capture-marked.js` into `bench/marked9-parse.json`, run
+`node --expose-gc bench/capture-marked.js`. It exists because the marked 9 -> 18
+upgrade replaces the parser every number above was measured through, and
+afterwards the marked-9 curve is not reconstructible: the bundle is gone, table
+tokenisation is restructured, and re-vendoring the old bundle to re-measure
+would mean two parsers against one set of pins - the ambiguity `corpus.js`
+hard-errors on.
+
+It measures the lexer and the full parse separately, at five sizes rather than
+three, and keeps raw per-repetition times. Separately, because the observation
+that started this says nothing about *which half* is superlinear - and that
+determines whether marked 18's tokeniser rewrite is likely to help.
+
+Median ms, 3 runs x 5 reps, node 24.18.1 / V8 13.6:
+
+| profile | | 128K | 256K | 512K | 1M | 2M | slope | per-doubling |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| wide | lex | 16.0 | 48.9 | 139.2 | 476.9 | **6002** | 2.038 | 1.61 1.51 1.78 **3.65** |
+| wide | parse | 19.3 | 53.5 | 150.4 | 515.6 | **6138** | 1.990 | 1.47 1.49 1.78 **3.57** |
+| tables | parse | 17.9 | 34.5 | 103.6 | 283.3 | 2658 | 1.746 | 0.94 1.59 1.45 3.23 |
+| dense | parse | 14.4 | 27.9 | 52.0 | 145.2 | 437 | 1.223 | 0.95 0.90 1.48 1.59 |
+| headings | parse | 7.1 | 13.9 | 26.9 | 56.2 | 151 | 1.083 | 0.96 0.95 1.07 1.43 |
+| prose | parse | 4.9 | 9.0 | 18.1 | 35.4 | 69.5 | **0.966** | 0.89 1.01 0.97 0.97 |
+
+**Lexing and parsing degrade together and by the same factor.** `wide` lex
+2.038 against parse 1.990 - the renderer half is not where the cost is going
+non-linear, the tokeniser is. That is the falsifiable prediction to hold against
+marked 18: if its tokeniser rewrite does not move these, the upgrade will not
+fix this.
+
+### The first capture produced an impossible number, and only impossibility caught it
+
+It timed lex and then parse inside one repetition, always in that order.
+`wide`@1 MB came back at **lex 944.7 ms against parse 613.0 ms** - and
+`marked.parse` lexes and *then* renders, so parse cannot be cheaper than lex.
+The reading reproduced in all three runs, so no variance or spread check would
+have rejected it; only the arithmetic does.
+
+The cause was heap state, not ordering as such: lexing a 1 MB wide document
+builds an enormous token tree, five repetitions build and discard five of them,
+and the resulting major collections land inside whichever timed region runs
+first. The fix is all lex repetitions then all parse repetitions, each with its
+own warm-up and an explicit collection *outside* the timed region.
+`capture-marked.js` now refuses any capture where a cell reports lex above
+parse, so this cannot come back quietly.
+
+It mattered to the conclusions, not just to the tidiness: `dense` measured 1.53
+before and **1.22** after, so most of its apparent superlinearity was collection
+cost. `dense` had been declared a negative control on the strength of the
+contaminated figure. It is now a subject, and `prose` is the only control - it
+is the only profile that earns the name, at 0.966 with every individual doubling
+between 0.89 and 1.01.
+
+### The blow-up is a sustained change of regime, not a cliff to stay under
+
+The per-doubling figures jump on exactly the last doubling for every structured
+profile, which looks like a threshold - and a threshold would mean there is a
+safe size just below it. There is not. Measured at eleven intermediate sizes,
+cost **per KB**:
+
+| MB | wide ms | ms/KB | prose ms | ms/KB |
+|---:|---:|---:|---:|---:|
+| 1.00 | 516 | 0.503 | 39 | 0.038 |
+| 1.25 | 791 | 0.618 | 56 | 0.043 |
+| 1.50 | 1326 | 0.863 | 63 | 0.041 |
+| 1.75 | 2998 | 1.673 | 72 | 0.040 |
+| 2.00 | 6346 | 3.099 | 88 | 0.043 |
+| 2.25 | 11520 | 5.000 | 88 | 0.038 |
+| 2.50 | **17415** | **6.803** | 104 | 0.041 |
+
+`prose` is flat to within noise across the whole range - 0.038 to 0.044 ms/KB -
+which is what makes the `wide` column attributable to the parser rather than to
+the machine, the allocator or the generator. `wide` rises monotonically with no
+discontinuity: local exponent about 1.7-2.1 below 1.4 MB, then about 5 from
+1.5 MB onward and staying there.
+
+**The consequence for the pending size guard is that document size alone is the
+wrong trigger.** At 2.5 MB `prose` parses in 104 ms and `wide` takes 17.4
+seconds - a 167x spread at identical byte count. A byte threshold set to protect
+against `wide` refuses documents that would have opened instantly; set where
+`prose` is comfortable, it does not fire until `wide` has already cost tens of
+seconds. Whatever the guard ends up being, it has to see structure, and a pipe
+count is O(n) and cheap.
+

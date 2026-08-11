@@ -384,6 +384,7 @@ module.exports = {
   generate,
   lexerCounts,
   lexTokens,
+  loadMarked,
   renderHtml,
   sha256,
   REFERENCE_SIZES,
