@@ -224,6 +224,11 @@ named:
 | a canonicalising `corpus.sha256` paired with a table column swap | CORPUS DIGEST (only once it stopped sharing the subject's hash) |
 | an unregistered tenth pin object, and a whitespace reformat that blinds the registry parse | PIN REGISTRY |
 | `highlightNewElements()` short-circuited (1.9x "faster", two-thirds of the DOM gone) | RENDER CENSUS (`run.js`, not `verify.js`) |
+| `markShortColumns()` short-circuited (no node, block or token count moves) | CLASS CENSUS (RENDER CENSUS silent) |
+| a browser-only `Prism.hooks` transform renaming `keyword` -> `builtin` | CLASS CENSUS (`verify.js` passed 232/232 under it) |
+| `QUIET_MS` shortened below the product's own idle deadline | REGIME INVARIANTS (before any cell is measured) |
+| the shared settle loop settling after a fixed few ticks instead of on the quiet window | SETTLE-LOOP CONTROL |
+| `applyTableBreakout()` gutted (372 ms -> 0 ms) | **NOTHING** - see "timing its most expensive pass executing only its no-op path" |
 
 The cell-shortening one is why texture is pinned in characters as well as words:
 shortening `value-3` to `v` leaves the word count identical and passed a
@@ -543,8 +548,135 @@ Three properties are deliberate:
 
 **Known limit, recorded rather than implied away.** The census sees changes that
 move node, block or token counts. It is blind to class- or attribute-only
-changes - short-circuiting `applyTableBreakout()`, for instance, adds no nodes.
-That gap is covered by the revert harness (R53), not by the benchmark.
+changes. That gap is now half-closed by `CLASS_CENSUS` below - and the other
+half turned out to be a hole in the *corpus*, not in the oracle.
+
+### A count is not a shape: the class census
+
+`RENDER_CENSUS` counts. A change that renames a class, drops a modifier or stops
+applying a decoration moves no count at all, so the strongest oracle in the file
+was blind to a whole category of regression.
+
+The fix is `CLASS_CENSUS`: an exact per-class histogram of everything under
+`#viewer`, pinned for all 18 cells. Four things about it were **measured before
+it was built**, because a histogram is only worth pinning if it is stable and
+bounded:
+
+- **The vocabulary is closed.** At most **17 distinct class names** appear in any
+  cell. A histogram over an unbounded vocabulary would be a hash by another name.
+- **It is byte-identical across every repetition of every cell.** 3 repetitions x
+  6 profiles produced exactly **6 distinct signatures**, one per profile. Class
+  counts are a property of the *document*, not of the machine, so unlike a timing
+  there is no jitter to absorb - which is why this is pinned **exactly, with no
+  tolerance**, and is the strictest oracle in the directory.
+- **The stability check is its own positive control.** The repetitions are
+  required to agree before the pin is consulted. If they ever stop agreeing, the
+  oracle says so rather than comparing the first repetition and calling it a day.
+- **An empty pin is a positive claim, not a vacuum.** `prose` and `lists` pin
+  `{}`. The comparison iterates the **union** of pinned and observed keys, so a
+  class appearing where none was pinned fails. Without the union an empty pin
+  would be unfalsifiable.
+
+**Proven sensitive twice, by two different classes of breaker.**
+
+1. `markShortColumns()` short-circuited. Exit 4, **exactly two assertions**
+   (`nowrap-col` 9090 -> 0 and 3366 -> 0), and `RENDER_CENSUS` stayed silent
+   throughout - i.e. the new oracle caught precisely what the old one could not.
+2. A **browser-only** `Prism.hooks.add('wrap', ...)` renaming `keyword` ->
+   `builtin`. Exit 4, four assertions naming both classes, node and token counts
+   unmoved. Under the identical breaker **`node bench/verify.js` passed
+   232/232** - because axis 7 runs the Prism bundle in a Node `vm`, so a
+   transform installed in the browser is invisible to it. That axis really was
+   blind, and the gap is now closed.
+
+### The benchmark was timing its most expensive pass executing only its no-op path
+
+`applyTableBreakout()` was 79% of a 1 MB render before the layout-thrash fix, and
+it is still the largest single phase in the table profiles. `table-breakout`
+appears in **no cell of the class census**.
+
+Chasing that: `nowrap-col` comes from `markShortColumns()`, not from
+`applyTableBreakout()`. Every table the corpus generates fits inside the 900px
+reading column, so the pass measures its containers, decides nothing needs
+widening, and returns. Gutting the function entirely was measured:
+
+| `tables@256KB` | nodes | class census | render | settle | breakout phase |
+|---|---|---|---|---|---|
+| intact | 18,685 | identical | 566 ms | 782 ms | 372 ms |
+| gutted | 18,685 | identical | 486 ms | 529 ms | **0 ms** |
+
+Every output oracle - nodes, blocks, tokens, class histogram - was silent, while
+a third of the render time vanished. **No oracle over rendered output can cover a
+pass that produces no output**, so this is not a defect in the census; it is a
+hole in the *corpus*.
+
+The fix is a table too wide for the reading column. It is deliberately scheduled
+to ride with the `marked` 9 -> 18 upgrade: both re-pin every cell, and doing them
+separately would reset the comparison baseline twice for one net change.
+
+### The measurement regime was unpinned, so two runs could be incomparable and both say OK
+
+Three dials decide what a settle figure *means* - the quiet window, the settle
+cap and the warm-up count - and all three were literals buried in the file. A run
+with a shortened quiet window produces smaller settle figures for every cell,
+prints `STATUS: OK`, and is not comparable with anything.
+
+Two decisions, both of which the reviewers reached independently:
+
+- **Invariants, not values.** Pinning `reps === 3` would need re-deriving on
+  every legitimate re-tune, and a pin that is routinely re-derived stops being
+  read. The four assertions state *properties*: `QUIET_MS > idleDeadlineMs`,
+  `SETTLE_CAP_MS > QUIET_MS * 2`, `WARMUP_REPS >= 2`, `reps >= 3`. A re-tune
+  passes silently; an un-tune fails by name, **before any cell is measured**.
+- **The threshold is derived, not compared against a literal.** `QUIET_MS` must
+  outlast the product's own deferred work, so the harness *parses*
+  `requestIdleCallback(cb, { timeout: N })` out of `renderer.js` rather than
+  comparing against `1000`. If the product raises its deadline the harness fails
+  and says so. The parse **refuses (exit 3) rather than defaulting** if the regex
+  stops matching - a default would silently restore the magic number the parse
+  exists to remove.
+
+The effective regime is then *recorded* in the fingerprint block:
+
+```
+regime  3 reps, warm-up 2x dense@1024KB, quiet 1500ms (product defers 1000ms),
+        cap 30000ms, gc renderer-only, throttling off
+```
+
+so two runs with different regimes cannot look comparable merely because both
+printed `STATUS: OK`.
+
+Proven sensitive: `QUIET_MS = 900` (below the product's 1000 ms deadline) exits 3
+naming the invariant, with no cell measured.
+
+### The settle loop had no positive control - and the first attempt at one re-implemented it
+
+`settle` is the headline number, and nothing checked that the loop producing it
+can see late work at all. A loop that gave up early would report smaller settle
+figures for every cell and never say so - the defect that once reported
+`dense@1MB` at 38,740 nodes against a true ~57,000.
+
+The control schedules a mutation at 400 ms and requires **both** halves:
+
+- the loop **saw** it (settle reaches ~400 ms), and
+- the loop was **held open** by it (total elapsed >= 400 + one full quiet window).
+
+The second half is what separates "the observer fired" from "the observer fired
+and the loop cared".
+
+**The first version of this control was itself defective, and it is the third
+instance of the same disease in this project** - after a test that judged a
+formula with a copy of that formula (6a) and an oracle that hashed with its
+subject's own hash function (round 8). The control carried **its own copy of the
+settle loop**, so it would have proven that *a correct loop* works, not that
+`measureOnce`'s loop works. Fixed by hoisting one `SETTLE_LOOP` template string
+used by both callers.
+
+Proven sensitive **after** the hoist, which is the only version of the proof that
+means anything: making the shared loop settle after 80 ms instead of on the quiet
+window makes the control abort with exit 3 (`reported 0ms for a document
+deliberately mutated at 400ms`) - and because the loop is now shared, that is
+demonstrably the same code every cell's settle figure comes from.
 
 ### A warning on stderr is not a property of the artifact
 

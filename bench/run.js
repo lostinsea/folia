@@ -528,6 +528,80 @@ const RENDER_CENSUS = {
   },
 };
 
+// THE CLASSES ON THE FINISHED DOCUMENT, pinned exactly, per (profile, size).
+//
+// WHY A SEPARATE CENSUS. RENDER_CENSUS counts nodes, blocks and tokens - so it
+// is blind to any pass that changes no counts. Both reviewers reached that
+// independently, and the class attribute is the unit those passes work in:
+// markShortColumns() adds `nowrap-col`, applyTableBreakout() adds
+// `table-breakout`, Prism labels every span with its token TYPE.
+//
+// WHY NOT A HASH OF innerHTML. It would move on every unrelated markup change
+// and force a re-pin constantly, and when it fired it would say only
+// "different" rather than naming what moved. Measured, the class vocabulary on
+// this corpus is a closed set of at most 17 names per cell - small enough to
+// pin by hand and to read in a diff.
+//
+// PINNED EXACTLY, WITH NO TOLERANCE, and that is measured rather than hoped:
+// across every repetition of every cell the histogram was byte-identical
+// (3 reps x 6 profiles, 6 distinct signatures, one per profile). Class counts
+// are a property of the document, not of the machine, so unlike a timing they
+// have no jitter to absorb. That makes this the strictest oracle in the file.
+//
+// WHAT IT CLOSES, MEASURED. Prism running in a real browser window was
+// previously pinned only by axis 7, which runs prism-bundle.js inside a Node
+// `vm` - a re-implementation of the endpoint, not the endpoint. The token
+// SUBTYPE counts here (keyword, function, string, number, operator,
+// punctuation) are what the shipped renderer actually produced, so a browser
+// Prism that silently started classifying differently now fails by name even
+// though the total `.token` count is unchanged.
+//
+// WHAT IT DOES NOT CLOSE, ALSO MEASURED, AND THE MORE IMPORTANT HALF.
+// applyTableBreakout() was short-circuited outright and this census did NOT
+// move - in any of the six profiles. The reason is not a weakness in the
+// oracle: `table-breakout` appears in no cell because every table in the
+// corpus FITS the reading column, so the pass never reaches its apply branch.
+// The benchmark's single most expensive pass is therefore being timed
+// executing only its no-op path (tables@256KB: render 566 -> 486ms, settle
+// 782 -> 529ms, breakout phase 372 -> 0ms, with node counts and this histogram
+// both perfectly unchanged). No oracle over the rendered output can cover a
+// pass that produces no output. The fix is a corpus that contains a table too
+// wide for the reading column - see BASELINE.md, where it is scheduled to ride
+// with the marked 9 -> 18 upgrade, because both re-pin every cell and doing
+// them separately would reset the comparison baseline twice.
+const CLASS_CENSUS = {
+  prose: {
+    262144: {},
+    524288: {},
+    1048576: {},
+  },
+  headings: {
+    262144: { "collapsible-section": 1615 },
+    524288: { "collapsible-section": 3221 },
+    1048576: { "collapsible-section": 6426 },
+  },
+  tables: {
+    262144: { "nowrap-col": 9090, "table-container": 505, "table-maximize-btn": 505 },
+    524288: { "nowrap-col": 18108, "table-container": 1006, "table-maximize-btn": 1006 },
+    1048576: { "nowrap-col": 35838, "table-container": 1991, "table-maximize-btn": 1991 },
+  },
+  lists: {
+    262144: {},
+    524288: {},
+    1048576: {},
+  },
+  code: {
+    262144: { "check-icon": 2433, "code-block-container": 2433, "code-copy-btn": 2433, "copy-icon": 2433, "function": 4866, "keyword": 4866, "language-js": 4866, "number": 2433, "operator": 2433, "prism-highlighted": 2433, "punctuation": 26763, "string": 2433, "token": 43794 },
+    524288: { "check-icon": 4823, "code-block-container": 4823, "code-copy-btn": 4823, "copy-icon": 4823, "function": 9646, "keyword": 9646, "language-js": 9646, "number": 4823, "operator": 4823, "prism-highlighted": 4823, "punctuation": 53053, "string": 4823, "token": 86814 },
+    1048576: { "check-icon": 9604, "code-block-container": 9604, "code-copy-btn": 9604, "copy-icon": 9604, "function": 19208, "keyword": 19208, "language-js": 19208, "number": 9604, "operator": 9604, "prism-highlighted": 9604, "punctuation": 105644, "string": 9604, "token": 172872 },
+  },
+  dense: {
+    262144: { "check-icon": 187, "code-block-container": 187, "code-copy-btn": 187, "collapsible-section": 187, "copy-icon": 187, "function": 374, "keyword": 374, "language-js": 374, "nowrap-col": 3366, "number": 187, "operator": 187, "prism-highlighted": 187, "punctuation": 2057, "string": 187, "table-container": 187, "table-maximize-btn": 187, "token": 3366 },
+    524288: { "check-icon": 373, "code-block-container": 373, "code-copy-btn": 373, "collapsible-section": 373, "copy-icon": 373, "function": 746, "keyword": 746, "language-js": 746, "nowrap-col": 6714, "number": 373, "operator": 373, "prism-highlighted": 373, "punctuation": 4103, "string": 373, "table-container": 373, "table-maximize-btn": 373, "token": 6714 },
+    1048576: { "check-icon": 745, "code-block-container": 745, "code-copy-btn": 745, "collapsible-section": 745, "copy-icon": 745, "function": 1490, "keyword": 1490, "language-js": 1490, "nowrap-col": 13410, "number": 745, "operator": 745, "prism-highlighted": 745, "punctuation": 8195, "string": 745, "table-container": 745, "table-maximize-btn": 745, "token": 13410 },
+  },
+};
+
 // WHEN TWO DOCUMENTS STOP BEING THE SAME DOCUMENT - one threshold, two uses.
 // It gates `nodesAgree` (do the repetitions of a cell agree with each other?)
 // and the census check (does the cell agree with its hand-pinned expectation?).
@@ -715,6 +789,88 @@ app.whenReady().then(async () => {
     return finish(1);
   }
 
+  const SETTLE_CAP_MS = 30000;
+  // THE MEASUREMENT REGIME. Every number below changes what a millisecond in
+  // BASELINE.md MEANS, without changing a single thing an output oracle can
+  // see: the corpus digest still matches, the render and class censuses still
+  // match, and the table still prints. Both reviewers named this independently
+  // as the dimension nothing covered.
+  //
+  // PINNED AS INVARIANTS, NOT AS VALUES - that is the whole design. Asserting
+  // `reps === 3` would have to be re-derived by hand every time someone
+  // legitimately raised it, and a pin that is routinely re-derived stops being
+  // read. Each assertion below instead states the PROPERTY the value has to
+  // have, so a legitimate re-tune passes silently and an accidental or
+  // adversarial un-tune fails by name.
+  //
+  // The quiet window is the one that matters most and it is DERIVED, not
+  // compared against a literal. The product defers highlighting with
+  // `requestIdleCallback(cb, { timeout: N })`, so N is the longest the document
+  // can be genuinely silent while still not being finished. An earlier version
+  // of this harness waited ~80ms and reported dense@1MB at 38,740 nodes where
+  // its siblings scaled to ~57,000 - it had measured a half-built document and
+  // printed a plausible number for it. Reading the deadline out of renderer.js
+  // means that if the product's deadline is ever raised, this fails and says
+  // so, instead of silently going back to measuring half a document.
+  const WARMUP_REPS = 2;
+  const QUIET_MS = 1500;
+  const idleDeadlineMs = (() => {
+    const src = fs.readFileSync(path.join(__dirname, "..", "renderer.js"), "utf8");
+    const m = src.match(/requestIdleCallback\([^)]*\{\s*timeout:\s*(\d+)\s*\}/);
+    if (!m) {
+      // A REGEX THAT STOPS MATCHING MUST REFUSE, NOT DEFAULT. Falling back to a
+      // literal here would silently restore the magic number this exists to
+      // remove, and the check would go on passing while checking nothing.
+      say("ABORT: could not read the product's requestIdleCallback deadline out of");
+      say("  renderer.js, so the settle window cannot be shown to exceed it. If the");
+      say("  product no longer defers work that way, this check needs rewriting, not");
+      say("  deleting - the settle window has to outlast whatever replaced it.");
+      return null;
+    }
+    return Number(m[1]);
+  })();
+  if (idleDeadlineMs === null) return finish(3);
+
+  const regimeFailures = [];
+  const regimeRequire = (ok, what) => {
+    if (!ok) regimeFailures.push(what);
+  };
+  regimeRequire(
+    QUIET_MS > idleDeadlineMs,
+    `the settle window (${QUIET_MS}ms) must outlast the product's own deferred-work ` +
+      `deadline (${idleDeadlineMs}ms), or a document is called settled while it is still being built`,
+  );
+  regimeRequire(
+    SETTLE_CAP_MS > QUIET_MS * 2,
+    `the settle cap (${SETTLE_CAP_MS}ms) must leave room for the quiet window ` +
+      `(${QUIET_MS}ms), or every cell is capped before it can ever be observed quiet`,
+  );
+  regimeRequire(
+    WARMUP_REPS >= 2,
+    `the warm-up must run at least twice (got ${WARMUP_REPS}): the SECOND repetition ` +
+      "was the worst one measured, which is what rules out plain JIT warm-up and " +
+      "identified V8 heap growth as the real cost",
+  );
+  regimeRequire(
+    reps >= 3,
+    `a median needs at least 3 samples (got ${reps}); one sample reported prose as ` +
+      "twice the data in two thirds of the time",
+  );
+
+  // The effective regime, recorded in the artifact. Codex's framing, and it is
+  // the same argument as the unverified-sizes marker: bench-results.txt is what
+  // gets quoted weeks later, and two runs with different regimes must not look
+  // comparable just because both say STATUS: OK.
+  const REGIME = {
+    reps,
+    warmup: `${WARMUP_REPS}x dense@${Math.round(Math.max(...sizes) / 1024)}KB`,
+    quietMs: QUIET_MS,
+    idleDeadlineMs,
+    settleCapMs: SETTLE_CAP_MS,
+    gc: typeof global.gc === "function" || "renderer-only",
+    backgroundThrottling: false,
+  };
+
   say("Folia render benchmark");
   say("");
   say("machine fingerprint (numbers are only comparable within one fingerprint)");
@@ -730,8 +886,32 @@ app.whenReady().then(async () => {
   // and a result relaxed with --spread-limit must not be comparable-looking
   // against one that was not.
   say(`  spread     reject > ${(spreadLimit * 100).toFixed(0)}% AND > ${spreadFloorMs}ms`);
+  // THE REGIME BELONGS WITH THE MACHINE, for the same reason the thresholds do.
+  // Every dial here changes what a millisecond MEANS while leaving every output
+  // oracle satisfied, so two runs with different regimes must not look
+  // comparable merely because both printed STATUS: OK.
+  say(
+    `  regime     ${REGIME.reps} reps, warm-up ${REGIME.warmup}, quiet ${REGIME.quietMs}ms ` +
+      `(product defers ${REGIME.idleDeadlineMs}ms), cap ${REGIME.settleCapMs}ms, ` +
+      `gc ${REGIME.gc === true ? "exposed" : REGIME.gc}, throttling off`,
+  );
   say(`  when       ${new Date().toISOString()}`);
   say("");
+
+  // A REGIME THAT VIOLATES ITS OWN INVARIANTS INVALIDATES EVERY NUMBER BELOW
+  // IT, so this refuses rather than warns - and it refuses HERE, before a
+  // single cell is measured, because nine minutes of timings produced under a
+  // broken regime are nine minutes of numbers nobody may quote.
+  if (regimeFailures.length) {
+    say("");
+    for (const f of regimeFailures) say(`REJECTED: ${f}`);
+    say("");
+    say("  These are invariants of the measurement, not preferences. Each states a");
+    say("  property the dial must have rather than the value it must hold, so a");
+    say("  legitimate re-tune passes silently and only an un-tune reaches here.");
+    clearTimeout(watchdog);
+    return finish(3);
+  }
 
   // The pipeline is timed from INSIDE the renderer. executeJavaScript queues on
   // the renderer's main thread, so timing the round trip from here would fold
@@ -841,6 +1021,35 @@ app.whenReady().then(async () => {
     new Promise((r) => setTimeout(r, 50)),
   ])`;
 
+  // THE SETTLE LOOP, WRITTEN ONCE. This is the only measurement in the harness
+  // that no oracle over the finished document can check: "settle" is a claim
+  // about WHEN the document stopped changing, and a finished document looks
+  // identical whether the loop watched it properly or gave up early. It is
+  // therefore covered by a positive control below - and the control is only
+  // worth anything if it exercises THIS loop.
+  //
+  // An earlier version of that control carried its own copy of these lines. It
+  // would have proven that a correct loop works, which is not the question, and
+  // it is precisely the fallacy this directory has now hit twice (a test that
+  // judged a formula with a copy of that formula; an axis that hashed with its
+  // subject's own hash). One source, two callers.
+  //
+  // Contract for callers: `lastMutationAt`, `seen`, `settled`, `capped` and
+  // `t0` must already exist, and QUIET_MS must be in scope.
+  const SETTLE_LOOP = `
+        const tick = ${TICK};
+        let quietSince = performance.now();
+        while (!settled) {
+          await tick();
+          if (lastMutationAt !== seen) {
+            seen = lastMutationAt;
+            quietSince = performance.now();
+          } else if (performance.now() - quietSince >= QUIET_MS) {
+            settled = true;
+          }
+          if (performance.now() - t0 > ${SETTLE_CAP_MS}) { capped = true; break; }
+        }`;
+
   const reset = async () => {
     // The reset is VERIFIED, not assumed, and it WAITS FOR QUIET rather than
     // sleeping a fixed interval. Two distinct hazards make both halves
@@ -915,7 +1124,7 @@ app.whenReady().then(async () => {
   // ONE SOURCE OF TRUTH FOR THE CAP. It was 30000 in the loop while the legend
   // printed "20s", so a capped figure would have been described to the reader
   // as a floor at the wrong number. Both now read this constant.
-  const SETTLE_CAP_MS = 30000;
+
 
   // The point past which a cell's repetitions disagree so much that the median
   // describes machine load rather than the code under test.
@@ -986,19 +1195,8 @@ app.whenReady().then(async () => {
         // it had measured a document that was still being built, and printed a
         // plausible number for it. The window must exceed the deadline the
         // product itself guarantees, so it is tied to that deadline.
-        const QUIET_MS = 1500;
-        const tick = ${TICK};
-        let quietSince = performance.now();
-        while (!settled) {
-          await tick();
-          if (lastMutationAt !== seen) {
-            seen = lastMutationAt;
-            quietSince = performance.now();
-          } else if (performance.now() - quietSince >= QUIET_MS) {
-            settled = true;
-          }
-          if (performance.now() - t0 > ${SETTLE_CAP_MS}) { capped = true; break; }
-        }
+        const QUIET_MS = ${QUIET_MS};
+        ${SETTLE_LOOP}
         observer.disconnect();
 
         return {
@@ -1011,6 +1209,23 @@ app.whenReady().then(async () => {
           blocks: viewer.children.length,
           nodes: viewer.querySelectorAll('*').length,
           tokens: viewer.querySelectorAll('.token').length,
+          // A COUNT OF NODES CANNOT SEE A CHANGE THAT MOVES NO NODES. Both
+          // reviewers reached this independently: short-circuiting a pass that
+          // only sets classes - applyTableBreakout(), markShortColumns() - adds
+          // and removes nothing, so blocks/nodes/tokens are all unmoved and the
+          // row prints clean. The histogram is over class TOKENS rather than
+          // over innerHTML because a hash of the markup moves on every
+          // unrelated change and would have to be re-pinned constantly, while
+          // a class name is exactly the unit those passes operate in.
+          classes: (() => {
+            const h = Object.create(null);
+            viewer.querySelectorAll('[class]').forEach((el) => {
+              const raw = el.getAttribute('class');
+              if (!raw) return;
+              for (const c of raw.split(/\\s+/)) if (c) h[c] = (h[c] || 0) + 1;
+            });
+            return h;
+          })(),
         };
       })()
     `);
@@ -1034,8 +1249,8 @@ app.whenReady().then(async () => {
   // warm-up exercises every path the measured profiles will take.
   try {
     const warmSize = Math.max(...sizes);
-    for (let i = 0; i < 2; i++) {
-      where = `warm-up ${i + 1}/2 at ${Math.round(warmSize / 1024)}KB`;
+    for (let i = 0; i < WARMUP_REPS; i++) {
+      where = `warm-up ${i + 1}/${WARMUP_REPS} at ${Math.round(warmSize / 1024)}KB`;
       await reset();
       await measureOnce(JSON.stringify(generate("dense", warmSize)));
     }
@@ -1044,6 +1259,83 @@ app.whenReady().then(async () => {
     clearTimeout(watchdog);
     return finish(1);
   }
+
+  // THE SETTLE LOOP IS THE ONE MEASUREMENT NOTHING ELSE CAN CHECK. Every other
+  // number here is verified by an oracle over the finished document, but
+  // "settle" is a claim about WHEN the document stopped changing, and a
+  // finished document looks identical whether the loop watched it properly or
+  // gave up early. The invariant assertions above prove the quiet window
+  // OUTLASTS the product's deferred-work deadline; they cannot prove the
+  // observer is wired up, that mutations reach it, or that a late change
+  // actually postpones the verdict.
+  //
+  // So this is a POSITIVE CONTROL, in the same shape this project already uses
+  // for the keyboard-shortcut probe: schedule a mutation at a known delay well
+  // past what a frame-counting loop would tolerate but well inside QUIET_MS,
+  // and require the reported settle time to reach it. A loop that stopped at a
+  // few animation frames - the exact defect that once reported dense@1MB at
+  // 38,740 nodes against a true ~57,000 - reports a settle far below the delay
+  // and fails here by name, BEFORE any cell is measured.
+  //
+  // Deliberately not a mutation of the real corpus render: this must test the
+  // observation machinery, not the product, and a product that legitimately
+  // stopped mutating late would otherwise make the control fail.
+  const PROBE_DELAY_MS = 400;
+  where = "settle-loop positive control";
+  const probe = await exec(`
+    (async () => {
+      const viewer = document.getElementById('viewer');
+      viewer.replaceChildren();
+      let lastMutationAt = 0;
+      const t0 = performance.now();
+      const observer = new MutationObserver(() => { lastMutationAt = performance.now(); });
+      observer.observe(viewer, { childList: true, subtree: true, attributes: true, characterData: true });
+      const p = document.createElement('p');
+      p.textContent = 'settle probe';
+      viewer.appendChild(p);
+      setTimeout(() => { p.textContent = 'settle probe, mutated late'; }, ${PROBE_DELAY_MS});
+      const QUIET_MS = ${QUIET_MS};
+      let settled = false;
+      let capped = false;
+      let seen = lastMutationAt;
+      ${SETTLE_LOOP}
+      observer.disconnect();
+      viewer.replaceChildren();
+      return {
+        settleMs: lastMutationAt ? lastMutationAt - t0 : 0,
+        elapsed: performance.now() - t0,
+        capped,
+      };
+    })()
+  `);
+  // The late mutation must have been SEEN (settle reaches the delay) and must
+  // have POSTPONED the verdict (the loop ran at least the delay plus a full
+  // quiet window). The second half is what separates "the observer fired" from
+  // "the observer fired and the loop cared".
+  const controlFailure =
+    probe.capped
+      ? `the settle loop hit its ${SETTLE_CAP_MS}ms cap on a document containing one paragraph`
+      : !(probe.settleMs >= PROBE_DELAY_MS * 0.9)
+        ? `the settle loop reported ${probe.settleMs.toFixed(0)}ms for a document deliberately ` +
+          `mutated at ${PROBE_DELAY_MS}ms, so it is not observing late work`
+        : !(probe.elapsed >= PROBE_DELAY_MS + QUIET_MS * 0.9)
+          ? `the settle loop finished after ${probe.elapsed.toFixed(0)}ms, but a mutation at ` +
+            `${PROBE_DELAY_MS}ms should have held it open for at least ` +
+            `${PROBE_DELAY_MS + QUIET_MS}ms - the mutation was seen but did not postpone the verdict`
+          : null;
+  if (controlFailure) {
+    say(`ABORT: ${controlFailure}.`);
+    say("  Every settle figure this run would produce describes a document that may");
+    say("  still have been being built. This is the defect that once reported");
+    say("  dense@1MB at 38,740 nodes against a true ~57,000.");
+    clearTimeout(watchdog);
+    return finish(3);
+  }
+  say(
+    `settle-loop control: a mutation at ${PROBE_DELAY_MS}ms was observed at ` +
+      `${probe.settleMs.toFixed(0)}ms and held the loop open to ${probe.elapsed.toFixed(0)}ms`,
+  );
+  say("");
 
   // WRAPPED IS A WEAKER CLAIM THAN CALLED, so check the stronger one now that a
   // full dense render has actually happened. The abort above only proves the
@@ -1154,6 +1446,8 @@ app.whenReady().then(async () => {
         nodes: rep.nodes,
         tokens: rep.tokens,
         blocks: rep.blocks,
+        classes: rep.classes,
+        allClasses: samples.map((s) => s.classes),
       });
     }
   }
@@ -1328,5 +1622,82 @@ app.whenReady().then(async () => {
     say("  };");
     return finish(4);
   }
+
+  // --- class census ---------------------------------------------------------
+  // Same refusal contract as RENDER_CENSUS above, with two deliberate
+  // differences: the comparison is EXACT (see the CLASS_CENSUS comment - the
+  // histogram was measured identical across every repetition, so there is no
+  // jitter to absorb and a tolerance would only hide real drift), and the
+  // repetitions are additionally required to agree with EACH OTHER. That second
+  // check is the positive control for the first: if the reps disagreed, the
+  // pin would be describing whichever rep happened to be reported, and an exact
+  // pin over a jittery quantity is worse than none.
+  const classSig = (h) =>
+    Object.keys(h)
+      .sort()
+      .map((k) => `${k}=${h[k]}`)
+      .join(" ");
+  const classBad = [];
+  const classUnstable = [];
+  const classUnpinned = [];
+  for (const r of rows) {
+    const sigs = new Set(r.allClasses.map(classSig));
+    if (sigs.size > 1) classUnstable.push({ r, sigs: [...sigs] });
+    const want = (CLASS_CENSUS[r.profile] || {})[r.size];
+    if (!want) {
+      classUnpinned.push(r);
+      continue;
+    }
+    const got = r.classes;
+    // Reported per CLASS rather than as one "signatures differ", because the
+    // whole reason this is a histogram and not a hash is that it should name
+    // what moved.
+    for (const name of new Set([...Object.keys(want), ...Object.keys(got)])) {
+      const g = got[name] || 0;
+      const w = want[name] || 0;
+      if (g !== w) classBad.push({ r, name, got: g, want: w });
+    }
+  }
+  if (classUnstable.length || classBad.length || classUnpinned.length) {
+    say("");
+    for (const c of classUnstable) {
+      say(
+        `REJECTED: ${c.r.profile}@${c.r.kb.toFixed(0)}KB repetitions disagreed on their own classes,` +
+          ` so no exact pin can describe them (${c.sigs.length} distinct signatures)`,
+      );
+    }
+    for (const c of classBad) {
+      say(
+        `REJECTED: ${c.r.profile}@${c.r.kb.toFixed(0)}KB rendered ${c.got} .${c.name}, pinned ${c.want}`,
+      );
+    }
+    for (const c of classUnpinned) {
+      say(
+        `REJECTED: ${c.profile}@${c.kb.toFixed(0)}KB has no pinned class census, so nothing checked it`,
+      );
+    }
+    say("");
+    say("  A render pass that changes only classes moves no node, block or token count, so");
+    say("  RENDER_CENSUS above cannot see it. If this is intended, paste the block below");
+    say("  into CLASS_CENSUS in bench/run.js by hand.");
+    say("");
+    say("  const CLASS_CENSUS = {");
+    for (const p of PROFILES) {
+      const cells = rows.filter((r) => r.profile === p);
+      if (!cells.length) continue;
+      say(`    ${p}: {`);
+      for (const r of cells) {
+        const body = Object.keys(r.classes)
+          .sort()
+          .map((k) => `${JSON.stringify(k)}: ${r.classes[k]}`)
+          .join(", ");
+        say(`      ${r.size}: { ${body} },`);
+      }
+      say("    },");
+    }
+    say("  };");
+    return finish(4);
+  }
+
   finish(0);
 });
