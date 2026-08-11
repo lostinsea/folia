@@ -505,9 +505,59 @@
   // newly active tab to the previous tab's anchor.
   let renderGeneration = 0;
 
+  // Tabs whose cost the reader has already accepted. A document is expensive
+  // once; asking again every time the tab is revisited would be the same
+  // mistake as guarding the refresh path.
+  const largeConfirmed = new Set();
+
+  /**
+   * Rendering is the expensive step, and tabs render lazily - createTab() only
+   * stores the text, switchToTab() is what pays for it. So a file that arrived
+   * through multi-select or a restored session has never passed the open-time
+   * guard in main.js, and clicking its tab is the first moment the cost is
+   * real. This is that guard, at the point where the work actually happens.
+   *
+   * @returns {boolean} true if the switch should proceed
+   */
+  function confirmLargeTab(tab) {
+    if (!fileHelpers || typeof fileHelpers.isLargeDocument !== "function") return true;
+    if (largeConfirmed.has(tab.id)) return true;
+
+    let verdict;
+    try {
+      verdict = fileHelpers.isLargeDocument(tab.content);
+    } catch (error) {
+      // A guard that throws must not make a tab unreachable.
+      console.error("[CustomTabs] size estimate failed:", error);
+      return true;
+    }
+    if (!verdict.large) return true;
+
+    let proceed = true;
+    try {
+      proceed = window.ipcRenderer.sendSync("confirm-large-render", {
+        name: tab.filename,
+        seconds: Math.round(verdict.estimatedMs / 1000),
+      });
+    } catch (error) {
+      console.error("[CustomTabs] size confirmation failed:", error);
+      return true;
+    }
+    if (proceed) largeConfirmed.add(tab.id);
+    return proceed;
+  }
+
   function switchToTab(tabId) {
     const tab = tabs.find((t) => t.id === tabId);
     if (!tab) return;
+    if (tabId !== activeTabId && !confirmLargeTab(tab)) {
+      // Declining means the switch does not happen: the reader stays where
+      // they were, with the document they were reading still on screen. This
+      // runs BEFORE snapshotActiveTab() and before any state is mutated, so
+      // there is nothing to unwind.
+      console.log("[CustomTabs] Large tab switch declined:", tab.filename);
+      return;
+    }
 
     snapshotActiveTab();
 

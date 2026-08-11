@@ -779,6 +779,28 @@ function resumeFileWatching() {
 // ============================================
 
 /**
+ * The one place the large-document wording lives, so the dialog the main
+ * process shows on open and the one the renderer requests on tab switch
+ * cannot drift apart.
+ * @returns {boolean} true if rendering should proceed
+ */
+function askAboutLargeDocument(name, seconds) {
+  const choice = dialog.showMessageBoxSync(mainWindow, {
+    type: "warning",
+    buttons: ["Open anyway", "Cancel"],
+    defaultId: 0,
+    cancelId: 1,
+    title: "Large document",
+    message: `"${name}" may take about ${seconds} seconds to display.`,
+    detail:
+      "The window will be unresponsive while it renders. This is an estimate " +
+      "based on the document's structure, not just its size - documents with " +
+      "large tables take much longer than plain text of the same length.",
+  });
+  return choice === 0;
+}
+
+/**
  * A document the cost model predicts will take a long time to become readable
  * gets the reader a choice rather than a frozen window.
  *
@@ -804,24 +826,24 @@ function confirmLargeDocument(content, filePath) {
   const name = path.basename(filePath);
   log(`Large document: ${name} predicted at ~${seconds}s to render`);
 
-  const choice = dialog.showMessageBoxSync(mainWindow, {
-    type: "warning",
-    buttons: ["Open anyway", "Cancel"],
-    defaultId: 0,
-    cancelId: 1,
-    title: "Large document",
-    message: `"${name}" may take about ${seconds} seconds to display.`,
-    detail:
-      "The window will be unresponsive while it renders. This is an estimate " +
-      "based on the document's structure, not just its size - documents with " +
-      "large tables take much longer than plain text of the same length.",
-  });
-  if (choice !== 0) {
+  if (!askAboutLargeDocument(name, seconds)) {
     log(`Large document open cancelled by user: ${name}`);
     return false;
   }
   return true;
 }
+
+// Tabs render lazily, so a file that arrived by multi-select or session
+// restore reaches its first render on a tab CLICK, in the renderer, long after
+// main.js's open-time guard has had its say. The renderer does its own
+// estimate (it loads the same file-helpers) and asks here only to put the
+// dialog on the main process, where dialogs belong. Sending the estimate
+// rather than the document keeps megabytes off the sync IPC channel.
+ipcMain.on("confirm-large-render", (event, data) => {
+  const name = data && typeof data.name === "string" ? data.name : "This document";
+  const seconds = data && Number.isFinite(data.seconds) ? data.seconds : 0;
+  event.returnValue = askAboutLargeDocument(name, seconds);
+});
 
 function openFile(filePath) {
   log("Attempting to open file:", filePath);
