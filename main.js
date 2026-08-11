@@ -408,6 +408,7 @@ const {
   wrapMermaidContent,
   removeBOM,
   readMarkdownFile,
+  isLargeDocument,
   sendIPCResult,
 } = require("./file-helpers");
 
@@ -777,6 +778,51 @@ function resumeFileWatching() {
 // FILE OPERATIONS
 // ============================================
 
+/**
+ * A document the cost model predicts will take a long time to become readable
+ * gets the reader a choice rather than a frozen window.
+ *
+ * The prediction is deliberately CHEAP and deliberately CONSERVATIVE: it is an
+ * O(n) character scan costing ~0.2% of the render it is gating, and it errs
+ * toward warning early (measured, it never under-predicts a real render by
+ * more than 1.01x). See file-helpers.js and bench/BASELINE.md.
+ *
+ * This is a WARNING, not a refusal. The reader knows things the estimator does
+ * not - that the file is the one they need, that they will wait. Refusing
+ * outright would make a large document unopenable in the only tool that opens
+ * it, so the default button opens it anyway.
+ *
+ * @param {string} content - Raw markdown
+ * @param {string} filePath - Shown to the reader so they know which file
+ * @returns {boolean} true if rendering should proceed
+ */
+function confirmLargeDocument(content, filePath) {
+  const { large, estimatedMs } = isLargeDocument(content);
+  if (!large) return true;
+
+  const seconds = Math.round(estimatedMs / 1000);
+  const name = path.basename(filePath);
+  log(`Large document: ${name} predicted at ~${seconds}s to render`);
+
+  const choice = dialog.showMessageBoxSync(mainWindow, {
+    type: "warning",
+    buttons: ["Open anyway", "Cancel"],
+    defaultId: 0,
+    cancelId: 1,
+    title: "Large document",
+    message: `"${name}" may take about ${seconds} seconds to display.`,
+    detail:
+      "The window will be unresponsive while it renders. This is an estimate " +
+      "based on the document's structure, not just its size - documents with " +
+      "large tables take much longer than plain text of the same length.",
+  });
+  if (choice !== 0) {
+    log(`Large document open cancelled by user: ${name}`);
+    return false;
+  }
+  return true;
+}
+
 function openFile(filePath) {
   log("Attempting to open file:", filePath);
 
@@ -806,6 +852,7 @@ function openFile(filePath) {
     }
 
     log("File read successfully, sending to renderer");
+    if (!confirmLargeDocument(data, filePath)) return;
     mainWindow.webContents.send("file-opened", {
       content: data,
       path: filePath,
@@ -843,6 +890,7 @@ function openFileDialog() {
           }
 
           // Send first file content and all selected paths
+          if (!confirmLargeDocument(data, firstFilePath)) return;
           mainWindow.webContents.send("file-opened", {
             content: data,
             path: firstFilePath,
@@ -1156,6 +1204,15 @@ ipcMain.on("set-active-file", (event, filePath) => {
 });
 
 // Handle file reload request
+//
+// DELIBERATELY NOT SIZE-GUARDED. This path refreshes a document that is
+// already open, which means the reader has already been asked about its cost
+// once and said yes. It is also the single most-repeated action in this fork -
+// the tabbed refresh workflow exists precisely so that files being rewritten
+// underneath you can be re-read constantly - so a confirmation here would fire
+// dozens of times in a session for a document the reader already committed to.
+// The guard belongs on the paths that OPEN something new, not on the ones that
+// re-read something chosen.
 ipcMain.on("reload-file", (event, data) => {
   const { filePath } = data;
 
