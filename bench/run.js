@@ -1057,16 +1057,57 @@ app.whenReady().then(async () => {
       // helper above cannot reach it - and on a table-heavy document the lexer
       // is exactly the phase most likely to dominate what the named passes
       // leave unaccounted for.
+      //
+      // THE WHOLE GLOBAL IS REPLACED RATHER THAN THE PROPERTY, and the reason is
+      // a defect this harness caught on the marked 9 -> 18 upgrade. marked 18 is
+      // bundled by esbuild, whose export helper defines every export as a
+      // GETTER-ONLY, NON-CONFIGURABLE accessor:
+      //     for (var k in all) Object.defineProperty(target, k, { get: all[k], enumerable: true })
+      // In marked 9 these were plain writable data properties, so assigning
+      // window.marked.parse = wrapped worked. Under 18 the same line is a
+      // SILENT NO-OP - sloppy-mode assignment to an accessor without a setter
+      // throws nothing - and Object.defineProperty throws
+      // "Cannot redefine property". All measured, not inferred.
+      //
+      // So the wrap reported success, the original parse kept being called, and
+      // marked.parse recorded 0ms. Only PHASE_NEVER_CALLED caught it. Replacing
+      // the namespace object works because the global binding itself is an
+      // ordinary writable property; every other key is forwarded by a getter so
+      // late mutation of the real module is still visible through the shim.
       if (window.marked && typeof window.marked.parse === 'function' && !window.marked.parse.__benchWrapped) {
-        const originalParse = window.marked.parse.bind(window.marked);
+        const realMarked = window.marked;
+        const originalParse = realMarked.parse.bind(realMarked);
         const wrappedParse = function (...args) {
           const t0 = performance.now();
           try { return originalParse(...args); }
           finally { window.__bench.phases['marked.parse'] = (window.__bench.phases['marked.parse'] || 0) + (performance.now() - t0); }
         };
         wrappedParse.__benchWrapped = true;
-        window.marked.parse = wrappedParse;
-      } else if (!window.marked || typeof window.marked.parse !== 'function') {
+        const shim = {};
+        for (const key of Object.getOwnPropertyNames(realMarked)) {
+          if (key === 'parse') continue;
+          Object.defineProperty(shim, key, {
+            get() { return realMarked[key]; },
+            enumerable: true,
+            configurable: true,
+          });
+        }
+        Object.defineProperty(shim, 'parse', {
+          value: wrappedParse,
+          writable: true,
+          enumerable: true,
+          configurable: true,
+        });
+        window.marked = shim;
+      }
+      // A WRAP THAT DID NOT TAKE IS NOT A WRAP. The previous version asked only
+      // whether marked.parse was a function BEFORE assigning, and then trusted
+      // the assignment - which is exactly what silently failed above. This
+      // asserts the post-condition instead, so an export shape this code cannot
+      // patch is reported at boot as PHASE_NOT_WRAPPED, naming the real cause,
+      // rather than surfacing a full measurement pass later as a phase that
+      // mysteriously never ran.
+      if (!window.marked || typeof window.marked.parse !== 'function' || !window.marked.parse.__benchWrapped) {
         window.__benchUnwrappable.push('marked.parse');
       }
       window.__benchWrapNames.push('marked.parse');
@@ -1728,11 +1769,21 @@ app.whenReady().then(async () => {
   // linear or quadratic - was then measured to be FALSE:
   //
   //   highest legitimate phase ratio, 5 clean runs x 12 phases   2.89
-  //     (marked.parse on `wide` is a stable 2.61-2.85, i.e. n^1.41;
-  //      marked's own lexer is genuinely superlinear on wide tables)
+  //     (marked.parse on `wide` was a stable 2.61-2.85, i.e. n^1.41;
+  //      marked 9's own lexer was genuinely superlinear on wide tables)
   //   lowest ratio a GENUINE injected quadratic produced            3.98
   //     (applyTableBreakout, 118 -> 469 -> 2779ms; the second doubling
   //      read 5.93, so 4.0 is not an unreachable asymptote)
+  //
+  // THE UPPER POPULATION HAS SINCE MOVED DOWN, AND THE BOUNDS ARE DELIBERATELY
+  // NOT RE-DERIVED FROM IT. The marked 9 -> 18 upgrade removed the phase that
+  // set the 2.89 figure: marked.parse on `wide` now measures 1.92 and 1.99.
+  // Re-fitting the bound to the new, tamer population would ratchet it down
+  // toward whatever the code happens to do today, which is how a regression
+  // detector slowly becomes a description of the status quo. 2.89 stays because
+  // it is a measured statement about what a legitimate non-quadratic phase CAN
+  // reach, and nothing has shown that ceiling to be lower - only that today's
+  // code no longer approaches it.
   //
   // So 3.0 sat 4% above real behaviour and 25% below the thing it hunts. The
   // fix is NOT to slide it to the midpoint of the measured populations: both
@@ -1999,8 +2050,9 @@ app.whenReady().then(async () => {
       );
     }
     say("  Superlinear, but below the ratio a genuine quadratic measured here (3.98).");
-    say("  `marked.parse` on `wide` lives here by design: marked's own lexer is n^1.41 on");
-    say("  wide tables. A NEW entry in this list is a real finding and should be diagnosed.");
+    say("  This list was NOT empty under marked 9: marked.parse on wide sat at 2.61-2.85");
+    say("  (n^1.41) by design. The 9 -> 18 upgrade made it linear (1.92, 1.99) and the");
+    say("  band is now expected to be EMPTY, so any entry here is a real finding.");
   }
   if (retryNotes.length) {
     say("");
