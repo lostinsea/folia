@@ -67,8 +67,11 @@ test-search-results.txt
 test-render-patch-results.txt
 test-table-display-results.txt
 
-# Scratch benchmark output
+# Scratch benchmark output. The .lock covers the file the runner leaves behind
+# when it is killed mid-run, which bench-*.txt does not match and which was
+# committed once by accident.
 bench-*.txt
+bench-*.txt.lock
 
 # Screenshots are debugging artifacts, never baselines - see test-visual-utils.js
 screenshots/
