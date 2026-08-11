@@ -1559,6 +1559,62 @@ holding tabs, the DOM and Prism - was worse than the capture suggested.
   whitespace inside a raw HTML block: `<div>\n\n<p>` became `<div><p>`.
 - `npm test`: 12 suites, 0 failures.
 
+### A second differential, aimed at what the first one could not see
+
+Review raised the fair objection that a synthetic 7-profile corpus plus 42
+hand-written cases is a poor instrument for SECURITY-relevant constructs, and
+that this matters more here than in most apps: the main window runs
+`nodeIntegration: true` with `contextIsolation: false`, so DOMPurify is the only
+thing between parser output and Node. A parser upgrade that changes what is
+emitted is therefore a security question, not only a rendering one.
+
+So a second differential was run over 45 constructs the corpus deliberately does
+not contain: raw HTML blocks (`<script>`, `<style>`, `<iframe>`, `<svg onload>`,
+`<base>`, `<meta refresh>`, unclosed tags), inline HTML interleaved with
+markdown, eleven `javascript:`/`vbscript:`/`data:` URL spellings (entity-encoded,
+percent-encoded, tab- and newline-split, angle-bracketed, reference-style),
+title-attribute quote breakouts, deeply nested emphasis, and raw HTML smuggled
+inside table cells, list items, headings and blockquotes.
+
+**43 of 45 are byte-identical.** The two that differ:
+
+| case | marked 9 | marked 18 |
+|---|---|---|
+| `<div>` + blank line + `**bold**` | `<div>\n\n<p>...` | `<div><p>...` |
+| `<img src=x onerror=1>` then `===` | `<h1>&lt;img ...&gt;</h1>` | `<p>&lt;img ...&gt;<br>===</p>` |
+
+The second is a genuinely NEW finding - the original 42 cases covered setext
+headings and covered raw HTML, but never the two together, and marked 18 no
+longer treats a raw-HTML-looking line followed by `===` as a setext heading.
+**Neither difference is executable**: both versions escape the tag to
+`&lt;img ...&gt;` text, so the change is structural (`h1` becomes `p`), not a
+sanitisation change.
+
+Then the same 45 were run through the app's REAL `SANITIZE_CONFIG` - extracted
+from `renderer.js` rather than retyped - and the surviving DOM inspected.
+**Nothing became newly executable under 18 that was inert under 9.**
+
+Two methodological notes worth keeping, because both produced confident wrong
+answers first:
+
+- **A regex over sanitised HTML is the wrong oracle.** The first version matched
+  `on[a-z]+=` against the output string and reported 8 "unsafe" cases. All 8
+  were inert: `&lt;img src=x onerror=1&gt;` is escaped TEXT, and
+  `title="t&quot; onerror=1"` is an entity-encoded quote INSIDE the title value.
+  A string cannot distinguish markup from text. The oracle now parses the
+  sanitised HTML and asks the DOM, and it is proven to fire on five executable
+  canaries while staying silent on five benign look-alikes.
+- **Testing stock DOMPurify is not testing this app.** The first run reported
+  `<form>` surviving, which is true of default DOMPurify and false here -
+  `renderer.js` sets `FORBID_TAGS: ['form']` for exactly this reason (SEC-11).
+
+One construct does survive sanitisation: `<iframe src="https://...">`. It is
+pre-existing, not upgrade-related, and it is contained by the layer below -
+`index.html`'s CSP is `default-src 'none'` with no `frame-src`, so Chromium
+refuses the load, which `test-render-security.js` already asserts (SEC-09). A
+dedicated probe also confirmed DOMPurify strips `srcdoc` even though it is in
+`ADD_ATTR`, along with `javascript:`, `data:`, `file:` and `onload` on frames.
+
 ### What it did to the end-to-end numbers
 
 `marked.parse` on `wide`, per-phase medians at 256/512/1024 KB: **37 / 71 /
@@ -1566,11 +1622,13 @@ holding tabs, the DOM and Prism - was worse than the capture suggested.
 harness's worst legitimate offender at 2.61-2.85. Its share of `wide`@1 MB
 render fell from roughly 12% to **4.1%**.
 
-The SUSPICIOUS band - ratios above 2.89 that are reported loudly but not
-refused - is now **empty**. It never was before; `marked.parse` was a permanent
-resident, documented in the report text as expected. That text has been updated,
-because a reader told to expect an entry that can no longer appear learns to
-ignore the list.
+That 2.61-2.85 sat just under `HIGHEST_LEGITIMATE_RATIO` (2.89) - the highest
+ratio the harness had ever measured from code believed correct, and the figure
+the refusal bound is derived from. It was NOT in the SUSPICIOUS band, which
+starts at 3.0: that band was empty under marked 9 too, because the highest
+legitimate phase ratio ever recorded across 5 runs x 12 phases was 2.89. What
+changed is not the band's occupancy but the MARGIN to it. `marked.parse` was
+the phase that set the bound; nothing now approaches it.
 
 `wide` render at 1 MB went 4347 -> 3397 ms, about 22%, and every profile's
 settle ratio stayed linear (1.87-2.06).
@@ -1581,7 +1639,6 @@ closest to the nonlinear bound on most runs. It is where the remaining
 large-document cost is.
 
 ### The harness caught the upgrade breaking its own instrumentation
-
 The first full run after re-vendoring refused with `PHASE_NEVER_CALLED:
 marked.parse`, and the cause was not in the product at all.
 
@@ -1611,4 +1668,31 @@ nothing. Two changes:
    wrapper, so an export shape this code cannot patch is reported at boot as
    `PHASE_NOT_WRAPPED` - naming the real cause - instead of surfacing eleven
    minutes later as a phase that mysteriously never ran.
+
+Review then pushed all three of these one step further, and each step was a real
+defect rather than a tidy-up:
+
+3. **Every ALIAS of `parse` must be wrapped, not just `parse`.** marked exports
+   the same callable under two names - `marked.marked === marked.parse` is true
+   on 18.0.9 - so a shim that forwards by name leaves the alias as an untimed
+   second door onto the same function. Measured: under the name-forwarding shim,
+   `marked.marked('# x')` recorded nothing at all. The shim now compares identity
+   rather than listing names, so it stays correct if a future version renames or
+   adds an alias. Both reviewers found this independently.
+4. **A structural post-condition is not enough either.** Checking that the
+   `__benchWrapped` marker is present proves installation happened; it says
+   nothing about whether calling the wrapper still records time. A later edit
+   that broke only the timing side effect would pass. The post-condition now
+   parses a trivial document and requires the counter to actually move. Proven
+   sensitive: with the timing statement removed and the marker left in place, the
+   structural check passes and the functional one fails.
+5. **The guard lived inside the eleven-minute artifact it protected.** `verify.js`
+   (which runs in `npm test`, and in about a second) now EXTRACTS the wrap's
+   source from `run.js` between two markers and runs it against the real vendored
+   bundle: premise, effect, every alias, and a mutation that breaks the timing to
+   prove the post-condition notices. It extracts rather than duplicates because a
+   hand-maintained copy would pass forever while the original rotted - the same
+   silent-divergence failure the `setOptions` axis exists to prevent. It found a
+   defect on its first run: the end marker was placed one line too early, so the
+   block being tested was not the whole block being shipped.
 

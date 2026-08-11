@@ -1074,9 +1074,16 @@ app.whenReady().then(async () => {
       // the namespace object works because the global binding itself is an
       // ordinary writable property; every other key is forwarded by a getter so
       // late mutation of the real module is still visible through the shim.
+      //
+      // BENCH-SHIM-BEGIN - bench/verify.js EXTRACTS the source between these two
+      // markers and runs it against the real vendored marked bundle, so the
+      // wrap is proven to still take effect in under a second instead of only
+      // being discovered by an eleven-minute measurement run. Do not rename or
+      // remove the markers; verify.js fails loudly if it cannot find them.
       if (window.marked && typeof window.marked.parse === 'function' && !window.marked.parse.__benchWrapped) {
         const realMarked = window.marked;
-        const originalParse = realMarked.parse.bind(realMarked);
+        const realParse = realMarked.parse;
+        const originalParse = realParse.bind(realMarked);
         const wrappedParse = function (...args) {
           const t0 = performance.now();
           try { return originalParse(...args); }
@@ -1087,7 +1094,14 @@ app.whenReady().then(async () => {
         for (const key of Object.getOwnPropertyNames(realMarked)) {
           if (key === 'parse') continue;
           Object.defineProperty(shim, key, {
-            get() { return realMarked[key]; },
+            // ALIASES OF parse MUST BE WRAPPED TOO, NOT JUST parse ITSELF.
+            // marked exports the same callable under more than one name -
+            // marked.marked === marked.parse is true on 18.0.9 - so forwarding
+            // by name alone would leave a second, untimed door onto the same
+            // function. Anything reaching it would be silently uncounted.
+            // Comparing identity rather than listing names keeps this true if a
+            // future version adds or renames an alias.
+            get() { const v = realMarked[key]; return v === realParse ? wrappedParse : v; },
             enumerable: true,
             configurable: true,
           });
@@ -1107,10 +1121,32 @@ app.whenReady().then(async () => {
       // patch is reported at boot as PHASE_NOT_WRAPPED, naming the real cause,
       // rather than surfacing a full measurement pass later as a phase that
       // mysteriously never ran.
+      //
+      // AND IT ASSERTS IT BY CALLING, NOT BY INSPECTING. A structural check -
+      // "is the marker present" - proves only that installation happened; it
+      // would still pass if a later edit broke the timing side effect itself,
+      // which is the same class of silent failure one level up. So parse a
+      // trivial document and require the counter to actually move. The phases
+      // object is reset before every measurement, so this costs nothing.
+      if (window.marked && typeof window.marked.parse === 'function' && window.marked.parse.__benchWrapped) {
+        const had = Object.prototype.hasOwnProperty.call(window.__bench.phases, 'marked.parse');
+        const before = window.__bench.phases['marked.parse'] || 0;
+        try {
+          window.marked.parse('probe');
+          if (!(window.__bench.phases['marked.parse'] > before)) {
+            window.__benchUnwrappable.push('marked.parse RECORDS NOTHING WHEN CALLED');
+          }
+        } catch (e) {
+          window.__benchUnwrappable.push('marked.parse THREW ON PROBE: ' + e.message);
+        }
+        if (had) window.__bench.phases['marked.parse'] = before;
+        else delete window.__bench.phases['marked.parse'];
+      }
+      window.__benchWrapNames.push('marked.parse');
       if (!window.marked || typeof window.marked.parse !== 'function' || !window.marked.parse.__benchWrapped) {
         window.__benchUnwrappable.push('marked.parse');
       }
-      window.__benchWrapNames.push('marked.parse');
+      // BENCH-SHIM-END
     })();
     null
   `);
@@ -2050,9 +2086,9 @@ app.whenReady().then(async () => {
       );
     }
     say("  Superlinear, but below the ratio a genuine quadratic measured here (3.98).");
-    say("  This list was NOT empty under marked 9: marked.parse on wide sat at 2.61-2.85");
-    say("  (n^1.41) by design. The 9 -> 18 upgrade made it linear (1.92, 1.99) and the");
-    say("  band is now expected to be EMPTY, so any entry here is a real finding.");
+    say("  This list has ALWAYS been empty: the highest ratio ever measured from code");
+    say("  believed correct was 2.89, below this band's 3.0 floor. So an entry here has");
+    say("  no precedent and is a real finding - it is not the harness's usual noise.");
   }
   if (retryNotes.length) {
     say("");

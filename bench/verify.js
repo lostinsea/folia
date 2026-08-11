@@ -1559,5 +1559,170 @@ for (const [profile, want] of Object.entries(CORPUS_DIGEST)) {
     );
   }
 }
+// ---------------------------------------------------------------------------
+// AXIS 10: THE BENCHMARK'S OWN INSTRUMENTATION STILL TAKES EFFECT.
+//
+// This axis exists because of a defect that reached a full run. bench/run.js
+// wraps marked.parse so the harness can attribute time to parsing. marked 18 is
+// bundled by esbuild, whose export helper defines every export as a GETTER-ONLY,
+// NON-CONFIGURABLE accessor, so the old `window.marked.parse = wrapped` became a
+// SILENT no-op - sloppy-mode assignment to an accessor without a setter throws
+// nothing. The wrap reported success, the original parse kept being called, and
+// the phase recorded 0ms, which in the results table is indistinguishable from a
+// phase that costs nothing. It surfaced eleven minutes later as PHASE_NEVER_CALLED.
+//
+// run.js now asserts its own post-condition, but that assertion lives INSIDE the
+// eleven-minute artifact it protects. This axis moves the same question into the
+// pre-flight, where it costs about a second.
+//
+// IT TESTS THE SHIPPED SOURCE, NOT A COPY. The block is extracted from run.js
+// between two markers and executed here. A hand-maintained duplicate of the shim
+// would pass forever while the real one rotted - the exact silent-divergence
+// failure the setOptions axis above was written to prevent.
+{
+  const runSrc = fs.readFileSync(path.join(__dirname, "run.js"), "utf8");
+  const B = "BENCH-SHIM-BEGIN";
+  const E = "BENCH-SHIM-END";
+  const bi = runSrc.indexOf(B);
+  const ei = runSrc.indexOf(E);
+  check(
+    "run.js still carries the extraction markers this axis reads",
+    bi !== -1 && ei !== -1 && ei > bi &&
+      runSrc.indexOf(B, bi + 1) === -1 && runSrc.indexOf(E, ei + 1) === -1,
+    `begin=${bi} end=${ei}. Without exactly one of each, the instrumentation cannot be ` +
+      "tested here and would again only be checked by an eleven-minute run.",
+  );
+
+  if (bi !== -1 && ei > bi) {
+    const shimSrc = runSrc.slice(runSrc.indexOf("\n", bi) + 1, runSrc.lastIndexOf("\n", ei));
+    // The extracted text must actually be the wrap. If a future edit moves the
+    // markers around something else, this axis would run harmless code and pass.
+    check(
+      "the extracted block is the marked.parse wrap",
+      shimSrc.includes("window.marked = shim") && shimSrc.includes("__benchWrapped"),
+      `extracted ${shimSrc.length} chars that do not look like the wrap`,
+    );
+
+    const bundlePath = path.join(__dirname, "..", "libs", "vendor", "marked.min.js");
+    const haveBundle = fs.existsSync(bundlePath);
+    check(
+      "the vendored marked bundle is present to test the wrap against",
+      haveBundle,
+      `${bundlePath} is missing - run 'npm run vendor'. Testing the wrap against a mock ` +
+        "would defeat the point: the defect was in the real bundle's export shape.",
+    );
+
+    if (haveBundle) {
+      const bundle = fs.readFileSync(bundlePath, "utf8");
+      const loadMarked = () => {
+        const sb = { console };
+        sb.globalThis = sb;
+        sb.window = sb;
+        sb.self = sb;
+        vm.createContext(sb);
+        vm.runInContext(bundle, sb);
+        return sb.marked;
+      };
+
+      // Run the extracted wrap against a window holding the real module.
+      const runShim = (win) => {
+        const ctx = { window: win, performance: { now: () => Date.now() }, console };
+        ctx.globalThis = ctx;
+        vm.createContext(ctx);
+        vm.runInContext(`(function(){\n${shimSrc}\n})()`, ctx);
+      };
+      const freshWindow = () => ({
+        marked: loadMarked(),
+        __bench: { phases: {} },
+        __benchUnwrappable: [],
+        __benchWrapNames: [],
+      });
+
+      // 1. THE PREMISE. If marked ever goes back to writable data exports the
+      //    shim is no longer necessary, and this says so rather than leaving a
+      //    workaround in place forever for a reason nobody can still verify.
+      const probe = loadMarked();
+      const desc = Object.getOwnPropertyDescriptor(probe, "parse");
+      check(
+        "marked's exports are still the getter-only accessors the shim exists for",
+        typeof desc.get === "function" && desc.configurable === false,
+        `parse is now {get:${typeof desc.get}, configurable:${desc.configurable}} - if it is ` +
+          "writable again, the namespace-replacement shim can be simplified.",
+      );
+
+      // 2. THE WRAP TAKES EFFECT AND ACTUALLY RECORDS TIME. Not "the marker is
+      //    present" - the counter must move, which is the failure mode above.
+      const w = freshWindow();
+      runShim(w);
+      check(
+        "the wrap reports no instrumentation problems against the real bundle",
+        w.__benchUnwrappable.length === 0,
+        w.__benchUnwrappable.join(", "),
+      );
+      check("the wrap registers marked.parse as a measured phase",
+        w.__benchWrapNames.includes("marked.parse"), w.__benchWrapNames.join(", "));
+      w.__bench.phases = {};
+      const html = w.marked.parse("| a | b |\n|---|---|\n| 1 | 2 |");
+      check(
+        "calling marked.parse through the wrap records time against marked.parse",
+        w.__bench.phases["marked.parse"] !== undefined,
+        `phases=${JSON.stringify(w.__bench.phases)} - the wrap installed but measures nothing`,
+      );
+      check("the wrap does not change what marked renders",
+        html.includes("<table"), html.slice(0, 80));
+
+      // 3. EVERY ALIAS OF parse IS WRAPPED. marked exports the same callable
+      //    under more than one name (marked.marked === marked.parse), and a
+      //    forward-by-name shim leaves the alias as an untimed second door.
+      const aliases = Object.getOwnPropertyNames(probe).filter((k) => probe[k] === probe.parse);
+      check(
+        "the aliases of marked.parse are known to this axis",
+        aliases.length >= 1 && aliases.includes("parse"),
+        `found ${JSON.stringify(aliases)}`,
+      );
+      for (const alias of aliases) {
+        const wa = freshWindow();
+        runShim(wa);
+        wa.__bench.phases = {};
+        wa.marked[alias]("# x");
+        check(
+          `calling marked.${alias} is timed, not an untimed second door onto parse`,
+          wa.__bench.phases["marked.parse"] !== undefined,
+          `marked.${alias} bypassed instrumentation; time spent there would vanish from the report`,
+        );
+      }
+
+      // 4. THE GUARD IS SENSITIVE. A check that cannot fail is a defect equal to
+      //    a product bug, so break the thing it watches and require it to notice.
+      //    The mutation removes ONLY the timing side effect and leaves the
+      //    __benchWrapped marker, which is precisely what a structural check
+      //    cannot see - it is the reason the post-condition calls rather than
+      //    inspects.
+      const brokenSrc = shimSrc.replace(
+        /window\.__bench\.phases\['marked\.parse'\] = \(window\.__bench\.phases\['marked\.parse'\] \|\| 0\) \+ \(performance\.now\(\) - t0\);/,
+        "void 0;",
+      );
+      check(
+        "the sensitivity mutation still matches the wrap's timing statement",
+        brokenSrc !== shimSrc,
+        "could not break the timing side effect, so the check below proves nothing",
+      );
+      if (brokenSrc !== shimSrc) {
+        const wb = freshWindow();
+        const ctx = { window: wb, performance: { now: () => Date.now() }, console };
+        ctx.globalThis = ctx;
+        vm.createContext(ctx);
+        vm.runInContext(`(function(){\n${brokenSrc}\n})()`, ctx);
+        check(
+          "the wrap's post-condition CATCHES a wrap that installs but records nothing",
+          wb.__benchUnwrappable.some((p) => String(p).startsWith("marked.parse")),
+          `a wrap with its timing removed was accepted (unwrappable=${JSON.stringify(wb.__benchUnwrappable)}). ` +
+            "The post-condition is checking the marker rather than the behaviour.",
+        );
+      }
+    }
+  }
+}
+
 console.log(`\n=== ${passed}/${passed + failed} passed ===`);
 process.exit(failed ? 1 : 0);
