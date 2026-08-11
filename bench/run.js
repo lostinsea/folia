@@ -526,6 +526,11 @@ const RENDER_CENSUS = {
     524288: { blocks: 150, nodes: 28721, tokens: 6714 },
     1048576: { blocks: 298, nodes: 57365, tokens: 13410 },
   },
+  wide: {
+    262144: { blocks: 293, nodes: 21389, tokens: 0 },
+    524288: { blocks: 585, nodes: 42705, tokens: 0 },
+    1048576: { blocks: 1169, nodes: 85337, tokens: 0 },
+  },
 };
 
 // THE CLASSES ON THE FINISHED DOCUMENT, pinned exactly, per (profile, size).
@@ -599,6 +604,20 @@ const CLASS_CENSUS = {
     262144: { "check-icon": 187, "code-block-container": 187, "code-copy-btn": 187, "collapsible-section": 187, "copy-icon": 187, "function": 374, "keyword": 374, "language-js": 374, "nowrap-col": 3366, "number": 187, "operator": 187, "prism-highlighted": 187, "punctuation": 2057, "string": 187, "table-container": 187, "table-maximize-btn": 187, "token": 3366 },
     524288: { "check-icon": 373, "code-block-container": 373, "code-copy-btn": 373, "collapsible-section": 373, "copy-icon": 373, "function": 746, "keyword": 746, "language-js": 746, "nowrap-col": 6714, "number": 373, "operator": 373, "prism-highlighted": 373, "punctuation": 4103, "string": 373, "table-container": 373, "table-maximize-btn": 373, "token": 6714 },
     1048576: { "check-icon": 745, "code-block-container": 745, "code-copy-btn": 745, "collapsible-section": 745, "copy-icon": 745, "function": 1490, "keyword": 1490, "language-js": 1490, "nowrap-col": 13410, "number": 745, "operator": 745, "prism-highlighted": 745, "punctuation": 8195, "string": 745, "table-container": 745, "table-maximize-btn": 745, "token": 13410 },
+  },
+  // THE ONLY PROFILE WHOSE CENSUS NAMES `table-breakout`, and the reason it
+  // exists. Every table here is wider than the 900px reading column, so the
+  // widening pass runs on all 293/585/1169 of them; in `tables` and `dense` the
+  // tables fit and the pass is silently a no-op, which is how a benchmark spent
+  // 79% of its time in a function no oracle could see the effect of. Note the
+  // ABSENCE of `wrap-anyway` is pinned just as hard as the presence of
+  // `table-breakout` - that class means the window was too narrow, which is a
+  // fact about the screen, and the viewport-floor invariant in the regime block
+  // is what makes its absence a property of the corpus instead.
+  wide: {
+    262144: { "compact-table": 293, "nowrap-col": 17580, "table-breakout": 293, "table-container": 293, "table-maximize-btn": 293 },
+    524288: { "compact-table": 585, "nowrap-col": 35100, "table-breakout": 585, "table-container": 585, "table-maximize-btn": 585 },
+    1048576: { "compact-table": 1169, "nowrap-col": 70140, "table-breakout": 1169, "table-container": 1169, "table-maximize-btn": 1169 },
   },
 };
 
@@ -790,6 +809,9 @@ app.whenReady().then(async () => {
   }
 
   const SETTLE_CAP_MS = 30000;
+  // See the viewport invariant below: this is a floor, not the requested size.
+  const MIN_VIEWPORT_WIDTH = 1280;
+  const innerWidth = Number(String(inner).split("x")[0]) || 0;
   // THE MEASUREMENT REGIME. Every number below changes what a millisecond in
   // BASELINE.md MEANS, without changing a single thing an output oracle can
   // see: the corpus digest still matches, the render and class censuses still
@@ -855,6 +877,30 @@ app.whenReady().then(async () => {
     reps >= 3,
     `a median needs at least 3 samples (got ${reps}); one sample reported prose as ` +
       "twice the data in two thirds of the time",
+  );
+  // THE VIEWPORT IS PART OF THE REGIME NOW, AND ONLY BECAME SO WHEN THE CORPUS
+  // GAINED A TABLE THAT BREAKS OUT OF THE READING COLUMN. Before the `wide`
+  // profile every pinned class was a property of the document alone, so the
+  // window size was worth recording but nothing depended on it. It is not
+  // decorative any more: applyTableBreakout adds `wrap-anyway` when a table's
+  // preferred width exceeds the space actually AVAILABLE, so on a narrow enough
+  // window the class census would gain a class the corpus did not put there and
+  // every wide cell would be refused for a reason that is about the screen.
+  //
+  // The floor is derived from measurement, not chosen. The wide table's
+  // preferred width is 974px at a 1988px, a 1588px and a 1268px viewport - it
+  // is a property of the content - and `available` is the inner width less
+  // roughly 48px of chrome. wrap-anyway therefore appears somewhere below an
+  // inner width of ~1022px. 1280 is the smallest widely-used desktop width and
+  // leaves ~258px of margin, which is what makes the exact class pin safe to
+  // assert rather than merely likely to hold.
+  regimeRequire(
+    innerWidth >= MIN_VIEWPORT_WIDTH,
+    `the window is ${innerWidth}px wide and the class census needs at least ` +
+      `${MIN_VIEWPORT_WIDTH}px: below roughly 1022px the wide profile's tables gain a ` +
+      "`wrap-anyway` class, which is a fact about this screen rather than about the " +
+      "corpus. main.js persists window bounds, so a previous run left at a small size " +
+      "can cause this - the request is 2000px wide",
   );
 
   // The effective regime, recorded in the artifact. Codex's framing, and it is

@@ -126,7 +126,90 @@ const BUILDERS = {
     BUILDERS.tables(rand, i, out);
     BUILDERS.code(rand, i, out);
   },
+
+  // A support-matrix table too wide for the 900px reading column: the ONLY
+  // profile that reaches applyTableBreakout's widening path.
+  //
+  // WHY THIS PROFILE EXISTS AT ALL. `tables` above was believed to exercise
+  // applyTableBreakout - it is the most expensive phase in that profile - but
+  // the class census showed `table-breakout` appearing in NO cell of the
+  // corpus. Every table `tables` generates measures 860px against an 860px
+  // reading column, so the pass measured its containers, decided nothing
+  // needed widening and returned. Gutting the function entirely moved no node
+  // count, no block count, no token count and no class in the histogram, while
+  // render dropped 566ms to 486ms. No oracle over rendered OUTPUT can cover a
+  // pass that produces no output, so the gap was in the corpus, not in any
+  // oracle.
+  //
+  // WHY IT IS A NEW PROFILE RATHER THAN A WIDER TABLE IN `tables`. Two reasons,
+  // both structural. The INTERNALS axis in verify.js requires min === max over
+  // every table token in a profile, so mixing a 4-column and a 10-column table
+  // into one profile would force that axis to be weakened to a range - and the
+  // axis exists to catch exactly the "a table collapsed to one column"
+  // degeneracy a range would admit. And keeping `tables` untouched preserves
+  // the narrow, fits-the-column path as its own measured baseline: closing this
+  // hole by widening the existing tables would have opened the symmetric one.
+  //
+  // WHY TEN COLUMNS OF TWELVE CHARACTERS, MEASURED RATHER THAN CHOSEN. The
+  // breakout trigger is `wanted > given`, where `given` is the reading column
+  // (measured 860px, not the 900px the stylesheet names - padding) and `wanted`
+  // is the table's preferred width. `wanted` is a property of the CONTENT: the
+  // same table measured 974px at a 1988px, a 1588px and a 1268px viewport.
+  // What IS viewport-dependent is `wrap-anyway`, which fires when
+  // `wanted > available` - so a table sized to trigger breakout only just
+  // would produce a class histogram that changed with the window, and the
+  // census is pinned exactly. Measured across those three viewports:
+  //
+  //     8 columns   wanted 860   no breakout at all
+  //    10 columns   wanted 974   breakout, wrap-anyway false at all three
+  //    16 columns   wanted 1598  wrap-anyway false at 1988, TRUE at 1588
+  //    24 columns   wanted 2430  wrap-anyway true at all three
+  //
+  // Ten is the shape with the widest margin on both sides at once: 114px clear
+  // of the trigger, and 246px clear of the wrap-anyway boundary at the
+  // narrowest viewport tested. `run.js` additionally refuses to run below a
+  // documented viewport floor, because that margin is what makes the pin
+  // meaningful.
+  //
+  // WHY THE CELLS ARE FIXED-WIDTH. Column width here IS the trigger, so it
+  // must not drift with the document. `i` grows into the thousands, and an
+  // unpadded index would make later tables wider than earlier ones - the
+  // widening decision would then depend on document SIZE, which is the one
+  // variable every ratio in this benchmark is trying to hold still. Padding to
+  // six digits keeps every cell exactly 12 characters up to 999,999
+  // iterations, against ~1,700 at the largest benchmarked size.
+  wide(rand, i, out) {
+    const idx = String(i).padStart(6, "0");
+    const rows = [
+      "| " + WIDE_HEADERS.join(" | ") + " |",
+      "|" + "---|".repeat(WIDE_HEADERS.length),
+    ];
+    for (let r = 0; r < 5; r++) {
+      rows.push("| " + WIDE_TAGS.map((tag) => tag + "-" + idx + "-" + r).join(" | ") + " |");
+    }
+    out.push(rows.join("\n"));
+  },
 };
+
+// Ten columns. The headers are all shorter than the 12-character cells below
+// them, so the CELLS decide every column's width and the measured 974px is a
+// property of the generated data rather than of these labels.
+const WIDE_HEADERS = [
+  "Platform",
+  "Runtime",
+  "Arch",
+  "Toolchain",
+  "Package",
+  "Signing",
+  "Tests",
+  "Lint",
+  "Docs",
+  "Publish",
+];
+// Three characters each and all distinct, so no two columns carry identical
+// text - a table of ten identical columns would be exactly the degeneracy the
+// INTERNALS axis exists to refuse.
+const WIDE_TAGS = ["plt", "run", "arc", "tch", "pkg", "sgn", "tst", "lnt", "doc", "pub"];
 
 const PROFILES = Object.keys(BUILDERS);
 
@@ -139,6 +222,7 @@ const SEEDS = {
   lists: 0x5eed0004,
   code: 0x5eed0005,
   dense: 0x5eed0006,
+  wide: 0x5eed0007,
 };
 
 // Generates at least `targetBytes` of markdown for `profile`. Growth is in

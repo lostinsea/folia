@@ -217,6 +217,7 @@ const SHAPE = {
     table: 1 / 7,
     code: 1 / 7,
   },
+  wide: { table: 1 },
 };
 // TOLERANCE IS ESSENTIALLY ZERO, AND THAT IS THE POINT. generate() only tests
 // the byte target between whole builder iterations (see the comment on
@@ -282,6 +283,11 @@ const INTERNALS = {
   lists: { items: 2 },
   code: { lines: 2 },
   dense: { headerCells: 4, rows: 5, items: 2, lines: 2 },
+  // Ten header cells is the whole reason this profile exists: it is what takes
+  // the table past the reading column and into applyTableBreakout's widening
+  // path. A change that narrowed it back to `tables`' four would silently
+  // return the benchmark to timing only the no-op path.
+  wide: { headerCells: 10, rows: 5 },
 };
 for (const [profile, want] of Object.entries(INTERNALS)) {
   const toks = lexTokens(generate(profile, REFERENCE_SIZES[0]));
@@ -365,6 +371,7 @@ const ELEMENTS = {
     pre: 1 / 7,
     code: 1 / 7,
   },
+  wide: { table: 1, thead: 1, tbody: 1, th: 10, tr: 6, td: 50 },
 };
 // 1% of the smallest pinned ratio. Deliberately not a share tolerance: these
 // are exact rationals, so anything beyond rounding is a real change.
@@ -482,6 +489,7 @@ const ATTRIBUTES = {
   lists: {},
   code: { 'class="language-js"': 1 },
   dense: { 'class="language-js"': 1 / 7 },
+  wide: {},
 };
 // A POSITIVE CONTROL, so the refusal above cannot quietly stop refusing. Every
 // assertion in this axis reads `unreadable` being EMPTY as good news, and an
@@ -670,6 +678,15 @@ const TEXTURE = {
     minChars: 30,
     at: { 65536: { words: 27.07, chars: 196.55 }, 1048576: { words: 27.03, chars: 199.35 } },
   },
+  // Every block in this profile is byte-identical in SHAPE - only the padded
+  // index differs - so the means are integers and do not move with size. That
+  // is the property the widening trigger depends on: a table whose width drifted
+  // with the document would make the breakout decision a function of file size.
+  wide: {
+    minWords: 120,
+    minChars: 880,
+    at: { 65536: { words: 127, chars: 895 }, 1048576: { words: 127, chars: 895 } },
+  },
 };
 // 2% against a per-size pin. The pinned value is exactly reproducible, so this
 // only has to absorb the generator's own byte-target rounding.
@@ -851,6 +868,30 @@ const TEXT_SHAPE = {
       chars: { "#": 0.4286, "'": 0.2857, "(": 0.4286, ")": 0.4286, ",": 0.1429, "-": 4.4286, ".": 0.8571, ";": 0.2857, "=": 0.1429, "_": 1.4286, "`": 0.8571, "alpha": 147.1651, "digit": 10.5781, "newline": 1.8571, "space": 24.7469, "{": 0.1429, "|": 5, "}": 0.1429 },
     },
   },
+  // IDENTICAL AT BOTH SIZES, TO THE CHARACTER, AND THAT IS AN ASSERTION RATHER
+  // THAN A COINCIDENCE. Every other profile's digit count drifts with document
+  // length because the generator writes an unpadded iteration index into the
+  // text - prose carries 7.27 digits per block at 64KB and 10.89 at 1MB. This
+  // profile pads that index to six characters precisely so its column widths
+  // cannot move with the document, and these two identical rows are what will
+  // fail if the padding is ever removed.
+  //
+  // maxRun is 41, and it is the `|---|---|...` separator row rather than any
+  // cell: with ten columns the separator is the longest unbroken run in the
+  // block. meanBlockMaxRun equals it exactly because every block has the same
+  // shape.
+  wide: {
+    65536: {
+      maxRun: 41,
+      meanBlockMaxRun: 41,
+      chars: { "-": 130, "alpha": 212, "digit": 350, "newline": 6, "space": 120, "|": 77 },
+    },
+    1048576: {
+      maxRun: 41,
+      meanBlockMaxRun: 41,
+      chars: { "-": 130, "alpha": 212, "digit": 350, "newline": 6, "space": 120, "|": 77 },
+    },
+  },
 };
 
 // Deterministic generation, so the only error to absorb is the 4-decimal
@@ -999,6 +1040,7 @@ const HIGHLIGHT = {
     65536: { blocks: 48, spans: { function: 0.2857, keyword: 0.2857, number: 0.1429, operator: 0.1429, punctuation: 1.5714, string: 0.1429 } },
     1048576: { blocks: 745, spans: { function: 0.2857, keyword: 0.2857, number: 0.1429, operator: 0.1429, punctuation: 1.5714, string: 0.1429 } },
   },
+  wide: {},
 };
 const HIGHLIGHT_TOLERANCE = 0.005;
 
@@ -1190,6 +1232,10 @@ const BLOCK_IDENTITY = {
     65536: { tokens: 336, blocks: ["1ae371b1de01eed7", "83b0b73871953d4b", "59c3f6a6499ec1f7", "75aec77e597bbc71", "44b7f8690eed416f", "738024cc94b52699", "a59d433481d7f9be", "e1d9723bc34187bb", "98daed013586d3aa"] },
     1048576: { tokens: 5215, blocks: ["1ae371b1de01eed7", "83b0b73871953d4b", "59c3f6a6499ec1f7", "75aec77e597bbc71", "44b7f8690eed416f", "738024cc94b52699", "a59d433481d7f9be", "0d809363bb095c17", "e85ce6b1501f28f0"] },
   },
+  wide: {
+    65536: { tokens: 74, blocks: ["06307e4c058d2b61", "f04bf1d8f10003fc", "b116885b41e02eda", "2d66ba598847d4f7", "1df82ab1927bdee4", "cbbf789e29d55330", "d82b2de6e518b0bf", "49267f4d1f8d525a", "021c03af54202b6f"] },
+    1048576: { tokens: 1169, blocks: ["06307e4c058d2b61", "f04bf1d8f10003fc", "b116885b41e02eda", "2d66ba598847d4f7", "1df82ab1927bdee4", "cbbf789e29d55330", "d82b2de6e518b0bf", "e776bf919eda9854", "94500fed5cc00132"] },
+  },
 };
 function blockHash(s) {
   return crypto.createHash("sha256").update(s, "utf8").digest("hex").slice(0, 16);
@@ -1355,6 +1401,12 @@ const CORPUS_DIGEST = {
     262144: "eaca039a1c37cbf0f24fac93c3e109e8f03ab7991224066a2354711d00a1066b",
     524288: "2f690f7e2171979080c9341c378590a45b23b27f619c1df17cb2aac797bbb763",
     1048576: "8e78e73f8bd06e5bb51cbc944778147d8f078cd3b069039a1dc0ea330ec15c48",
+  },
+  wide: {
+    65536: "838adc3b6170788194264cf8c748677f7285f32ee285c9de9104e6bba0a712e4",
+    262144: "b3cde4bfb7ce1e20c4d199ed34b14282ae65e33461ec1eafed45a3d62fb9abd3",
+    524288: "fd8eb0df770cef111f87b1079170ea4096765a97f70ebc7894012a574a1af578",
+    1048576: "bc7360dd943c34f55ecb48ad77d2d17ebd4ecca5336b8653670a9861434365c0",
   },
 };
 

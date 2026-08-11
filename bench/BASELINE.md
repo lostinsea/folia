@@ -228,7 +228,8 @@ named:
 | a browser-only `Prism.hooks` transform renaming `keyword` -> `builtin` | CLASS CENSUS (`verify.js` passed 232/232 under it) |
 | `QUIET_MS` shortened below the product's own idle deadline | REGIME INVARIANTS (before any cell is measured) |
 | the shared settle loop settling after a fixed few ticks instead of on the quiet window | SETTLE-LOOP CONTROL |
-| `applyTableBreakout()` gutted (372 ms -> 0 ms) | **NOTHING** - see "timing its most expensive pass executing only its no-op path" |
+| `applyTableBreakout()` gutted (372 ms -> 0 ms) | CLASS CENSUS, once the `wide` profile existed - see "The widening pass now has a corpus that exercises it". It was caught by **NOTHING** for the six profiles before it |
+| the viewport-floor invariant disabled and the window shrunk to 988px | CLASS CENSUS (`"wrap-anyway": 293` where 0 is pinned) |
 
 The cell-shortening one is why texture is pinned in characters as well as words:
 shortening `value-3` to `v` leaves the word count identical and passed a
@@ -610,9 +611,99 @@ a third of the render time vanished. **No oracle over rendered output can cover 
 pass that produces no output**, so this is not a defect in the census; it is a
 hole in the *corpus*.
 
-The fix is a table too wide for the reading column. It is deliberately scheduled
-to ride with the `marked` 9 -> 18 upgrade: both re-pin every cell, and doing them
-separately would reset the comparison baseline twice for one net change.
+The fix is a table too wide for the reading column. **It was originally scheduled
+to ride with the `marked` 9 -> 18 upgrade and both reviewers, independently,
+overruled that.** The scheduling argument was that both changes re-pin every cell
+and doing them apart resets the comparison baseline twice. The counter-argument
+was decisive: the prose beside the `tables` numbers in this file was *already
+false* - it described a widening pass that never ran - and while a baseline is
+re-measured routinely, there is no mechanism that re-measures the *interpretation*
+printed next to a number. A wrong number gets corrected on the next run; a wrong
+sentence does not.
+
+See "The widening pass now has a corpus that exercises it" below for what was
+built and what it caught.
+
+### The widening pass now has a corpus that exercises it
+
+A seventh profile, `wide`, whose only content is tables that do not fit the
+reading column. `tables` was deliberately left untouched: the narrow,
+fits-the-column path is its own baseline, and closing today's hole by converting
+that profile would have opened the symmetric one.
+
+**Why a new profile rather than a wider table added to `tables`.** The
+`INTERNALS` axis in `verify.js` requires `min === max` over every table token in
+a profile - it is what catches "a table collapsed to a single column". Mixing a
+4-column and a 10-column table into one profile forces that axis down to a range,
+which admits exactly the degeneracy it exists to catch. Keeping them apart also
+left all nine existing axes and all 18 existing cells completely unchanged.
+
+**The trigger was measured, not reasoned about.** `applyTableBreakout()` widens
+when `wanted > given + 1 && available > given`. A throwaway probe rendered seven
+candidate table shapes at three viewports:
+
+| shape | `wanted` | breaks out | `wrap-anyway` @1988 / @1588 / @1268 |
+|---|---|---|---|
+| 8 cols x 12 chars | 860 | **no** | - |
+| **10 cols x 12 chars** | **974** | yes | no / no / no |
+| 12 cols x 12 chars | 1182 | yes | no / no / no |
+| 16 cols x 12 chars | 1598 | yes | no / **yes** / **yes** |
+| 24 cols x 12 chars | 2430 | yes | yes / yes / yes |
+
+Two facts came out of it that reading the code would not have given:
+
+- `given` - the reading column - measures **860px**, not the 900px the
+  stylesheet names. The difference is padding.
+- `wanted` is **viewport-invariant**: identical at all three window widths for
+  every candidate. What *is* viewport-dependent is `wrap-anyway`, which appears
+  when `wanted` exceeds the space actually available.
+
+So a table sized to *just* trigger breakout would have produced a class histogram
+that changed with the window, and `CLASS_CENSUS` is pinned exactly. Ten columns
+clears the trigger by 114px and the wrap-anyway boundary by 246px at the narrowest
+viewport tested - a large margin on both sides at once, which is the property that
+was being selected for.
+
+**Fixed-width cells are load-bearing, not tidiness.** Column width *is* the
+trigger, so it must not drift with document length: the iteration counter reaches
+1,169 at 1 MB, and an unpadded index would make later tables wider than earlier
+ones, which would make the widening decision depend on document *size*. Padding
+to six digits holds every cell at exactly 12 characters. `TEXT_SHAPE` shows it
+worked - the character histogram and `maxRun` are identical at 64 KB and 1 MB,
+where every other profile's digit counts drift. (`maxRun` is 41 and it is the
+separator row, `|` followed by `---|` ten times, not any cell.)
+
+**Measured on the real generated corpus, not on the probe:** 293 of 293 tables
+carry `table-breakout` at 256 KB, `wrap-anyway` is absent, and the full class
+histogram is byte-identical at 1988px, 1588px and 1268px.
+
+**The viewport is therefore part of the regime now**, and is enforced as such: a
+fifth invariant refuses (exit 3, before any cell is measured) below an inner width
+of 1280px. Below roughly 1022px the wide tables gain `wrap-anyway`, which is a
+fact about the screen rather than about the corpus. Both halves were proven:
+requesting a 1000px window exits 3 naming the invariant, and with the invariant
+disabled at that same width the class census gains `"wrap-anyway": 293` and is
+rejected. `main.js` persists window bounds, so this is a reachable accident, not
+a theoretical one.
+
+**What it catches.** Gutting `applyTableBreakout()` - the change that every
+oracle was previously silent about - is now refused by name in all three cells:
+
+```
+REJECTED: wide@257KB rendered 0 .table-breakout, pinned 293
+REJECTED: wide@512KB rendered 0 .table-breakout, pinned 585
+REJECTED: wide@1024KB rendered 0 .table-breakout, pinned 1169
+```
+
+`verify.js` went 232 -> 267 assertions (nine axes x three new cells, plus manifest
+coverage), and `print-pins.js` was extended from 2 axes to 5 so the added pins are
+re-derivable. That extension duplicates measurement code that `verify.js` also
+has, which is normally forbidden here - it is safe **only** because `print-pins.js`
+is not an oracle: it *proposes* numbers and `verify.js` recomputes every one
+independently, so a divergence produces a failing assertion rather than a false
+pass. It was validated by confirming it reproduces every pre-existing pin exactly.
+If `verify.js` ever imports those functions the property is gone and both files
+would agree on the same mistake, which is the round-8 defect shape.
 
 ### The measurement regime was unpinned, so two runs could be incomparable and both say OK
 
@@ -1074,3 +1165,38 @@ being measured, which is the claim that actually needed evidence.
 Node counts are byte-identical to the baseline in all 18 cells. That is the
 strongest single check here: the corpus and the render pipeline both produced
 exactly the same document twice, ninety minutes and one axis apart.
+
+## The `wide` profile's first full run
+
+Run `2026-08-11T09:56:37Z`, same machine and fingerprint, viewport 1988x1070,
+`corpus manifest verified (7 profiles)`. `STATUS: OK`; no cell rejected on
+spread; the settle-loop control reported a mutation at 400 ms observed at 406 ms
+holding the loop open to 1939 ms.
+
+| profile | 256 KB | 512 KB | 1024 KB | ratios |
+|---|---|---|---|---|
+| prose | 81 | 159 | 295 | 1.96 / 1.85 |
+| headings | 289 | 574 | 1132 | 1.98 / 1.97 |
+| tables | 758 | 1434 | 2771 | 1.89 / 1.93 |
+| lists | 317 | 673 | 1351 | 2.12 / 2.01 |
+| code | 633 | 1301 | 2622 | 2.05 / 2.02 |
+| dense | 524 | 1068 | 2209 | 2.04 / 2.07 |
+| **wide** | **1105** | **2210** | **4347** | **2.00 / 1.97** |
+
+**Node counts are byte-identical to the baseline in all 18 pre-existing cells**
+(753/1507/2994, 4845/9663/19278, 18685/37222/73667, 8694/17361/34695,
+65691/130221/259308, 14399/28721/57365). Adding a seventh profile did not perturb
+the six that were already there - which is the claim that most needed evidence,
+since the whole reason for a new profile rather than a wider table in `tables`
+was to leave the existing cells alone.
+
+**`wide` is now the most expensive profile in the corpus**, and that is the
+finding rather than a complaint: at 1 MB the widening phase is 2254 ms of a
+3209 ms render - **70%** - against 1424 ms of 2245 ms (63%) for `tables`, where
+the pass runs but decides nothing needs widening. Before this profile existed the
+single most expensive function in the pipeline was benchmarked only in the
+configuration where it returns early.
+
+The ratios (2.00 / 1.97) say the widening pass is linear in table count, so the
+layout-thrash fix holds on the path that actually exercises it. That was
+previously an inference from a profile where the pass did no work.

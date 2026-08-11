@@ -117,6 +117,24 @@
           "code": 745
         }
       }
+    },
+    "wide": {
+      "65536": {
+        "bytes": 66376,
+        "blocks": 74,
+        "sha256": "838adc3b6170788194264cf8c748677f7285f32ee285c9de9104e6bba0a712e4",
+        "tokens": {
+          "table": 74
+        }
+      },
+      "1048576": {
+        "bytes": 1048591,
+        "blocks": 1169,
+        "sha256": "bc7360dd943c34f55ecb48ad77d2d17ebd4ecca5336b8653670a9861434365c0",
+        "tokens": {
+          "table": 1169
+        }
+      }
     }
   }
 }
