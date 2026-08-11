@@ -1007,7 +1007,18 @@ app.whenReady().then(async () => {
       // pipeline was previously folded into "unaccounted".
       const NAMES = ['patchViewerDOM', 'applyTableBreakout', 'assignHeadingIds', 'makeHeadersCollapsible',
        'sanitizeHtml', 'addTableMaximizeButtons', 'initImageZoom',
-       'applyNoteStyles', 'applyRawHtmlDocuments', 'highlightNewElements'];
+       'applyNoteStyles', 'applyRawHtmlDocuments', 'highlightNewElements',
+       // buildTableOfContents was the one pass both reviewers independently
+       // named as missing. It CALLS assignHeadingIds, so its figure nests that
+       // one rather than excluding it - harmless, because nothing sums these
+       // phases and each ratio is computed against itself at another size. It
+       // is included even though it is cheap today: the per-phase ratio check
+       // skips any phase under the spread floor, so instrumenting a small pass
+       // costs two timestamp reads and asserts nothing until the pass grows
+       // enough to be worth asserting on. That makes inclusion self-regulating,
+       // which is the opposite trade from the corpus pins, where an unpinned
+       // profile is simply never visited by an axis.
+       'buildTableOfContents'];
       // A duplicate in that list is not harmless: the second wrap() call sees
       // __benchWrapped and returns silently, so a typo would remove a phase
       // while looking like it added one.
@@ -1227,6 +1238,28 @@ app.whenReady().then(async () => {
         const t0 = performance.now();
         await renderMarkdown(md);
         const renderMs = performance.now() - t0;
+        // THE RESOLVE-SIDE CENSUS, TAKEN BEFORE THE SETTLE LOOP RUNS. Both
+        // reviewers, independently and from opposite directions, proposed this
+        // as the replacement for a "settle > K * render" timing assertion. The
+        // phenomenon worth pinning is that this pipeline measures in TWO
+        // STAGES: renderMarkdown() resolves on readable content, and Prism then
+        // does the largest single pass in the corpus behind
+        // requestIdleCallback. A timing ratio would express that with a K that
+        // nobody can re-derive and that a faster machine moves. A pair of node
+        // counts expresses the same fact with no constant at all: on a cell
+        // where deferred work exists, there must be MORE nodes at settle than
+        // there were at resolve. If a refactor ever unified the two stages,
+        // these two counts become equal and the invariant fails by name.
+        //
+        // (No backticks in this comment on purpose - it is inside an exec()
+        // template literal, where one would terminate the string. That has cost
+        // this project a diagnostic cycle more than once.)
+        //
+        // Read here rather than reconstructed afterwards because it is not
+        // recoverable later: once the settle loop has run, the resolve-time
+        // state is gone.
+        const renderNodes = viewer.querySelectorAll('*').length;
+        const renderTokens = viewer.querySelectorAll('.token').length;
 
         let settled = false;
         let capped = false;
@@ -1252,6 +1285,8 @@ app.whenReady().then(async () => {
           settleMs: lastMutationAt ? lastMutationAt - t0 : renderMs,
           capped,
           phases: window.__bench.phases,
+          renderNodes,
+          renderTokens,
           blocks: viewer.children.length,
           nodes: viewer.querySelectorAll('*').length,
           tokens: viewer.querySelectorAll('.token').length,
@@ -1408,13 +1443,13 @@ app.whenReady().then(async () => {
     return finish(1);
   }
 
-  const rows = [];
-  for (const profile of profiles) {
-    if (!PROFILES.includes(profile)) {
-      say(`skipping unknown profile: ${profile}`);
-      continue;
-    }
-    for (const size of sizes) {
+  // ONE CELL, MEASURED. Extracted from the loop below so that the per-phase
+  // ratio invariant can RE-MEASURE a breached pair rather than refusing on a
+  // single observation - see the retry block after the report. Nothing else
+  // about the measurement changed in the extraction: the same reset, the same
+  // repetitions, the same aggregation.
+  const measureCell = async (profile, size) => {
+    {
       const text = generate(profile, size);
       // JSON.stringify rather than a template literal: the corpus contains
       // backticks (fenced code) and ${, either of which would otherwise be
@@ -1441,7 +1476,7 @@ app.whenReady().then(async () => {
         // not billed to the next.
         await sleep(300);
       }
-      if (failed) continue;
+      if (failed) return null;
       if (arg("dump", "") === "1") {
         // Raw per-repetition numbers. A spread figure names the size of a
         // disagreement but not its shape: one slow outlier and a bimodal
@@ -1465,7 +1500,7 @@ app.whenReady().then(async () => {
       const rep = ordered[Math.floor((ordered.length - 1) / 2)];
       const settles = samples.map((s) => s.settleMs);
       const nodeCounts = samples.map((s) => s.nodes);
-      rows.push({
+      return {
         profile,
         // The REQUESTED size, which is the key the census and the corpus digest
         // are both pinned by. Deliberately not the generated byte count:
@@ -1489,12 +1524,52 @@ app.whenReady().then(async () => {
           Math.max(...nodeCounts) - Math.min(...nodeCounts) <=
           Math.max(...nodeCounts) * sameDocumentTolerance,
         phases: rep.phases,
+        // PER-PHASE MEDIANS, FOR THE RATIO INVARIANT ONLY - deliberately a
+        // different aggregation from `phases` above, and the difference was
+        // measured rather than assumed. `rep` is the sample whose SETTLE time
+        // is the median, which keeps every printed figure describing one
+        // coherent render; but a phase's own value in that sample can sit well
+        // away from that phase's median. Measured with --dump=1 on wide+code:
+        // addTableMaximizeButtons diverges 11.4% and 12.9% between the two
+        // aggregations, which moves its ratio from 2.042 to 2.305. That is the
+        // same order as the headroom marked.parse actually has (2.65 measured
+        // against a 3.0 bound), so the two together are a false refusal waiting
+        // for a loaded machine. The coherence argument that chose `rep` does
+        // not apply here: it exists so two figures PRINTED SIDE BY SIDE cannot
+        // contradict each other, whereas this compares one phase against
+        // itself at another size, where robustness is the only property that
+        // matters.
+        phaseMedians: (() => {
+          const out = {};
+          for (const name of Object.keys(rep.phases || {})) {
+            const vals = samples.map((s) => (s.phases || {})[name] || 0).sort((a, b) => a - b);
+            out[name] = vals[Math.floor((vals.length - 1) / 2)];
+          }
+          return out;
+        })(),
         nodes: rep.nodes,
         tokens: rep.tokens,
         blocks: rep.blocks,
+        // Taken from the SAME representative sample as nodes/tokens, so the
+        // two-stage invariant below compares two readings of one render rather
+        // than two readings of different ones.
+        renderNodes: rep.renderNodes,
+        renderTokens: rep.renderTokens,
         classes: rep.classes,
         allClasses: samples.map((s) => s.classes),
-      });
+      };
+    }
+  };
+
+  const rows = [];
+  for (const profile of profiles) {
+    if (!PROFILES.includes(profile)) {
+      say(`skipping unknown profile: ${profile}`);
+      continue;
+    }
+    for (const size of sizes) {
+      const row = await measureCell(profile, size);
+      if (row) rows.push(row);
     }
   }
 
@@ -1588,6 +1663,323 @@ app.whenReady().then(async () => {
     return finish(3);
   }
 
+  // --- shape-of-the-result invariants ---------------------------------------
+  //
+  // These describe the RESULT rather than the corpus or the regime, and both
+  // exist because a reviewer proposed a threshold and the threshold turned out
+  // to be the weak part of the proposal. In both cases the fix was to find a
+  // formulation with no constant to re-derive.
+
+  // (1) A DOUBLING THAT LOOKS QUADRATIC. The legend under the table already
+  // states the semantics - "~2.0 is linear and ~4.0 is quadratic" - so the
+  // refusal threshold is not a new magic number: it is the midpoint of the two
+  // values the artifact itself names. Only the UPPER bound refuses. A lower
+  // bound was proposed and rejected on Codex's argument, which is sound: an
+  // optimisation that removes fixed per-render overhead legitimately pushes the
+  // ratio DOWN, so a low ratio is not evidence of anything wrong.
+  //
+  // IT IS CHECKED PER PHASE AS WELL AS ON THE TOTAL, AND THAT WAS FORCED BY A
+  // MEASUREMENT RATHER THAN CHOSEN. Opus objected that a bound which has never
+  // fired is a guess; the objection was tested by injecting a genuine quadratic
+  // into applyTableBreakout, scaled by the document's own block count. The
+  // breakout phase went 119ms -> 468ms across one doubling - a ratio of 3.93,
+  // unambiguously quadratic - while the TOTAL settle ratio came out at 2.68 and
+  // sailed under the bound, because the rest of the pipeline is linear and
+  // dominates at the small end. So a total-only bound is far less sensitive
+  // than it looks: a quadratic can hide inside a linear majority. The per-phase
+  // check catches the same injection at 3.93, and every real phase ratio in the
+  // 21-cell corpus sits between 1.8 and 2.3.
+  //
+  // The noise floor is the EXISTING spread floor, not a second constant. A
+  // phase costing under that many milliseconds is one the harness already
+  // considers too small to draw conclusions from, and dividing two such figures
+  // produces a ratio dominated by scheduling jitter - prose spends 0ms in
+  // breakout, and 0.4/0.1 is not a quadratic.
+  //
+  // THERE ARE TWO BOUNDS, NOT ONE, AND THAT IS THE RESULT OF MEASURING BOTH
+  // POPULATIONS. The original single bound was 3.0, the midpoint of the
+  // legend's idealised 2.0/4.0. The legend's premise - that a phase is either
+  // linear or quadratic - was then measured to be FALSE:
+  //
+  //   highest legitimate phase ratio, 5 clean runs x 12 phases   2.89
+  //     (marked.parse on `wide` is a stable 2.61-2.85, i.e. n^1.41;
+  //      marked's own lexer is genuinely superlinear on wide tables)
+  //   lowest ratio a GENUINE injected quadratic produced            3.98
+  //     (applyTableBreakout, 118 -> 469 -> 2779ms; the second doubling
+  //      read 5.93, so 4.0 is not an unreachable asymptote)
+  //
+  // So 3.0 sat 4% above real behaviour and 25% below the thing it hunts. The
+  // fix is NOT to slide it to the midpoint of the measured populations: both
+  // reviewers rejected that independently, and for the same reason from
+  // opposite directions - a single threshold has to be either a refusal or a
+  // warning, and the 3.0-3.4 band needs to be both. A superlinear regression
+  // that is real but smaller than full quadratic (n^1.6 reads ~3.03) lands
+  // exactly there, and moving the sole bound to 3.4 would wave it through
+  // silently.
+  //
+  // Hence: 3.0 is SUSPICIOUS - it triggers a re-measurement and, if the
+  // re-measurement agrees, a loud line on an otherwise passing run. 3.4
+  // REFUSES. Each number keeps its own derivation and does its own job.
+  const SUSPICIOUS_RATIO = (2 + 4) / 2;
+  // Measured, not chosen - see above. Named separately so a future run that
+  // moves either population can re-derive the bound from the new numbers
+  // rather than editing a bare constant.
+  const HIGHEST_LEGITIMATE_RATIO = 2.89;
+  const LOWEST_QUADRATIC_RATIO = 3.98;
+  const QUADRATIC_RATIO = (HIGHEST_LEGITIMATE_RATIO + LOWEST_QUADRATIC_RATIO) / 2;
+
+  // Every adjacent-size ratio in a row list, computed once so the retry below
+  // can recompute them against re-measured cells without duplicating the rule.
+  const ratiosFor = (list) => {
+    const out = [];
+    let previous = null;
+    for (const r of list) {
+      const same = previous && previous.profile === r.profile && previous.settle > 0;
+      // Only compare adjacent SIZES of one profile, and only when neither cell
+      // hit the settle cap - a capped figure is a floor, so a ratio computed
+      // from one understates and could hide the very thing this looks for.
+      if (same && !previous.capped && !r.capped) {
+        out.push({
+          profile: r.profile,
+          what: "settle",
+          ratio: r.settle / previous.settle,
+          was: previous.settle,
+          now: r.settle,
+          cells: [previous, r],
+        });
+        for (const phase of Object.keys(r.phaseMedians || {})) {
+          const was = (previous.phaseMedians || {})[phase];
+          const now = r.phaseMedians[phase];
+          if (!(was >= spreadFloorMs) || !(now > 0)) continue;
+          out.push({
+            profile: r.profile,
+            what: `the ${phase} phase`,
+            ratio: now / was,
+            was,
+            now,
+            cells: [previous, r],
+          });
+        }
+      }
+      previous = r;
+    }
+    return out;
+  };
+
+  const cellKey = (r) => `${r.profile}@${r.size}`;
+  let observations = ratiosFor(rows);
+  let suspicious = observations.filter((o) => o.ratio > SUSPICIOUS_RATIO);
+  const retryNotes = [];
+
+  // RETRY ONCE BEFORE REFUSING. Both reviewers chose this independently over
+  // the alternatives (gate on the phase's share of settle; require two
+  // aggregations to agree), and for the same reason: the failure mode measured
+  // here is a single CONTAMINATED RUN, not a within-run disagreement. Five
+  // runs of `wide` put patchViewerDOM@1024 at 161/230/163/162/163ms - one
+  // outlier out of five, whose within-run spread was 12.6% and therefore under
+  // the spread limit. Neither the spread bound nor the per-phase medians can
+  // see that, because both are computed inside one run. Re-measuring is the
+  // only observation that is independent of it.
+  //
+  // The first and second ratios are BOTH reported, so a cell that needs a
+  // retry on every run is visible rather than silently defended - that
+  // distinction is the whole difference between a retry and a widened bound.
+  if (suspicious.length) {
+    const need = new Map();
+    for (const o of suspicious) for (const c of o.cells) need.set(cellKey(c), c);
+    say("");
+    say(
+      `${suspicious.length} ratio(s) exceeded ${SUSPICIOUS_RATIO.toFixed(1)}; re-measuring ` +
+        `${need.size} cell(s) before deciding:`,
+    );
+    for (const o of suspicious) {
+      say(`  ${o.profile} ${o.what} at ${o.ratio.toFixed(2)}`);
+    }
+    // The main watchdog was cleared before the report, so the retry gets its
+    // own. A retry that hangs must still name the cell it hung in rather than
+    // leaving the process wedged with the table already printed.
+    const retryDog = setTimeout(() => {
+      say(`=== timed out after 900s during re-measurement while: ${where} ===`);
+      finish(1);
+    }, 900000);
+    const remeasured = new Map();
+    for (const c of need.values()) {
+      const again = await measureCell(c.profile, c.size);
+      if (again) remeasured.set(cellKey(c), again);
+    }
+    clearTimeout(retryDog);
+    const rows2 = rows.map((r) => remeasured.get(cellKey(r)) || r);
+    // A re-measurement taken on a machine that is still busy answers nothing.
+    // Refuse rather than let a contaminated retry either clear or condemn a
+    // cell: the whole point of the retry is a SECOND independent observation.
+    const dirty = rows2.filter((r) => remeasured.has(cellKey(r)) && untrustworthy(r));
+    if (dirty.length) {
+      say("");
+      for (const r of dirty) {
+        say(
+          `REJECTED: re-measurement of ${r.profile}@${r.kb.toFixed(0)}KB was itself contaminated ` +
+            `(spread ${((r.spread / r.settle) * 100).toFixed(0)}%, ${r.spread.toFixed(0)}ms)`,
+        );
+      }
+      say("  The retry exists to give a second INDEPENDENT observation of a suspicious ratio.");
+      say("  A noisy retry cannot clear one or condemn one. Re-run on an idle machine.");
+      return finish(3);
+    }
+    const before = new Map(observations.map((o) => [`${o.profile}|${o.what}`, o.ratio]));
+    observations = ratiosFor(rows2);
+    for (const o of observations) {
+      const was = before.get(`${o.profile}|${o.what}`);
+      if (was !== undefined && (was > SUSPICIOUS_RATIO || o.ratio > SUSPICIOUS_RATIO)) {
+        retryNotes.push({ profile: o.profile, what: o.what, first: was, second: o.ratio });
+      }
+    }
+  }
+
+  const nonlinear = observations.filter((o) => o.ratio > QUADRATIC_RATIO);
+  // Reported on every passing run, so drift toward the bound is readable
+  // before it crosses it.
+  let closest = null;
+  for (const o of observations) {
+    if (!closest || o.ratio > closest.ratio) closest = o;
+  }
+
+  // (2) THE PIPELINE MEASURES IN TWO STAGES, AND NOTHING CHECKED THAT IT STILL
+  // DOES. renderMarkdown() resolves on readable content; Prism then runs the
+  // largest single pass in the corpus behind requestIdleCallback. `settle` is
+  // the headline number precisely because of that gap, so a change that folded
+  // the deferred pass back into the render would make `settle` and `render`
+  // describe the same instant while every existing oracle stayed silent - the
+  // node counts, the classes and the corpus digest would all be unmoved,
+  // because the same work still happened, just earlier.
+  //
+  // Both reviewers proposed a `settle > K * render` timing assertion and both,
+  // independently, withdrew it in favour of this: the SUBJECT is not time, it
+  // is whether nodes appeared after the render resolved. Counts are
+  // machine-independent, need no K, and fail by name.
+  //
+  // The cells in scope are chosen from the PIN, not from the measurement, and
+  // that distinction is what removes the need for a vacuity guard. Asking "did
+  // this cell produce tokens?" and then checking those cells would pass
+  // silently on a run where the tokens vanished entirely - the selector and the
+  // subject would be the same quantity, which is the defect shape this project
+  // hit with a revert-id filter that matched nothing and reported ALL PROVEN.
+  // Asking instead "is this cell PINNED as containing Prism tokens?" makes the
+  // scope a fact about the corpus. A cell that lost its tokens altogether is
+  // then caught by the class census, and a cell that kept them but stopped
+  // deferring them is caught here.
+  // VACUITY IS CLOSED BY CROSS-VALIDATION, NOT BY A GUARD - do not add one.
+  // A "protective" vacuity guard here would recreate the disease it looks like
+  // it prevents. The scope is a fact about the PIN, and the pin is checked by
+  // the class census on this same run BEFORE this block is reached: a
+  // code-bearing profile whose census pin lost its tokens fails there and
+  // aborts. So for this check to pass vacuously, two independent oracles would
+  // have to fail in exactly the same direction at the same time.
+  const hasPinnedTokens = (r) => (((CLASS_CENSUS[r.profile] || {})[r.size] || {}).token || 0) > 0;
+  const twoStageBad = [];
+  for (const r of rows.filter(hasPinnedTokens)) {
+    if (!(r.tokens > r.renderTokens)) {
+      twoStageBad.push({ r, what: "tokens", at: r.renderTokens, after: r.tokens });
+    } else if (!(r.nodes > r.renderNodes)) {
+      twoStageBad.push({ r, what: "nodes", at: r.renderNodes, after: r.nodes });
+    }
+  }
+  // A run narrowed with --profiles may legitimately contain no such cell, and
+  // refusing then would make `--profiles=prose` impossible to run. But a FULL
+  // run with none would mean the corpus had stopped exercising deferred work
+  // anywhere, which is a fact about the corpus worth refusing on.
+  if (profiles.length === PROFILES.length && !rows.some(hasPinnedTokens)) {
+    twoStageBad.push({
+      r: { profile: "(the whole corpus)", kb: 0 },
+      what: "cells pinned as containing Prism tokens",
+      at: 0,
+      after: 0,
+    });
+  }
+
+  if (nonlinear.length || twoStageBad.length) {
+    say("");
+    for (const n of nonlinear) {
+      say(
+        `REJECTED: ${n.profile} ${n.what} went ${n.was.toFixed(0)}ms -> ${n.now.toFixed(0)}ms ` +
+          `for a doubling of size, a ratio of ${n.ratio.toFixed(2)} against ${QUADRATIC_RATIO.toFixed(2)}`,
+      );
+    }
+    for (const t of twoStageBad) {
+      say(
+        `REJECTED: ${t.r.profile}@${t.r.kb.toFixed(0)}KB had ${t.at} ${t.what} when the render ` +
+          `resolved and ${t.after} once it settled, so nothing was deferred`,
+      );
+    }
+    say("");
+    say("  These are properties of the RESULT rather than of the corpus or the machine,");
+    say("  so a spread re-run will not clear them. A nonlinear ratio is the signature of");
+    say("  the two quadratics already found here; a collapsed two-stage measurement means");
+    say("  `settle` and `render` have stopped being different questions, and every settle");
+    say("  figure in bench/BASELINE.md was recorded when they were.");
+    if (nonlinear.length && retryNotes.length) {
+      say("  The nonlinear ratios above SURVIVED a re-measurement of both cells, so they are");
+      say("  a second independent observation rather than one contaminated run:");
+      for (const n of retryNotes) {
+        say(`    ${n.profile} ${n.what}  ${n.first.toFixed(2)} -> ${n.second.toFixed(2)}`);
+      }
+    }
+    return finish(3);
+  }
+
+  // THE SUSPICIOUS BAND IS REPORTED LOUDLY ON A PASSING RUN. A ratio between
+  // the two bounds is the shape of a real superlinearity that is not yet
+  // quadratic - n^1.6 reads about 3.03 - and it is exactly what a single bound
+  // at either 3.0 or 3.4 gets wrong: 3.0 refuses on it (and on marked's real
+  // n^1.41, every run, forever) while 3.4 says nothing at all. Neither is
+  // right, because the correct response to this band is neither "stop" nor
+  // "fine": it is "this is still true, and it was still true when re-measured".
+  const banded = observations.filter(
+    (o) => o.ratio > SUSPICIOUS_RATIO && o.ratio <= QUADRATIC_RATIO,
+  );
+  if (banded.length) {
+    say("");
+    say(
+      `SUSPICIOUS but not refused - ${banded.length} ratio(s) between ${SUSPICIOUS_RATIO.toFixed(1)} ` +
+        `and ${QUADRATIC_RATIO.toFixed(2)}, each confirmed by a re-measurement:`,
+    );
+    for (const o of banded) {
+      say(
+        `  ${o.profile} ${o.what} at ${o.ratio.toFixed(2)} ` +
+          `(${o.was.toFixed(0)}ms -> ${o.now.toFixed(0)}ms)`,
+      );
+    }
+    say("  Superlinear, but below the ratio a genuine quadratic measured here (3.98).");
+    say("  `marked.parse` on `wide` lives here by design: marked's own lexer is n^1.41 on");
+    say("  wide tables. A NEW entry in this list is a real finding and should be diagnosed.");
+  }
+  if (retryNotes.length) {
+    say("");
+    say("re-measured ratios (first observation -> second):");
+    for (const n of retryNotes) {
+      say(
+        `  ${n.profile} ${n.what}  ${n.first.toFixed(2)} -> ${n.second.toFixed(2)}` +
+          (n.first > SUSPICIOUS_RATIO && n.second <= SUSPICIOUS_RATIO ? "   OK_AFTER_RETRY" : ""),
+      );
+    }
+    say("  A cell that needs a retry on EVERY run is not noise and should be diagnosed;");
+    say("  that is the distinction a widened bound would have hidden.");
+  }
+
+  // A BOUND THAT IS SILENT UNTIL IT FIRES CANNOT SHOW DRIFT. The refusal above
+  // says nothing on a passing run, so a phase creeping toward the bound over
+  // several releases would arrive as an abrupt failure with no history behind
+  // it. Naming the closest approach every run makes the trend readable, and it
+  // earned its place on its first run by surfacing a patchViewerDOM ratio of
+  // 2.89 that four subsequent runs put at 1.99 - which is how the single
+  // contaminated run that motivated the retry above was found at all.
+  if (closest) {
+    say("");
+    say(
+      `closest approach to the nonlinear bound: ${closest.profile} ${closest.what} at ` +
+        `${closest.ratio.toFixed(2)} against ${QUADRATIC_RATIO.toFixed(2)} ` +
+        `(${(((QUADRATIC_RATIO - closest.ratio) / QUADRATIC_RATIO) * 100).toFixed(0)}% headroom)`,
+    );
+  }
   // A FASTER NUMBER FOR A SMALLER DOCUMENT IS NOT A FASTER RENDER.
   //
   // Every oracle in verify.js pins the corpus - the INPUT. Nothing pinned what

@@ -230,6 +230,8 @@ named:
 | the shared settle loop settling after a fixed few ticks instead of on the quiet window | SETTLE-LOOP CONTROL |
 | `applyTableBreakout()` gutted (372 ms -> 0 ms) | CLASS CENSUS, once the `wide` profile existed - see "The widening pass now has a corpus that exercises it". It was caught by **NOTHING** for the six profiles before it |
 | the viewport-floor invariant disabled and the window shrunk to 988px | CLASS CENSUS (`"wrap-anyway": 293` where 0 is pinned) |
+| a genuine quadratic injected into `applyTableBreakout` (phase 119 -> 468 ms) | NONLINEAR RATIO, **per phase**; the total settle ratio was 2.68 and passed |
+| the deferred highlight pass invoked synchronously instead of on idle | TWO-STAGE CENSUS - every other axis is silent, because the same work still happens |
 
 The cell-shortening one is why texture is pinned in characters as well as words:
 shortening `value-3` to `v` leaves the word count identical and passed a
@@ -704,6 +706,234 @@ independently, so a divergence produces a failing assertion rather than a false
 pass. It was validated by confirming it reproduces every pre-existing pin exactly.
 If `verify.js` ever imports those functions the property is gone and both files
 would agree on the same mistake, which is the round-8 defect shape.
+
+### A quadratic can hide inside a linear majority
+
+Every oracle above describes the corpus, the regime or the rendered *output*.
+None described the **shape of the timing result itself**, so the two defects
+this project was created by - a pass going quadratic, and a deferred pass
+quietly becoming synchronous - would both have produced a clean run with
+nothing but larger numbers, and larger numbers are what a benchmark is expected
+to produce when the machine is busy.
+
+Both reviewers proposed an invariant, both proposals rested on a constant, and
+in both cases the constant was the weak part. The interesting part is how each
+was replaced.
+
+**(1) The ratio bound, and the measurement that contradicted both framings.**
+The table's own legend already states the semantics - *~2.0 is linear, ~4.0 is
+quadratic* - so the first refusal threshold was the midpoint of two values the
+artifact itself names, not a new magic number. Only the upper bound refuses: a
+lower bound was proposed and rejected on the argument that an optimisation
+removing fixed per-render overhead legitimately pushes the ratio *down*.
+
+One reviewer objected that a bound which has never fired is a guess. That was
+tested rather than argued, by injecting a genuine quadratic into
+`applyTableBreakout` scaled by the document's own block count, so doubling the
+document quadruples the injected cost:
+
+| | 256 KB | 512 KB | ratio |
+|---|---:|---:|---:|
+| the `applyTableBreakout` phase | 119 ms | 468 ms | **3.95** |
+| total settle | - | - | 2.68 |
+
+**The phase is unambiguously quadratic and the total sailed under a 3.0 bound.**
+The rest of the pipeline is linear and dominates at the small end, so it dilutes
+the ratio. A total-only bound is far less sensitive than it looks. The bound is
+therefore applied **per recorded phase as well as to the total**, which catches
+the same injection at 3.95.
+
+The noise floor is the **existing** spread floor rather than a second constant.
+A phase costing less than that is one the harness already considers too small to
+draw conclusions from, and dividing two such figures gives a ratio dominated by
+scheduling jitter - prose spends ~0 ms in breakout, and 0.4/0.1 is not a
+quadratic.
+
+#### The legend's premise turned out to be false, and the bound was mis-derived
+
+The 3.0 bound assumed a phase is *either* linear *or* quadratic. Measuring both
+populations - which nobody had done, including the two reviewers who argued
+about where the bound belonged - showed that premise is wrong.
+
+**Legitimate behaviour, five clean runs of `wide`, per-phase medians:**
+
+| phase | ms at 1024 KB across 5 runs | ratio 512 -> 1024 |
+|---|---|---:|
+| `applyTableBreakout` | 2234 / 2193 / 2209 / 2251 / 2347 | 2.01 - 2.11 |
+| `sanitizeHtml` | 443 / 444 / 446 / 447 / 447 | 1.99 - 2.04 |
+| `marked.parse` | 286 / 284 / 287 / 289 / 296 | **2.61 - 2.85** |
+| `patchViewerDOM` | 161 / **230** / 163 / 162 / 163 | 1.99 - **2.89** |
+| `addTableMaximizeButtons` | 211 / 220 / 211 / 215 / 218 | 1.64 - 2.67 |
+
+Two separate facts fall out, and they have different causes:
+
+- **`marked.parse` is genuinely superlinear** - a stable 2.61-2.85 across five
+  runs and across *both* doublings, i.e. roughly **n^1.41**. That is not noise;
+  two independent doublings agreeing to within 2% is a property of marked's own
+  lexer on wide tables. It is invisible on every other profile.
+- **`patchViewerDOM`'s 230 ms is one contaminated run out of five.** Four runs
+  agree at 161-163 ms. Its within-run spread was 12.6%, i.e. *under* the spread
+  limit, so neither the spread bound nor the per-phase medians could see it -
+  both are computed inside a single run.
+
+**And what a real quadratic actually reads as**, re-measured across both
+doublings rather than one:
+
+| | 256 KB | 512 KB | 1024 KB | ratios |
+|---|---:|---:|---:|---|
+| injected quadratic in `applyTableBreakout` | 118 ms | 469 ms | 2779 ms | **3.98**, 5.93 |
+| total settle | 140 ms | 406 ms | 1678 ms | 2.89, 4.14 |
+
+This corrected two things previously believed here. First, *"4.0 is an asymptote
+a quadratic approaches from below, so a bound at 4.0 could never fire"* is
+**wrong**: once the quadratic term overtakes the linear one the ratio overshoots
+4.0 (5.93 on the second doubling). Second, the total is not blind to a quadratic
+*forever* - it reached 4.14 on the second doubling. The honest claim for the
+per-phase check is therefore narrower than first stated: **it catches a
+quadratic one doubling earlier**, not uniquely.
+
+So the two populations are:
+
+| | value |
+|---|---:|
+| highest **legitimate** phase ratio (5 runs x 12 phases) | 2.89 |
+| lowest ratio a **genuine quadratic** produced | 3.98 |
+
+3.0 sat **4% above real behaviour** and 25% below the thing it hunts.
+
+#### Two bounds, because one threshold cannot do both jobs
+
+The obvious repair - slide the bound to 3.44, the midpoint of the measured
+populations - was proposed to both reviewers and **rejected by both,
+independently, from opposite directions**. They agreed on the diagnosis and
+disagreed on the cure, which is what made the exchange worth having:
+
+- One argued that 3.44 is *pareto-dominated*: it catches nothing 3.0 does not,
+  while waving through a real-but-not-quadratic regression (n^1.6 reads ~3.03),
+  and it collapses per-phase structure that a global constant cannot express.
+- The other argued the same band from the other end: moving the *sole* bound to
+  3.44 deletes the 3.0-3.44 signal entirely, and that band is exactly where a
+  superlinear regression smaller than full quadratic first appears.
+
+**The question was a false dichotomy, and both numbers are right for different
+jobs.** The harness now carries two:
+
+| bound | value | derivation | effect |
+|---|---:|---|---|
+| `SUSPICIOUS_RATIO` | 3.0 | midpoint of the table legend's 2.0 / 4.0 | re-measure, then report loudly on a passing run |
+| `QUADRATIC_RATIO` | 3.44 | midpoint of the two **measured** populations (2.89, 3.98) | refuse |
+
+Each keeps its own derivation. Neither was chosen to make a specific
+observation pass or fail, and `marked.parse` at ~2.72 is now reported every run
+with 21% headroom instead of 5% - visible, characterised, and not a per-run
+alarm about behaviour that has already been diagnosed.
+
+**A rejected third option is recorded because it is the strongest of the ones
+not taken.** One reviewer proposed a per-phase bound of `min(3.0, base * 1.3)`
+derived from each phase's own measured baseline, which would catch a
+`sanitizeHtml` regression from 2.04 to 2.7 that no global bound can see. It was
+not taken for two reasons, one of them measured: `addTableMaximizeButtons`
+measures 2.19-2.67 legitimately on one doubling, so a bound at `base * 1.3`
+would sit about 12% above a phase whose own measured noise is +/-22% - a false
+refusal waiting to happen. And the other reviewer's objection is structural: a
+bound derived from the product's current performance drifts *with* the product,
+so a gradual regression that lands in the baseline becomes the new normal. It
+remains the honest answer if per-phase sensitivity is ever needed.
+
+#### Re-measure once before refusing
+
+Both reviewers chose this independently, over the alternatives (gate the refusal
+on the phase's share of settle; require two aggregations to agree), and for the
+same reason: **the measured failure mode is a single contaminated run, and every
+other proposal only attacks within-run variation.** A second observation is the
+only thing independent of it.
+
+On any ratio above `SUSPICIOUS_RATIO` the harness re-measures both cells of the
+pair and recomputes. Both the first and second ratios are reported, so a cell
+needing a retry on *every* run is visible rather than silently defended - which
+is precisely the distinction a widened bound destroys. A re-measurement that is
+itself over the spread limit **refuses**: a noisy retry can neither clear a
+suspicious ratio nor condemn one.
+
+It earned its place immediately. Proving the path (by lowering both bounds until
+real ratios crossed them) caught a live instance of the exact phenomenon it was
+built for:
+
+```
+re-measured ratios (first observation -> second):
+  wide the marked.parse phase    2.71 -> 2.69
+  wide the patchViewerDOM phase  2.92 -> 2.50
+```
+
+`patchViewerDOM` was observed at 2.92 - near the bound - and came back at 2.50
+on re-measurement, unprompted, in a run that was not looking for it.
+
+**The retry, the band report and the contaminated-retry refusal are all dead
+code on a passing run**, because the closest real approach is 2.72. A path that
+has never executed is not verified, so both were forced and proven: one
+scenario landing in the band (exit 0, band reported, first->second printed) and
+one crossing the refusal bound (exit 3, with the surviving re-measurement
+printed beside the refusal).
+
+**Per-phase ratios use per-phase medians, not the representative sample**, and
+that distinction was forced by measurement too. The printed table uses one
+coherent sample - the one whose *settle* is the median - so that two figures
+printed side by side cannot contradict each other (`settle < render` is
+arithmetically possible and physically meaningless). But a phase's value *in
+that sample* can sit well off that phase's own median: `addTableMaximizeButtons`
+diverges **11.4% and 12.9%** between the two aggregations, moving its ratio from
+2.042 to 2.305. The coherence argument that chose the representative sample does
+not apply to an invariant, which compares one phase against *itself* at another
+size, where robustness is the only property that matters.
+
+**(2) The two-stage invariant, and why neither reviewer's own proposal was
+taken.** `renderMarkdown()` resolves on readable content; Prism then runs the
+largest single pass in the corpus behind `requestIdleCallback`. `settle` is the
+headline number *because* of that gap. A change folding the deferred pass back
+into the render would make `settle` and `render` describe the same instant while
+every existing oracle stayed silent - the node counts, the classes and the
+corpus digest would all be unmoved, because the same work still happened, just
+earlier.
+
+Both reviewers proposed `settle > K * render`. Both, independently, withdrew it
+in favour of a **resolve-side census**: record node and token counts at the
+instant `renderMarkdown()` resolves, and require the settled counts to exceed
+them. The subject is not time, it is whether nodes appeared after the render
+resolved. No `K`, machine-independent, and it fails by name:
+
+```
+REJECTED: code@256KB had 43794 tokens when the render resolved and 43794 once
+it settled, so nothing was deferred
+```
+
+**The scope comes from the PIN, not from the measurement, and that removes the
+need for a vacuity guard.** Selecting "cells that produced tokens" and then
+checking those cells makes the selector and the subject the same quantity, so a
+run where the tokens vanished entirely would select nothing and pass - the
+defect shape this project already hit with a revert-id filter that matched
+nothing and printed ALL PROVEN. Selecting instead on `CLASS_CENSUS[...].token >
+0` makes the scope a hand-pinned fact about the corpus. A cell that lost its
+tokens is then caught by the class census; a cell that kept them but stopped
+deferring them is caught here. A narrowed `--profiles` run may legitimately have
+no cell in scope, but a *full* run with none is itself refused.
+
+**THE OBVIOUS REVERT FOR (2) IS A WRONG-GUARD, and it is recorded because the
+next person will reach for it.** `run.js` parses
+`requestIdleCallback(cb, { timeout: 1000 })` out of `renderer.js` to derive
+`QUIET_MS`, so any revert editing that call site aborts at the regime parse
+before the invariant is ever evaluated - proving nothing while looking like a
+proof. The faithful revert perturbs the **call** instead
+(`requestIdle(() => {` -> an immediate invocation), leaving the parsed text
+untouched: the scheduler is still declared, the callback simply runs
+synchronously. Both invariants were shown sensitive that way before either was
+trusted.
+
+| mutation | caught by |
+|---|---|
+| a genuine quadratic injected into `applyTableBreakout` | NONLINEAR RATIO, per phase at 3.98 - the **total** ratio was 2.89 and passed |
+| the deferred highlight pass invoked synchronously | TWO-STAGE CENSUS (`43794` tokens at resolve, `43794` at settle) |
+| a suspicious ratio confirmed by re-measurement | REFUSAL, with both observations printed |
+| a suspicious ratio cleared by re-measurement | `OK_AFTER_RETRY`, run passes and says so |
 
 ### The measurement regime was unpinned, so two runs could be incomparable and both say OK
 
