@@ -1805,5 +1805,123 @@ for (const [profile, want] of Object.entries(CORPUS_DIGEST)) {
   }
 }
 
+// ============================================================================
+// AXIS 11 - the product's size guard still predicts what the corpus costs
+// ============================================================================
+// The guard in file-helpers.js decides whether to render a document by
+// estimating its cost WITHOUT parsing it. That estimate was fitted against
+// this corpus (bench/BASELINE.md, "Byte count is the wrong trigger"), so this
+// corpus is the only thing that can tell whether it still holds.
+//
+// The unit counts are pinned rather than the predicted milliseconds: units are
+// a deterministic function of the corpus text and are identical on every
+// machine, while milliseconds are not. The measured-render comparison that
+// justified the model is a one-time result recorded in BASELINE.md - repeating
+// it here would make npm test a benchmark.
+{
+  const fh = require(path.join(__dirname, "..", "file-helpers.js"));
+
+  check(
+    "file-helpers still exports the size-guard estimator",
+    typeof fh.estimateRenderUnits === "function" &&
+      typeof fh.isLargeDocument === "function" &&
+      typeof fh.LARGE_DOC_BUDGET_MS === "number",
+    "the product's guard is gone or renamed; this axis and the guard's tuning are stale",
+  );
+
+  if (typeof fh.estimateRenderUnits === "function") {
+    // Pinned at a corpus-verified size. A change here means either the corpus
+    // or the cost model moved, and the two must be re-reconciled deliberately.
+    const PINNED = {
+      prose: { units: 1505, fencedLines: 0, pipes: 0 },
+      headings: { units: 6459, fencedLines: 0, pipes: 0 },
+      tables: { units: 21714, fencedLines: 0, pipes: 17675 },
+      lists: { units: 6761, fencedLines: 0, pipes: 0 },
+      code: { units: 4379.2, fencedLines: 9731, pipes: 0 },
+      dense: { units: 10808.4, fencedLines: 747, pipes: 6545 },
+      wide: { units: 24904, fencedLines: 0, pipes: 22561 },
+    };
+    const SIZE = 262144;
+    check(
+      "every corpus profile is pinned by this axis",
+      PROFILES.every((p) => PINNED[p]) && Object.keys(PINNED).length === PROFILES.length,
+      `pinned ${JSON.stringify(Object.keys(PINNED))} vs corpus ${JSON.stringify(PROFILES)}. ` +
+        "An unpinned profile is one the cost model is not checked against.",
+    );
+    for (const p of PROFILES) {
+      if (!PINNED[p]) continue;
+      const got = fh.estimateRenderUnits(generate(p, SIZE));
+      check(
+        `the cost model still scores ${p} as ${PINNED[p].units} units`,
+        Math.abs(got.units - PINNED[p].units) < 0.001 &&
+          got.fencedLines === PINNED[p].fencedLines &&
+          got.pipes === PINNED[p].pipes,
+        `got units=${got.units} fenced=${got.fencedLines} pipes=${got.pipes}, ` +
+          `expected ${JSON.stringify(PINNED[p])}. The guard's tuning in BASELINE.md ` +
+          "was derived from these numbers and no longer describes this code.",
+      );
+    }
+
+    // ORDERING IS THE POINT. A guard that ranks a table-heavy document below a
+    // prose one at the same byte count is the byte-count guard this replaced.
+    const at = (p) => fh.estimateRenderUnits(generate(p, SIZE)).units;
+    check(
+      "the model still ranks table-heavy documents above prose at equal bytes",
+      at("wide") > at("prose") * 10 && at("tables") > at("prose") * 10,
+      `wide=${at("wide")} tables=${at("tables")} prose=${at("prose")}. ` +
+        "Measured, wide costs 12.9x prose at equal size; a model that misses that is byte count.",
+    );
+    check(
+      "the model still ranks fenced code far below its raw line count",
+      at("code") < at("headings"),
+      `code=${at("code")} headings=${at("headings")}. code has ~2x the LINES of headings and ` +
+        "renders in ~half the time; counting lines scored 26.9x and lost to bytes.",
+    );
+
+    // Pipes inside a fence are code, not table cells.
+    const fenced = fh.estimateRenderUnits("```\n|||||||||||\n```\n");
+    check(
+      "pipes inside a fenced block are not counted as table cells",
+      fenced.pipes === 0,
+      `counted ${fenced.pipes} pipes inside a code fence, which would make any document ` +
+        "containing a table-shaped code sample look expensive",
+    );
+
+    // A guard that throws is worse than no guard: it blocks the open path.
+    for (const [label, value] of [
+      ["empty string", ""],
+      ["null", null],
+      ["undefined", undefined],
+      ["a number", 42],
+      ["no trailing newline", "# hi"],
+      ["an unclosed fence", "```\na|b\nc|d"],
+    ]) {
+      let ok = false;
+      try {
+        const r = fh.isLargeDocument(value);
+        ok = typeof r.large === "boolean" && Number.isFinite(r.estimatedMs) && r.estimatedMs >= 0;
+      } catch (e) {
+        ok = false;
+      }
+      check(
+        `the guard survives ${label} without throwing`,
+        ok,
+        "this runs on the file-open path; throwing here makes a document unopenable",
+      );
+    }
+
+    // The budget must not have been quietly retuned away from what the
+    // measured trip points in BASELINE.md describe.
+    const perMB = fh.estimateRenderMs(generate("wide", 1048576));
+    const tripMB = fh.LARGE_DOC_BUDGET_MS / perMB;
+    check(
+      "the 10s budget still trips wide at about 2 MB, as BASELINE.md documents",
+      tripMB > 1.8 && tripMB < 2.5,
+      `wide trips at ${tripMB.toFixed(2)} MB. BASELINE.md tells the reader 2.1 MB; ` +
+        "either the budget, the model, or the documentation moved without the others.",
+    );
+  }
+}
+
 console.log(`\n=== ${passed}/${passed + failed} passed ===`);
 process.exit(failed ? 1 : 0);
