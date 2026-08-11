@@ -1126,14 +1126,24 @@ app.whenReady().then(async () => {
       // "is the marker present" - proves only that installation happened; it
       // would still pass if a later edit broke the timing side effect itself,
       // which is the same class of silent failure one level up. So parse a
-      // trivial document and require the counter to actually move. The phases
-      // object is reset before every measurement, so this costs nothing.
+      // trivial document and require the counter to actually be written.
+      //
+      // IT TESTS THAT THE COUNTER EXISTS, NOT THAT TIME ELAPSED. Requiring a
+      // POSITIVE delta looks equivalent and is not: parsing the word 'probe'
+      // takes about 50us once marked is warm, so on a coarse clock the honest
+      // answer is 0 and the guard would fail on working code. Measured in the
+      // verify.js harness at 1ms resolution: 452 of 500 healthy runs reported a
+      // zero delta. A timing guard whose verdict depends on the clock's
+      // resolution is a flaky test, and a flaky guard gets disabled. Writing the
+      // key is what the wrap is for; how long the parse took is not the claim.
+      // The key is deleted first so the pre-state is known rather than assumed.
       if (window.marked && typeof window.marked.parse === 'function' && window.marked.parse.__benchWrapped) {
         const had = Object.prototype.hasOwnProperty.call(window.__bench.phases, 'marked.parse');
-        const before = window.__bench.phases['marked.parse'] || 0;
+        const before = window.__bench.phases['marked.parse'];
+        delete window.__bench.phases['marked.parse'];
         try {
           window.marked.parse('probe');
-          if (!(window.__bench.phases['marked.parse'] > before)) {
+          if (!Object.prototype.hasOwnProperty.call(window.__bench.phases, 'marked.parse')) {
             window.__benchUnwrappable.push('marked.parse RECORDS NOTHING WHEN CALLED');
           }
         } catch (e) {

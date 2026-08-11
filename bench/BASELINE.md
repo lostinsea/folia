@@ -1608,11 +1608,28 @@ answers first:
   `<form>` surviving, which is true of default DOMPurify and false here -
   `renderer.js` sets `FORBID_TAGS: ['form']` for exactly this reason (SEC-11).
 
-One construct does survive sanitisation: `<iframe src="https://...">`. It is
-pre-existing, not upgrade-related, and it is contained by the layer below -
-`index.html`'s CSP is `default-src 'none'` with no `frame-src`, so Chromium
-refuses the load, which `test-render-security.js` already asserts (SEC-09). A
-dedicated probe also confirmed DOMPurify strips `srcdoc` even though it is in
+One construct survives DOMPurify itself: `<iframe src="https://...">`. Two
+corrections matter here, and the second was found by review after I had already
+made the same mistake twice above.
+
+- It is **pre-existing**, not upgrade-related: marked 9 emitted it identically.
+- **DOMPurify plus `SANITIZE_CONFIG` is still not the app's sanitiser.**
+  `renderer.js` installs an `afterSanitizeAttributes` hook that forces
+  `sandbox="allow-scripts"` onto every iframe and **removes `src` outright**,
+  precisely because the only frame this app intends to emit is the `@@@html`
+  block, which is built from `srcdoc` (SEC-11). `test-render-security.js`
+  asserts the resulting `src === null`. So the frame never loads anything, and
+  the CSP (`default-src 'none'` with no `frame-src`) and main.js's subframe
+  navigation denial sit underneath that as two further layers.
+
+That is three times in one investigation that testing a subset of the pipeline
+produced a finding the product does not have: stock DOMPurify instead of the
+app's config, then the config without the app's hooks. **The sanitiser is
+`sanitizeHtml()`, not `DOMPurify.sanitize()`, and a probe that reaches past it
+is measuring something else.** Recorded because the mistake was not obvious
+either time.
+
+A dedicated probe did confirm DOMPurify strips `srcdoc` even though it is in
 `ADD_ATTR`, along with `javascript:`, `data:`, `file:` and `onload` on frames.
 
 ### What it did to the end-to-end numbers
@@ -1695,4 +1712,27 @@ defect rather than a tidy-up:
    silent-divergence failure the `setOptions` axis exists to prevent. It found a
    defect on its first run: the end marker was placed one line too early, so the
    block being tested was not the whole block being shipped.
+6. **The post-condition must not depend on the clock's resolution.** Requiring a
+   POSITIVE time delta looked equivalent to requiring the counter to be written,
+   and was not. Parsing the word `probe` costs about 50us once marked is warm, so
+   at 1 ms resolution the honest answer is zero - and a guard that reads zero as
+   "records nothing" fails on working code. Measured across 500 healthy runs:
+
+   | clock | require delta > 0 | require counter written |
+   |---|---:|---:|
+   | `Date.now` (1 ms) | **453 / 500 false failures** | 0 / 500 |
+   | `hrtime` | 0 / 200 | 0 / 200 |
+   | frozen (never advances) | **200 / 200 false failures** | 0 / 200 |
+
+   The guard now asks whether the wrapper WROTE the counter, which is its actual
+   claim; how long the parse took is not. A frozen clock is now a permanent check
+   in `verify.js` - deterministic where a stress run is not, and proven to
+   discriminate: the old logic fails it 200/200, the new logic passes, and a wrap
+   with its timing statement removed is still caught under both clocks.
+
+   This was the round's one genuine disagreement between the two reviewers. One
+   reasoned from the code that it could not bite today, because the first parse
+   of a cold marked takes about 10 ms; the other ran it 500 times and found it
+   biting 452 times. **The measurement was right and the reasoning was wrong**,
+   which is the whole basis on which this harness was built.
 

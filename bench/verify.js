@@ -1625,8 +1625,16 @@ for (const [profile, want] of Object.entries(CORPUS_DIGEST)) {
       };
 
       // Run the extracted wrap against a window holding the real module.
+      //
+      // performance.now() HERE MUST BE HIGH-RESOLUTION, like the renderer's.
+      // A Date.now() stand-in quantises to 1ms, and parsing a short string once
+      // marked is warm takes about 50us - so the sandbox would report 0ms for
+      // work that really happened and would misrepresent the environment the
+      // shim actually runs in. Measured: 452 of 500 healthy runs saw a zero
+      // delta under Date.now(), none under hrtime.
+      const hrMs = () => Number(process.hrtime.bigint()) / 1e6;
       const runShim = (win) => {
-        const ctx = { window: win, performance: { now: () => Date.now() }, console };
+        const ctx = { window: win, performance: { now: hrMs }, console };
         ctx.globalThis = ctx;
         vm.createContext(ctx);
         vm.runInContext(`(function(){\n${shimSrc}\n})()`, ctx);
@@ -1671,7 +1679,27 @@ for (const [profile, want] of Object.entries(CORPUS_DIGEST)) {
       check("the wrap does not change what marked renders",
         html.includes("<table"), html.slice(0, 80));
 
-      // 3. EVERY ALIAS OF parse IS WRAPPED. marked exports the same callable
+      // 3. THE POST-CONDITION MUST NOT DEPEND ON CLOCK RESOLUTION. This is the
+      //    regression test for a real flake: when the guard required a POSITIVE
+      //    time delta, 452 of 500 healthy runs failed at 1ms resolution, because
+      //    parsing a short string once marked is warm takes about 50us. A clock
+      //    that never advances is the worst case, and is deterministic where a
+      //    stress run is not - so freeze it and require the healthy wrap to pass
+      //    anyway. The wrap's claim is that it WRITES the counter; how long the
+      //    parse took is not the claim.
+      const frozen = freshWindow();
+      const fctx = { window: frozen, performance: { now: () => 0 }, console };
+      fctx.globalThis = fctx;
+      vm.createContext(fctx);
+      vm.runInContext(`(function(){\n${shimSrc}\n})()`, fctx);
+      check(
+        "the wrap's post-condition survives a clock that never advances",
+        frozen.__benchUnwrappable.length === 0,
+        `${frozen.__benchUnwrappable.join(", ")} - the guard is measuring elapsed time rather ` +
+          "than whether the counter was written, so it will fail intermittently on fast machines",
+      );
+
+      // 4. EVERY ALIAS OF parse IS WRAPPED. marked exports the same callable
       //    under more than one name (marked.marked === marked.parse), and a
       //    forward-by-name shim leaves the alias as an untimed second door.
       const aliases = Object.getOwnPropertyNames(probe).filter((k) => probe[k] === probe.parse);
@@ -1692,7 +1720,7 @@ for (const [profile, want] of Object.entries(CORPUS_DIGEST)) {
         );
       }
 
-      // 4. THE GUARD IS SENSITIVE. A check that cannot fail is a defect equal to
+      // 5. THE GUARD IS SENSITIVE. A check that cannot fail is a defect equal to
       //    a product bug, so break the thing it watches and require it to notice.
       //    The mutation removes ONLY the timing side effect and leaves the
       //    __benchWrapped marker, which is precisely what a structural check
@@ -1709,7 +1737,7 @@ for (const [profile, want] of Object.entries(CORPUS_DIGEST)) {
       );
       if (brokenSrc !== shimSrc) {
         const wb = freshWindow();
-        const ctx = { window: wb, performance: { now: () => Date.now() }, console };
+        const ctx = { window: wb, performance: { now: hrMs }, console };
         ctx.globalThis = ctx;
         vm.createContext(ctx);
         vm.runInContext(`(function(){\n${brokenSrc}\n})()`, ctx);
