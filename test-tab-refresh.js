@@ -1793,6 +1793,34 @@ async function run(win) {
   // A single pending slot cross-wires them: the first reply adopts the SECOND
   // request's bytes, so the store claims a document that is not yet on disk.
   // Ctrl+S twice, or Save then Ctrl+S, reaches this with no exotic timing.
+  //
+  // THE OUTCOME ON DISK IS NOT A SOUND ORACLE FOR THE SERIALISATION, and R102
+  // was vacuous because of it. Without queueSave the two writes are concurrent
+  // open-truncate-write sequences and WHICH ONE LANDS LAST IS DECIDED BY THE
+  // OS - so "the last write won" fails only when the scheduler happens to
+  // cooperate, and a revert that removes the fix reports VACUOUS the rest of
+  // the time. Same disease as R57 riding on parity: a real property measured
+  // through something that is not deterministic.
+  //
+  // What queueSave actually guarantees is deterministic and is a property of
+  // the code rather than of the scheduler: two writes to ONE PATH NEVER
+  // OVERLAP. So the write intervals are recorded directly. main.js resolves
+  // `fs.writeFile` at call time and shares this process's module cache, so
+  // wrapping it here observes the real writes the real handler issues.
+  const writeSpans = [];
+  const realWriteFile = fs.writeFile;
+  fs.writeFile = function (target, ...rest) {
+    const span = { path: String(target), start: Date.now(), end: null };
+    writeSpans.push(span);
+    const cb = rest[rest.length - 1];
+    if (typeof cb === "function") {
+      rest[rest.length - 1] = function (...args) {
+        span.end = Date.now();
+        return cb.apply(this, args);
+      };
+    }
+    return realWriteFile.call(fs, target, ...rest);
+  };
   const twoOut = await exec(`
     (async () => {
       const realConfirm = window.confirm;
@@ -1825,7 +1853,28 @@ async function run(win) {
     })()
   `);
   const two = JSON.parse(twoOut);
+  fs.writeFile = realWriteFile;
   const diskTwo = fs.readFileSync(two.path, "utf8");
+  // Overlap, not outcome. Sorted by start, a serialised pair has
+  // next.start >= prev.end; a concurrent pair has both writes open at once.
+  // The >= 2 guard is what stops this reading as "no overlaps found" when the
+  // scenario failed to dispatch two writes at all - an empty set trivially
+  // satisfies the property it is supposed to be testing.
+  const sameFileSpans = writeSpans
+    .filter((s) => s.path === String(two.path))
+    .sort((a, b) => a.start - b.start);
+  const overlaps = [];
+  for (let i = 1; i < sameFileSpans.length; i += 1) {
+    const prev = sameFileSpans[i - 1];
+    const next = sameFileSpans[i];
+    if (prev.end === null || next.start < prev.end) overlaps.push([prev, next]);
+  }
+  check(
+    "two saves to one path are serialised: their writes never overlap",
+    sameFileSpans.length >= 2 && overlaps.length === 0,
+    `${sameFileSpans.length} write(s) to the file, ${overlaps.length} overlapping: ` +
+      JSON.stringify(sameFileSpans.map((s) => [s.start % 100000, s.end === null ? null : s.end % 100000])),
+  );
   check(
     "the two-writes-in-flight case really was set up: the last write won on disk",
     two.editMode === true && diskTwo.includes("S9D_SECOND"),

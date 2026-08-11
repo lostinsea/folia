@@ -21,6 +21,8 @@
 "use strict";
 const fs = require("fs");
 const path = require("path");
+const vm = require("vm");
+const crypto = require("crypto");
 const {
   PROFILES,
   RENDER_OPTIONS,
@@ -397,7 +399,16 @@ for (const [profile, want] of Object.entries(ELEMENTS)) {
 function countAttributes(html) {
   const tally = {};
   const unreadable = [];
-  const permissiveRe = /<[a-zA-Z][a-zA-Z0-9-]*(?:\s[^>]*)?\/?>/g;
+  // THE PERMISSIVE SCAN SKIPS OVER QUOTED REGIONS. A naive `[^>]*` stops at the
+  // first `>` even when it is inside a legal attribute value, so `class="a>b"`
+  // would be truncated to `<span class="a>` - which the strict parser then
+  // rejects, and the two would disagree about a tag that is not malformed at
+  // all. That is a false positive rather than a hole (the axis fails loud
+  // instead of miscounting), but a guard that cries wolf on legal input is one
+  // a future reader widens a tolerance to silence. The strict parser and the
+  // tally regex below both already tolerate `>` inside a value, so this is the
+  // only place the two could have diverged.
+  const permissiveRe = /<[a-zA-Z][a-zA-Z0-9-]*(?:\s+(?:"[^"]*"|'[^']*'|[^>"'])*)?\s*\/?>/g;
   const strictRe = /^<[a-zA-Z][a-zA-Z0-9-]*((?:\s+[a-zA-Z-]+(?:="[^"]*")?)*)\s*\/?>$/;
   let seen;
   while ((seen = permissiveRe.exec(html))) {
@@ -436,6 +447,20 @@ const ATTRIBUTES = {
     "the attribute parser reports a value it cannot read rather than skipping it",
     bad.unreadable.length === 1 && good.unreadable.length === 0,
     `single-quoted ${JSON.stringify(bad.unreadable)}, double-quoted ${JSON.stringify(good.unreadable)}`,
+  );
+
+  // THE TWO PARSERS MUST AGREE ON LEGAL INPUT, not merely disagree on illegal
+  // input. `>` inside a double-quoted value is valid HTML that the strict
+  // parser accepts, so if the permissive scan truncated there the pair would
+  // manufacture an "unreadable" tag out of a well-formed one - the guard
+  // failing on the very documents it is meant to pass. Asserting the VALUE is
+  // tallied whole, not just that nothing was reported, is what makes this a
+  // check on the parse rather than on the complaint.
+  const angle = countAttributes(`<span class="a>b">y</span>`);
+  check(
+    "a legal attribute value containing > is read whole by both parsers",
+    angle.unreadable.length === 0 && angle.tally['class="a>b"'] === 1,
+    `unreadable ${JSON.stringify(angle.unreadable)}, tally ${JSON.stringify(angle.tally)}`,
   );
 }
 
@@ -858,6 +883,331 @@ for (const [profile, want] of Object.entries(TEXT_SHAPE)) {
       `the ${profile} profile's text wraps where it is pinned to at ${size / 1024}KB`,
       runProblems.length === 0,
       runProblems.join("; "),
+    );
+  }
+}
+
+// AXIS 7: SYNTAX HIGHLIGHTING. Also NOT regenerable.
+//
+// EVERY AXIS ABOVE MEASURES marked's OUTPUT OR ITS INPUT. NOTHING MEASURES
+// PRISM - and Prism is 1160ms of the code profile's 2156ms of post-resolve time
+// at 1MB, the single largest deferred phase in the whole corpus. Six axes
+// therefore described everything about the benchmark except its most expensive
+// pass.
+//
+// This was found by the round-6 review, and it was MEASURED end to end rather
+// than argued: uppercasing the two keywords in BUILDERS.code (`const` -> `CONST`,
+// `if` -> `IF`) passes 166/166 WITH A REGENERATED MANIFEST. Every axis is
+// silent for a reason that is individually correct - SHAPE, INTERNALS, ELEMENTS
+// and ATTRIBUTES all see marked's `<pre><code class="language-js">` wrapper and
+// never look inside it; TEXTURE sees identical word and character counts
+// (`const`/`CONST` are both 5 characters); axis 6 groups A-Z with a-z, so the
+// histogram is identical to the byte and so are the run lengths.
+//
+// What actually moves is measured here, in this file's own VM, on the same
+// bundle the app loads:
+//
+//     const value0 = ... / if (...)     18 spans   keyword 2
+//     CONST value0 = ... / IF (...)     19 spans   keyword 0, constant 2
+//     snect value0 = ... / fi (...)     18 spans   keyword 0, function 3
+//
+// THAT THIRD ROW IS WHY THIS AXIS TALLIES BY TOKEN TYPE RATHER THAN COUNTING
+// SPANS. Replacing the keywords with same-length non-keywords leaves the TOTAL
+// span count identical at 18 while emptying the keyword bucket entirely - so a
+// total-span oracle would pass it, and so would splitting axis 6's `alpha`
+// class into upper and lower. Splitting `alpha` closes the case-swap instance;
+// only tallying what Prism actually emitted closes the class. That distinction
+// is the whole point: this suite has now been broken five times by a whitelist
+// that covered the member in front of it and not the class behind it.
+//
+// EXHAUSTIVE IN BOTH DIRECTIONS, like axes 3, 5 and 6. A token type Prism emits
+// that nothing pins is a failure; a pinned type that stops occurring is a
+// failure.
+//
+// A MISSING GRAMMAR IS A FAILURE, NOT A SKIP. This is the countAttributes
+// lesson: if the bundle failed to load, or a fence carried a language Prism
+// does not know, silently highlighting nothing would leave every tally empty
+// and read as a passing assertion about a highlighter that never ran. So the
+// number of blocks HIGHLIGHTED must equal the number of fenced blocks FOUND,
+// both are pinned, and the load itself carries a positive control below.
+//
+// The pins are size-independent here, unlike axes 4 and 6, because each code
+// block has the same token structure whatever iteration index is written into
+// it. They are still pinned PER SIZE rather than once: two identical numbers
+// are an assertion that they are identical, and a mutation that made the two
+// sizes drift apart would be caught by exactly that.
+//
+// GENERATED from the corpus and spliced in, not transcribed.
+const HIGHLIGHT = {
+  prose: {},
+  headings: {},
+  tables: {},
+  lists: {},
+  code: {
+    65536: { blocks: 626, spans: { function: 2, keyword: 2, number: 1, operator: 1, punctuation: 11, string: 1 } },
+    1048576: { blocks: 9604, spans: { function: 2, keyword: 2, number: 1, operator: 1, punctuation: 11, string: 1 } },
+  },
+  dense: {
+    65536: { blocks: 48, spans: { function: 0.2857, keyword: 0.2857, number: 0.1429, operator: 0.1429, punctuation: 1.5714, string: 0.1429 } },
+    1048576: { blocks: 745, spans: { function: 0.2857, keyword: 0.2857, number: 0.1429, operator: 0.1429, punctuation: 1.5714, string: 0.1429 } },
+  },
+};
+const HIGHLIGHT_TOLERANCE = 0.005;
+
+// The bundle is a browser script, so it is given a window that is its own
+// global and nothing else. It is deliberately the SAME FILE index.html loads;
+// a second copy of Prism would make this axis describe a highlighter the
+// application does not run.
+const prismSandbox = { console };
+prismSandbox.window = prismSandbox;
+prismSandbox.self = prismSandbox;
+vm.createContext(prismSandbox);
+vm.runInContext(
+  fs.readFileSync(path.join(__dirname, "..", "libs", "prismjs", "prism-bundle.js"), "utf8"),
+  prismSandbox,
+);
+const Prism = prismSandbox.Prism;
+
+function tallySpans(code, lang, grammar) {
+  const html = Prism.highlight(code, grammar, lang);
+  const tally = {};
+  for (const m of html.match(/<span class="token [^"]*"/g) || []) {
+    const type = m.match(/token ([a-z-]+)/)[1];
+    tally[type] = (tally[type] || 0) + 1;
+  }
+  return tally;
+}
+
+// POSITIVE CONTROL. "No token types found" is also what a Prism that failed to
+// load, or one loaded without its JavaScript grammar, reports - and it reports
+// it as silence, which every assertion below would read as agreement. So before
+// anything is pinned, the highlighter must be shown to DISCRIMINATE: a keyword
+// must be reported as a keyword, and a non-keyword of the same length must not.
+const controlOk = (() => {
+  if (!Prism || !Prism.languages || !Prism.languages.js) return "the js grammar did not load";
+  const kw = tallySpans("const x = 1;", "js", Prism.languages.js);
+  const no = tallySpans("snect x = 1;", "js", Prism.languages.js);
+  if (kw.keyword !== 1) return `a keyword was reported ${kw.keyword} time(s), expected 1`;
+  if (no.keyword) return `a non-keyword was reported as a keyword ${no.keyword} time(s)`;
+  return null;
+})();
+check(
+  "the vendored Prism bundle loads and tells a keyword from a non-keyword",
+  controlOk === null,
+  controlOk || `${Object.keys((Prism && Prism.languages) || {}).length} grammars loaded`,
+);
+
+for (const [profile, want] of Object.entries(HIGHLIGHT)) {
+  for (const size of REFERENCE_SIZES) {
+    const toks = lexTokens(generate(profile, size));
+    const n = toks.length;
+    const pin = want[size];
+    const problems = [];
+
+    const tally = {};
+    let blocks = 0;
+    let highlighted = 0;
+    for (const t of toks) {
+      if (t.type !== "code") continue;
+      blocks++;
+      const lang = String(t.lang || "").trim();
+      const grammar = Prism.languages[lang];
+      if (!grammar) {
+        if (problems.length < 3) problems.push(`no Prism grammar for the language ${JSON.stringify(lang)}`);
+        continue;
+      }
+      highlighted++;
+      const c = tallySpans(String(t.text || ""), lang, grammar);
+      for (const k of Object.keys(c)) tally[k] = (tally[k] || 0) + c[k];
+    }
+
+    // A profile pinned as carrying no code that starts carrying some is the
+    // same omission-shaped failure as an unpinned element, so the empty object
+    // is an assertion rather than an absence of one.
+    if (!pin) {
+      check(
+        `the ${profile} profile contains no syntax-highlighted code at ${size / 1024}KB`,
+        blocks === 0,
+        `${blocks} fenced code block(s) appeared in a profile pinned as having none`,
+      );
+      continue;
+    }
+
+    if (blocks !== pin.blocks) problems.push(`${blocks} fenced code blocks, pinned at ${pin.blocks}`);
+    if (highlighted !== blocks) problems.push(`${blocks} fenced blocks but only ${highlighted} were highlighted`);
+
+    for (const type of Object.keys(tally).sort()) {
+      const per = tally[type] / n;
+      if (!(type in pin.spans)) {
+        problems.push(`the ${JSON.stringify(type)} token is not pinned but occurs ${per.toFixed(4)} per token`);
+        continue;
+      }
+      const expected = pin.spans[type];
+      if (Math.abs(per - expected) / Math.max(expected, 1e-9) > HIGHLIGHT_TOLERANCE) {
+        problems.push(`the ${JSON.stringify(type)} token occurs ${per.toFixed(4)} per token, pinned at ${expected}`);
+      }
+    }
+    for (const type of Object.keys(pin.spans)) {
+      if (!(type in tally)) problems.push(`the ${JSON.stringify(type)} token is pinned but no longer occurs`);
+    }
+
+    check(
+      `the ${profile} profile highlights into the pinned token mix at ${size / 1024}KB`,
+      problems.length === 0,
+      problems.join("; "),
+    );
+  }
+}
+// AXIS 8: BLOCK IDENTITY. Also NOT regenerable - and DIFFERENT IN KIND from
+// everything above it. Read this before adding a ninth statistic.
+//
+// Axes 1-7 are all AGGREGATES: proportions, per-token means, histograms,
+// tallies. An aggregate necessarily throws information away, and every review
+// round so far has found a different thing that was thrown away:
+//
+//   round 5  text content inside a pinned extent      -> axis 6
+//   round 6  character IDENTITY inside a pinned count -> axis 7 (Prism)
+//   round 6  the ARRANGEMENT of already-pinned content within a token
+//
+// That last one was measured end to end by the second reviewer and is the
+// reason this axis exists. Swapping the tables builder's Description and
+// Default columns - the same characters, the same words, the same run lengths,
+// the same histogram, in a different order - passed 180/180 WITH A REGENERATED
+// MANIFEST. What it changes is the per-column maximum, [7,7,59,7] -> [7,7,7,59],
+// which flips which column markShortColumns() marks nowrap for every table in
+// the corpus: a direct change to the layout pass this benchmark exists to
+// measure.
+//
+// A CORRESPONDING EIGHTH STATISTIC WOULD HAVE CLOSED THAT INSTANCE AND INVITED
+// A NINTH ROUND. Two independent reviewers found two different surviving
+// breakers in the same round; the honest reading is that the supply of
+// discarded dimensions is not close to exhausted, and that chasing them one at
+// a time is a losing game.
+//
+// So this axis is not another statistic. It pins THE BLOCKS THEMSELVES, by
+// hash, and therefore discards nothing about the blocks it covers. Every
+// breaker any reviewer has produced across six rounds - word fusion, template
+// literals, keyword case, non-keyword substitution, column reordering - is a
+// change to a BUILDER, so it changes every block that builder emits, so it
+// changes these hashes.
+//
+// THE STATISTICAL AXES ARE NOT MADE REDUNDANT BY THIS, and must not be deleted
+// as though they were. They are complementary in both directions: they cover
+// EVERY block weakly where this covers nine exactly, so a mutation touching
+// only unsampled blocks is caught only by them; and their failures NAME THE
+// DIMENSION that moved ("the keyword token is pinned but no longer occurs"),
+// which is what tells a reader re-deriving the pins what actually changed. A
+// hash mismatch alone says only "different", which is why the failure below
+// prints the block.
+//
+// THREE SAMPLES PER CELL WOULD NOT HAVE BEEN ENOUGH, AND THAT WAS MEASURED
+// RATHER THAN GUESSED. The first version sampled the first, middle and last
+// block. Against the column-reordering breaker the `tables` profile failed
+// correctly - but `dense` PASSED, because `dense` cycles seven builders and
+// none of its three sampled blocks happened to be the table. The sample now
+// covers indices 0-6, which is one full cycle and therefore every builder in
+// every profile, plus the middle and last block so that a mutation guarded on
+// the iteration index (`if (i > 100)`) still has nowhere to hide.
+//
+// EVENLY SPREAD SAMPLING WOULD HAVE BEEN WORSE THAN THE NAIVE VERSION, which is
+// why the indices are consecutive. Nine evenly spread indices over dense's 336
+// tokens land on 0, 42, 84 ... and 42 is a multiple of 7, so every single
+// sample would have been the SAME builder - an axis that looks like it covers
+// nine blocks while covering one, aliased against the very cycle it is meant to
+// sample. Consecutive indices cannot alias with any cycle length.
+//
+// GENERATED from the corpus and spliced in, not transcribed.
+const BLOCK_IDENTITY = {
+  prose: {
+    65536: { tokens: 191, blocks: ["aaa15cda4acb2ad5", "a8178204ebce6177", "0f9b4ff3cb442a19", "e6ad3a3b0faaf97e", "b24dcfcd5f221a53", "c8bc6dca5bde7e27", "5f03d98b10f1d37a", "4847cf77acc1c8e0", "beaf54b40e3df472"] },
+    1048576: { tokens: 2994, blocks: ["aaa15cda4acb2ad5", "a8178204ebce6177", "0f9b4ff3cb442a19", "e6ad3a3b0faaf97e", "b24dcfcd5f221a53", "c8bc6dca5bde7e27", "5f03d98b10f1d37a", "3ff59c0f622d2392", "932d0d9c30faa3fb"] },
+  },
+  headings: {
+    65536: { tokens: 818, blocks: ["229aa4be4eb82fbd", "90873696ee6ec886", "b649b1f9f596a493", "95fbb8c473cfe2fc", "e4a1effec2ba81d0", "4bf55a76cd514182", "e9d7ab31167fbb6c", "774f33f03e44fb70", "9ac16db4f08f7977"] },
+    1048576: { tokens: 12852, blocks: ["229aa4be4eb82fbd", "90873696ee6ec886", "b649b1f9f596a493", "95fbb8c473cfe2fc", "e4a1effec2ba81d0", "4bf55a76cd514182", "e9d7ab31167fbb6c", "555521b7e614b43f", "5a7613a16c049e51"] },
+  },
+  tables: {
+    65536: { tokens: 128, blocks: ["977a566e13ea7404", "e5f3604ca19664b3", "61e563a445416668", "d3778c70efe821e9", "e57271b91a35eb77", "c0c2c5f2a40eeb12", "4739b5474cd02379", "5d6cb5ca695a532a", "e69a8de2714807c4"] },
+    1048576: { tokens: 1991, blocks: ["977a566e13ea7404", "e5f3604ca19664b3", "61e563a445416668", "d3778c70efe821e9", "e57271b91a35eb77", "c0c2c5f2a40eeb12", "4739b5474cd02379", "11aa31cdaff62cca", "ab09ad5cc18e077f"] },
+  },
+  lists: {
+    65536: { tokens: 484, blocks: ["cd1b8e414d33ba67", "c239197d414559ba", "12cd1312aecff681", "5a0af5fa06939bfc", "89fed31686bf421c", "0b75a66c09b2d327", "42c8a259b66d30ce", "be6cd8cd7e605767", "911d80c9ea31fd99"] },
+    1048576: { tokens: 7710, blocks: ["cd1b8e414d33ba67", "c239197d414559ba", "12cd1312aecff681", "5a0af5fa06939bfc", "89fed31686bf421c", "0b75a66c09b2d327", "42c8a259b66d30ce", "5fd241103084ba73", "2b484d404c0b2cf1"] },
+  },
+  code: {
+    65536: { tokens: 626, blocks: ["c43d60d01b0e3929", "3fffd623fe321ba4", "3f6b60a6843d7c7d", "770f839092cb7966", "2603b82468549b2e", "c5e55cce9fa68e9c", "5b030520e6f3d1e6", "c7ff2fcc06b6f363", "0733aae25b7141eb"] },
+    1048576: { tokens: 9604, blocks: ["c43d60d01b0e3929", "3fffd623fe321ba4", "3f6b60a6843d7c7d", "770f839092cb7966", "2603b82468549b2e", "c5e55cce9fa68e9c", "5b030520e6f3d1e6", "2f7a4e374502fe5c", "4faa9bd8917b5e50"] },
+  },
+  dense: {
+    65536: { tokens: 336, blocks: ["1ae371b1de01eed7", "83b0b73871953d4b", "59c3f6a6499ec1f7", "75aec77e597bbc71", "44b7f8690eed416f", "738024cc94b52699", "a59d433481d7f9be", "e1d9723bc34187bb", "98daed013586d3aa"] },
+    1048576: { tokens: 5215, blocks: ["1ae371b1de01eed7", "83b0b73871953d4b", "59c3f6a6499ec1f7", "75aec77e597bbc71", "44b7f8690eed416f", "738024cc94b52699", "a59d433481d7f9be", "0d809363bb095c17", "e85ce6b1501f28f0"] },
+  },
+};
+function blockHash(s) {
+  return crypto.createHash("sha256").update(s, "utf8").digest("hex").slice(0, 16);
+}
+
+// A POSITIVE CONTROL, for the same reason axes 5 and 7 carry one. Every
+// assertion below reads "the hashes agree" as good news, and two hashes of the
+// same empty string agree too. If the sampling ever silently started reading
+// nothing - an empty raw, a token list of length zero - the axis would go on
+// passing. So the hash must be shown to DISCRIMINATE, and the sampled blocks
+// must be shown to be non-empty below.
+check(
+  "the block hash tells two different blocks apart",
+  blockHash("| a | b |") !== blockHash("| b | a |") && blockHash("x") === blockHash("x"),
+  "the sampled-block hash does not distinguish reordered content",
+);
+
+// MUST MATCH THE GENERATOR EXACTLY. The pins are an array positional against
+// this list, so a divergence here does not fail loudly - it silently compares
+// block 3 against block 5's hash and reports a mutation that did not happen.
+// The length assertion below is what makes a divergence in the COUNT loud.
+function sampleIndices(n) {
+  const idx = [];
+  for (let i = 0; i < 7 && i < n; i++) idx.push(i);
+  for (const extra of [Math.floor(n / 2), n - 1]) if (!idx.includes(extra)) idx.push(extra);
+  return idx.sort((a, b) => a - b);
+}
+
+for (const [profile, want] of Object.entries(BLOCK_IDENTITY)) {
+  for (const size of REFERENCE_SIZES) {
+    const toks = lexTokens(generate(profile, size));
+    const n = toks.length;
+    const pin = want[size];
+    const problems = [];
+
+    if (n !== pin.tokens) {
+      // Named separately from the hashes because it moves the sample indices,
+      // so it would otherwise present as several unrelated blocks all changing.
+      problems.push(`${n} top-level tokens, pinned at ${pin.tokens}`);
+    }
+
+    const indices = sampleIndices(n);
+    if (indices.length !== pin.blocks.length) {
+      problems.push(
+        `${indices.length} sampled blocks against ${pin.blocks.length} pinned hashes, so the two are no longer aligned`,
+      );
+    }
+    for (let s = 0; s < Math.min(indices.length, pin.blocks.length); s++) {
+      const raw = String((toks[indices[s]] || {}).raw || "").trim();
+      if (!raw) {
+        problems.push(`block ${indices[s]} is empty, so its hash proves nothing`);
+        continue;
+      }
+      const got = blockHash(raw);
+      if (got !== pin.blocks[s]) {
+        const shown = raw.length > 160 ? `${raw.slice(0, 160)}...` : raw;
+        problems.push(
+          `block ${indices[s]} hashes ${got}, pinned ${pin.blocks[s]} - it now reads ${JSON.stringify(shown)}`,
+        );
+      }
+    }
+
+    check(
+      `the ${profile} profile's sampled blocks are the pinned text at ${size / 1024}KB`,
+      problems.length === 0,
+      problems.join("; "),
     );
   }
 }

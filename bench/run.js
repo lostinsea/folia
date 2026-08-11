@@ -77,6 +77,58 @@ const RESULTS_PATH = path.join(__dirname, "..", "bench-results.txt");
 // interruption. So the holder's pid is recorded and checked: a live holder is
 // refused, a dead one is taken over and said so.
 const LOCK_PATH = RESULTS_PATH + ".lock";
+// DEFINED BEFORE THE LOCK BLOCK BECAUSE THE LOCK BLOCK NEEDS IT. Its ordinary
+// call site is still further down, after the exit wrapper is installed - only
+// the definition moved. See the long comment there for why the report is
+// overwritten at all.
+function invalidateReport() {
+  try {
+    fs.writeFileSync(
+      RESULTS_PATH,
+      "STATUS: INCOMPLETE (the run did not reach the end; this file is not a result)\n",
+    );
+  } catch (err) {
+    console.error(
+      `bench: cannot write ${RESULTS_PATH} (${(err && err.code) || err}).\n` +
+        "bench: REFUSING TO RUN - the file still on disk is a PREVIOUS run's report and\n" +
+        "bench: nothing would mark it stale. Close whatever holds it open and retry.",
+    );
+    process.exit(2);
+  }
+}
+// REFUSING BECAUSE THE LOCK PATH IS BROKEN AND REFUSING BECAUSE SOMEBODY ELSE
+// IS RUNNING ARE NOT THE SAME REFUSAL, and the difference is entirely about who
+// owns bench-results.txt.
+//
+// A live holder owns it: they are mid-run and will write their own report, so
+// touching it would corrupt a run that is doing nothing wrong. That refusal
+// must leave the file completely alone.
+//
+// An unusable lock path - a directory at bench-results.txt.lock, a permissions
+// failure, an unlink that cannot succeed - means NOBODY holds the lock, because
+// nobody could have taken it. The file on disk is therefore some PREVIOUS run's
+// report, and exiting without saying so leaves a `STATUS: OK` that reads
+// exactly like a fresh pass. That is the same stale-artifact disease as the
+// screenshot harness leaving the last run's PNG in place, and it was reproduced
+// here rather than assumed: with the lock path a directory the run exited 2 and
+// bench-results.txt still said STATUS: OK.
+function refuseBrokenLock(reason) {
+  console.error(
+    `bench: ${reason}\n` +
+      `bench: REFUSING TO RUN. The lock path ${LOCK_PATH} is unusable, so no run holds it -\n` +
+      `bench: ${RESULTS_PATH} is a PREVIOUS run's report and is being marked stale now.`,
+  );
+  invalidateReport();
+  process.exit(2);
+}
+// A live holder whose lock is older than this is treated as stale anyway.
+// THIS IS A BOUND, NOT A PROOF, and it is written down as one: a pid can be
+// reused by an entirely unrelated process, and there is no portable way to ask
+// whether pid N is really the benchmark that wrote this file. Without a ceiling
+// that misidentification refuses every future run until someone deletes the
+// file by hand. The value is ~13x the slowest full bench observed (9 minutes),
+// so it cannot plausibly steal a real run.
+const LOCK_MAX_AGE_MS = 2 * 60 * 60 * 1000;
 function pidAlive(pid) {
   try {
     // Signal 0 performs the permission and existence check without delivering
@@ -88,35 +140,95 @@ function pidAlive(pid) {
     return !!err && err.code === "EPERM";
   }
 }
-function releaseLock() {
+// THE RAW UNLINK AND "RELEASE THE LOCK I HOLD" ARE DELIBERATELY TWO FUNCTIONS.
+// The stale-takeover path below removes SOMEBODY ELSE's file before we own
+// anything, so routing it through the latched release would mark our own lock
+// as already released and then skip the unlink that actually matters - we would
+// leak the very lock we just took. Splitting them makes that impossible rather
+// than merely unlikely.
+// RETURNS WHETHER THE PATH IS CLEAR, because the takeover path needs to know.
+// A failed unlink used to warn and let the loop go round again, which produced
+// the same EEXIST, another takeover announcement and another failed unlink -
+// three identical warnings for one unusable path, and then a refusal naming
+// EEXIST, which is the one thing that was NOT the problem.
+function unlinkLock() {
   try {
     fs.unlinkSync(LOCK_PATH);
+    return true;
   } catch (err) {
-    if (err && err.code !== "ENOENT") {
-      console.error(`bench: could not remove ${LOCK_PATH} (${err.code}); remove it by hand.`);
-    }
+    if (!err || err.code === "ENOENT") return true;
+    console.error(`bench: could not remove ${LOCK_PATH} (${err.code}); remove it by hand.`);
+    return false;
   }
+}
+// MUST STAY SYNCHRONOUS AND MUST NOT THROW OUTWARD. It runs from inside the
+// process.exit wrapper below and from signal handlers, where there is no later
+// turn of the event loop to finish anything asynchronous and nothing to catch
+// an exception. Making it async, or letting an error escape, turns the wrapper
+// into either a no-op or an unhandled throw on the way out.
+//
+// IDEMPOTENT because it is reached from several paths at once: bail() and
+// finish() call it explicitly, the exit wrapper calls it, and a signal handler
+// that then exits calls it a third time.
+let lockHeld = false;
+function releaseLock() {
+  if (!lockHeld) return;
+  lockHeld = false;
+  unlinkLock();
 }
 for (let attempt = 0; ; attempt++) {
   try {
-    fs.writeFileSync(LOCK_PATH, String(process.pid), { flag: "wx" });
+    fs.writeFileSync(LOCK_PATH, JSON.stringify({ pid: process.pid, started: Date.now() }), {
+      flag: "wx",
+    });
+    lockHeld = true;
     break;
   } catch (err) {
-    if (!err || err.code !== "EEXIST" || attempt >= 2) {
-      console.error(
-        `bench: cannot take ${LOCK_PATH} (${(err && err.code) || err}). REFUSING TO RUN.`,
+    if (!err || err.code !== "EEXIST") {
+      refuseBrokenLock(`cannot create ${LOCK_PATH} (${(err && err.code) || err}).`);
+    }
+    if (attempt >= 2) {
+      refuseBrokenLock(
+        `${LOCK_PATH} still exists after ${attempt + 1} attempts to clear a stale lock.`,
       );
-      process.exit(2);
     }
     let holder = 0;
+    let started = 0;
     try {
-      holder = Number(String(fs.readFileSync(LOCK_PATH, "utf8")).trim()) || 0;
+      const text = String(fs.readFileSync(LOCK_PATH, "utf8")).trim();
+      let parsed = null;
+      try {
+        parsed = JSON.parse(text);
+      } catch (parseErr) {
+        parsed = null;
+      }
+      // JSON.parse SUCCEEDS on a bare pid - "999999" is valid JSON for the
+      // NUMBER 999999 - so testing only for a thrown error is not enough. That
+      // was measured, not predicted: a legacy lock reported its holder as
+      // "unknown" and was taken over, which for a LIVE holder is precisely the
+      // concurrent run this lock exists to refuse. The shape of the parse
+      // result is what decides, not whether it threw.
+      if (parsed && typeof parsed === "object") {
+        holder = Number(parsed.pid) || 0;
+        started = Number(parsed.started) || 0;
+      } else {
+        // A lock written by an older build of this file held the bare pid and
+        // no timestamp, so it can only ever be judged by liveness.
+        holder = Number(text) || 0;
+      }
     } catch (readErr) {
       // The holder released it between our open and our read. Retry.
       if (readErr && readErr.code === "ENOENT") continue;
-      holder = 0;
+      // ANY OTHER READ FAILURE MEANS WE CANNOT SEE WHO HOLDS IT, and "I could
+      // not read it" is not evidence that it is stale. Announcing a takeover
+      // here - which is what this used to do, twice, for a directory - claims
+      // in as many words that the holder is no longer running, on the strength
+      // of no information at all.
+      refuseBrokenLock(`cannot read ${LOCK_PATH} (${(readErr && readErr.code) || readErr}).`);
     }
-    if (holder && holder !== process.pid && pidAlive(holder)) {
+    const ageMs = started ? Date.now() - started : 0;
+    if (holder && holder !== process.pid && pidAlive(holder) && ageMs <= LOCK_MAX_AGE_MS) {
+      // DELIBERATELY NOT invalidateReport(): the live holder owns that file.
       console.error(
         `bench: another benchmark run (pid ${holder}) is in progress. REFUSING TO RUN -\n` +
           "bench: two runs share bench-results.txt and would overwrite each other's report,\n" +
@@ -125,9 +237,14 @@ for (let attempt = 0; ; attempt++) {
       process.exit(2);
     }
     console.error(
-      `bench: taking over a stale lock left by pid ${holder || "unknown"}, which is no longer running.`,
+      `bench: taking over a stale lock left by pid ${holder || "unknown"}` +
+        (started && ageMs > LOCK_MAX_AGE_MS
+          ? `, whose pid is live but whose lock is ${Math.round(ageMs / 60000)} minutes old.`
+          : ", which is no longer running."),
     );
-    releaseLock();
+    if (!unlinkLock()) {
+      refuseBrokenLock(`the stale lock at ${LOCK_PATH} could not be removed.`);
+    }
   }
 }
 // THE LOCK MUST BE RELEASED ON EVERY EXIT PATH, AND `process.on("exit")` DOES
@@ -149,6 +266,51 @@ process.exit = (code) => {
   releaseLock();
   return realProcessExit(code);
 };
+
+// SIGNALS BYPASS THE WRAPPER ENTIRELY - AND ON WINDOWS THIS HANDLER IS PROVEN
+// NOT TO FIRE. Read that before trusting it.
+//
+// Ctrl-C is how an interrupted bench actually ends, far more often than a clean
+// early return, and it terminates the process without any of the code above
+// running. The round-6 review proposed this handler as the fix. It is only half
+// a fix, and the half that is missing was MEASURED with a control rather than
+// assumed - the same method that caught process.on("exit") being inert here:
+//
+//   a throwaway probe registering exactly these four handlers, launched twice,
+//   sent the same real CTRL_C_EVENT via GenerateConsoleCtrlEvent:
+//     plain node.exe   sigintListeners=1  ->  HANDLER RAN: SIGINT
+//     electron.exe     sigintListeners=1  ->  handler never ran, process died
+//
+// So Electron's own console-control handling terminates the main process before
+// the Node layer is given the event. Confirmed end to end against this file: a
+// real Ctrl-C to a live `npm run bench` killed it with the lock still on disk.
+//
+// THE HANDLER IS KEPT ANYWAY, and deliberately so: on POSIX hosts the signal is
+// real and this releases correctly, and bench/ is a developer tool that is not
+// Windows-only. What is NOT kept is the impression that it closes the gap. On
+// this platform THE STALE-LOCK TAKEOVER ABOVE IS THE LOAD-BEARING MECHANISM for
+// an interrupted run, which is why it is written to expect a stale lock as the
+// normal case rather than an exceptional one.
+//
+// The handler re-raises rather than swallowing: exiting 130 here would report a
+// clean-ish shutdown for what was really an interrupt, and anything wrapping
+// this run (npm, a shell loop) needs the true disposition.
+for (const sig of ["SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"]) {
+  try {
+    process.on(sig, () => {
+      releaseLock();
+      process.removeAllListeners(sig);
+      try {
+        process.kill(process.pid, sig);
+      } catch (err) {
+        realProcessExit(130);
+      }
+    });
+  } catch (err) {
+    // SIGHUP/SIGBREAK are not available on every platform; the ones that are
+    // still get their handler.
+  }
+}
 
 // INVALIDATE THE PREVIOUS REPORT BEFORE MEASURING ANYTHING.
 //
@@ -173,19 +335,7 @@ process.exit = (code) => {
 // to stop a stale report being believed was, unguarded, the likeliest way to
 // leave one. Exit loudly instead, and say that the file on disk is now unsafe
 // to read - because it is, and nothing else will say so.
-try {
-  fs.writeFileSync(
-    RESULTS_PATH,
-    "STATUS: INCOMPLETE (the run did not reach the end; this file is not a result)\n",
-  );
-} catch (err) {
-  console.error(
-    `bench: cannot write ${RESULTS_PATH} (${(err && err.code) || err}).\n` +
-      "bench: REFUSING TO RUN - the file still on disk is a PREVIOUS run's report and\n" +
-      "bench: nothing would mark it stale. Close whatever holds it open and retry.",
-  );
-  process.exit(2);
-}
+invalidateReport();
 
 // Writing the terminal status is best-effort by necessity: the run is already
 // over and the process is on its way out, so there is nothing left to fall back

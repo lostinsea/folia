@@ -813,7 +813,12 @@ const REVERTS = [
     from: "    queueSave(filePath, () => new Promise((done) => {",
     to: "    Promise.resolve().then(() => new Promise((done) => {",
     expect: [
-      /the two-writes-in-flight case really was set up: the last write won on disk/,
+      // NOT the disk outcome. Which write lands last without queueSave is
+      // decided by the OS, so an outcome-based expectation reports VACUOUS
+      // whenever the scheduler happens to cooperate - which is exactly what
+      // this entry did. Overlap is a property of the code: with the fix
+      // removed both writes are open at once, every time.
+      /two saves to one path are serialised: their writes never overlap/,
     ],
   },
   {

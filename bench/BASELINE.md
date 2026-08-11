@@ -167,8 +167,18 @@ hard-coded in `bench/verify.js` and cannot be regenerated:
    digit counts genuinely move with document length - the generator writes the
    iteration index into the text, so prose carries 7.27 digits per block at
    64 KB and 10.89 at 1 MB.
+7. **SYNTAX HIGHLIGHTING** - what Prism does with the fenced code blocks:
+   an exhaustive tally of highlighted span types per top-level token, plus the
+   fenced-block count and a requirement that every block found was actually
+   highlighted. Measured against the same `libs/prismjs/prism-bundle.js` the
+   application loads, run in this file's own VM. Profiles with no code are
+   pinned as having none, so a profile that starts emitting code fails.
+8. **BLOCK IDENTITY** - the blocks themselves, by sha256, for nine sampled
+   top-level tokens per cell, plus the token count. Not a statistic: an
+   exemplar. See "Aggregates discard information" below for why this exists
+   alongside seven statistical axes rather than instead of them.
 
-**Axes 3, 5 and 6 are exhaustive, and that is the design.** All three count what the
+**Axes 3, 5, 6 and 7 are exhaustive, and that is the design.** All four count what the
 render actually emits and treat *anything not explicitly pinned* as a failure,
 rather than tallying a whitelist. The whitelist version was broken by both
 reviewers independently, the same way: an element absent from the list is never
@@ -195,6 +205,9 @@ named:
 | the code fence language changed from `js` to `py` | ATTRIBUTES |
 | three table-cell words fused into one and a fourth split to compensate | TEXT SHAPE (runs) |
 | the code fence's string literal rewritten as a template literal | TEXT SHAPE (histogram) |
+| the code fence's keywords uppercased (`const` -> `CONST`, `if` -> `IF`) | HIGHLIGHTING |
+| the code fence's keywords replaced by same-length non-keywords (`const` -> `snect`) | HIGHLIGHTING |
+| the table's Description and Default payloads exchanged | BLOCK IDENTITY |
 
 The cell-shortening one is why texture is pinned in characters as well as words:
 shortening `value-3` to `v` leaves the word count identical and passed a
@@ -211,7 +224,75 @@ second reviewer was right. Prism is the single largest deferred phase in the
 corpus (1160 ms of the code profile's 2156 ms at 1 MB), so a ~25% swing in the
 tokens it produces is a material change to what is being benchmarked.
 
-### The corpus must be parsed the way the app parses
+### Aggregates discard information, so an eighth statistic was the wrong answer
+
+Axes 1-7 are all aggregates: proportions, counts, means, histograms, tallies. An
+aggregate is a projection, and a projection necessarily throws information away.
+Every review round found a mutation living in whatever the current set had
+thrown away, and each was closed by adding one more statistic - which merely
+moved the surviving dimension somewhere new.
+
+**Round 6 is where that pattern became untenable, because two reviewers found
+two DIFFERENT surviving breakers in the same round.** One exchanged the table's
+Description and Default payloads. Every character, every word, every run length
+and the whole character histogram are preserved, because the same text is still
+present - it has only moved column. The corpus passed **180/180**, including the
+brand-new highlighting axis, and `write-manifest.js` regenerated it cleanly with
+exit 0. Both were reproduced here before being believed.
+
+It matters for exactly the reason the corpus exists: the per-column maxima move
+`[7,7,59,7] -> [7,7,7,59]`, which flips which column `markShortColumns()` marks
+nowrap for every table in the corpus, changing the layout work the benchmark is
+supposed to be holding constant.
+
+So axis 8 pins the blocks themselves rather than another projection of them.
+Nine sampled top-level tokens per cell are hashed with sha256. A hash discards
+nothing about the block it covers, which closes the *class* - "some property of
+an already-pinned block's text changed" - rather than the two instances.
+
+**The seven statistical axes are NOT made redundant and must not be deleted as
+though they were.** They are complementary in both directions:
+
+- They cover **every** block weakly, where axis 8 covers nine exactly. A
+  mutation confined to unsampled blocks is caught only by them.
+- Their failures **name the dimension** that moved ("the keyword token is pinned
+  but no longer occurs"), which is what tells whoever re-derives the pins what
+  actually changed. A hash mismatch says only "different" - which is why the
+  axis-8 failure prints the block text.
+
+**A third breaker, found in the same review, is closed by the same change** and
+was verified rather than assumed: fusing three table-cell words into one and
+splitting a fourth to compensate preserves the character count *and* the word
+count while growing the longest unbroken run 9 -> 22. It is caught twice over,
+by axis 6's run lengths and by axis 8.
+
+#### The sample is nine consecutive-plus-two indices, and the reason is aliasing
+
+The first version sampled three blocks - first, middle, last. Against the
+column-exchange breaker the `tables` profile failed correctly and **`dense` did
+not**, because `dense` cycles seven builders and none of its three sampled
+blocks happened to be a table. Measured, not predicted; it is the reason the
+sample was widened at all.
+
+The sample is now indices 0-6 (one full cycle, so every builder in every
+profile) plus the middle and last block, so a mutation guarded on the iteration
+index still has nowhere to hide. With that, the `dense` legs fail at block 5 -
+the table in the cycle.
+
+**Evenly spread indices would have been worse than the naive three**, which is
+why the first seven are consecutive. Nine evenly spread indices over dense's 336
+tokens land on 0, 42, 84 ... and 42 is a multiple of 7, so every sample would
+have been the same builder: an axis that appears to cover nine blocks while
+covering one, aliased against the very cycle it exists to sample. Consecutive
+indices cannot alias with any cycle length.
+
+The sampling function in `verify.js` must stay identical to the generator's,
+because the pins are positional against it. A divergence would not fail loudly -
+it would compare block 3 against block 5's hash and report a mutation that never
+happened - so the axis additionally asserts that the number of sampled blocks
+still equals the number of pinned hashes.
+
+
 
 `bench/corpus.js` never calls `marked.setOptions` (it must not mutate a parser
 other code shares) and marked applies per-call options *instead of* the globals,
@@ -299,6 +380,60 @@ reads "nothing unreadable was found" as good news - and that is also what a
 parser which has stopped looking returns. Two lines assert that a single-quoted
 tag *is* reported and a double-quoted one is not.
 
+The control also pins the *converse*: the two parsers must **agree on legal
+input**, not merely disagree on illegal input. The permissive scan originally
+used `[^>]*`, which stops at the first `>` even inside a well-formed value, so
+`class="a>b"` was truncated to `<span class="a>` and reported as unreadable
+while the strict parser and the tally both read it correctly. That is a false
+positive rather than a hole - the axis fails loud instead of miscounting - but a
+guard that cries wolf on valid documents is one a future reader widens a
+tolerance to silence. The scan now skips over quoted regions, and the control
+asserts the *value is tallied whole*, not merely that nothing was complained
+about.
+
+### Nothing measured Prism, and Prism is the most expensive pass
+
+Six axes described everything about the benchmark except its largest deferred
+phase. Every one of them reads marked's output or its input, and marked emits
+`<pre><code class="language-js">` with the fence body untouched inside it -
+so **no axis ever looked inside a code block**, while Prism highlighting is
+1160 ms of the code profile's 2156 ms of post-resolve time at 1 MB.
+
+Found by the round-6 review and MEASURED end to end: uppercasing the two
+keywords in `BUILDERS.code` passes **166/166 with a regenerated manifest**.
+Every axis is silent for a reason that is individually correct - SHAPE,
+INTERNALS, ELEMENTS and ATTRIBUTES all see the wrapper and never its contents;
+TEXTURE sees identical word and character counts (`const` and `CONST` are both
+five characters); TEXT SHAPE groups A-Z with a-z, so the histogram is identical
+to the byte and so are the run lengths.
+
+**The axis tallies by token type rather than counting spans, and that
+distinction is the whole point.** Measured in this file's own VM on the bundle
+the app loads:
+
+| fence body | spans | keyword spans |
+|---|---:|---:|
+| `const value0 = …` / `if (…)` | 18 | 2 |
+| `CONST value0 = …` / `IF (…)` | 19 | 0 |
+| `snect value0 = …` / `fi (…)` | 18 | 0 |
+
+That third row is the one that matters. Replacing the keywords with same-length
+non-keywords leaves the **total span count identical at 18** while emptying the
+keyword bucket entirely - so a total-span oracle would pass it, and so would the
+cheaper remedy of splitting TEXT SHAPE's `alpha` class into upper and lower.
+Splitting `alpha` closes the case-swap *instance*; only tallying what Prism
+actually emitted closes the *class*. Both breakers were applied for real: each
+failed exactly the four HIGHLIGHTING assertions with axes 1-6 silent, and
+`write-manifest.js` refused to regenerate in both cases, leaving `manifest.json`
+byte-identical.
+
+**A missing grammar is a failure, not a skip** - the same rule as the attribute
+parser. If the bundle failed to load, highlighting nothing would leave every
+tally empty and read as agreement, so the number of blocks highlighted must
+equal the number found, both are pinned, and the load carries a positive control
+requiring Prism to report a keyword as a keyword *and* a same-length
+non-keyword as not one.
+
 ### One run at a time
 
 Two concurrent `npm run bench` invocations share `bench-results.txt`: the
@@ -324,6 +459,87 @@ next run announced a stale takeover. Releasing at each call site was rejected as
 the fix: argument validation alone has six early exits, and adding an early exit
 without noticing what it bypassed is precisely the bug the ordering fix above
 exists to correct. The exit is wrapped instead, so the class is closed.
+
+**Nor do signal handlers - and this reverses a review recommendation.** Round 6
+proposed a `SIGINT` handler to cover Ctrl-C, which the exit wrapper cannot see.
+It was implemented and then measured with a control, the same method that caught
+`process.on("exit")`: a throwaway probe registering the four handlers was
+launched twice and sent the same real `CTRL_C_EVENT`.
+
+```
+plain node.exe    sigintListeners=1  ->  HANDLER RAN: SIGINT
+electron.exe      sigintListeners=1  ->  handler never ran, process died
+```
+
+Electron's own console-control handling terminates the main process before the
+Node layer sees the event; confirmed end to end against `run.js`, where a real
+Ctrl-C killed a live run with the lock still on disk. The handler is **kept**,
+because on POSIX hosts the signal is real and `bench/` is not a Windows-only
+tool - but the comment now says exactly what it does not cover, because on this
+platform **the stale-lock takeover is the load-bearing mechanism** for an
+interrupted run. `child.kill("SIGINT")` cannot be used to test any of this on
+Windows: it calls `TerminateProcess` and no signal is ever delivered, so that
+route measures nothing.
+
+**Two defects in the lock were found by testing it rather than reading it.**
+The first: making `releaseLock()` idempotent with a single `released` flag - the
+obvious implementation, and the one suggested in review - would have *leaked the
+lock*, because the stale-takeover path calls into the same function to remove
+**somebody else's** file before we own anything, latching the flag before our
+own release could ever run. Raw unlink and "release the lock I hold" are
+therefore two separate functions. The second: the lock now records
+`{pid, started}` as JSON, and `JSON.parse` **succeeds on a bare pid** - `"999999"`
+is valid JSON for a number - so testing only for a thrown error left the legacy
+fallback unreachable and reported the holder as unknown. A legacy lock held by a
+*live* process would have been silently stolen, which is exactly the concurrent
+run the lock exists to refuse. The parse result's *shape* decides, not whether
+it threw.
+
+The timestamp exists because a pid can be reused by an unrelated process and
+there is no portable way to ask whether pid N is really this benchmark. A live
+holder whose lock is older than two hours - about 13x the slowest observed full
+run - is treated as stale anyway. **That is a bound, not a proof**, and it is
+written down as one.
+
+**A broken lock path and a busy lock are not the same refusal**, and conflating
+them left a stale `STATUS: OK` on disk. Reported in review and reproduced here
+before being fixed: with a *directory* at `bench-results.txt.lock`, the run
+exited 2 and `bench-results.txt` still read `STATUS: OK` from a previous run -
+indistinguishable from a fresh pass. It was also worse than reported. A
+directory yields `EEXIST`, not some other error, so the run took the *takeover*
+path and twice announced
+
+```
+bench: taking over a stale lock left by pid unknown, which is no longer running.
+```
+
+which asserts in as many words that the holder is dead, on the strength of a
+read that had just failed with `EISDIR`. "I could not read it" is not evidence
+that it is stale.
+
+The distinction is entirely about **who owns `bench-results.txt`**:
+
+- A **live holder** owns it. They are mid-run and will write their own report,
+  so that refusal must leave the file completely alone.
+- An **unusable lock path** - a directory, a permissions failure, an unlink that
+  cannot succeed - means *nobody* holds the lock, because nobody could have
+  taken it. The file on disk is therefore some previous run's report, and
+  exiting quietly leaves a `STATUS: OK` that reads like a fresh pass.
+
+So `refuseBrokenLock()` invalidates and says why; the live-holder branch
+deliberately does not, and carries a comment saying so. `unlinkLock()` now
+reports success, so a failed unlink refuses instead of looping into two more
+identical warnings and a final message naming `EEXIST` - the one thing that was
+not the problem. Both directions were then measured: broken path -> `STATUS:
+INCOMPLETE`, live holder -> the holder's `STATUS: OK` untouched and its lock
+still on disk.
+
+The same review raised early `process.exit(2)` paths in argument validation
+bypassing the invalidating write. That had already been closed by moving
+argument parsing after it, and was re-measured rather than assumed: `--sizes=abc`
+exits 2, leaves `STATUS: INCOMPLETE`, and releases the lock. The suggestion to
+write per-run report files instead is not needed for its stated purpose, since
+the lock refuses the second run outright.
 
 ### A crashed run must not leave a passing report
 
