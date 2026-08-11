@@ -1603,6 +1603,28 @@ for (const [profile, want] of Object.entries(CORPUS_DIGEST)) {
       `extracted ${shimSrc.length} chars that do not look like the wrap`,
     );
 
+    // NO BACKTICK OR INTERPOLATION MAY APPEAR IN THE SHIM, INCLUDING IN COMMENTS.
+    // This region is embedded in run.js inside an exec() template literal, so a
+    // backtick here terminates that literal early and a ${ starts an unintended
+    // interpolation. This was a comment-only convention until it broke the file
+    // twice in one sitting, and the second time `node --check` PASSED: a BALANCED
+    // pair of backticks closes the outer literal and reopens it, leaving run.js
+    // syntactically valid and semantically shredded. It failed at runtime, eleven
+    // minutes into a benchmark, as "TypeError: 0 is not a function". A syntax gate
+    // cannot see this; only the character ban can.
+    const BACKTICK = String.fromCharCode(96);
+    const offenders = shimSrc
+      .split(/\r?\n/)
+      .map((line, i) => ({ line, i }))
+      .filter(({ line }) => line.includes(BACKTICK) || line.includes("$" + "{"));
+    check(
+      "the shim contains no backtick or interpolation, which its host template literal cannot survive",
+      offenders.length === 0,
+      `${offenders.length} offending line(s): ` +
+        offenders.map(({ line, i }) => `[+${i}] ${line.trim()}`).join(" | ") +
+        ". A balanced pair still parses, so this will not be caught by node --check.",
+    );
+
     const bundlePath = path.join(__dirname, "..", "libs", "vendor", "marked.min.js");
     const haveBundle = fs.existsSync(bundlePath);
     check(

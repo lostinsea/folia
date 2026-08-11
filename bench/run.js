@@ -1144,7 +1144,7 @@ app.whenReady().then(async () => {
       // Number.isFinite rather than a typeof === 'number' test is deliberate:
       // it does not coerce (so '12' is rejected) and it rejects Infinity, which a
       // divide-by-zero in a future timing calculation would produce and which
-      // compares `>= 0` perfectly happily.
+      // compares >= 0 perfectly happily.
       // The key is deleted first so the pre-state is known rather than assumed.
       if (window.marked && typeof window.marked.parse === 'function' && window.marked.parse.__benchWrapped) {
         const had = Object.prototype.hasOwnProperty.call(window.__bench.phases, 'marked.parse');
