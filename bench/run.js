@@ -1141,7 +1141,7 @@ app.whenReady().then(async () => {
       // null would satisfy it while recording nothing usable, and the old delta
       // check would have caught all of them. So check the value's TYPE AND RANGE
       // instead, which is resolution-independent AND catches garbage.
-      // `Number.isFinite` rather than a `typeof === 'number'` test is deliberate:
+      // Number.isFinite rather than a typeof === 'number' test is deliberate:
       // it does not coerce (so '12' is rejected) and it rejects Infinity, which a
       // divide-by-zero in a future timing calculation would produce and which
       // compares `>= 0` perfectly happily.
