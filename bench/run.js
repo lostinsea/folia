@@ -22,7 +22,14 @@ const { app, BrowserWindow } = require("electron");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { PROFILES, generate, sha256, REFERENCE_SIZES } = require("./corpus");
+const {
+  PROFILES,
+  generate,
+  sha256,
+  REFERENCE_SIZES,
+  BENCH_DEFAULT_SIZES,
+  DIGEST_SIZES,
+} = require("./corpus");
 
 // A HEAP FULL OF THE PREVIOUS DOCUMENT'S GARBAGE IS INHERITED STATE. Measured
 // on tables@1MB with every phase instrumented: marked.parse took 181ms on one
@@ -378,12 +385,18 @@ function bail(kind, err) {
 process.on("unhandledRejection", (err) => bail("unhandled rejection", err));
 process.on("uncaughtException", (err) => bail("uncaught exception", err));
 
+// Appended to the STATUS line so a caveat about the run travels WITH the
+// artifact rather than only on stderr. Declared here, above finish(), because
+// the pin objects in this project have already caused one TDZ crash by being
+// referenced before their module-scope declaration ran.
+let statusSuffix = "";
+
 function finish(code) {
   // A MACHINE-READABLE VERDICT ON THE FIRST LINE. The REJECTED banner is prose
   // at the bottom of a 50-line report, so anything that reads the file rather
   // than the exit code - a later comparison script, a human skimming for the
   // table - cannot tell a rejected run from a good one. It can now.
-  const status = code === 0 ? "STATUS: OK" : `STATUS: FAILED (exit ${code})`;
+  const status = code === 0 ? `STATUS: OK${statusSuffix}` : `STATUS: FAILED (exit ${code})`;
   const text = [status, ...lines].join("\n") + "\n";
   // Electron drops buffered stdout on app.exit() when redirected, so the file
   // is the authoritative record - the same reason test-startup-perf.js writes
@@ -442,7 +455,7 @@ const num = (name, fallback, { integer = false } = {}) => {
 // that the fingerprint block then recorded as an ordinary run. The
 // everything-dropped case was already caught below; the partial case is the one
 // that lies, because it still produces a plausible table.
-const sizeArg = String(arg("sizes", "262144,524288,1048576"));
+const sizeArg = String(arg("sizes", BENCH_DEFAULT_SIZES.join(",")));
 const sizes = sizeArg
   .split(",")
   .map((s) => s.trim())
@@ -455,6 +468,77 @@ const sizes = sizeArg
     }
     return n;
   });
+// A SIZE NOBODY VERIFIED IS A NUMBER NOBODY SHOULD QUOTE. The default sizes
+// are all covered by the corpus digest oracle, but --sizes accepts anything,
+// and a custom size renders a corpus whose text no oracle has ever checked. It
+// is still allowed - exploring a new size is a legitimate thing to want - but
+// the run says so, because the whole point of the corpus is that a number in
+// this table is attached to a known document.
+// A WARNING ON STDERR IS NOT A PROPERTY OF THE ARTIFACT. A reviewer's point,
+// and it is correct: the authoritative record is bench-results.txt, and a run
+// with an unverified size still wrote `STATUS: OK` at the top of it with
+// nothing in the file to say the corpus underneath it was unpinned. stderr is
+// gone the moment the terminal scrolls; the file is what gets quoted, compared
+// and pasted into BASELINE.md. So the marker goes in the status line itself,
+// where anything reading the file - or skimming it - meets it first.
+const unverifiedSizes = sizes.filter((s) => !DIGEST_SIZES.includes(s));
+if (unverifiedSizes.length) {
+  statusSuffix = ` (UNVERIFIED SIZES: ${unverifiedSizes.join(", ")} - corpus not pinned by any oracle)`;
+  console.error(
+    `bench: ${unverifiedSizes.join(", ")} is outside the verified set ` +
+      `(${DIGEST_SIZES.join(", ")}). The corpus at those sizes is NOT pinned by\n` +
+      "bench: any oracle, so treat the rows as exploratory and do not record them as a baseline.",
+  );
+}
+// THE FINISHED DOCUMENT, PINNED BY HAND, per (profile, size) the benchmark
+// reports. See the census check at the bottom of this file for why this exists
+// and what it caught. Every number here was MEASURED by a run that refused the
+// unpinned cell and printed a paste-ready block - never predicted, and never
+// derived from anything the application could also change.
+const RENDER_CENSUS = {
+  prose: {
+    262144: { blocks: 753, nodes: 753, tokens: 0 },
+    524288: { blocks: 1507, nodes: 1507, tokens: 0 },
+    1048576: { blocks: 2994, nodes: 2994, tokens: 0 },
+  },
+  headings: {
+    262144: { blocks: 646, nodes: 4845, tokens: 0 },
+    524288: { blocks: 1290, nodes: 9663, tokens: 0 },
+    1048576: { blocks: 2572, nodes: 19278, tokens: 0 },
+  },
+  tables: {
+    262144: { blocks: 505, nodes: 18685, tokens: 0 },
+    524288: { blocks: 1006, nodes: 37222, tokens: 0 },
+    1048576: { blocks: 1991, nodes: 73667, tokens: 0 },
+  },
+  lists: {
+    262144: { blocks: 1932, nodes: 8694, tokens: 0 },
+    524288: { blocks: 3858, nodes: 17361, tokens: 0 },
+    1048576: { blocks: 7710, nodes: 34695, tokens: 0 },
+  },
+  code: {
+    262144: { blocks: 2433, nodes: 65691, tokens: 43794 },
+    524288: { blocks: 4823, nodes: 130221, tokens: 86814 },
+    1048576: { blocks: 9604, nodes: 259308, tokens: 172872 },
+  },
+  dense: {
+    262144: { blocks: 76, nodes: 14399, tokens: 3366 },
+    524288: { blocks: 150, nodes: 28721, tokens: 6714 },
+    1048576: { blocks: 298, nodes: 57365, tokens: 13410 },
+  },
+};
+
+// WHEN TWO DOCUMENTS STOP BEING THE SAME DOCUMENT - one threshold, two uses.
+// It gates `nodesAgree` (do the repetitions of a cell agree with each other?)
+// and the census check (does the cell agree with its hand-pinned expectation?).
+// Those are the same question asked of different pairs, so they must not be
+// able to drift apart: a project rule earned the hard way here is that a magic
+// number duplicated is a magic number that will eventually disagree with
+// itself. 2% is well above the observed repetition jitter and far below any
+// real regression - the Prism-skip breaker that motivated the census moved the
+// node count by 67%.
+const sameDocumentTolerance = 0.02;
+
 // Each (profile, size) is measured this many times and the MEDIAN is reported.
 // One sample is not a measurement here: the first run of this benchmark showed
 // prose at 103ms for 256KB and 66ms for 512KB - twice the data in two thirds of
@@ -1045,6 +1129,16 @@ app.whenReady().then(async () => {
       const nodeCounts = samples.map((s) => s.nodes);
       rows.push({
         profile,
+        // The REQUESTED size, which is the key the census and the corpus digest
+        // are both pinned by. Deliberately not the generated byte count:
+        // generate() only checks its target between whole builder iterations,
+        // so it overshoots by a profile-dependent amount (prose@256KB really
+        // emits 262,464 bytes). Keying on the overshoot would make the pin move
+        // whenever a builder's per-iteration size changed, which is a fact the
+        // manifest already pins, and would stop the keys matching
+        // BENCH_DEFAULT_SIZES - so "is every benchmarked size pinned?" would
+        // stop being answerable.
+        size,
         kb: Buffer.byteLength(text, "utf8") / 1024,
         total: rep.renderMs,
         settle: rep.settleMs,
@@ -1053,7 +1147,9 @@ app.whenReady().then(async () => {
         // If the repetitions did not agree on how big the finished document
         // was, they were not all measuring the same document, and the timing is
         // not comparable with anything. Reported rather than silently averaged.
-        nodesAgree: Math.max(...nodeCounts) - Math.min(...nodeCounts) <= Math.max(...nodeCounts) * 0.02,
+        nodesAgree:
+          Math.max(...nodeCounts) - Math.min(...nodeCounts) <=
+          Math.max(...nodeCounts) * sameDocumentTolerance,
         phases: rep.phases,
         nodes: rep.nodes,
         tokens: rep.tokens,
@@ -1150,6 +1246,87 @@ app.whenReady().then(async () => {
     }
     say("  Re-run on an idle machine. Do NOT compare these figures to bench/BASELINE.md.");
     return finish(3);
+  }
+
+  // A FASTER NUMBER FOR A SMALLER DOCUMENT IS NOT A FASTER RENDER.
+  //
+  // Every oracle in verify.js pins the corpus - the INPUT. Nothing pinned what
+  // the application actually built out of it, and the two are not the same
+  // claim. MEASURED: `highlightNewElements()` was made to return immediately -
+  // the shape of a plausible "optimisation" - and code@256KB went from 65,691
+  // nodes / 700ms to 21,897 nodes / 370ms. That is a 1.9x speedup printed as a
+  // clean row: two thirds of the DOM was missing, `nodesAgree` was TRUE because
+  // all three repetitions agreed on the wrong number, and `npm run test:corpus`
+  // passed 232/232 because the corpus text was untouched.
+  //
+  // `nodesAgree` compares the repetitions to EACH OTHER, so it cannot see a
+  // change that is perfectly reproducible - which every code change is. The
+  // census below compares them to a hand-pinned expectation instead.
+  //
+  // WHY THIS IS NOT THE CORRECTNESS SUITE'S JOB: the 12-suite chain renders its
+  // own fixtures, never bench/corpus.js. A pipeline change that only shows up
+  // on a 256KB machine-generated document is invisible to it. This is the only
+  // oracle whose subject is the render the benchmark actually times.
+  //
+  // THE PIN MOVES ONLY BY HAND, and that is the contract - the same one axis 9
+  // has. A legitimate render change (marked 9 -> 18 will be one) MUST re-pin
+  // these numbers deliberately, because such a change also means the timings
+  // are no longer comparable to the ones in BASELINE.md.
+  const censusBad = [];
+  const censusUnpinned = [];
+  for (const r of rows) {
+    const want = (RENDER_CENSUS[r.profile] || {})[r.size];
+    // A MISSING PIN IS A REFUSAL, NOT A SKIP - same rule as the corpus digest.
+    // A cell nobody pinned is a cell nobody checked, and silently passing it is
+    // exactly how two of the three benchmarked sizes ended up verified by
+    // nothing at all.
+    if (!want) {
+      censusUnpinned.push(r);
+      continue;
+    }
+    for (const key of ["blocks", "nodes", "tokens"]) {
+      // THE SAME CONSTANT `nodesAgree` USES, not a second one that happens to
+      // hold the same value. If two repetitions differing by more than this
+      // "were not measuring one document", then a repetition differing from the
+      // pin by more than this is likewise not the pinned document.
+      const drift = Math.abs(r[key] - want[key]);
+      if (drift > Math.max(want[key], r[key]) * sameDocumentTolerance) {
+        censusBad.push({ r, key, got: r[key], want: want[key] });
+      }
+    }
+  }
+  if (censusUnpinned.length || censusBad.length) {
+    say("");
+    for (const c of censusBad) {
+      say(
+        `REJECTED: ${c.r.profile}@${c.r.kb.toFixed(0)}KB rendered ${c.got} ${c.key}, pinned ${c.want}` +
+          ` (${(((c.got - c.want) / c.want) * 100).toFixed(1)}%)`,
+      );
+    }
+    for (const c of censusUnpinned) {
+      say(`REJECTED: ${c.profile}@${c.kb.toFixed(0)}KB has no pinned census, so nothing checked it`);
+    }
+    say("");
+    say("  The application built a different document out of the same pinned corpus, so");
+    say("  these timings are not comparable with bench/BASELINE.md. Either a render change");
+    say("  is doing less (or more) work than the baseline, or the change is intended and");
+    say("  the census below must be pasted into RENDER_CENSUS in bench/run.js by hand,");
+    say("  together with a fresh baseline table - the old timings no longer describe it.");
+    say("");
+    say("  const RENDER_CENSUS = {");
+    for (const p of PROFILES) {
+      const cells = rows.filter((r) => r.profile === p);
+      if (!cells.length) continue;
+      say(`    ${p}: {`);
+      for (const r of cells) {
+        say(
+          `      ${r.size}: { blocks: ${r.blocks}, nodes: ${r.nodes}, tokens: ${r.tokens} },`,
+        );
+      }
+      say("    },");
+    }
+    say("  };");
+    return finish(4);
   }
   finish(0);
 });

@@ -271,6 +271,29 @@ function sha256(text) {
 // milliseconds, large enough that a generator change cannot miss both.
 const REFERENCE_SIZES = [64 * 1024, 1024 * 1024];
 
+// THE SIZES `npm run bench` ACTUALLY MEASURES. This used to be a string
+// literal in run.js's argument defaults, and the two lists silently disagreed:
+// the benchmark reported 256 KB, 512 KB and 1 MB while the oracles verified
+// 64 KB and 1 MB, leaving TWO OF THE THREE REPORTED SIZES UNVERIFIED.
+//
+// That was not theoretical. A mutation guarded on `targetBytes === 262144 ||
+// targetBytes === 524288` - replacing every table description with fifty
+// identical characters, which is about as violent as a corpus change gets -
+// passed all eight axes at 193/193 AND regenerated the manifest cleanly. Two
+// thirds of every row in BASELINE.md would have been describing a different
+// corpus with nothing to say so.
+//
+// So the list lives HERE, is consumed by run.js as its default, and verify.js
+// asserts that it pins a digest for every entry. Neither file can now move
+// without the other noticing.
+const BENCH_DEFAULT_SIZES = [256 * 1024, 512 * 1024, 1024 * 1024];
+
+// Every size any oracle must cover: the two reference sizes the statistical
+// axes are pinned at, plus every size the benchmark actually reports.
+const DIGEST_SIZES = Array.from(new Set([...REFERENCE_SIZES, ...BENCH_DEFAULT_SIZES])).sort(
+  (a, b) => a - b,
+);
+
 module.exports = {
   PROFILES,
   RENDER_OPTIONS,
@@ -280,4 +303,6 @@ module.exports = {
   renderHtml,
   sha256,
   REFERENCE_SIZES,
+  BENCH_DEFAULT_SIZES,
+  DIGEST_SIZES,
 };

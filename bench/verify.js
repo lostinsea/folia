@@ -30,9 +30,32 @@ const {
   lexerCounts,
   lexTokens,
   renderHtml,
-  sha256,
   REFERENCE_SIZES,
+  BENCH_DEFAULT_SIZES,
+  DIGEST_SIZES,
 } = require("./corpus");
+
+// AN ORACLE MAY NOT SHARE CODE WITH ITS SUBJECT.
+//
+// This used to import `sha256` from corpus.js - the very module every axis here
+// exists to police - and a reviewer broke it by MEASUREMENT: he applied the
+// round-7 column-swap mutation to the generator AND taught corpus.js's own
+// `sha256()` to canonicalise the swapped rows back before hashing. Every digest
+// cell still matched, so the axis advertised as "the one with no complement"
+// had the largest complement of all - the entire hash function.
+//
+// It is the same fallacy this project has already been bitten by once, when a
+// test judged a formula with a copy of that formula (test-tab-refresh.js
+// Scenario 4). A hash computed by the subject is the subject's own opinion of
+// itself.
+//
+// So the digest is computed HERE, from node's crypto, and corpus.js's helper is
+// deliberately not imported. It is byte-identical today - plain sha256 over
+// utf8, so no pin needed re-deriving - and that is exactly the point: the pins
+// do not move, but they can no longer be moved BY the thing they describe.
+function digest(text) {
+  return crypto.createHash("sha256").update(text, "utf8").digest("hex");
+}
 
 // COUNT EVERY ELEMENT THE RENDER EMITS, NEVER A WHITELIST OF THEM.
 //
@@ -130,8 +153,8 @@ for (const profile of PROFILES) {
     );
     check(
       `${label} reproduces the pinned sha256`,
-      sha256(text) === expected.sha256,
-      `got ${sha256(text).slice(0, 16)}, pinned ${expected.sha256.slice(0, 16)}`,
+      digest(text) === expected.sha256,
+      `got ${digest(text).slice(0, 16)}, pinned ${expected.sha256.slice(0, 16)}`,
     );
     check(
       `${label} is byte-identical when generated twice`,
@@ -243,7 +266,18 @@ for (const [profile, shape] of Object.entries(SHAPE)) {
 // constructs is that construct COST is what the ratios are reading.
 // Every figure below was measured on the current corpus and is exact
 // (min === max across every token at both reference sizes).
+//
+// A PROFILE WITH NO SUCH CONSTRUCTS IS PINNED AS `{}`, NOT OMITTED, and the
+// empty pin is an assertion rather than a shrug. `prose` and `headings` were
+// simply absent from this object until the profile-coverage check below was
+// written, and absent is indistinguishable from forgotten - the same "an item
+// not on the list is never counted" defect that made axes 3, 5, 6 and 7
+// exhaustive. Writing `prose: {}` says "this profile has no tables, lists or
+// fenced blocks", and the loop now CHECKS that claim, so the empty pin cannot
+// be a vacuous pass either.
 const INTERNALS = {
+  prose: {},
+  headings: {},
   tables: { headerCells: 4, rows: 5 },
   lists: { items: 2 },
   code: { lines: 2 },
@@ -264,6 +298,20 @@ for (const [profile, want] of Object.entries(INTERNALS)) {
   sweep("table", "rows", (t) => (t.rows || []).length);
   sweep("list", "items", (t) => (t.items || []).length);
   sweep("code", "lines", (t) => String(t.text || "").split("\n").length);
+  // THE UNPINNED CONSTRUCTS ARE A CLAIM TOO. Saying nothing about tables in the
+  // prose profile is only safe if prose really has none; if it ever grew one,
+  // this axis would be silent about the construct it exists to police. So every
+  // construct WITHOUT a pin must be absent, which turns each omission into a
+  // positive statement instead of a gap.
+  for (const [type, names] of [
+    ["table", ["headerCells", "rows"]],
+    ["list", ["items"]],
+    ["code", ["lines"]],
+  ]) {
+    if (names.some((n) => want[n] !== undefined)) continue;
+    const n = toks.filter((t) => t.type === type).length;
+    if (n) problems.push(`${n} ${type} tokens, but none are pinned, so none are being checked`);
+  }
   check(
     `the ${profile} profile's constructs are not degenerate`,
     problems.length === 0,
@@ -1208,6 +1256,250 @@ for (const [profile, want] of Object.entries(BLOCK_IDENTITY)) {
       `the ${profile} profile's sampled blocks are the pinned text at ${size / 1024}KB`,
       problems.length === 0,
       problems.join("; "),
+    );
+  }
+}
+// ============================================================================
+// AXIS 9: CORPUS DIGEST - the whole text, losslessly, at every size the
+// benchmark actually reports.
+//
+// EVERY AXIS ABOVE IS A PROJECTION, AND EVERY PROJECTION HAS A COMPLEMENT.
+// Axes 1-7 are aggregates, so they discard whatever the aggregate does not
+// carry. Axis 8 is a sample, so it discards every block it does not sample.
+// Round 7 is where that stopped being an abstract worry: BOTH reviewers,
+// independently and without coordinating, produced the SAME mutation - the
+// round-6 column exchange, guarded to fire only on iterations axis 8 does not
+// sample:
+//
+//   if (i > 6 && i !== 64 && i !== 127 && i !== 995 && i !== 1990) { ...swap... }
+//
+// Reproduced here before being believed: 193/193, and write-manifest.js
+// regenerated the manifest with exit 0. It moves the per-column maxima on 1984
+// of 1991 tables, flipping which column markShortColumns() marks nowrap across
+// 99.6% of the corpus.
+//
+// A SAMPLING ORACLE CANNOT BE FIXED BY CHANGING THE SAMPLE. Both remedies
+// offered in review were rejected for the same reason. A pseudo-random or
+// seeded sample is obscurity, not security: the pins are literals in this file,
+// so anyone editing corpus.js can read exactly which indices are watched.
+// Raising the sample from 9 to 32 only raises the cost of enumerating the
+// complement; it does not remove the complement. Both are the same treadmill
+// that axis 8 was itself created to get off.
+//
+// So this axis does not sample and does not aggregate. It pins sha256 of the
+// ENTIRE generated text. There is no complement to hide in, because there is
+// nothing it does not cover. Every breaker found in seven rounds of review
+// fails it, and so will every future one, because a mutation that does not
+// change the text does not change what is measured.
+//
+// THIS IS NOT A DUPLICATE OF manifest.json, ALTHOUGH IT IS LITERALLY THE SAME
+// NUMBER, and de-duplicating it would silently delete the entire defence.
+// manifest.json is REGENERABLE - write-manifest.js rebuilds it from whatever
+// corpus.js currently says - which is why it only ever catches an accident.
+// These pins are hand-held: regenerating the manifest cannot touch them. That
+// difference is the whole point, and it is why both exist.
+//
+// THE STATISTICAL AXES STILL EARN THEIR PLACE, for one reason: a digest
+// mismatch says only "different". It cannot say WHAT moved, and "what moved" is
+// exactly what tells whoever is re-pinning whether the change was the one they
+// intended. Axes 1-7 name the dimension, axis 8 prints the block, axis 9
+// guarantees that SOMETHING always fires. Detector and diagnosis are different
+// jobs and this file needs both.
+//
+// PINNED AT EVERY BENCHMARKED SIZE, NOT THE TWO REFERENCE SIZES, because a
+// second complement was found while closing the first - and this one nobody had
+// looked for. run.js reported 256 KB, 512 KB and 1 MB while every oracle
+// verified 64 KB and 1 MB, so two of the three reported sizes were unverified
+// by anything at all. Measured: a mutation guarded on
+// `targetBytes === 262144 || targetBytes === 524288`, replacing every table
+// description with fifty identical characters, passed all eight axes at 193/193
+// and regenerated the manifest cleanly. This axis is cheap - generate() and a
+// hash, with no parse and no highlighting - so it covers all four sizes, while
+// the expensive diagnostic axes stay at the two reference sizes.
+//
+// GENERATED by `node bench/print-pins.js digest`, which is committed so these
+// can be re-derived reproducibly. Read the failures before pasting new ones.
+const CORPUS_DIGEST = {
+  prose: {
+    65536: "bac1fbc5773fa6e43c29bdcafc270e2576f0bce33b430bf2f3cdb7c33ba1b214",
+    262144: "974b6c33f666da27fbb932428a2e72e81f2955c9481839e05e482f486d90a176",
+    524288: "c0dda63ee596af64fa77373969f0b5e2d0d6db9afb4ef09b27cd9a8ed6a64fe4",
+    1048576: "eb719cbc8ef53757d5d6ba2c6fa1562a3f30db93691ca9f2e7fa77089d504203",
+  },
+  headings: {
+    65536: "100aad026ac7c283ed7c6b6d4df92b4dc9cbd8505e06b080d3bdbed17c316b7d",
+    262144: "de16b918151998ac1e400b78f5f9e66fe5d3e5871a23cd47cf7ae18211e4bdbc",
+    524288: "bfc0d57c9706d6ae5fc2f09b990c5483c28556022424644eb3fd7d0e603da171",
+    1048576: "4d26ab3c5af43a393b76241fc9fc2872ea9a40e73d73969d0023ba87d465e915",
+  },
+  tables: {
+    65536: "095ee6ce45d695360252b56b3e8ffe59342e294e361763a169d1fe0eadff34a6",
+    262144: "34e7e33d7c9160ee977d57d42abcc5d4f9caed192405f209b2618be80dba0143",
+    524288: "c1f181657fdb00358b7927d5d146c2615614c4cc0e276ee655a423cedae44f43",
+    1048576: "f989218a6777e2f48c31ba3323940e8b588f08991db0d034cd762625bbade3d4",
+  },
+  lists: {
+    65536: "fdf83f75c5d3896b096761dea8929b7433590c6b6335b7346b4aa263a7771143",
+    262144: "f4095686f000af4b296727b3230cbe0f393a96d76f6673c254f949bb81b9fd07",
+    524288: "541806b9d06c709f8d5aefac7e50240c35705deda9660669c98fef55d9b1797e",
+    1048576: "14e289cc3dbbf495acf141cd00b527fc94553c593ee3288805ef6ec2ef3db29e",
+  },
+  code: {
+    65536: "c6547282166c871dc8406fa6eae9db0be31f438715901943c4d68dfa5c8c89cd",
+    262144: "91e9e8994613ca2efc9e35739c5a00b3cd23e0b8e7b038022102f0b9490610ce",
+    524288: "da4e2f01e7abf43ae1a295cabfb826df1e2cfbaba39ed0af1dc42a7b7eb995c6",
+    1048576: "5eaee1027db8be5b48ad866b2205f347313bbbb820aee4aa0a88ec4dc5c4f542",
+  },
+  dense: {
+    65536: "c4c6dd2b4db99266676056671399f1edaf68e46347eee1b369c031ef9d296ed2",
+    262144: "eaca039a1c37cbf0f24fac93c3e109e8f03ab7991224066a2354711d00a1066b",
+    524288: "2f690f7e2171979080c9341c378590a45b23b27f619c1df17cb2aac797bbb763",
+    1048576: "8e78e73f8bd06e5bb51cbc944778147d8f078cd3b069039a1dc0ea330ec15c48",
+  },
+};
+
+// THE TWO LISTS MUST NOT DRIFT APART AGAIN, and this is what stops them. The
+// hole above existed because run.js's default sizes were a string literal in
+// its argument parsing and this file's were a separate constant; nothing
+// related them, so nothing noticed when they disagreed. Now the benchmark's
+// defaults are exported from corpus.js and this asserts that a digest is pinned
+// for every one of them. Adding a size to the benchmark without pinning it
+// fails here rather than silently producing unverified rows.
+{
+  const unpinned = BENCH_DEFAULT_SIZES.filter((s) => !DIGEST_SIZES.includes(s));
+  check(
+    "every size the benchmark reports is covered by a pinned digest",
+    unpinned.length === 0,
+    `the benchmark measures ${unpinned.join(", ")}, which no oracle verifies`,
+  );
+}
+
+// A POSITIVE CONTROL, for the same reason axes 5, 7 and 8 carry one. Every
+// assertion below reads "the digests agree" as good news, and two digests of
+// the same empty string agree too. If generate() ever started returning "" the
+// axis would go on passing, so the hash must be shown to discriminate and the
+// text must be shown to be non-empty.
+check(
+  "the corpus digest tells two different documents apart",
+  digest("| a | b |") !== digest("| b | a |") && digest("x") === digest("x"),
+  "the corpus digest does not distinguish reordered content",
+);
+
+for (const [profile, want] of Object.entries(CORPUS_DIGEST)) {
+  for (const size of DIGEST_SIZES) {
+    const text = generate(profile, size);
+    const got = digest(text);
+    const pin = want[size];
+    // A missing pin is a REFUSAL, not a skip. A silently absent entry is how an
+    // oracle ends up asserting nothing about the size that matters most.
+    if (!pin) {
+      check(
+        `the ${profile} corpus is pinned at ${size / 1024}KB`,
+        false,
+        "no digest is pinned for this size, so nothing about it is being checked",
+      );
+      continue;
+    }
+    check(
+      `the ${profile} corpus is byte-for-byte the pinned document at ${size / 1024}KB`,
+      got === pin && text.length > 0,
+      text.length === 0
+        ? "generate() returned an empty document"
+        : `sha256 ${got}, pinned ${pin} - the corpus text at this size is not the one every ` +
+          "number in BASELINE.md was measured against",
+    );
+  }
+}
+// ============================================================================
+// EVERY AXIS MUST PIN EVERY PROFILE, AND UNTIL NOW NONE OF THEM CHECKED.
+//
+// All nine pin objects are keyed by profile and every axis iterates
+// `Object.entries(PIN)`. A profile that is absent from a pin object is
+// therefore not failed - it is never visited at all. And `PROFILES` is
+// `Object.keys(BUILDERS)`, so ADDING A BUILDER SILENTLY CREATES A PROFILE.
+// Extending the corpus with a new construct is the documented way to use this
+// directory, which makes this the one hole here most likely to be hit by
+// accident rather than by an adversary.
+//
+// MEASURED, not reasoned. A seventh "ghost" builder was added and nothing else
+// was touched. The manifest tier caught it - and then `write-manifest.js`
+// regenerated the manifest and the whole suite passed at 229/229, exit 0. The
+// assertion count went UP by ten, so it read as MORE verification while the new
+// profile - an entire document class the benchmark renders, times and prints a
+// row for - was checked by nothing that could not be regenerated away.
+//
+// This is the same disease as the two complements above, on a third axis:
+// something the benchmark reports that no non-regenerable oracle covers. The
+// manifest is not an answer, precisely because it regenerates.
+//
+// THE REGISTRY IS CHECKED AGAINST THIS FILE'S OWN SOURCE so that a tenth axis
+// cannot quietly skip it. Registering by hand would just move the omission one
+// level up - the new axis would be unregistered exactly as the ghost profile
+// was unpinned. Instead every `const NAME = {` at column zero is discovered by
+// reading __filename, and any such declaration missing from the registry is a
+// failure. This is the same technique verify.js already uses to read
+// renderer.js's setOptions block rather than hard-coding a copy of it.
+{
+  const PIN_OBJECTS = {
+    SHAPE,
+    INTERNALS,
+    ELEMENTS,
+    ATTRIBUTES,
+    TEXTURE,
+    TEXT_SHAPE,
+    HIGHLIGHT,
+    BLOCK_IDENTITY,
+    CORPUS_DIGEST,
+  };
+  const source = fs.readFileSync(__filename, "utf8");
+  const declared = new Set();
+  const declRe = /^const ([A-Z][A-Z0-9_]*) = \{/gm;
+  let match;
+  while ((match = declRe.exec(source))) declared.add(match[1]);
+  // prismSandbox and friends are lower-case by convention, so the pattern is
+  // already specific to pin objects; anything new that matches it is one.
+  const unregistered = [...declared].filter((name) => !(name in PIN_OBJECTS));
+  check(
+    "every hand-pinned oracle in this file is registered for the profile-coverage check",
+    unregistered.length === 0,
+    `${unregistered.join(", ")} is pinned per profile but is not in PIN_OBJECTS, so nobody ` +
+      "checks that it covers every profile",
+  );
+
+  // THE DISCOVERY MUST BE PROVEN TO DISCOVER. If declRe ever stops matching -
+  // an ESM migration putting `export` in front, a wrapper like
+  // `Object.freeze({...})`, `let` instead of `const`, a reformat inserting a
+  // second space - then `declared` is empty, `unregistered` is empty, and the
+  // check above PASSES while checking nothing. That is the exact failure it
+  // exists to prevent, one level up.
+  //
+  // The expected minimum is the registry itself rather than a hard-coded count:
+  // a literal floor would need raising by hand on every new axis, and the hand
+  // that forgets to register an axis is the same hand that forgets to raise the
+  // floor. Requiring both directions makes the two sets equal, so the pattern
+  // is re-proven against live declarations on every run.
+  const undiscovered = Object.keys(PIN_OBJECTS).filter((name) => !declared.has(name));
+  check(
+    "the source pattern really finds the pin objects it is meant to police",
+    undiscovered.length === 0,
+    `${undiscovered.join(", ")} is registered but was not found by the source pattern, so the ` +
+      "pattern no longer matches how pin objects are declared and can no longer detect a new one",
+  );
+
+  const wantProfiles = [...PROFILES].sort().join(",");
+  for (const [name, pin] of Object.entries(PIN_OBJECTS)) {
+    const got = Object.keys(pin).sort().join(",");
+    const missing = [...PROFILES].filter((p) => !(p in pin));
+    const extra = Object.keys(pin).filter((p) => !PROFILES.includes(p));
+    check(
+      `${name} pins every profile the corpus defines`,
+      got === wantProfiles,
+      [
+        missing.length ? `pins nothing for ${missing.join(", ")}` : "",
+        extra.length ? `pins ${extra.join(", ")}, which the corpus no longer defines` : "",
+      ]
+        .filter(Boolean)
+        .join("; ") || `${got} against ${wantProfiles}`,
     );
   }
 }

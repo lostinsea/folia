@@ -138,7 +138,7 @@ thing:
 
 `bench/manifest.json` pins bytes, SHA-256, block counts and token counts - but a
 manifest can be regenerated, so on its own it only detects an *accidental*
-change. `npm run test:corpus` therefore also asserts six axes that are
+change. `npm run test:corpus` therefore also asserts nine axes that are
 hard-coded in `bench/verify.js` and cannot be regenerated:
 
 1. **SHAPE** - the exact set of top-level token types and their exact
@@ -177,6 +177,16 @@ hard-coded in `bench/verify.js` and cannot be regenerated:
    top-level tokens per cell, plus the token count. Not a statistic: an
    exemplar. See "Aggregates discard information" below for why this exists
    alongside seven statistical axes rather than instead of them.
+9. **CORPUS DIGEST** - sha256 of the entire generated text, hand-pinned, at
+   **every size the benchmark reports**, not just the two reference sizes.
+   Neither an aggregate nor a sample, so it has no complement to hide in.
+   See "A projection always has a complement" below.
+
+**Across all nine, every pin object must cover every profile the corpus
+defines**, and the registry of pin objects is checked against `verify.js`'s own
+source so a tenth axis cannot go unregistered. Without that, a new profile is
+not *failed* by an axis - it is never visited by one. See "A third complement"
+below.
 
 **Axes 3, 5, 6 and 7 are exhaustive, and that is the design.** All four count what the
 render actually emits and treat *anything not explicitly pinned* as a failure,
@@ -208,6 +218,12 @@ named:
 | the code fence's keywords uppercased (`const` -> `CONST`, `if` -> `IF`) | HIGHLIGHTING |
 | the code fence's keywords replaced by same-length non-keywords (`const` -> `snect`) | HIGHLIGHTING |
 | the table's Description and Default payloads exchanged | BLOCK IDENTITY |
+| the same exchange, guarded to skip the nine sampled iterations | CORPUS DIGEST |
+| every table description replaced by 50 identical chars at 256KB and 512KB only | CORPUS DIGEST |
+| a seventh builder added, pinned by nothing | PROFILE COVERAGE |
+| a canonicalising `corpus.sha256` paired with a table column swap | CORPUS DIGEST (only once it stopped sharing the subject's hash) |
+| an unregistered tenth pin object, and a whitespace reformat that blinds the registry parse | PIN REGISTRY |
+| `highlightNewElements()` short-circuited (1.9x "faster", two-thirds of the DOM gone) | RENDER CENSUS (`run.js`, not `verify.js`) |
 
 The cell-shortening one is why texture is pinned in characters as well as words:
 shortening `value-3` to `v` leaves the word count identical and passed a
@@ -247,8 +263,11 @@ supposed to be holding constant.
 
 So axis 8 pins the blocks themselves rather than another projection of them.
 Nine sampled top-level tokens per cell are hashed with sha256. A hash discards
-nothing about the block it covers, which closes the *class* - "some property of
-an already-pinned block's text changed" - rather than the two instances.
+nothing about the block it covers, which closes every mutation that touches a
+sampled block - **but a sample is itself a projection, and round 7 broke it with
+a mutation guarded on the complement of the sample. See "A projection always has
+a complement" below. The claim originally made here, that axis 8 closed the
+class, was wrong, and both reviewers said so independently.**
 
 **The seven statistical axes are NOT made redundant and must not be deleted as
 though they were.** They are complementary in both directions:
@@ -276,8 +295,9 @@ sample was widened at all.
 
 The sample is now indices 0-6 (one full cycle, so every builder in every
 profile) plus the middle and last block, so a mutation guarded on the iteration
-index still has nowhere to hide. With that, the `dense` legs fail at block 5 -
-the table in the cycle.
+index is not invisible *by accident*. With that, the `dense` legs fail at block 5
+- the table in the cycle. **A mutation guarded on the iteration index
+deliberately is a different matter, and axis 9 is what answers it.**
 
 **Evenly spread indices would have been worse than the naive three**, which is
 why the first seven are consecutive. Nine evenly spread indices over dense's 336
@@ -292,7 +312,250 @@ it would compare block 3 against block 5's hash and report a mutation that never
 happened - so the axis additionally asserts that the number of sampled blocks
 still equals the number of pinned hashes.
 
+### A projection always has a complement
 
+Axes 1-7 are aggregates, so they discard whatever the aggregate does not carry.
+Axis 8 is a sample, so it discards every block it does not sample. Both are
+projections, and **every projection has a complement a mutation can be guarded
+on**. Six rounds of review were spent discovering, one at a time, which
+complement was currently reachable.
+
+**Round 7 is where that ended, because both reviewers independently produced the
+same breaker** - the round-6 column exchange, guarded to fire only on iterations
+axis 8 does not sample:
+
+```js
+if (i > 6 && i !== 64 && i !== 127 && i !== 995 && i !== 1990) { ...swap... }
+```
+
+Reproduced here before being believed: **193/193, and `write-manifest.js`
+regenerated the manifest with exit 0**. It moves the per-column maxima on 1984 of
+1991 tables, flipping which column `markShortColumns()` marks nowrap across
+99.6% of the corpus - the same layout effect axis 8 was added to catch, simply
+stepped around it.
+
+**A sampling oracle cannot be repaired by changing the sample.** Both remedies
+offered in review were rejected for the same reason:
+
+- A *pseudo-random or seeded* sample is obscurity, not security. The pins are
+  literals in `verify.js`, so anyone editing `corpus.js` can read exactly which
+  indices are watched.
+- Raising the sample from 9 to 32 raises the cost of enumerating the complement.
+  It does not remove the complement.
+
+Both are the same treadmill axis 8 was itself created to get off.
+
+So axis 9 neither samples nor aggregates: it pins sha256 of the **entire
+generated text**. There is nothing it does not cover, so there is no complement.
+Every breaker found in seven rounds fails it, and so will every future one,
+because a mutation that does not change the text does not change what is
+measured.
+
+**It is not a duplicate of `manifest.json`, although it is literally the same
+number, and de-duplicating it would silently delete the whole defence.**
+`manifest.json` is *regenerable* - `write-manifest.js` rebuilds it from whatever
+`corpus.js` currently says - which is exactly why it only ever catches an
+accident. Axis 9's pins are hand-held and regeneration cannot touch them. That
+difference is the entire point, and it is why both exist.
+
+**The statistical axes still earn their place.** A digest mismatch says only
+"different"; it cannot say *what* moved, and what moved is precisely what tells
+whoever is re-pinning whether the change was the one they intended. Axes 1-7
+name the dimension, axis 8 prints the block, axis 9 guarantees that *something*
+always fires. Detector and diagnosis are different jobs.
+
+#### Two of the three reported sizes were verified by nothing at all
+
+Closing the first complement surfaced a second that nobody had looked for in
+seven rounds, including both reviewers. `run.js` measured and reported **256 KB,
+512 KB and 1 MB**, while every oracle verified **64 KB and 1 MB**. The two lists
+were unrelated - the benchmark's sizes were a string literal in its argument
+defaults, `REFERENCE_SIZES` was a separate constant - so nothing noticed they
+disagreed.
+
+Measured, not reasoned: a mutation guarded on
+`targetBytes === 262144 || targetBytes === 524288`, replacing every table
+description with fifty identical characters, **passed all eight axes at 193/193
+and regenerated the manifest cleanly**. Two thirds of every row in the table
+below would have described a different corpus with nothing to say so.
+
+Axis 9 is cheap - `generate()` and a hash, with no parse and no highlighting -
+so it covers all four sizes while the expensive diagnostic axes stay at the two
+reference sizes. The benchmark's defaults now live in `corpus.js` as
+`BENCH_DEFAULT_SIZES`, `run.js` consumes them, and `verify.js` **asserts that a
+digest is pinned for every one of them**, so the two lists cannot drift apart
+again. A `--sizes` override outside the verified set is still allowed - exploring
+a new size is legitimate - but the run says out loud that those rows are not
+pinned by anything and must not be recorded as a baseline.
+
+#### The pins are now reproducible
+
+Until round 7 the hand-pinned literals in `verify.js` were produced by throwaway
+helpers that were never committed, so they could be re-derived by nobody but
+their author - a fair review finding, and its own kind of unmaintainable.
+`bench/print-pins.js` is committed to fix it. **It prints; it does not write**,
+and it is deliberately not wired into `write-manifest.js` - doing so would make
+the hand-pinned axes regenerable and hand back the exact property they exist to
+have. The intended workflow is: change the corpus on purpose, run
+`npm run test:corpus` and *read the named failures*, satisfy yourself each
+dimension moved for the reason you intended, and only then paste. Pasting first
+turns every oracle in this directory into a rubber stamp.
+
+Confirmation that the tool is faithful: run against the unchanged corpus it
+reproduces the committed `BLOCK_IDENTITY` block byte-for-byte.
+
+#### A third complement: an entire profile that nothing pinned
+
+All nine pin objects are keyed by profile, and every axis iterates
+`Object.entries(PIN)`. A profile absent from a pin object is therefore not
+failed - **it is never visited at all**. And `PROFILES` is
+`Object.keys(BUILDERS)`, so *adding a builder silently creates a profile*.
+Extending the corpus with a new construct is the documented way to use this
+directory, which makes this the one hole here most likely to be hit by accident
+rather than by an adversary.
+
+Measured: a seventh "ghost" builder was added and nothing else touched. The
+manifest tier caught it - and then `write-manifest.js` regenerated the manifest
+and the suite passed at **229/229, exit 0**. The assertion count went *up* by
+ten, so it read as more verification while the new profile - a whole document
+class the benchmark renders, times and prints a row for - was covered by nothing
+that could not be regenerated away.
+
+Every pin object is now checked to pin exactly the profiles the corpus defines.
+**The registry of pin objects is itself checked against this file's own source**,
+because registering by hand would only move the omission up a level: a tenth
+axis would go unregistered exactly as the ghost profile went unpinned. Every
+`const NAME = {` at column zero is discovered by reading `__filename` and must
+appear in the registry. Proven sensitive: an unregistered tenth pin object fails
+the check by name.
+
+Writing that check immediately found a real pre-existing gap - `INTERNALS` had
+never pinned `prose` or `headings`. That was defensible (neither profile has
+tables, lists or fenced blocks) but it was nowhere recorded, and *absent is
+indistinguishable from forgotten*. They are now pinned as `{}`, and because an
+empty pin would otherwise be a vacuous pass, the axis additionally asserts that
+every construct WITHOUT a pin is genuinely absent - turning each omission into a
+positive claim.
+
+#### A registry's discovery must itself be proven to discover
+
+The registry check above reads this file's own source with a regular expression.
+That is a linter, not a proof, and **both reviewers said so independently**. Worse,
+it could go *vacuous*: if the pattern ever stopped matching - a reformat, a
+rename, a change to how pin objects are declared - `declared` would be empty,
+"nothing is unregistered" would be trivially true, and the check would pass while
+checking nothing at all.
+
+A hard-coded floor (`declared.length >= 10`) was rejected: it needs raising by
+hand on every new axis, and the hand that forgets to register an axis is the same
+hand that forgets to raise the floor. Instead the two sets must be **equal** -
+every registered name must also be *discovered*. The registry is then its own
+self-calibrating expected-minimum and cannot rot.
+
+Proven sensitive by the exact accident it defends against: inserting one extra
+space (`const  SHAPE = {`) - a pure-whitespace reformat with zero semantic
+effect - fails exactly one assertion, and it names `SHAPE`.
+
+### An oracle may not share code with its subject
+
+Axis 9 hashes the whole corpus text and compares against a pinned digest. It was
+advertised here as *the axis with no complement*, and it had the largest one of
+all: **the entire hash function**. `verify.js` imported `sha256` from
+`corpus.js` - the very module every axis in this file exists to police.
+
+Measured, not argued. Apply the round-7 column-swap mutation to `BUILDERS.tables`
+*and* teach `corpus.sha256()` to canonicalise that swap away, then run the suite:
+
+| axis 9 computes its digest with | failures on the breaker |
+|---|---|
+| `corpus.sha256` (as shipped through round 7) | **0** |
+| `crypto` directly, inside `verify.js` | **8** |
+
+Every one of the eight digest cells still matched, because subject and oracle
+agreed on a lie. This project has hit this exact fallacy once before - a test
+that judged a formula with a copy of that formula (`test-tab-refresh.js`
+Scenario 4) - which is the argument for writing it down rather than fixing it
+quietly.
+
+`verify.js` now computes its digest from `crypto` in a local `digest()` and no
+longer imports `sha256` at all. **The pins did not move**, which is the proof the
+change is purely structural: `corpus.sha256` is plain sha256 over utf8 today, so
+the two functions are byte-identical *now* - the defect was never a wrong hash,
+it was a shared one.
+
+`write-manifest.js` still uses `corpus.sha256`, and that is now *better* rather
+than merely tolerable: the manifest tier compares an independently-computed
+digest against the manifest's, so a lying `corpus.sha256` makes regeneration
+**fail** instead of pass.
+
+### Nothing pinned what the application actually rendered
+
+Every axis in `verify.js` pins the corpus *text*. `run.js` then feeds that text
+to the real render pipeline and times it. Nothing anywhere pinned what the
+pipeline **built** - so any change that made the app render *less* would be
+reported as a speed-up.
+
+`nodesAgree` cannot cover this. It compares repetitions **to each other**, so it
+is structurally blind to any change that is perfectly reproducible - which every
+code change is. Nor can the correctness suites: they render their own fixtures
+and never open `bench/corpus.js`.
+
+Measured with a plausible-looking "optimisation" - an early return in
+`highlightNewElements()`, the shape a well-meaning change would take:
+
+| `code@256KB` | nodes | render |
+|---|---|---|
+| pinned | 65,691 | 700 ms |
+| with Prism skipped | 21,897 | 370 ms |
+
+A **1.9x speed-up** with two-thirds of the DOM missing, printed as a clean row.
+`nodesAgree` was TRUE (all repetitions agreed on the wrong number) and
+`npm run test:corpus` passed 232/232 (the corpus text was untouched).
+
+`RENDER_CENSUS` in `run.js` now pins `blocks` / `nodes` / `tokens` for every
+benchmarked cell. Re-running the same breaker with it in place:
+
+```
+REJECTED: code@256KB  rendered 21897 nodes, pinned 65691 (-66.7%)
+REJECTED: code@256KB  rendered 0 tokens,    pinned 43794 (-100.0%)
+REJECTED: code@512KB  rendered 43407 nodes, pinned 130221 (-66.7%)
+...
+REJECTED: dense@256KB rendered 11033 nodes, pinned 14399  (-23.4%)
+```
+
+Three properties are deliberate:
+
+- **A missing pin is a refusal, not a default.** An unpinned cell exits 4 and
+  prints a paste-ready `RENDER_CENSUS` block, so pins are always *measured*
+  rather than predicted - and re-pinning is the deliberate act it is meant to be.
+- **The key is the REQUESTED size, not the generated byte count.** `generate()`
+  only checks its target between whole builder iterations, so it overshoots by a
+  profile-dependent amount (`prose@256KB` emits 262,464 bytes). Keying on the
+  overshoot would make the census move with any per-iteration size change - a
+  fact the manifest already pins - and would stop the keys matching
+  `BENCH_DEFAULT_SIZES`, making "is every benchmarked size pinned?"
+  unanswerable.
+- **One tolerance, one constant.** `sameDocumentTolerance` gates both
+  `nodesAgree` and the census: the same question asked of different pairs. An
+  earlier version carried a comment claiming "one rule, applied twice" while
+  leaving two literal `0.02`s - a magic number duplicated will eventually
+  disagree with itself.
+
+**Known limit, recorded rather than implied away.** The census sees changes that
+move node, block or token counts. It is blind to class- or attribute-only
+changes - short-circuiting `applyTableBreakout()`, for instance, adds no nodes.
+That gap is covered by the revert harness (R53), not by the benchmark.
+
+### A warning on stderr is not a property of the artifact
+
+`bench-results.txt` is what gets quoted, pasted and compared weeks later; stderr
+is gone the moment the terminal scrolls. A run given `--sizes` values that no
+digest pins was warning on stderr while the artifact still said `STATUS: OK`.
+The caveat now goes into the `STATUS:` line itself via `statusSuffix`, which is
+declared above `finish()` - module-scope pin objects in this directory have
+already caused one TDZ crash.
+
+### The corpus must be parsed the way the app parses
 
 `bench/corpus.js` never calls `marked.setOptions` (it must not mutate a parser
 other code shares) and marked applies per-call options *instead of* the globals,
