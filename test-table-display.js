@@ -2594,6 +2594,224 @@ async function run(win) {
     await resizeWindow(splitBounds);
   }
 
+  // --- 18. The measurement pass is BATCHED, not interleaved -------------------
+  //
+  // This is a performance property, and the obvious way to assert it - time the
+  // pass - is exactly the way that produces a flaky suite. So assert the
+  // STRUCTURE that makes it fast instead, which is deterministic and says what
+  // broke when it fails.
+  //
+  // The defect: `preferredTableWidth()` used to write `width: max-content` onto
+  // a table and then immediately read its rect. A write followed by a read
+  // forces a synchronous layout, so doing it once per table costs one FULL
+  // DOCUMENT layout per table - O(tables x document). Measured on a 1 MB
+  // document (2919 tables): 35.5s of a 45.6s render, with the per-table cost
+  // rising 3.3 -> 5.7 -> 12.2ms as the document grew, which is the signature of
+  // thrash rather than of expensive measurement. Batched, the same pass takes
+  // 2.3s.
+  //
+  // The observable difference: when every table is written FIRST and read
+  // afterwards, all N tables are simultaneously at `max-content` at the moment
+  // any one of their rects is read. Interleaved, exactly one ever is. So patch
+  // getBoundingClientRect, and on each TABLE read count how many tables are
+  // currently at max-content. Batched => N. Thrashing => 1.
+  //
+  // The assertion is on the MINIMUM of those counts, not the maximum, and the
+  // difference is the whole strength of the oracle. A maximum is satisfied by
+  // the FIRST sample alone, so an implementation that wrote every table up
+  // front but then restored each one inside the read loop would produce
+  // N, N-1, N-2, ... - a maximum of N, and a green test - while forcing a fresh
+  // layout for every table after the first and leaving the pass just as
+  // quadratic as before. The minimum can only reach N if no table was released
+  // before the last one was read, which is the property being claimed.
+  //
+  // The only TABLE rects read during this pass are the ones in
+  // tablePreferredRead: the container reads are on a DIV and
+  // measureTextColumnCap's probe reads a CELL, so the tagName filter isolates
+  // the phase exactly. Probe tables are excluded by their absolute positioning
+  // anyway, so a future probe that outlived its measurement could not inflate
+  // the count.
+  win.unmaximize();
+  await resizeWindow({ x: 40, y: 40, width: 2000, height: 1100 });
+  const batching = JSON.parse(
+    await exec(`
+      (async () => {
+        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+        if (isEditMode) { toggleEditBtn.click(); await sleep(700); }
+        await renderMarkdown(${JSON.stringify(DOC)}, "full");
+        await sleep(1800);
+
+        const viewer = document.getElementById('viewer');
+        const atMaxContent = () => [...viewer.querySelectorAll('.table-container > table')]
+          .filter(t => t.style.width === 'max-content' && t.style.position !== 'absolute').length;
+
+        const samples = [];
+        const real = Element.prototype.getBoundingClientRect;
+        Element.prototype.getBoundingClientRect = function () {
+          if (this.tagName === 'TABLE') samples.push(atMaxContent());
+          return real.apply(this, arguments);
+        };
+        try {
+          applyTableBreakout();
+        } finally {
+          Element.prototype.getBoundingClientRect = real;
+        }
+
+        return JSON.stringify({
+          tableReads: samples.length,
+          maxConcurrent: samples.length ? Math.max.apply(null, samples) : 0,
+          minConcurrent: samples.length ? Math.min.apply(null, samples) : 0,
+          containers: viewer.querySelectorAll('.table-container').length,
+          // Nothing may be left at max-content: the restore pass has to put
+          // every table back before the apply pass reads the layout again.
+          leftAtMaxContent: atMaxContent(),
+        });
+      })()
+    `),
+  );
+  // Vacuity guard. With fewer than three measurable tables "all of them at once"
+  // and "one at a time" are not distinguishable enough to be worth asserting,
+  // and a document that silently stopped rendering tables would otherwise
+  // satisfy the assertion below by measuring nothing at all.
+  check(
+    "the batching probe really measured several tables",
+    batching.tableReads >= 3,
+    JSON.stringify(batching),
+  );
+  check(
+    "every table is sized for measurement before any of them is measured",
+    batching.tableReads >= 3 && batching.minConcurrent === batching.tableReads,
+    JSON.stringify(batching),
+  );
+  check(
+    "the measurement pass leaves no table stuck at max-content",
+    batching.leftAtMaxContent === 0,
+    JSON.stringify(batching),
+  );
+
+  // Exception safety, which BATCHING is what made worth asserting. The
+  // un-batched version held one table's write and its restore in a single
+  // scope, so a throw could strand exactly one table at max-content. Writing
+  // every table up front turns that into every table in the document, and
+  // nothing puts them back: the restore only runs on the next
+  // applyTableBreakout(), and the ResizeObserver that would call it is
+  // width-guarded, so no resize means no repair. The user is left looking at a
+  // page of tables stretched past their containers.
+  //
+  // The throw is injected into the READ, which is the phase that runs after
+  // every table has already been written - the worst moment, and the one the
+  // `finally` exists for.
+  const stranded = JSON.parse(
+    await exec(`
+      (async () => {
+        const viewer = document.getElementById('viewer');
+        const atMaxContent = () => [...viewer.querySelectorAll('.table-container > table')]
+          .filter(t => t.style.width === 'max-content' && t.style.position !== 'absolute').length;
+
+        let reads = 0, threw = false;
+        const real = Element.prototype.getBoundingClientRect;
+        Element.prototype.getBoundingClientRect = function () {
+          if (this.tagName === 'TABLE') {
+            reads++;
+            if (reads === 2) throw new Error('injected measurement failure');
+          }
+          return real.apply(this, arguments);
+        };
+        try {
+          applyTableBreakout();
+        } catch (e) {
+          threw = true;
+        } finally {
+          Element.prototype.getBoundingClientRect = real;
+        }
+        const left = atMaxContent();
+        // Put the page back for anything that runs after this.
+        applyTableBreakout();
+        return JSON.stringify({ reads, threw, left, after: atMaxContent() });
+      })()
+    `),
+  );
+  // Vacuity guard: if the injected failure never fired, or never propagated,
+  // the assertion below would be satisfied by a pass that simply succeeded.
+  check(
+    "the injected measurement failure really did abort the pass",
+    stranded.threw === true && stranded.reads >= 2,
+    JSON.stringify(stranded),
+  );
+  check(
+    "a measurement that throws part way through still puts every table back",
+    stranded.left === 0,
+    JSON.stringify(stranded),
+  );
+
+  // The equivalence claim itself, measured rather than argued. Batching is only
+  // legitimate if asking every table at once gives the SAME answer as asking
+  // them one at a time; if it did not, this would be an approximation dressed
+  // up as an optimisation.
+  //
+  // Review singled out nested tables as the shape where "a table at max-content
+  // cannot change what another table sees" is least obvious, and the reasoning
+  // offered against it - that raw HTML becomes a sandboxed iframe, so a nested
+  // table never reaches the viewer - is WRONG: a raw <table> is wrapped like
+  // any other and its inner table is wrapped too. The shape is reachable, so it
+  // is included here deliberately rather than assumed away.
+  const equiv = JSON.parse(
+    await exec(`
+      (async () => {
+        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+        await renderMarkdown(${JSON.stringify(
+          [
+            "# Nested",
+            "",
+            "<table><tr><td><table><tr><td>inner cell content</td></tr></table></td></tr></table>",
+            "",
+            "| column one | column two | column three |",
+            "|---|---|---|",
+            "| a value here | another value | and a third |",
+            "",
+            "<div><table><tr><td>table inside a div</td></tr></table></div>",
+          ].join("\n"),
+        )}, "full");
+        await sleep(1200);
+
+        const viewer = document.getElementById('viewer');
+        const cs = [...viewer.querySelectorAll('.table-container')];
+
+        // Batched: write every table, read every table, restore every table.
+        const batchedMemo = new Map();
+        const states = cs.map(c => tablePreferredBegin(c, batchedMemo));
+        const batched = states.map(s => s ? tablePreferredRead(s) : 0);
+        states.forEach(s => { if (s) tablePreferredRestore(s); });
+
+        // One at a time, through the wrapper that keeps the original shape.
+        const singleMemo = new Map();
+        const single = cs.map(c => preferredTableWidth(c, singleMemo));
+
+        return JSON.stringify({
+          containers: cs.length,
+          nested: viewer.querySelectorAll('.table-container table table').length,
+          batched,
+          single,
+          identical: batched.length === single.length &&
+                     batched.every((v, i) => Math.abs(v - single[i]) < 0.01),
+        });
+      })()
+    `),
+  );
+  // Vacuity guard. Two empty lists are trivially "identical", and a document
+  // whose nested table silently stopped being wrapped would make this assertion
+  // stop covering the shape it was written for without ever failing.
+  check(
+    "the equivalence probe really measured several tables including a nested one",
+    equiv.containers >= 3 && equiv.nested >= 1,
+    JSON.stringify(equiv),
+  );
+  check(
+    "measuring every table at once gives the same widths as measuring them one at a time",
+    equiv.identical === true,
+    JSON.stringify(equiv),
+  );
+
   // Without this the sentinel reporting nothing and the sentinel having quietly
   // stopped watching are indistinguishable - the vacuity this harness exists to
   // rule out. Both channels are proven because they fail independently.

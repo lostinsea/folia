@@ -2420,6 +2420,126 @@ async function run(win) {
     );
   }
 
+  // --- 16. Replacing the document detaches the new blocks in BULK -------------
+  //
+  // A performance property asserted structurally rather than by timing, so it
+  // is deterministic and names what broke.
+  //
+  // Measured in Blink (Electron 43): removing a child from a container costs
+  // time proportional to the CONTAINER's size, so draining one child at a time
+  // is O(n^2). On a 1 MB document (29,055 blocks) the move loop took 23.7s.
+  // Inserting nodes that have NO PARENT is linear and effectively free - the
+  // same 29,055 insertions took 10ms - and a bulk clear of the whole container
+  // costs 16ms. Draining first therefore turns 23.7s into 36ms.
+  //
+  // The counter-intuitive part, and the reason this needs a permanent guard:
+  // batching the INSERT side does not help. viewer.append(...nodes), a
+  // DocumentFragment and replaceChildren(...nodes) were all measured and are
+  // all just as slow, because each one still detaches every argument from its
+  // current parent first. So an "optimisation" that replaced the insert loop
+  // with any of those would look obviously better and be no faster at all.
+  // What makes it fast is that the nodes are ALREADY PARENTLESS when they
+  // arrive, and that is exactly what this measures.
+  //
+  // Two documents with no block in common, so the LCS finds no reuse and the
+  // whole viewer is replaced - the path a tab switch and a refresh both take.
+  {
+    const A = Array.from({ length: 120 }, (_, i) => `Alpha paragraph ${i} aaa.`).join("\n\n");
+    const B = Array.from({ length: 120 }, (_, i) => `Beta paragraph ${i} bbb.`).join("\n\n");
+    const drain = JSON.parse(
+      await exec(`
+        (async () => {
+          const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+          await renderMarkdown(${JSON.stringify(A)}, "full");
+          await sleep(900);
+
+          const viewer = document.getElementById('viewer');
+          let inserts = 0, stillAttached = 0, viewerRemovals = 0, stagingRemovals = 0;
+          const realInsert = Node.prototype.insertBefore;
+          const realAppend = Node.prototype.appendChild;
+          const realRemove = Element.prototype.remove;
+          const realRemoveChild = Node.prototype.removeChild;
+          // Counted by EFFECT, not by which method was called. An earlier
+          // version watched only insertBefore and Element.remove, so the very
+          // optimisations this guard exists to reject - draining the viewer with
+          // removeChild, or staging nodes through appendChild - would have kept
+          // it green while restoring the quadratic.
+          const noteInsert = (parent, n) => {
+            if (parent === viewer) { inserts++; if (n && n.parentNode) stillAttached++; }
+          };
+          const noteRemoval = (parent) => {
+            if (parent === viewer) viewerRemovals++;
+            else if (parent && parent.nodeType === 1 && !parent.isConnected) stagingRemovals++;
+          };
+          Node.prototype.insertBefore = function (n) {
+            noteInsert(this, n);
+            return realInsert.apply(this, arguments);
+          };
+          Node.prototype.appendChild = function (n) {
+            noteInsert(this, n);
+            return realAppend.apply(this, arguments);
+          };
+          Element.prototype.remove = function () {
+            noteRemoval(this.parentNode);
+            return realRemove.apply(this, arguments);
+          };
+          Node.prototype.removeChild = function () {
+            noteRemoval(this);
+            return realRemoveChild.apply(this, arguments);
+          };
+          try {
+            await renderMarkdown(${JSON.stringify(B)}, "full");
+            await sleep(900);
+          } finally {
+            Node.prototype.insertBefore = realInsert;
+            Node.prototype.appendChild = realAppend;
+            Element.prototype.remove = realRemove;
+            Node.prototype.removeChild = realRemoveChild;
+          }
+
+          return JSON.stringify({
+            inserts,
+            stillAttached,
+            viewerRemovals,
+            stagingRemovals,
+            // The document really was replaced, not merely reordered.
+            blocks: viewer.children.length,
+            beta: (viewer.textContent || '').includes('Beta paragraph 119'),
+            alpha: (viewer.textContent || '').includes('Alpha paragraph 119'),
+          });
+        })()
+      `),
+    );
+    // Vacuity guards. An insert loop that ran zero times, or a diff that
+    // happened to reuse everything, would satisfy the assertions below by
+    // doing nothing.
+    check(
+      "the bulk-drain probe really replaced a whole document",
+      drain.inserts >= 100 && drain.beta === true && drain.alpha === false,
+      JSON.stringify(drain),
+    );
+    check(
+      "every new block is already detached when it is inserted",
+      drain.inserts >= 100 && drain.stillAttached === 0,
+      JSON.stringify(drain),
+    );
+    check(
+      "a full replacement clears the viewer in one go rather than node by node",
+      drain.viewerRemovals === 0,
+      JSON.stringify(drain),
+    );
+    // The other half of the same property. Draining the staging container one
+    // child at a time is just as quadratic as draining the viewer one child at
+    // a time, and it is the shape an "optimisation" that stages through a
+    // DocumentFragment would naturally take, so it is asserted separately
+    // rather than left to the viewer-side count.
+    check(
+      "the staging container is drained in one go rather than node by node",
+      drain.stagingRemovals === 0,
+      JSON.stringify(drain),
+    );
+  }
+
   const alive = await proveSentinelAlive(win, sentinel);
   check(
     "the error sentinel was demonstrably watching both channels",

@@ -304,8 +304,8 @@ const REVERTS = [
     id: "R66",
     what: "widen only when clipped (a table squeezed into narrow columns still 'fits', so it is never widened)",
     file: RENDERER,
-    from: "      wanted: Math.max(rect * overflow, preferredTableWidth(container, capMemo)),",
-    to: "      wanted: rect * overflow,",
+    from: "      m.wanted = Math.max(m.rect * m.overflow, preferred);",
+    to: "    m.wanted = m.rect * m.overflow;",
     expect: [/table too wide for the reading column is widened/],
   },
   {
@@ -621,7 +621,7 @@ const REVERTS = [
     suite: "test:tabs",
     what: "resync originalMarkdown from the textarea after every successful save, including view-mode saves",
     file: RENDERER,
-    from: "      if (entry) {\n        originalMarkdown = entry.content;\n      } else if (isEditMode) {",
+    from: "      if (entry && !storeMovedDuringWrite) {\n        originalMarkdown = entry.content;\n      } else if (!entry && isEditMode) {",
     to: "      if (false) {\n        originalMarkdown = entry.content;\n      } else if (true) {",
     expect: [/a successful view-mode save does not overwrite the in-memory document/],
   },
@@ -729,7 +729,7 @@ const REVERTS = [
     suite: "test:tabs",
     what: "resync the document store from the textarea after a save instead of from the bytes that were written",
     file: RENDERER,
-    from: "      if (entry) {\n        originalMarkdown = entry.content;",
+    from: "      if (entry && !storeMovedDuringWrite) {\n        originalMarkdown = entry.content;",
     to: "      if (false) {\n        originalMarkdown = entry.content;",
     expect: [
       /after a save the document store holds the bytes that were written, not later keystrokes/,
@@ -743,7 +743,7 @@ const REVERTS = [
     suite: "test:tabs",
     what: "declare the document clean after a save even if it was typed into while the write was in flight",
     file: RENDERER,
-    from: "      hasUnsavedChanges = isEditMode\n        ? markdownEditor.value !== originalMarkdown\n        : false;",
+    from: "      hasUnsavedChanges = isEditMode\n        ? markdownEditor.value !== originalMarkdown\n        : storeMovedDuringWrite;",
     to: "      hasUnsavedChanges = false;",
     expect: [/keystrokes made during a save are still reported as unsaved/],
   },
@@ -3309,6 +3309,148 @@ const REVERTS = [
     mustPass: [
       /every build target is one the download-table check knows how to look for/,
       /the README names exactly the extensions the installer actually registers/,
+    ],
+  },
+  {
+    id: "R227",
+    // The performance defect, restored exactly: measure each table on its own,
+    // write-then-read, which forces one full-document layout per table and
+    // makes the pass O(tables x document). Measured at 35.5s of a 45.6s render
+    // on a 1 MB document, against 2.3s batched.
+    //
+    // Note this revert is GEOMETRICALLY CORRECT - preferredTableWidth() is the
+    // same measurement, taken one table at a time - so nothing else may fail.
+    // That is the point: the only thing separating the two versions is when the
+    // layouts happen, and a suite that could not tell them apart would have let
+    // this regress silently.
+    what: "measure each table one at a time (write-then-read per table, forcing a full-document layout for every table)",
+    file: RENDERER,
+    from: "      preferredStates.push(tablePreferredBegin(m.container, capMemo));",
+    to: "      preferredStates.push(null);",
+    also: {
+      from: "      const preferred = preferredStates[i] ? tablePreferredRead(preferredStates[i]) : 0;",
+      to: "      const preferred = preferredTableWidth(m.container, capMemo);",
+    },
+    expect: [/every table is sized for measurement before any of them is measured/],
+    mustPass: [
+      // Geometry must be untouched. If these fail, the revert has broken the
+      // measurement rather than merely un-batching it.
+      /a table too wide for the reading column is widened/,
+      /an explanation column is given a readable measure/,
+      /the measurement pass leaves no table stuck at max-content/,
+    ],
+  },
+  {
+    id: "R228",
+    suite: "test:patch",
+    // Drain the parsed blocks one at a time instead of in bulk. Removing a
+    // child costs time proportional to the container's size, so this is the
+    // O(n^2) half of the render: 23.7s against 36ms on a 1 MB document.
+    //
+    // The revert leaves temp populated, so every node is still attached to it
+    // when viewer.insertBefore detaches it - which is precisely what the
+    // assertion observes.
+    what: "leave the parsed blocks attached to their parser container, so each insert detaches one node at a time",
+    file: RENDERER,
+    from: "  temp.replaceChildren();",
+    to: "  /* bulk drain reverted for proof */",
+    expect: [/every new block is already detached when it is inserted/],
+    mustPass: [
+      /the bulk-drain probe really replaced a whole document/,
+      /a full replacement clears the viewer in one go rather than node by node/,
+    ],
+  },
+  {
+    id: "R229",
+    suite: "test:patch",
+    // The other half: when nothing was reused, clear the viewer node by node.
+    // Kept as a separate revert from R228 because the two are independent
+    // defects on opposite sides of the same loop, and a fix for one does not
+    // imply the other.
+    what: "clear the viewer node by node even when nothing was reused",
+    file: RENDERER,
+    from: "  if (!pairs.length) {\n    viewer.replaceChildren();\n  } else {\n    oldEls.forEach((el, i) => {\n      if (!reusedOld[i]) el.remove();\n    });\n  }",
+    to: "  oldEls.forEach((el, i) => {\n    if (!reusedOld[i]) el.remove();\n  });",
+    expect: [/a full replacement clears the viewer in one go rather than node by node/],
+    mustPass: [
+      /the bulk-drain probe really replaced a whole document/,
+      /every new block is already detached when it is inserted/,
+    ],
+  },
+  {
+    id: "R230",
+    // The batching oracle's own blind spot, found in review. Writing every
+    // table up front and then releasing each one as soon as it has been read is
+    // still one forced layout per table - the quadratic, restored - but the
+    // FIRST sample still sees all N at max-content. An assertion on the MAXIMUM
+    // concurrent count therefore stays green. Only the minimum can tell the two
+    // apart, and this revert is what proves it does.
+    //
+    // Geometrically identical to the fix: restoring a table after its own read
+    // cannot change that read. Nothing but the batching assertion may fail.
+    what: "release each table as soon as it is read, so only the first measurement sees a batched document",
+    file: RENDERER,
+    from: "      const preferred = preferredStates[i] ? tablePreferredRead(preferredStates[i]) : 0;\n      m.wanted = Math.max(m.rect * m.overflow, preferred);",
+    to: "      const preferred = preferredStates[i] ? tablePreferredRead(preferredStates[i]) : 0;\n      if (preferredStates[i]) tablePreferredRestore(preferredStates[i]);\n      m.wanted = Math.max(m.rect * m.overflow, preferred);",
+    expect: [/every table is sized for measurement before any of them is measured/],
+    mustPass: [
+      /the batching probe really measured several tables/,
+      /the measurement pass leaves no table stuck at max-content/,
+      /a table too wide for the reading column is widened/,
+    ],
+  },
+  {
+    id: "R231",
+    // Exception safety. Batching is what makes this matter: the un-batched
+    // version could strand one table at max-content, this one strands every
+    // table in the document, and no resize follows to repair it.
+    what: "restore table widths outside a finally, so a throw mid-measurement strands every table at max-content",
+    file: RENDERER,
+    from: "  const preferredStates = [];\n  try {",
+    to: "  const preferredStates = [];\n  {",
+    also: {
+      from: "  } finally {\n    // Write pass: put every table's own width back before anything is applied,\n    // so the apply pass below starts from the layout the reader had.\n    preferredStates.forEach((state) => {\n      if (state) tablePreferredRestore(state);\n    });\n  }",
+      to: "  }\n  preferredStates.forEach((state) => {\n    if (state) tablePreferredRestore(state);\n  });",
+    },
+    expect: [/a measurement that throws part way through still puts every table back/],
+    mustPass: [
+      /the injected measurement failure really did abort the pass/,
+      /every table is sized for measurement before any of them is measured/,
+      /the measurement pass leaves no table stuck at max-content/,
+    ],
+  },
+  {
+    id: "R232",
+    suite: "test:patch",
+    // The staging half of the drain guard. This revert still leaves every node
+    // parentless before it is inserted, so the "already detached" assertion
+    // stays green - it is only the one-at-a-time detach that is restored, which
+    // is the whole cost. An oracle that watched only the viewer would miss it.
+    what: "drain the staging container one child at a time instead of in one bulk clear",
+    file: RENDERER,
+    from: "  temp.replaceChildren();",
+    to: "  while (temp.firstChild) temp.removeChild(temp.firstChild);",
+    expect: [/the staging container is drained in one go rather than node by node/],
+    mustPass: [
+      /the bulk-drain probe really replaced a whole document/,
+      /every new block is already detached when it is inserted/,
+    ],
+  },
+  {
+    id: "R233",
+    suite: "test:patch",
+    // Same defect as R229, reached through a different API. The first version
+    // of this oracle counted only Element.prototype.remove, so clearing the
+    // viewer with removeChild would have restored the quadratic and stayed
+    // green. Counting by effect rather than by method is what this proves.
+    what: "clear the viewer with removeChild in a loop rather than one bulk clear",
+    file: RENDERER,
+    from: "    viewer.replaceChildren();",
+    to: "    while (viewer.firstChild) viewer.removeChild(viewer.firstChild);",
+    expect: [/a full replacement clears the viewer in one go rather than node by node/],
+    mustPass: [
+      /the bulk-drain probe really replaced a whole document/,
+      /every new block is already detached when it is inserted/,
     ],
   },
 ];

@@ -3998,11 +3998,72 @@ function patchViewerDOM(newHtml) {
     reusedOld[oi] = true;
   }
 
+  // Detaching the freshly parsed blocks in BULK, before any of them is
+  // inserted, is what keeps this pass linear - and it is the single largest win
+  // available on a big document.
+  //
+  // Measured in Blink: removing children from a container ONE AT A TIME costs
+  // time proportional to the container's size, so draining it that way is
+  // O(n^2). On a 1 MB document (29,055 top-level blocks) the move loop below
+  // took 23.7s. Inserting nodes that have NO PARENT, by contrast, is linear and
+  // effectively free: the same 29,055 insertions took 10ms. A bulk clear costs
+  // 16ms for the whole container, so draining first and then inserting takes
+  // 36ms in total - about 650x faster, and the difference is a complexity
+  // class, not a constant.
+  //
+  // Those figures are for a DENSE document (about 135 DOM nodes per KB: tables,
+  // lists and code alongside the prose), because detaching a block costs more
+  // the larger its subtree. Re-measured later on plain single-element
+  // paragraphs, the same defect is worth 571ms against 119ms at 16,000 blocks,
+  // and is still a complexity class: 174ms -> 571ms for 8,000 -> 16,000 blocks
+  // is 3.3x for twice the work. The shape of the curve is the claim here; the
+  // absolute numbers only mean anything alongside the document they came from.
+  //
+  // Note this cannot be fixed by batching the INSERT side (append(...nodes), a
+  // DocumentFragment, replaceChildren(...nodes)): all three were measured and
+  // all three are just as slow, because each one still has to detach every node
+  // from its current parent first. The detach is the cost, so the detach is
+  // what has to be batched.
+  //
+  // Only elements are carried over, which is unchanged: newEls comes from
+  // temp.children, so a stray top-level text node was never inserted before
+  // either.
+  temp.replaceChildren();
+
   // Anything the new document no longer contains goes first, leaving the viewer
   // holding exactly the reused nodes in their final relative order.
-  oldEls.forEach((el, i) => {
-    if (!reusedOld[i]) el.remove();
-  });
+  //
+  // When NOTHING was matched, that is every old node, so the same bulk clear
+  // applies - and nothing can be lost by it, precisely because nothing was
+  // going to be preserved. The per-node path is kept for the incremental case,
+  // where the whole point is to leave the reused nodes attached and untouched:
+  // a bulk clear there would detach and reattach them, discarding any state
+  // that lives in their layout objects (an inner scroll offset, a loaded
+  // sandboxed frame) for no benefit.
+  //
+  // Review asked whether this gate is too tight - one reused block (a shared
+  // title, YAML frontmatter, a banner) sends the whole document down the
+  // per-node path - and proposed a threshold that bulk-clears once most of the
+  // document is being replaced. MEASURED INSTEAD, and the answer is no: with
+  // the staging drain above in place, removing nodes one at a time from the
+  // viewer is LINEAR, not quadratic.
+  //
+  //     blocks   bulk clear   per-node (1 shared block)   removals
+  //      4,000        32ms                        31ms      3,999
+  //      8,000        67ms                        70ms      7,999
+  //     16,000       119ms                       132ms     15,999
+  //
+  // Flat per block, and the two paths are within about 10% of each other, so a
+  // threshold would have added a state-destroying branch to buy nothing. The
+  // bulk clear stays because it is free and marginally faster where it is
+  // provably safe, NOT because the per-node path is a hazard.
+  if (!pairs.length) {
+    viewer.replaceChildren();
+  } else {
+    oldEls.forEach((el, i) => {
+      if (!reusedOld[i]) el.remove();
+    });
+  }
 
   // Then walk the target sequence, inserting only the genuinely new blocks.
   let ref = viewer.firstChild;
@@ -4611,17 +4672,41 @@ function measureTextColumnCap(container, table, templateCell, memo) {
   return resolved;
 }
 
-// Measures what the table would like, not what it has been given. Setting
-// `width: max-content` and reading back forces a synchronous layout per table,
-// which is why this is called once per table inside the batched read pass and
-// never in a loop that also writes.
-function preferredTableWidth(container, memo) {
+// Measures what the table would like, not what it has been given.
+//
+// Asking the question requires writing `width: max-content` and reading a rect
+// back, and a write followed by a read is a forced synchronous layout. Done once
+// per table in a loop, that is one FULL-DOCUMENT layout per table - the whole
+// pass is then O(tables x document), and the cost per table grows with the
+// number of tables. Measured on a 1 MB document (2919 tables) before this was
+// split up: applyTableBreakout took 35.5s of a 45.6s render, and the per-table
+// cost rose 3.3ms -> 5.7ms -> 12.2ms as the document grew from 0.25 MB to 1 MB.
+// That curve is the signature of layout thrash, not of expensive measurement.
+//
+// So the question is asked in three separable phases - write every table, read
+// every table, restore every table - which costs a fixed number of layouts for
+// the whole document instead of one per table. applyTableBreakout drives the
+// phases directly; the wrapper below keeps the original one-table call shape for
+// callers (and tests) that only want a single answer.
+//
+// Batching is layout-EQUIVALENT here, not an approximation, and that rests on
+// two properties worth stating because a future stylesheet change could remove
+// them: `.table-container` is `width: 100%; overflow-x: auto`, so a table sized
+// to max-content is contained by its own scroller and cannot change the geometry
+// any other table sees; and `max-content` (with the cell widths under it) is an
+// INTRINSIC size, so it does not depend on the space available either.
+function tablePreferredBegin(container, memo) {
   const table = container.querySelector('table');
   const row = table && table.querySelector('tr');
-  if (!row || !row.cells.length) return 0;
+  if (!row || !row.cells.length) return null;
   const cap = measureTextColumnCap(container, table, row.cells[0], memo);
   const previous = table.style.width;
   table.style.width = 'max-content';
+  return { table, row, cap, previous };
+}
+
+function tablePreferredRead(state) {
+  const { table, row, cap } = state;
   // Measure the table itself rather than summing cells: the sum omits borders
   // and border-spacing, which underestimated the requirement and left a
   // residual horizontal scrollbar on a 16-column table that would otherwise
@@ -4636,8 +4721,24 @@ function preferredTableWidth(container, memo) {
     // identifiers still gets exactly what it needs.
     excess += Math.max(0, cell.getBoundingClientRect().width - cap);
   }
-  table.style.width = previous;
   return full - excess;
+}
+
+function tablePreferredRestore(state) {
+  state.table.style.width = state.previous;
+}
+
+function preferredTableWidth(container, memo) {
+  const state = tablePreferredBegin(container, memo);
+  if (!state) return 0;
+  // `finally` rather than a plain sequence: a throw in the read must not leave
+  // the table stranded at max-content, which is a visible corruption of the
+  // page rather than a missed measurement.
+  try {
+    return tablePreferredRead(state);
+  } finally {
+    tablePreferredRestore(state);
+  }
 }
 
 // Add maximize buttons to tables for popup view
@@ -4786,10 +4887,10 @@ function applyTableBreakout() {
   });
   if (splitView) return;
 
-  // Read pass. preferredTableWidth writes then reads per table, so this is not
-  // a single reflow for the batch; it is still worth keeping the measurement
-  // separate from the application so that widening one table cannot change what
-  // the next one measures.
+  // Read pass. Nothing is written in this loop, so it costs ONE layout for the
+  // whole document rather than one per container. Both values describe the
+  // layout the reader is actually looking at, so they must be taken before any
+  // table is resized below.
   const capMemo = new Map();
   const measured = visible.map((container) => {
     // Everything below is in viewport pixels, to match `available`.
@@ -4800,17 +4901,44 @@ function applyTableBreakout() {
     // has been wrong twice.
     const rect = container.getBoundingClientRect().width;
     const overflow = container.clientWidth > 0 ? container.scrollWidth / container.clientWidth : 1;
-    return {
-      container,
+    return { container, rect, overflow, wanted: 0, given: rect };
+  });
+
+  // Write pass: ask EVERY table what it would like, all at once. Interleaving
+  // this with the read below is what used to make the whole pass quadratic -
+  // see the note on tablePreferredBegin.
+  //
+  // Begin and read run under a `finally` that restores, and the states are
+  // collected INCREMENTALLY rather than through `.map`, so a throw part way
+  // through either pass still puts back the tables that were already written.
+  // Batching is what made that matter: the un-batched version held one table's
+  // write and its restore in a single scope, so a throw could strand ONE table
+  // at max-content. Spread across the document, the same throw would strand
+  // EVERY table, and nothing puts them back until the next resize - which the
+  // ResizeObserver will not deliver, because no resize happened.
+  const preferredStates = [];
+  try {
+    for (const m of measured) {
+      preferredStates.push(tablePreferredBegin(m.container, capMemo));
+    }
+
+    // Read pass: one layout now answers every table.
+    measured.forEach((m, i) => {
       // Two reasons to widen, and both matter. Overflow is the hard case:
       // content that cannot shrink any further (an unbreakable token) and is
-      // genuinely clipped. preferredTableWidth is the soft case: a table that
+      // genuinely clipped. The preferred width is the soft case: a table that
       // fits only because every column has been squeezed, which is the
       // complaint this work exists to answer.
-      wanted: Math.max(rect * overflow, preferredTableWidth(container, capMemo)),
-      given: rect,
-    };
-  });
+      const preferred = preferredStates[i] ? tablePreferredRead(preferredStates[i]) : 0;
+      m.wanted = Math.max(m.rect * m.overflow, preferred);
+    });
+  } finally {
+    // Write pass: put every table's own width back before anything is applied,
+    // so the apply pass below starts from the layout the reader had.
+    preferredStates.forEach((state) => {
+      if (state) tablePreferredRestore(state);
+    });
+  }
 
   // Write pass: apply.
   measured.forEach(({ container, wanted, given }) => {
