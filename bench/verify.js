@@ -1722,30 +1722,61 @@ for (const [profile, want] of Object.entries(CORPUS_DIGEST)) {
 
       // 5. THE GUARD IS SENSITIVE. A check that cannot fail is a defect equal to
       //    a product bug, so break the thing it watches and require it to notice.
-      //    The mutation removes ONLY the timing side effect and leaves the
-      //    __benchWrapped marker, which is precisely what a structural check
-      //    cannot see - it is the reason the post-condition calls rather than
-      //    inspects.
-      const brokenSrc = shimSrc.replace(
-        /window\.__bench\.phases\['marked\.parse'\] = \(window\.__bench\.phases\['marked\.parse'\] \|\| 0\) \+ \(performance\.now\(\) - t0\);/,
-        "void 0;",
-      );
-      check(
-        "the sensitivity mutation still matches the wrap's timing statement",
-        brokenSrc !== shimSrc,
-        "could not break the timing side effect, so the check below proves nothing",
-      );
-      if (brokenSrc !== shimSrc) {
+      //    Each mutation leaves the __benchWrapped marker intact, which is
+      //    precisely what a structural check cannot see - it is the reason the
+      //    post-condition calls rather than inspects.
+      //
+      //    The GARBAGE-WRITE cases exist because the post-condition was once
+      //    written as a bare hasOwnProperty test, which every one of them slips
+      //    past: the key is present, so the wrap reads as healthy while the
+      //    number it records is unusable. They are here so that the type+range
+      //    check which replaced it is a tested guarantee rather than an asserted
+      //    one. The zero case is the opposite: a legitimate reading on a coarse
+      //    clock, so the guard MUST accept it, and that is checked too.
+      const TIMING_STMT =
+        /window\.__bench\.phases\['marked\.parse'\] = \(window\.__bench\.phases\['marked\.parse'\] \|\| 0\) \+ \(performance\.now\(\) - t0\);/;
+      const WRITE = "window.__bench.phases['marked.parse'] = ";
+      const mutations = [
+        ["records nothing at all", "void 0;", true],
+        ["records NaN", `${WRITE}NaN;`, true],
+        // Infinity is the case that separates Number.isFinite from a bare
+        // `typeof === 'number'` test: it compares `>= 0` perfectly happily, so
+        // the weaker form accepts it. A divide-by-zero in a future timing
+        // calculation is how it would arrive.
+        ["records Infinity", `${WRITE}Infinity;`, true],
+        ["records a negative number", `${WRITE}-1;`, true],
+        ["records a string", `${WRITE}'12';`, true],
+        ["records undefined", `${WRITE}undefined;`, true],
+        ["records null", `${WRITE}null;`, true],
+        // NOT a mutation to catch: an honest zero from a coarse clock. If the
+        // guard ever fails this leg it has regressed to a timing assertion and
+        // will flake on 90% of healthy runs (measured: 453/500).
+        ["records an honest zero", `${WRITE}0;`, false],
+      ];
+      for (const [label, replacement, mustCatch] of mutations) {
+        const brokenSrc = shimSrc.replace(TIMING_STMT, replacement);
+        check(
+          `the sensitivity mutation for "${label}" still matches the wrap's timing statement`,
+          brokenSrc !== shimSrc,
+          "could not rewrite the timing side effect, so the check below proves nothing",
+        );
+        if (brokenSrc === shimSrc) continue;
         const wb = freshWindow();
         const ctx = { window: wb, performance: { now: hrMs }, console };
         ctx.globalThis = ctx;
         vm.createContext(ctx);
         vm.runInContext(`(function(){\n${brokenSrc}\n})()`, ctx);
+        const caught = wb.__benchUnwrappable.some((p) => String(p).startsWith("marked.parse"));
         check(
-          "the wrap's post-condition CATCHES a wrap that installs but records nothing",
-          wb.__benchUnwrappable.some((p) => String(p).startsWith("marked.parse")),
-          `a wrap with its timing removed was accepted (unwrappable=${JSON.stringify(wb.__benchUnwrappable)}). ` +
-            "The post-condition is checking the marker rather than the behaviour.",
+          mustCatch
+            ? `the wrap's post-condition CATCHES a wrap that ${label}`
+            : `the wrap's post-condition ACCEPTS a wrap that ${label}`,
+          caught === mustCatch,
+          mustCatch
+            ? `a wrap that ${label} was accepted (unwrappable=${JSON.stringify(wb.__benchUnwrappable)}). ` +
+              "The post-condition is checking the marker rather than the value."
+            : `a legitimate zero reading was REJECTED (unwrappable=${JSON.stringify(wb.__benchUnwrappable)}). ` +
+              "The post-condition has become clock-resolution dependent and will flake.",
         );
       }
     }

@@ -1128,14 +1128,23 @@ app.whenReady().then(async () => {
       // which is the same class of silent failure one level up. So parse a
       // trivial document and require the counter to actually be written.
       //
-      // IT TESTS THAT THE COUNTER EXISTS, NOT THAT TIME ELAPSED. Requiring a
+      // IT TESTS THE VALUE THE WRAPPER WROTE, NOT THAT TIME ELAPSED. Requiring a
       // POSITIVE delta looks equivalent and is not: parsing the word 'probe'
       // takes about 50us once marked is warm, so on a coarse clock the honest
       // answer is 0 and the guard would fail on working code. Measured in the
       // verify.js harness at 1ms resolution: 452 of 500 healthy runs reported a
       // zero delta. A timing guard whose verdict depends on the clock's
-      // resolution is a flaky test, and a flaky guard gets disabled. Writing the
-      // key is what the wrap is for; how long the parse took is not the claim.
+      // resolution is a flaky test, and a flaky guard gets disabled.
+      //
+      // But merely asking whether the KEY EXISTS trades that flake for a blind
+      // spot: a wrap that writes NaN, Infinity, a negative number, a string or
+      // null would satisfy it while recording nothing usable, and the old delta
+      // check would have caught all of them. So check the value's TYPE AND RANGE
+      // instead, which is resolution-independent AND catches garbage.
+      // `Number.isFinite` rather than a `typeof === 'number'` test is deliberate:
+      // it does not coerce (so '12' is rejected) and it rejects Infinity, which a
+      // divide-by-zero in a future timing calculation would produce and which
+      // compares `>= 0` perfectly happily.
       // The key is deleted first so the pre-state is known rather than assumed.
       if (window.marked && typeof window.marked.parse === 'function' && window.marked.parse.__benchWrapped) {
         const had = Object.prototype.hasOwnProperty.call(window.__bench.phases, 'marked.parse');
@@ -1143,8 +1152,9 @@ app.whenReady().then(async () => {
         delete window.__bench.phases['marked.parse'];
         try {
           window.marked.parse('probe');
-          if (!Object.prototype.hasOwnProperty.call(window.__bench.phases, 'marked.parse')) {
-            window.__benchUnwrappable.push('marked.parse RECORDS NOTHING WHEN CALLED');
+          const rec = window.__bench.phases['marked.parse'];
+          if (!(Number.isFinite(rec) && rec >= 0)) {
+            window.__benchUnwrappable.push('marked.parse RECORDED ' + String(rec) + ' WHEN CALLED');
           }
         } catch (e) {
           window.__benchUnwrappable.push('marked.parse THREW ON PROBE: ' + e.message);
