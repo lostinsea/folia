@@ -12,11 +12,12 @@ const fs = require("fs");
 const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
-const CSS = path.join(ROOT, "styles.css");
-const RENDERER = path.join(ROOT, "renderer.js");
-const TABS = path.join(ROOT, "custom-tabs.js");
-const COLLAPSE = path.join(ROOT, "custom-collapse.js");
-const MAIN = path.join(ROOT, "main.js");
+const SRC = path.join(ROOT, "src");
+const CSS = path.join(SRC, "styles.css");
+const RENDERER = path.join(SRC, "renderer.js");
+const TABS = path.join(SRC, "custom-tabs.js");
+const COLLAPSE = path.join(SRC, "custom-collapse.js");
+const MAIN = path.join(SRC, "main.js");
 const VISUAL = path.join(ROOT, "test", "test-visual-utils.js");
 const RELEASE = path.join(ROOT, "scripts", "release.js");
 const PKG = path.join(ROOT, "package.json");
@@ -25,8 +26,8 @@ const LICENSE_TXT = path.join(ROOT, "LICENSE.txt");
 const LICENSE_MD = path.join(ROOT, "LICENSE");
 const NOTICES_GEN = path.join(ROOT, "scripts", "generate-notices.js");
 const ATTRS = path.join(ROOT, ".gitattributes");
-const HTML = path.join(ROOT, "index.html");
-const CUSTOM_CSS = path.join(ROOT, "custom-styles.css");
+const HTML = path.join(SRC, "index.html");
+const CUSTOM_CSS = path.join(SRC, "custom-styles.css");
 
 const REVERTS = [
   {
@@ -502,8 +503,8 @@ const REVERTS = [
     id: "R79",
     what: "point a declared @font-face at a TTF that was never vendored (the app silently falls back and every table width is measured in the wrong font)",
     file: CSS,
-    from: "  src: url('fonts/FiraCode-Regular.ttf') format('truetype');",
-    to: "  src: url('fonts/FiraCode-Regular-NEVER-VENDORED.ttf') format('truetype');",
+    from: "  src: url('../fonts/FiraCode-Regular.ttf') format('truetype');",
+    to: "  src: url('../fonts/FiraCode-Regular-NEVER-VENDORED.ttf') format('truetype');",
     expect: [
       /every Fira Code weight the stylesheet declares is really loaded/,
       /exists in the vendored/,
@@ -1038,7 +1039,7 @@ const REVERTS = [
     suite: "test:packaging",
     what: "hardcode the AppUserModelId instead of deriving it from build.appId",
     file: MAIN,
-    from: '    const { appId } = require("./package.json").build;\n    if (appId) app.setAppUserModelId(appId);',
+    from: '    const { appId } = require("../package.json").build;\n    if (appId) app.setAppUserModelId(appId);',
     to: '    const appId = "io.github.lostinsea.folia";\n    if (appId) app.setAppUserModelId("io.github.lostinsea.folia");',
     expect: [/read from build\.appId rather than duplicated/],
     mustPass: [/sets an explicit AppUserModelId/],
@@ -1564,7 +1565,7 @@ const REVERTS = [
     id: "R140",
     suite: "test:packaging",
     what: "reintroduce an abbreviated second copy of the product name in the header",
-    file: path.join(ROOT, "index.html"),
+    file: HTML,
     from: '<span class="app-title">Folia</span>',
     to: '<span class="app-title">Folia</span>\n            <span class="app-title-short">MV</span>',
     expect: [/header carries no abbreviated second copy of the product name/],

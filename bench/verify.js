@@ -574,7 +574,7 @@ for (const [profile, want] of Object.entries(ATTRIBUTES)) {
 // checking a subset - the "a parser with no end marker reports on text nobody
 // claimed it was reading" lesson.
 {
-  const src = fs.readFileSync(path.join(__dirname, "..", "renderer.js"), "utf8");
+  const src = fs.readFileSync(path.join(__dirname, "..", "src", "renderer.js"), "utf8");
   const start = src.indexOf("marked.setOptions({");
   const end = start === -1 ? -1 : src.indexOf("});", start);
   check(
@@ -1819,7 +1819,7 @@ for (const [profile, want] of Object.entries(CORPUS_DIGEST)) {
 // justified the model is a one-time result recorded in BASELINE.md - repeating
 // it here would make npm test a benchmark.
 {
-  const fh = require(path.join(__dirname, "..", "file-helpers.js"));
+  const fh = require(path.join(__dirname, "..", "src", "file-helpers.js"));
 
   check(
     "file-helpers still exports the size-guard estimator",

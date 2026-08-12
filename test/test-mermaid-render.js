@@ -28,7 +28,7 @@ const os = require("os");
 const path = require("path");
 const { VISUAL_PROBE_SOURCE, inspectVisual, captureScreenshot, startErrorSentinel, proveSentinelAlive, LIVENESS_MUTE_REASON, trapExternalOpens, waitForExternalTrap } = require("./test-visual-utils");
 
-require("../main.js");
+require("../src/main.js");
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mdv-mermaid-"));
 const fileM = path.join(dir, "diagrams.md");

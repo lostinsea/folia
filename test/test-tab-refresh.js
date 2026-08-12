@@ -16,7 +16,7 @@ const {
   trapExternalOpens,
 } = require("./test-visual-utils");
 
-require("../main.js");
+require("../src/main.js");
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mdv-e2e-"));
 const fileA = path.join(dir, "alpha.md");

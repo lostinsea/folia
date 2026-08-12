@@ -14,6 +14,15 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$SCRIPT_DIR/.."
 
+# Every `node -e` below reads ./package.json relatively, and `npm install` in
+# step 6 installs into the CWD. Both were silently relying on the script being
+# invoked from the repo root. Anchor the CWD instead - note that $ROOT is a
+# Git Bash path (/c/repos/...) which bash resolves but native Windows node does
+# NOT, so passing $ROOT into node makes it throw MODULE_NOT_FOUND; combined with
+# a `2>/dev/null` that turns an assertion into a silent pass. Relative paths
+# from a known CWD are the form that works on both.
+cd "$ROOT"
+
 echo "=== Applying post-merge customizations ==="
 
 # -----------------------------------------------------------------------------
@@ -52,13 +61,13 @@ check_line() {
 }
 
 MISSING_REFS=0
-check_line "$ROOT/index.html" 'custom-styles.css'      '<link rel="stylesheet" href="custom-styles.css">'
-check_line "$ROOT/index.html" 'custom-tabs.js'         '<script src="custom-tabs.js"></script>'
-check_line "$ROOT/index.html" 'custom-performance.js'  '<script src="custom-performance.js"></script>'
-check_line "$ROOT/index.html" 'custom-theme.js'        '<script src="custom-theme.js"></script>'
-check_line "$ROOT/index.html" 'tabsContainer'          '<div id="tabsContainer" ...> - must be just before <div class="main-content">'
-check_line "$ROOT/index.html" 'app-title'              '<span class="app-title">Folia</span> - inside #logoLink'
-check_line "$ROOT/index.html" '<title>Folia</title>'  '<title>Folia</title>'
+check_line "$ROOT/src/index.html" 'custom-styles.css'      '<link rel="stylesheet" href="custom-styles.css">'
+check_line "$ROOT/src/index.html" 'custom-tabs.js'         '<script src="custom-tabs.js"></script>'
+check_line "$ROOT/src/index.html" 'custom-performance.js'  '<script src="custom-performance.js"></script>'
+check_line "$ROOT/src/index.html" 'custom-theme.js'        '<script src="custom-theme.js"></script>'
+check_line "$ROOT/src/index.html" 'tabsContainer'          '<div id="tabsContainer" ...> - must be just before <div class="main-content">'
+check_line "$ROOT/src/index.html" 'app-title'              '<span class="app-title">Folia</span> - inside #logoLink'
+check_line "$ROOT/src/index.html" '<title>Folia</title>'  '<title>Folia</title>'
 
 if [ "$MISSING_REFS" -eq 1 ]; then
   echo ""
@@ -109,21 +118,21 @@ fi
 # -----------------------------------------------------------------------------
 echo ""
 echo "4. Checking main.js..."
-if grep -q 'backgroundThrottling.*true' "$ROOT/main.js"; then
+if grep -q 'backgroundThrottling.*true' "$ROOT/src/main.js"; then
   echo "   ✓ backgroundThrottling: true is present"
 else
   echo "   ✗ MISSING: backgroundThrottling: true not found in main.js"
   echo "     → Add 'backgroundThrottling: true' to webPreferences in new BrowserWindow()"
 fi
 
-if grep -q "window-visibility-changed" "$ROOT/main.js"; then
+if grep -q "window-visibility-changed" "$ROOT/src/main.js"; then
   echo "   ✓ window-visibility-changed IPC events present"
 else
   echo "   ✗ MISSING: window-visibility-changed IPC not found in main.js"
   echo "     → Add mainWindow.on('hide'/'show'/'minimize'/'restore') IPC sends"
 fi
 
-if grep -q "window-state.json\|loadWindowState\|saveWindowState" "$ROOT/main.js"; then
+if grep -q "window-state.json\|loadWindowState\|saveWindowState" "$ROOT/src/main.js"; then
   echo "   ✓ Window state persistence (loadWindowState/saveWindowState) present"
 else
   echo "   ✗ MISSING: window state persistence not found in main.js"
@@ -131,21 +140,21 @@ else
   echo "     → See docs/CUSTOMIZATIONS.md section 'Window state persistence'"
 fi
 
-if grep -q "app\.on.*open-file" "$ROOT/main.js"; then
+if grep -q "app\.on.*open-file" "$ROOT/src/main.js"; then
   echo "   ✓ macOS open-file event handler present"
 else
   echo "   ✗ MISSING: app.on('open-file') handler not found in main.js"
   echo "     → Add open-file handler before app.whenReady() so double-clicking .md files works"
 fi
 
-if grep -q "title:.*Folia" "$ROOT/main.js"; then
+if grep -q "title:.*Folia" "$ROOT/src/main.js"; then
   echo "   ✓ BrowserWindow title is 'Folia'"
 else
   echo "   ✗ WRONG TITLE: main.js BrowserWindow title should be 'Folia'"
   echo "     → Set title: 'Folia' in new BrowserWindow()"
 fi
 
-if grep -q "app-icon" "$ROOT/main.js"; then
+if grep -q "app-icon" "$ROOT/src/main.js"; then
   echo "   ✓ BrowserWindow / dock icon uses app-icon.png"
 else
   echo "   ✗ WRONG ICON in main.js: icon references should use 'app-icon.png'"
@@ -170,7 +179,7 @@ echo "5. Checking renderer.js window exports..."
 check_renderer() {
   local symbol="$1"
   local hint="$2"
-  if grep -q "$symbol" "$ROOT/renderer.js"; then
+  if grep -q "$symbol" "$ROOT/src/renderer.js"; then
     echo "   ✓ $symbol exported"
   else
     echo "   ✗ MISSING: $symbol not found in renderer.js"
@@ -211,7 +220,7 @@ echo "7. Checking index.html loads all custom overlay scripts..."
 
 check_html_script() {
   local script="$1"
-  if grep -q "src=\"$script\"" "$ROOT/index.html"; then
+  if grep -q "src=\"$script\"" "$ROOT/src/index.html"; then
     echo "   ✓ $script present"
   else
     echo "   ✗ MISSING: $script not found in index.html"
@@ -229,7 +238,7 @@ check_html_script "custom-performance.js"
 # resurrect it; index.html would then load a file that no longer exists.
 check_html_absent() {
   local script="$1"
-  if grep -q "src=\"$script\"" "$ROOT/index.html"; then
+  if grep -q "src=\"$script\"" "$ROOT/src/index.html"; then
     echo "   ✗ RESURRECTED: $script is registered in index.html but was removed from this fork"
     echo "     → Delete the <script src=\"$script\"></script> tag; do not re-add the file"
   else
@@ -245,23 +254,27 @@ check_html_absent "custom-language.js"
 echo ""
 echo "8. Checking package.json build.files for overlay scripts..."
 
-check_build_custom() {
-  local file="$1"
-  if grep -q "\"$file\"" "$ROOT/package.json"; then
-    echo "   ✓ $file in build.files"
-  else
-    echo "   ✗ MISSING: $file not in package.json build.files"
-    echo "     → Add \"$file\" to the build.files array in package.json"
-  fi
-}
+# These used to be checked by a second, hand-rolled `grep -q "\"$file\""`
+# helper that duplicated check_build_file above. The duplication was not
+# harmless: the grep matched the filename WITH its surrounding quotes, so it
+# broke the moment the sources moved into src/ and the entries became
+# "src/custom-tabs.js" - reporting five files MISSING that were correctly
+# declared, while the substring-based section 3 went on passing. Reuse the one
+# helper so the two can never disagree again.
+check_build_file "custom-collapse.js"
+check_build_file "custom-tabs.js"
+check_build_file "custom-theme.js"
+check_build_file "custom-performance.js"
+check_build_file "custom-styles.css"
 
-check_build_custom "custom-collapse.js"
-check_build_custom "custom-tabs.js"
-check_build_custom "custom-theme.js"
-check_build_custom "custom-performance.js"
-check_build_custom "custom-styles.css"
-
-if grep -q "\"custom-language.js\"" "$ROOT/package.json"; then
+# The mirror image, and the more dangerous half: this asserts an ABSENCE, so a
+# matcher that has stopped matching reports success. The old exact-quote grep
+# would have waved "src/custom-language.js" straight back into the build with a
+# ✓ beside it. Substring matching keeps it honest regardless of directory.
+if node -e "
+  const files = (require('./package.json').build || {}).files || [];
+  process.exit(files.some(f => typeof f === 'string' && f.includes('custom-language.js')) ? 0 : 1);
+"; then
   echo "   ✗ RESURRECTED: custom-language.js is back in build.files but was removed from this fork"
   echo "     → Remove it from the build.files array in package.json"
 else

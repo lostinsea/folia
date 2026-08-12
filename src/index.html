@@ -46,7 +46,7 @@
     <link rel="stylesheet" href="custom-styles.css" />
     <link
       rel="stylesheet"
-      href="libs/prismjs/themes/prism-solarizedlight.css"
+      href="../libs/prismjs/themes/prism-solarizedlight.css"
     />
     <!--
       Runtime libraries are vendored locally by scripts/vendor-libs.js (run on
@@ -57,21 +57,21 @@
       also let the app render offline and make `npm audit` reflect what
       actually ships. Do not reintroduce CDN <script> tags here.
     -->
-    <script src="libs/vendor/marked.min.js"></script>
+    <script src="../libs/vendor/marked.min.js"></script>
         <!-- mermaid.min.js is NOT loaded here: it is 3.5MB and cost ~128ms of every
              launch even for documents with no diagrams. renderer.js fetches it on
              first actual need via ensureMermaid(). See PERF-03 in docs/PERF-AUDIT.md. -->
-        <script src="libs/vendor/purify.min.js"></script>
+        <script src="../libs/vendor/purify.min.js"></script>
     <!-- PrismJS - Bundled Core and Language Components -->
-    <script src="libs/prismjs/prism-bundle.js"></script>
+    <script src="../libs/prismjs/prism-bundle.js"></script>
   </head>
   <body>
     <div class="container">
       <div class="header">
         <div class="header-left">
           <a href="#" id="logoLink" title="Folia">
-            <img src="assets/logo.png" alt="Logo" class="app-logo logo-light" />
-            <img src="assets/logo_dark.png" alt="Logo" class="app-logo logo-dark" />
+            <img src="../assets/logo.png" alt="Logo" class="app-logo logo-light" />
+            <img src="../assets/logo_dark.png" alt="Logo" class="app-logo logo-dark" />
             <span class="app-title">Folia</span>
           </a>
         </div>

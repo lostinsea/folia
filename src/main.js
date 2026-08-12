@@ -498,7 +498,7 @@ function createWindow() {
       enableRemoteModule: true,
       backgroundThrottling: true, // Throttle background renderers to save CPU
     },
-    icon: path.join(__dirname, "assets", "app-icon.png"),
+    icon: path.join(__dirname, "..", "assets", "app-icon.png"),
   });
 
   // The main window runs with nodeIntegration: true, so a navigation away from
@@ -1297,7 +1297,7 @@ ipcMain.on("open-mermaid-popup", (event, data) => {
     autoHideMenuBar: true,
     webPreferences: popupWebPreferences("mermaid"),
     title: "Mermaid Diagram - Zoom with mouse wheel, Pan by dragging",
-    icon: path.join(__dirname, "assets", "app-icon.png"),
+    icon: path.join(__dirname, "..", "assets", "app-icon.png"),
   });
 
   registerPopup(popupWindow, "mermaid");
@@ -1661,7 +1661,7 @@ ipcMain.on("open-image-popup", (event, data) => {
     autoHideMenuBar: true,
     webPreferences: popupWebPreferences("image"),
     title,
-    icon: path.join(__dirname, "assets", "app-icon.png"),
+    icon: path.join(__dirname, "..", "assets", "app-icon.png"),
   });
 
   registerPopup(popupWindow, "image");
@@ -1973,22 +1973,26 @@ ipcMain.on("open-table-popup", (event, data) => {
       contextIsolation: true,
     },
     title: "Interactive Table - Sort, Filter, Export",
-    icon: path.join(__dirname, "assets", "app-icon.png"),
+    icon: path.join(__dirname, "..", "assets", "app-icon.png"),
   });
 
   registerPopup(popupWindow, "table");
 
   popupWindow.setMenu(null);
 
-  // Read Tabulator files from local directory
+  // Read Tabulator files from local directory. `libs/` is a SIBLING of src/,
+  // not a child: it holds vendored third-party code with its own LICENSE and
+  // .gitattributes pins, so it does not belong inside our own source tree.
   const tabulatorJsPath = path.join(
     __dirname,
+    "..",
     "libs",
     "tabulator",
     "tabulator.min.js",
   );
   const tabulatorCssPath = path.join(
     __dirname,
+    "..",
     "libs",
     "tabulator",
     "tabulator.min.css",
@@ -2399,7 +2403,7 @@ ipcMain.on("request-open-file", (event, data) => {
 // guarding it keeps the intent legible.
 if (process.platform === "win32") {
   try {
-    const { appId } = require("./package.json").build;
+    const { appId } = require("../package.json").build;
     if (appId) app.setAppUserModelId(appId);
   } catch {
     // Packaged asar layouts always contain package.json; a failure here must
@@ -2451,7 +2455,7 @@ if (!gotTheLock) {
     // Set dock icon on macOS (applies in dev mode where the .icns bundle isn't used)
     if (process.platform === "darwin" && app.dock) {
       try {
-        app.dock.setIcon(path.join(__dirname, "assets", "app-icon.png"));
+        app.dock.setIcon(path.join(__dirname, "..", "assets", "app-icon.png"));
       } catch (e) {
         // Non-fatal: window still opens even if icon file is missing
       }
@@ -2593,7 +2597,7 @@ ipcMain.handle("get-readme-path", () => {
   if (app.isPackaged) {
     return path.join(process.resourcesPath, "README.md");
   }
-  return path.join(__dirname, "README.md");
+  return path.join(__dirname, "..", "README.md");
 });
 
 // IPC handlers for update actions

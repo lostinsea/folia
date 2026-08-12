@@ -65,7 +65,10 @@ function ensureMermaid() {
 
   mermaidLoadPromise = new Promise((resolve, reject) => {
     const script = document.createElement('script');
-    script.src = 'libs/vendor/mermaid.min.js';
+    // Relative to the DOCUMENT (src/index.html), not to this file, and libs/ is
+    // a sibling of src/ - so this needs the `../` even though renderer.js and
+    // index.html live in the same directory.
+    script.src = '../libs/vendor/mermaid.min.js';
     script.onload = () => {
       if (!window.mermaid) {
         mermaidLoadPromise = null;

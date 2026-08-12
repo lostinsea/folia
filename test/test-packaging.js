@@ -24,6 +24,15 @@ const { execFileSync } = require("child_process");
 // the suites live in test/, and every path here goes through ROOT rather than
 // __dirname so that stays true in one place.
 const ROOT = path.join(__dirname, "..");
+// The application's own source. `libs/` (vendored third party), `fonts/` (a
+// gitignored BUILD OUTPUT of scripts/vendor-libs.js) and `assets/` (tracked
+// image and font sources) are deliberately SIBLINGS of it rather than children:
+// vendored code carries its own LICENSE and .gitattributes pins, and build
+// output does not belong inside a source tree. The cost of that decision is
+// that references crossing out of src/ are relative (`../libs/...`), which is
+// why the discovery below resolves each reference against the directory of the
+// file it was found in rather than against ROOT.
+const SRC = path.join(ROOT, "src");
 let pass = 0;
 let fail = 0;
 const skipped = [];
@@ -139,29 +148,41 @@ function main() {
   );
 
   const referenced = new Set();
+  // A reference is relative to the FILE THAT MAKES IT, not to the repository
+  // root. That distinction did not exist while every referring file sat at the
+  // root, and it is exactly what the src/ move introduced: `../libs/x.js` in
+  // src/index.html and `libs/x.js` in a root-level file name the same file.
+  // Resolving here - once - keeps every downstream assertion (exists on disk,
+  // is in build.files, the mermaid canary) speaking one vocabulary: paths
+  // relative to the repository root, in POSIX form, which is what build.files
+  // is written in.
+  const addRef = (fromDir, ref) => {
+    const abs = path.resolve(fromDir, ref);
+    referenced.add(path.relative(ROOT, abs).replace(/\\/g, "/"));
+  };
 
   // 1. Preload scripts referenced from the main process.
-  const mainJs = read("main.js");
+  const mainJs = read("src/main.js");
   const preloadRe = /preload:\s*path\.join\(\s*__dirname\s*,\s*["'`]([^"'`]+)["'`]\s*\)/g;
   let m;
-  while ((m = preloadRe.exec(mainJs))) referenced.add(m[1]);
+  while ((m = preloadRe.exec(mainJs))) addRef(SRC, m[1]);
   check("found at least one preload reference in main.js", referenced.size > 0);
 
   // 2. Scripts and stylesheets loaded by the renderer document.
-  const indexHtml = read("index.html");
+  const indexHtml = read("src/index.html");
   const srcRe = /<(?:script[^>]*\ssrc|link[^>]*\shref)=["']([^"':]+)["']/gi;
   while ((m = srcRe.exec(indexHtml))) {
     const ref = m[1].replace(/^\.\//, "");
-    if (!/^(https?:|data:|#)/i.test(ref)) referenced.add(ref);
+    if (!/^(https?:|data:|#)/i.test(ref)) addRef(SRC, ref);
   }
 
   // 3. Font files referenced by @font-face, which have no import statement to
   //    give them away and so are especially easy to leave out.
-  const css = read("styles.css");
+  const css = read("src/styles.css");
   const urlRe = /url\(\s*['"]?([^'")]+)['"]?\s*\)/g;
   while ((m = urlRe.exec(css))) {
     const ref = m[1].replace(/^\.\//, "");
-    if (!/^(https?:|data:)/i.test(ref)) referenced.add(ref);
+    if (!/^(https?:|data:)/i.test(ref)) addRef(SRC, ref);
   }
 
   // 4. Assets loaded lazily at runtime by injecting a <script> or <link>, or by
@@ -182,17 +203,17 @@ function main() {
   //    an error message only adds an assertion that the file ships, which it
   //    should. Under-matching is the failure that actually costs anything.
   const runtimeSources = fs
-    .readdirSync(ROOT)
+    .readdirSync(SRC)
     .filter((f) => f.endsWith(".js") && !/^(test-|bench-|probe-)/.test(f));
   const assetLiteralRe =
-    /['"`]((?:libs|fonts|assets)\/[^'"`$\\\s]+\.(?:js|mjs|css|woff2?|ttf|eot|svg|png|jpg|gif))['"`]/g;
+    /['"`]((?:\.\.\/)?(?:libs|fonts|assets)\/[^'"`$\\\s]+\.(?:js|mjs|css|woff2?|ttf|eot|svg|png|jpg|gif))['"`]/g;
   // A path built by interpolation cannot be resolved statically. Rather than
   // quietly missing it, say so.
-  const unresolvableRe = /`(?:libs|fonts|assets)\/[^`]*\$\{/g;
+  const unresolvableRe = /`(?:\.\.\/)?(?:libs|fonts|assets)\/[^`]*\$\{/g;
   const unresolvable = [];
   for (const file of runtimeSources) {
-    const src = read(file);
-    while ((m = assetLiteralRe.exec(src))) referenced.add(m[1]);
+    const src = read("src/" + file);
+    while ((m = assetLiteralRe.exec(src))) addRef(SRC, m[1]);
     if (unresolvableRe.test(src)) unresolvable.push(file);
     unresolvableRe.lastIndex = 0;
   }
@@ -205,6 +226,11 @@ function main() {
   // A canary rather than a count. "at least one dynamic reference exists" was
   // satisfied by mermaid alone, so it stayed green - and stayed reassuring -
   // even if a newly added lazy asset was being missed entirely.
+  //
+  // It is also the guard on the src/ move: the sweep above reads a DIRECTORY,
+  // so pointing it at the wrong one yields an empty file list and a silent
+  // pass. Measured by forcing the sweep to return nothing - this canary is one
+  // of three assertions that fire.
   check(
     "the known lazily-loaded bundle is discovered by the scanner",
     referenced.has("libs/vendor/mermaid.min.js"),
@@ -231,7 +257,7 @@ function main() {
   }
 
   // Explicit regression guards for the two files this suite was written for.
-  check("popup-preload.js is in build.files", isPackaged(files, "popup-preload.js"));
+  check("popup-preload.js is in build.files", isPackaged(files, "src/popup-preload.js"));
   // fonts/ is a BUILD OUTPUT (gitignored) produced by scripts/vendor-libs.js
   // from the tracked assets/fonts/. Asserting only on fonts/ would therefore
   // keep passing on a machine that has stale build output while the SOURCE has
@@ -267,18 +293,18 @@ function main() {
   // earlier install, and throws on a clean install.
   {
     const shippedJs = fs
-      .readdirSync(ROOT)
+      .readdirSync(SRC)
       .filter(
         (f) =>
           f.endsWith(".js") &&
           !/^(test-|bench-|probe-)/.test(f) &&
-          isPackaged(files, f),
+          isPackaged(files, "src/" + f),
       );
     const builtins = new Set(require("module").builtinModules);
     const required = new Map();
     const bareRe = /\brequire\(\s*["']([^"'.\/][^"']*)["']\s*\)/g;
     for (const f of shippedJs) {
-      const src = read(f);
+      const src = read("src/" + f);
       let mm;
       while ((mm = bareRe.exec(src))) {
         // Scoped and subpath specifiers resolve to their package root.
@@ -628,7 +654,7 @@ function main() {
   // to three of the four Electron claims.
   {
     const readme = read("README.md");
-    const rendererSrc = read("renderer.js");
+    const rendererSrc = read("src/renderer.js");
     // Brace-matched body extraction. Substring searches over a 9000-line file
     // cannot distinguish a definition from a call from a mention in a comment,
     // which is the whole reason the first version of these oracles was weak.
@@ -725,7 +751,7 @@ function main() {
   // never a second copy of the sentence.
   {
     const readme = read("README.md");
-    const indexSrc = read("index.html");
+    const indexSrc = read("src/index.html");
 
     const winAssoc = ((pkg.build.win || {}).fileAssociations || []).map((a) => a.ext).sort();
     check(
@@ -784,7 +810,7 @@ function main() {
     // generalised, because the note, find-note and edit-text dialogs are NOT.
     // Asserted as an exact set so widening the CSS without widening the prose
     // fails, and so does the reverse.
-    const resizable = [...read("styles.css").matchAll(/([^\n{}]+)\{[^}]*resize:\s*both[^}]*\}/g)]
+    const resizable = [...read("src/styles.css").matchAll(/([^\n{}]+)\{[^}]*resize:\s*both[^}]*\}/g)]
       .map((m) => m[1].trim())
       .sort();
     check(
@@ -845,7 +871,7 @@ function main() {
     // a fourth copy checked against a third copy proves only that two files
     // agree.
     {
-      const html = fs.readFileSync(path.join(ROOT, "index.html"), "utf8");
+      const html = fs.readFileSync(path.join(SRC, "index.html"), "utf8");
       const productName = (pkg.build && pkg.build.productName) || pkg.productName;
       const titleTag = /<title>([^<]*)<\/title>/i.exec(html);
       const appTitle = /<span class="app-title">([^<]*)<\/span>/i.exec(html);
@@ -863,7 +889,7 @@ function main() {
       check(
         "the header carries no abbreviated second copy of the product name",
         !/app-title-short/.test(html) &&
-          !/app-title-short/.test(fs.readFileSync(path.join(ROOT, "custom-styles.css"), "utf8")),
+          !/app-title-short/.test(fs.readFileSync(path.join(SRC, "custom-styles.css"), "utf8")),
         "app-title-short still present",
       );
     }
@@ -1217,7 +1243,7 @@ function main() {
     // literal here would drift the moment appId changed, silently splitting
     // one app into two Windows identities - the failure mode is invisible in
     // the UI, so only a structural assertion catches it.
-    const mainSrc = fs.readFileSync(path.join(ROOT, "main.js"), "utf8");
+    const mainSrc = fs.readFileSync(path.join(SRC, "main.js"), "utf8");
     check(
       "main.js sets an explicit AppUserModelId, so Windows groups and notifies as Folia",
       /app\.setAppUserModelId\(/.test(mainSrc),
@@ -1225,7 +1251,7 @@ function main() {
     );
     check(
       "the AppUserModelId is read from build.appId rather than duplicated as a literal",
-      /appId\s*\}\s*=\s*require\(["']\.\/package\.json["']\)\.build/.test(
+      /appId\s*\}\s*=\s*require\(["']\.{1,2}\/package\.json["']\)\.build/.test(
         mainSrc,
       ) && !/setAppUserModelId\(\s*["']/.test(mainSrc),
       "expected the id to come from package.json build.appId",
@@ -1535,7 +1561,7 @@ function main() {
     // "v2.0.0" and was still claiming it after the 1.0 rebrand, because nothing
     // made the two agree.
     {
-      const html = fs.readFileSync(path.join(ROOT, "index.html"), "utf8");
+      const html = fs.readFileSync(path.join(SRC, "index.html"), "utf8");
       const m = html.match(
         /id="welcomeVersion"[^>]*>([^<]*)</,
       );
@@ -2629,8 +2655,8 @@ function main() {
   // "no localisation" cannot be asserted by its absence - it has to be
   // asserted against the specific machinery that was taken out.
   {
-    const rendererSrc = fs.readFileSync(path.join(ROOT, "renderer.js"), "utf8");
-    const htmlSrc = fs.readFileSync(path.join(ROOT, "index.html"), "utf8");
+    const rendererSrc = fs.readFileSync(path.join(SRC, "renderer.js"), "utf8");
+    const htmlSrc = fs.readFileSync(path.join(SRC, "index.html"), "utf8");
     // "Shipped" is defined by package.json build.files, not by a hand-kept list
     // here. An earlier version of this block scanned only renderer.js,
     // index.html and custom-*.js while claiming to cover every shipped file -
@@ -2652,9 +2678,9 @@ function main() {
     check(
       "the shipped-script list really was resolved from the packaging manifest",
       shippedScripts.length >= 12 &&
-        shippedScripts.includes("renderer.js") &&
-        shippedScripts.includes("main.js") &&
-        shippedScripts.includes("popup-preload.js"),
+        shippedScripts.includes("src/renderer.js") &&
+        shippedScripts.includes("src/main.js") &&
+        shippedScripts.includes("src/popup-preload.js"),
       `${shippedScripts.length}: ${shippedScripts.join(", ")}`,
     );
 
@@ -2684,7 +2710,7 @@ function main() {
     // Tools menu, and custom-theme.js injects its Theme submenu into it. A
     // deletion that took the classes with it would silently unstyle both, so
     // the survivors are pinned explicitly.
-    const cssSrc = fs.readFileSync(path.join(ROOT, "styles.css"), "utf8");
+    const cssSrc = fs.readFileSync(path.join(SRC, "styles.css"), "utf8");
     check(
       "the shared submenu styling the Theme menu depends on survived the removal",
       // Anchored at line start on purpose: an unanchored /\.tools-submenu\s*\{/
@@ -2766,7 +2792,7 @@ function main() {
     const shippedScripts = pkg.build.files.filter(
       (f) => /^[^!*]+\.js$/.test(f) && fs.existsSync(path.join(ROOT, f)),
     );
-    const htmlSrc = fs.readFileSync(path.join(ROOT, "index.html"), "utf8");
+    const htmlSrc = fs.readFileSync(path.join(SRC, "index.html"), "utf8");
     const allSrc =
       htmlSrc +
       "\n" +

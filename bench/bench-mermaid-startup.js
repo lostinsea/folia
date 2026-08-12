@@ -21,7 +21,7 @@ const RUNS = 7;
 app.on('window-all-closed', () => {}); // the benchmark destroys windows between runs
 
 function buildVariant(name, eager) {
-  let html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+  let html = fs.readFileSync(path.join(ROOT, 'src', 'index.html'), 'utf8');
   const PURIFY = '<script src="libs/vendor/purify.min.js"></script>';
   if (eager) {
     // index.html no longer carries the tag (PERF-03), so the "before" variant is

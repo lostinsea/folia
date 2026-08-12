@@ -10,7 +10,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const src = fs.readFileSync(path.join(__dirname, "..", "main.js"), "utf8");
+const src = fs.readFileSync(path.join(__dirname, "..", "src", "main.js"), "utf8");
 const start = src.indexOf("const LEGACY_USERDATA_NAME");
 const end = src.indexOf("migrateLegacyUserData();", start);
 if (start === -1 || end === -1) {

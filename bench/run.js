@@ -46,7 +46,7 @@ const {
 // the runner went on printing plausible medians.
 app.commandLine.appendSwitch("js-flags", "--expose-gc");
 
-require("../main.js");
+require("../src/main.js");
 
 // THE REPORT IS INVALIDATED BEFORE ANYTHING ELSE RUNS, INCLUDING ARGUMENT
 // VALIDATION. Those checks exit(2) on a typo, and while they were ordered after
@@ -872,7 +872,7 @@ app.whenReady().then(async () => {
   const WARMUP_REPS = 2;
   const QUIET_MS = 1500;
   const idleDeadlineMs = (() => {
-    const src = fs.readFileSync(path.join(__dirname, "..", "renderer.js"), "utf8");
+    const src = fs.readFileSync(path.join(__dirname, "..", "src", "renderer.js"), "utf8");
     const m = src.match(/requestIdleCallback\([^)]*\{\s*timeout:\s*(\d+)\s*\}/);
     if (!m) {
       // A REGEX THAT STOPS MATCHING MUST REFUSE, NOT DEFAULT. Falling back to a

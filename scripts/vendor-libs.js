@@ -72,12 +72,19 @@ function main() {
   // without adding the file, vendoring fails here instead of degrading to a
   // generic monospace in front of the user.
   console.log("Vendoring Fira Code ...");
-  const cssText = fs.readFileSync(path.join(ROOT, "styles.css"), "utf8");
+  const cssText = fs.readFileSync(path.join(ROOT, "src", "styles.css"), "utf8");
   const wanted = [
     ...new Set(
       [
         ...cssText.matchAll(
-          /url\(\s*['"]?fonts\/([^'")?#]+\.ttf)(?:[?#][^'")]*)?['"]?\s*\)/gi,
+          // `../fonts/` since the stylesheet moved into src/ and fonts/ stayed
+          // a sibling. The `(?:\.\.\/)?` is deliberately optional rather than
+          // required: this regex is the only thing standing between a clean
+          // clone and a silent fallback face, so it should keep matching if the
+          // stylesheet ever moves back rather than fail closed on a cosmetic
+          // change. It failing at all is the design - a clean clone throws here
+          // instead of degrading to generic monospace in front of the reader.
+          /url\(\s*['"]?(?:\.\.\/)?fonts\/([^'")?#]+\.ttf)(?:[?#][^'")]*)?['"]?\s*\)/gi,
         ),
       ].map((m) => m[1]),
     ),
