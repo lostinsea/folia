@@ -1,6 +1,6 @@
 {
   "name": "folia",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "productName": "Folia",
   "description": "Folia - a fast, offline markdown viewer with tabs, Mermaid diagrams and live reload",
   "main": "main.js",
@@ -68,7 +68,13 @@
   "build": {
     "appId": "io.github.lostinsea.folia",
     "productName": "Folia",
-    "publish": [{ "provider": "github", "owner": "lostinsea", "repo": "markdown-viewer" }],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "lostinsea",
+        "repo": "markdown-viewer"
+      }
+    ],
     "directories": {
       "output": "dist"
     },

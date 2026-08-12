@@ -12,7 +12,7 @@ This guide helps you test the Windows installer to ensure everything works corre
 ### Installation Test
 
 1. **Run the Installer**
-   - Double-click `Folia-Setup-1.0.0.exe`
+   - Double-click `Folia-Setup-<version>.exe`
    - UAC prompt should appear (requires admin rights)
 
 2. **License Agreement**
@@ -87,7 +87,7 @@ Test each file type (only once `build.fileAssociations` exists):
 #### Programs and Features
 - [ ] Open "Add/Remove Programs" (Windows Settings > Apps)
 - [ ] "Folia" appears in list
-- [ ] Version number is correct (1.0.0)
+- [ ] Version number matches `package.json`'s `version`
 - [ ] Publisher shows as the signing certificate's subject, or is blank on an
       unsigned build (`build.win.signtoolOptions` is null — see BUILD.md)
 - [ ] Install location shows correct path
@@ -174,7 +174,7 @@ For automated testing, use silent installation:
 
 ```batch
 REM Install silently
-Folia-Setup-1.0.0.exe /S
+Folia-Setup-<version>.exe /S
 
 REM Wait for installation
 timeout /t 10
