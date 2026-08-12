@@ -162,8 +162,55 @@ holding `contents: write`). Without the flag electron-builder's default
 `onTagOrDraft` would publish from inside the build matrix as well, racing that
 job with three concurrent uploads of the same tag.
 
-Windows builds are signed (`build.win.signtoolOptions`); macOS builds are not,
-so macOS auto-update will fail signature validation until they are.
+Windows and macOS builds are both **unsigned**: `build.win.signtoolOptions` is
+`null` and no macOS identity is configured. Measured on the published v0.1.0
+installer — `Get-AuthenticodeSignature` reports `NotSigned`, despite
+electron-builder logging a `signing with signtool.exe` line for every artifact,
+which it prints whether or not a certificate was supplied. So SmartScreen warns
+on Windows, Gatekeeper warns on macOS, and macOS auto-update will fail signature
+validation until an identity is configured. Release notes must say so; a user
+who is told nothing reasonably concludes the download is corrupt.
+
+## Cutting a release
+
+**`git push origin v0.1.0` does not start anything.** The workflow declares a
+`push` trigger on `v*` tags and that trigger has never once fired on this
+repository. Measured rather than assumed: two separate pushes of `v0.1.0` and a
+throwaway `v0.0.0-trigger-probe` tag all completed successfully at the git
+level and produced zero workflow runs, while `workflow_dispatch` through the
+same credentials started a run within seconds. GitHub suppresses the delivery,
+not the workflow — `actions/permissions` reports `enabled: true` and the
+workflow's own state is `active`. This is fork behaviour, and its failure mode
+is the worst kind: the push succeeds, nothing reports a problem, and the release
+simply never appears.
+
+Dispatch **on the tag ref**, not on a branch:
+
+```bash
+git tag -a v0.1.0 -m "Folia 0.1.0"
+git push origin v0.1.0
+gh workflow run release.yml --repo lostinsea/markdown-viewer --ref v0.1.0
+gh run watch <id> --repo lostinsea/markdown-viewer --exit-status
+```
+
+The `--ref v0.1.0` is load-bearing. `create-release` is gated on
+`startsWith(github.ref, 'refs/tags/')`, so a dispatch against `main` builds all
+three platforms, uploads the artifacts to the run, and then publishes nothing —
+a green run with no release at the end of it.
+
+Bump `version` in **both** `package.json` and `package-lock.json` before
+tagging. The workflow installs with `npm ci`, which fails outright when the two
+disagree, so a bump that touched only `package.json` breaks the build it exists
+to produce. `npm pkg set version=X` alone does not update the lockfile;
+`npm install --package-lock-only` after it does.
+
+After the run, verify the update manifest actually describes the artifact that
+was uploaded — the two are produced by different jobs on different machines:
+
+```bash
+gh release download <tag> --pattern "latest.yml" --pattern "Folia-Setup-<v>.exe"
+# the base64 sha512 in latest.yml must equal the installer's own
+```
 
 ## Clean Build
 
