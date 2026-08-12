@@ -88,10 +88,12 @@ libs/vendor/
 
 # Claude Code documentation (local only)
 CLAUDE.md
-# Agent working directories. Taken from upstream 7e48d9f; the other two paths
-# in that commit are NOT taken - `tests-electronics/` belongs to upstream's
-# tscircuit work, and `ss/` is upstream's screenshot directory, whereas this
-# fork writes test artifacts to `screenshots/` (already ignored above).
+# Agent working directories. Taken from upstream 7e48d9f; the other path in
+# that commit is NOT taken - `tests-electronics/` belongs to upstream's
+# tscircuit work. Upstream's `ss/` screenshot directory was inherited as a
+# TRACKED directory of six vendor-branded PNGs referenced by nothing, and has
+# been deleted; this fork writes test artifacts to `screenshots/` (ignored
+# above).
 # `.cursor/` was inherited as a TRACKED rules directory and deleted: its rules
 # contradicted how this repo actually works, and .github/copilot-instructions.md
 # is now the single source of agent guidance. Ignored so it cannot drift back.
