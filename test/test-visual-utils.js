@@ -31,6 +31,11 @@
 const fs = require("fs");
 const path = require("path");
 
+// Must come before any window exists: this relocates the suite's userData off
+// the developer's real profile, and app.setPath("userData") is silently ignored
+// once the app is ready. See test-userdata-isolation.js for the measurement.
+require("./test-userdata-isolation");
+
 // ---------------------------------------------------------------------------
 // Survive a closed stdout.
 //

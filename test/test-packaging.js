@@ -506,6 +506,58 @@ function main() {
       `${buildScripts.length} build scripts, ${unguarded.length} without --publish never: ${unguarded.join(", ")}`,
     );
 
+    // Every Electron suite must run against an ISOLATED userData profile.
+    //
+    // The suites used to share ONE profile between them, and eight of them
+    // require ../src/main.js, so main.js's "confirm-large-render" handler was
+    // live in all eight and each opened a real window. A restored session
+    // holding an expensive document reached dialog.showMessageBoxSync(), which
+    // is modal IN THE MAIN PROCESS and so cannot be dismissed by any stub,
+    // watchdog or renderer-side patch - the process that would run the rescue
+    // is the process that is blocked. test-tab-refresh's own 260KB guard-big.md
+    // fixture is persisted by saveTabs() the moment its tab is created, so a
+    // killed run planted a landmine that stopped every LATER suite until a
+    // human clicked. A/B measured: seeded profile hung with zero assertions,
+    // empty profile finished 7/7 in 8s.
+    //
+    // THE REQUIRE MUST BE AT MODULE SCOPE. app.setPath("userData", ...) is
+    // ignored once the app is ready, so an indented require - inside a
+    // function, a ready handler or a try block - establishes nothing. That is
+    // not hypothetical: test-render-patch.js reached the shared helper only
+    // from inside `async function run(win)`, long after the window had loaded.
+    // A check that accepted a require anywhere in the file would have passed
+    // for that suite while it ran unisolated.
+    //
+    // This lives in the PACKAGING suite because it is a property of the test
+    // estate as a whole - a tenth suite added later is exactly what a per-suite
+    // assertion cannot see.
+    const ISOLATION_AT_MODULE_SCOPE =
+      /^(?:const\s+\w+\s*=\s*)?require\(["']\.\/test-userdata-isolation["']\);?\s*$/m;
+    const electronSuites = Object.values(pkg.scripts || {})
+      .flatMap((v) => [...v.matchAll(/electron\s+(test\/[\w.-]+\.js)/g)].map((m) => m[1]))
+      .filter((v, i, a) => a.indexOf(v) === i);
+    const unisolated = electronSuites.filter((rel) => {
+      const abs = path.join(ROOT, rel);
+      if (!fs.existsSync(abs)) return true;
+      return !ISOLATION_AT_MODULE_SCOPE.test(fs.readFileSync(abs, "utf8"));
+    });
+    check(
+      "every Electron test suite establishes an isolated userData profile",
+      electronSuites.length >= 8 && unisolated.length === 0,
+      `${electronSuites.length} suites; missing: ${unisolated.join(", ") || "none"}`,
+    );
+
+    // The isolation module only works because it refuses to run late. Without
+    // that throw it would silently no-op and every assertion above would keep
+    // passing while the suites ran against a shared profile again - an absence
+    // assertion failing open, the defect class this project keeps rediscovering.
+    check(
+      "the isolation module refuses to run after the app is ready",
+      /app\.isReady\(\)/.test(
+        fs.readFileSync(path.join(ROOT, "test", "test-userdata-isolation.js"), "utf8"),
+      ),
+    );
+
     // Auto-update exists for the packaged app only if an app-update.yml is
     // packed beside it, and electron-builder writes that file ONLY when an
     // NSIS (or updater-aware appx) target is part of the build - read out of

@@ -1699,7 +1699,54 @@ const REVERTS = [
     expect: [/every section the shipped README promises a reader is still present/],
   },
   {
-    // The one defect here that is invisible BOTH on GitHub and in the test
+    // Isolation without the wipe is the same defect with a smaller blast
+    // radius: a killed run still poisons its own NEXT run, because
+    // custom-tabs.js saveTabs() persists a tab the moment it is created, long
+    // before any scenario cleanup closes it. That is how a 260KB guard-big.md
+    // fixture ended up restored at startup and blocking on
+    // dialog.showMessageBoxSync().
+    //
+    // This entry removes ONLY the wipe, never the redirect. Reverting the
+    // redirect would point the suite back at the developer's real profile,
+    // which is precisely the state that hangs - and a harness that hangs
+    // reports a 180s timeout rather than a verdict. A revert must fail fast
+    // and by name.
+    id: "R238",
+    suite: "test:startup",
+    what: "keep the isolated test profile but stop wiping it between runs",
+    file: path.join(ROOT, "test", "test-userdata-isolation.js"),
+    from: "  fs.rmSync(USER_DATA_DIR, { recursive: true, force: true });\n",
+    to: "",
+    expect: [/booted from a profile with no inherited session/],
+    mustPass: [
+      /runs against an isolated userData directory/,
+      /is not using the developer's real profile/,
+    ],
+  },
+  {
+    // The oracle's whole point is the COLUMN-0 requirement, and an oracle that
+    // merely looks for the require anywhere in the file would pass for the
+    // exact shape that failed: test-render-patch.js reached the shared helper
+    // only from inside `async function run(win)`, i.e. after the window had
+    // loaded, where app.setPath("userData", ...) is silently ignored.
+    //
+    // This revert moves one suite's require into a block WITHOUT changing what
+    // the suite actually does - the require still runs at module scope, so
+    // isolation still works and no Electron suite regresses. What changes is
+    // only the SHAPE, so the packaging assertion is the sole thing that can
+    // notice. That is deliberate: it isolates the oracle's discrimination from
+    // the fix's behaviour, which no behavioural revert can do.
+    id: "R239",
+    suite: "test:packaging",
+    what: "hide a suite's isolation require inside a block, so only a column-0-aware oracle catches it",
+    file: path.join(ROOT, "test", "test-render-patch.js"),
+    from: 'require("./test-userdata-isolation");\n',
+    to: '{\n  require("./test-userdata-isolation");\n}\n',
+    expect: [/every Electron test suite establishes an isolated userData profile/],
+    mustPass: [/the isolation module refuses to run after the app is ready/],
+  },
+  {
+
     // output of every other suite: a shields.io badge renders perfectly on the
     // web and passes every assertion about branding, wording and versions,
     // while making the app phone a third party each time it opens its own

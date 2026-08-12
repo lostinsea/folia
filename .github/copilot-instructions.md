@@ -196,6 +196,54 @@ packaged app: look at what it drew.
 
 These have each cost real time. They are not hypothetical.
 
+**A modal dialog in the MAIN process cannot be dismissed by any test.**
+`dialog.showMessageBoxSync` blocks the main process itself, so a renderer stub,
+an `executeJavaScript` timeout and an in-process watchdog are all equally
+useless — the process that would run the rescue is the process that is blocked.
+The measured instance: **eight** suites `require("../src/main.js")`, so in all
+of them `ipcMain "confirm-large-render"` is registered and a real window opens.
+They all used to share ONE persistent profile, so `test-tab-refresh.js`'s own
+260 KB `guard-big.md` fixture — persisted by `saveTabs()` the instant its tab is
+created — poisoned every suite that ran after it, and the run stopped until a
+human clicked. A/B: seeded profile hung with **zero** assertions, empty profile
+finished **7/7 in 8s**.
+- Fixed structurally by `test/test-userdata-isolation.js`, which every Electron
+  suite requires **at column 0** — `app.setPath("userData", …)` is silently
+  ignored once the app is ready, so the module throws rather than no-op. That
+  throw is not decorative: it is what caught `test-render-patch.js`, which
+  reached the helper only from inside `async function run(win)`.
+- **The packaging oracle demands column 0 for exactly that reason.** A check
+  that accepted the require *anywhere in the file* would have passed for the
+  one suite that was genuinely unisolated. R239 pins the discrimination by
+  moving a require into a block *without* changing behaviour, so only a
+  shape-aware oracle can notice.
+- It **wipes** as well as redirects. Isolation alone still lets a killed run
+  poison its own next run. R238 pins the wipe; it deliberately does *not*
+  revert the redirect, because that would reintroduce the hang and a harness
+  that hangs reports a timeout, not a verdict.
+- Coverage is enforced in `test:packaging`, because a *thirteenth* suite added
+  later is exactly what a per-suite assertion cannot see.
+- **My own grep said one suite, not eight, and that changed the diagnosis.**
+  It was exposed only by a failing run. A negative grep result deserves a
+  positive control.
+- This was the **fourth** instance of suites measuring inherited session state
+  (window bounds, splitter ratio, an `mdv-probe` temp dir resolving a relative
+  `<img>`). Prefer fixing the class.
+
+**A wait predicate that reads the STORE does not wait for the DOM.**
+`renderer.js` assigns `originalMarkdown` at line 5154 and only reaches
+`await renderMarkdown(...)` at 5176, so a poll on `currentFilePath` +
+`originalMarkdown` is satisfiable while the viewer still holds the *previous*
+document. `test-render-patch.js`'s `openFresh()` had this shape: it passed
+standalone, where the render won the race, and failed three assertions in the
+full chain, where load made it lose. The failure named an *image* and was
+really about *ordering* — the most expensive kind of misleading failure.
+Predicates that precede a DOM assertion must reach the DOM; here each body
+opens with a distinct `# Heading`, and the document is painted in one pass, so
+the heading landing in the viewer is a sound proxy for "this has rendered".
+Companion rule already recorded elsewhere: a predicate that is *already true*
+measures nothing.
+
 **Backticks inside `bench/run.js`'s `exec()` template literal.** The shim region
 (~1077-1160) is source code embedded in a template literal. A backtick there —
 *including in a `//` comment* — ends the literal.

@@ -16,6 +16,10 @@ const {
   trapExternalOpens,
 } = require("./test-visual-utils");
 
+// Isolate this suite's userData profile before main.js exists and before the
+// app is ready. See test-userdata-isolation.js.
+require("./test-userdata-isolation");
+
 require("../src/main.js");
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mdv-e2e-"));

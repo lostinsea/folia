@@ -16,6 +16,10 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
+// Isolate this suite's userData profile before main.js exists and before the
+// app is ready. See test-userdata-isolation.js.
+require("./test-userdata-isolation");
+
 require("../src/main.js");
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mdv-sec-"));

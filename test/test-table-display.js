@@ -31,6 +31,10 @@ const { app, BrowserWindow } = require("electron");
 const fs = require("fs");
 const path = require("path");
 
+// Isolate this suite's userData profile before main.js exists and before the
+// app is ready. See test-userdata-isolation.js.
+require("./test-userdata-isolation");
+
 require("../src/main.js");
 
 const { captureScreenshot, startErrorSentinel, proveSentinelAlive, trapExternalOpens } = require("./test-visual-utils");

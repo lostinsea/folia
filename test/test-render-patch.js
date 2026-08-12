@@ -33,6 +33,10 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
+// Isolate this suite's userData profile before main.js exists and before the
+// app is ready. See test-userdata-isolation.js.
+require("./test-userdata-isolation");
+
 require("../src/main.js");
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mdv-patch-"));
@@ -1777,14 +1781,26 @@ async function run(win) {
   // this change: three of the seven auto-save call sites had no probe reaching
   // them at all, so removing the write from any of them left the suite green.
   {
+    // The wait must reach the DOM, not just the store. renderMarkdown() is
+    // async and originalMarkdown is assigned BEFORE it completes, so a
+    // predicate that only reads the store is satisfied while the viewer still
+    // holds the PREVIOUS document. Standalone the render won that race and the
+    // block passed; under full-chain load it lost, and querySelector('img')
+    // came back null - a test failure that names an image but is really about
+    // ordering. Every body here opens with a distinct `# Heading`, and the
+    // whole document is painted in one pass, so the heading landing in the
+    // viewer is a sound proxy for "this document has rendered".
     const openFresh = async (file, body) => {
       const p = path.join(dir, file);
+      const heading = /^#\s+(.+)$/m.exec(body)[1];
       fs.writeFileSync(p, body, "utf8");
       await exec(`ipcRenderer.send('open-file-path', ${JSON.stringify(p)}); null`);
       await waitFor(
         exec,
-        `${file} to become the open document`,
-        `(currentFilePath === ${JSON.stringify(p)} && originalMarkdown === ${JSON.stringify(body)}) ? 'ok' : false`,
+        `${file} to become the open AND RENDERED document`,
+        `(currentFilePath === ${JSON.stringify(p)} && originalMarkdown === ${JSON.stringify(body)}
+          && viewer.querySelector('h1')
+          && viewer.querySelector('h1').textContent.trim() === ${JSON.stringify(heading)}) ? 'ok' : false`,
         20000,
       );
       return p;

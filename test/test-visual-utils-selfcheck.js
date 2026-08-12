@@ -1,6 +1,10 @@
 // Self-check for test-visual-utils' probe: proves it actually detects each
 // failure mode it claims to. A visual assertion that cannot fail is worse than
 // no assertion, because it reads as coverage. Run with: npm run test:visual
+// Isolate this suite's userData profile before the app is ready. See
+// test-userdata-isolation.js.
+require("./test-userdata-isolation");
+
 const { app, BrowserWindow } = require("electron");
 const {
   inspectVisual,

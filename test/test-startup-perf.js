@@ -22,6 +22,14 @@
 // together rather than leaving a load check standing over a deleted package.
 // Section 2 loads it explicitly and checks the shape the call sites depend on.
 
+// This suite is the ONLY one that requires ../src/main.js, which means it is the
+// only one where main.js's ipcMain "confirm-large-render" handler is live and a
+// real window is created. Running it against the developer's real profile let a
+// restored session containing a large document open a main-process modal that no
+// test can dismiss. Isolation must therefore be established before main.js is
+// required, and before the app becomes ready.
+const isolation = require("./test-userdata-isolation");
+
 const { app } = require("electron");
 const { ipcMain } = require("electron");
 const fs = require("fs");
@@ -65,6 +73,40 @@ app.whenReady().then(async () => {
   // checkForUpdatesOnStartup() is on app.on("ready"); if it ever regressed to
   // loading electron-updater eagerly in dev, it would have done so by now.
   await new Promise((r) => setTimeout(r, 3000));
+
+  // --- 0. This suite must not be touching the developer's profile ----------
+  // This is the only suite that requires ../src/main.js, so it is the only one
+  // where main.js's ipcMain "confirm-large-render" handler is registered and a
+  // real window is created. Run against the real profile, a restored session
+  // holding an expensive document reaches dialog.showMessageBoxSync(), which is
+  // modal IN THE MAIN PROCESS: the watchdog above cannot fire, because the
+  // process that would run its timer is the process that is blocked. Measured
+  // A/B: seeded profile hung indefinitely with zero assertions; empty profile
+  // finished 7/7 in 8s.
+  //
+  // These assertions exist so that losing isolation fails FAST and BY NAME
+  // instead of hanging, which is the only failure mode a harness can act on.
+  const activeUserData = app.getPath("userData");
+  check(
+    "the suite runs against an isolated userData directory",
+    isolation.USER_DATA_DIR !== null &&
+      path.resolve(activeUserData) === path.resolve(isolation.USER_DATA_DIR),
+    activeUserData,
+  );
+  check(
+    "the suite is not using the developer's real profile",
+    isolation.REAL_USER_DATA !== null &&
+      path.resolve(activeUserData) !== path.resolve(isolation.REAL_USER_DATA),
+    `real=${isolation.REAL_USER_DATA}`,
+  );
+  // Pins the WIPE rather than the redirect. Isolation alone still lets a killed
+  // run poison its own next run - a tab is persisted by saveTabs() the moment it
+  // is created, long before any scenario cleanup closes it.
+  check(
+    "the suite booted from a profile with no inherited session",
+    isolation.POST_WIPE_ENTRIES === 0,
+    `entries=${isolation.POST_WIPE_ENTRIES}`,
+  );
 
   // --- 1. The heavy module is not loaded by startup ------------------------
   const updaterCached = cachedModulePaths("electron-updater");

@@ -28,6 +28,10 @@ const os = require("os");
 const path = require("path");
 const { VISUAL_PROBE_SOURCE, inspectVisual, captureScreenshot, startErrorSentinel, proveSentinelAlive, LIVENESS_MUTE_REASON, trapExternalOpens, waitForExternalTrap } = require("./test-visual-utils");
 
+// Isolate this suite's userData profile before main.js exists and before the
+// app is ready. See test-userdata-isolation.js.
+require("./test-userdata-isolation");
+
 require("../src/main.js");
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mdv-mermaid-"));
