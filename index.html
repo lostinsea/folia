@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <!--
       SEC-09. Content Security Policy for the main window. Every directive here
-      was chosen from a measurement, not from the spec - see SECURITY-AUDIT.md.
+      was chosen from a measurement, not from the spec - see docs/SECURITY-AUDIT.md.
 
       `script-src` intentionally keeps 'unsafe-inline'. Per CSP inheritance, an
       `about:srcdoc` frame runs under its embedder's policy, and the @@@html
@@ -60,7 +60,7 @@
     <script src="libs/vendor/marked.min.js"></script>
         <!-- mermaid.min.js is NOT loaded here: it is 3.5MB and cost ~128ms of every
              launch even for documents with no diagrams. renderer.js fetches it on
-             first actual need via ensureMermaid(). See PERF-03 in PERF-AUDIT.md. -->
+             first actual need via ensureMermaid(). See PERF-03 in docs/PERF-AUDIT.md. -->
         <script src="libs/vendor/purify.min.js"></script>
     <!-- PrismJS - Bundled Core and Language Components -->
     <script src="libs/prismjs/prism-bundle.js"></script>

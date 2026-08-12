@@ -163,7 +163,7 @@
     console.error(
       "[CustomTabs] window.dismissFileUpdateNotification is missing - " +
         "update prompts will be suppressed until renderer's timer expires. " +
-        "Re-add the export in renderer.js (see CUSTOMIZATIONS.md).",
+        "Re-add the export in renderer.js (see docs/CUSTOMIZATIONS.md).",
     );
     const toast = document.getElementById("fileUpdateToast");
     if (toast) toast.classList.remove("show");

@@ -1,7 +1,7 @@
 // Regression harness for in-document search (PERF-02 and its correctness risk).
 // Run with: npm run test:search
 //
-// PERF-AUDIT.md measured highlightSearchTerm() at 316ms on a 2MB / 2001-heading
+// docs/PERF-AUDIT.md measured highlightSearchTerm() at 316ms on a 2MB / 2001-heading
 // document, paid on every keystroke, because it walks the entire rendered tree
 // and replaces text nodes with fragments. The fix is a 150ms debounce plus two
 // algorithmic repairs (normalize() once per parent instead of once per match,

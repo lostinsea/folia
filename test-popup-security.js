@@ -918,7 +918,7 @@ async function run() {
   // Worth recording as a product observation rather than a test failure:
   // maximizing an image from a hostile document does contact its host, which
   // leaks the reader's IP. That is inherited from the main viewer's behaviour
-  // and is a policy decision, not a regression - see SECURITY-AUDIT.md.
+  // and is a policy decision, not a regression - see docs/SECURITY-AUDIT.md.
   const nonImage = netSentinel.filter((r) => r.type !== "image");
   check(
     "SEC-12 popups can only ever emit image loads, never any other request type",

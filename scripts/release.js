@@ -10,7 +10,7 @@
  * 4. Uploads all build artifacts to that release
  *
  * Note: installed builds auto-update from this fork's own GitHub releases
- * (build.publish - see BUILD.md), so the latest*.yml manifests must be
+ * (build.publish - see docs/BUILD.md), so the latest*.yml manifests must be
  * uploaded alongside the installers or no client can see the release.
  * The portable .exe never self-updates.
  *

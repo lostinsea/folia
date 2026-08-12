@@ -226,6 +226,10 @@
       {
         "from": "LICENSE.txt",
         "to": "LICENSE.txt"
+      },
+      {
+        "from": "docs/images",
+        "to": "docs/images"
       }
     ],
     "nsis": {

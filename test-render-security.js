@@ -2,7 +2,7 @@
 // Run with: npm run test:security
 //
 // Boots the real main.js, then drives window.renderMarkdown() with the exact
-// payloads from SECURITY-AUDIT.md (SEC-01 through SEC-04) and asserts that none
+// payloads from docs/SECURITY-AUDIT.md (SEC-01 through SEC-04) and asserts that none
 // of them execute. Every attack test is paired with a feature test, because the
 // remedy - making DOMPurify the last step in the pipeline instead of the third
 // of nine - is exactly the kind of change that can silently stop mermaid,

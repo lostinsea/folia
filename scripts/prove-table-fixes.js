@@ -1652,13 +1652,50 @@ const REVERTS = [
     // relative form, 512 for a data: URI. This revert restores exactly the
     // mistake that is easy to make (a tidy `logo.png` reference instead of a
     // 12 KB blob) and shows the suite refusing it.
+    // INVERTED, and the inversion is the point. This used to restore a
+    // relative path to prove images had to be EMBEDDED. Since
+    // resolveDocumentRelativeImageSrc() the app resolves relative paths
+    // itself, and the embedding was what broke GitHub - which strips `data:`
+    // from an <img src> - so the README's screenshots were broken icons on the
+    // project's own front page while every assertion here passed.
     id: "R144",
     suite: "test:packaging",
-    what: "reference a README image by relative path, which the app cannot resolve",
+    what: "embed a README image as a data: URI, which GitHub silently strips",
     file: path.join(ROOT, "README.md"),
     from: ' alt="Folia" width="100">',
-    to: ' alt="Folia" width="100">\n  <img src="logo.png" alt="Folia">',
-    expect: [/README images are embedded/],
+    to: ' alt="Folia" width="100">\n  <img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" alt="Folia">',
+    expect: [/no README image is embedded as a data: URI/],
+  },
+  {
+    // The other half of the same rule, and the half that is invisible from
+    // GitHub: an image can be perfectly correct in the repository and still be
+    // a broken icon in the installed app, because the README ships into
+    // resources/ with only what extraResources puts beside it. Points the
+    // reference at a real file in a directory extraResources does not ship, so
+    // the repo-existence assertion keeps passing and only the shipping one
+    // fails - otherwise this would prove nothing more than a typo would.
+    id: "R236",
+    suite: "test:packaging",
+    what: "reference a README image from a directory the installer does not ship",
+    file: path.join(ROOT, "README.md"),
+    from: '<img src="docs/images/folia.png"',
+    to: '<img src="app-icon.png"',
+    expect: [/ships beside the installed README/],
+    mustPass: [/every README image exists in the repository/],
+  },
+  {
+    // The defect that produced this assertion was MINE, and it survived all
+    // 197 assertions that existed at the time: an edit inserting two sections
+    // consumed the `## Development` heading, orphaning the install and test
+    // commands under the section above. It was caught only by rendering the
+    // README in the app and counting <h2> elements.
+    id: "R237",
+    suite: "test:packaging",
+    what: "delete a README section heading, orphaning its body under the section above",
+    file: path.join(ROOT, "README.md"),
+    from: "## Development\n",
+    to: "",
+    expect: [/every section the shipped README promises a reader is still present/],
   },
   {
     // The one defect here that is invisible BOTH on GitHub and in the test
@@ -1839,7 +1876,7 @@ const REVERTS = [
     // fired for real on the committed defect and is kept as the post-commit
     // half of the same guard.
     what: "put a lone CR back into a tracked source file, as a stray automated edit would",
-    file: path.join(ROOT, "CUSTOMIZATIONS.md"),
+    file: path.join(ROOT, "docs/CUSTOMIZATIONS.md"),
     from: "## Modifying Customizations",
     to: "## Modifying Customizations\r",
     expect: [/no tracked source file contains a lone CR/],

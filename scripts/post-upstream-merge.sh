@@ -63,7 +63,7 @@ check_line "$ROOT/index.html" '<title>Folia</title>'  '<title>Folia</title>'
 if [ "$MISSING_REFS" -eq 1 ]; then
   echo ""
   echo "   ⚠ Some custom references are missing from index.html."
-  echo "     See CUSTOMIZATIONS.md for where to add them."
+  echo "     See docs/CUSTOMIZATIONS.md for where to add them."
   echo "     KEY POINTS:"
   echo "       - tabsContainer div must be added just before <div class=\"main-content\">"
   echo "       - app-title span must be inside #logoLink (after logo img tags)"
@@ -128,7 +128,7 @@ if grep -q "window-state.json\|loadWindowState\|saveWindowState" "$ROOT/main.js"
 else
   echo "   ✗ MISSING: window state persistence not found in main.js"
   echo "     → Add loadWindowState/saveWindowState functions and wire into createWindow()"
-  echo "     → See CUSTOMIZATIONS.md section 'Window state persistence'"
+  echo "     → See docs/CUSTOMIZATIONS.md section 'Window state persistence'"
 fi
 
 if grep -q "app\.on.*open-file" "$ROOT/main.js"; then
@@ -192,7 +192,7 @@ check_renderer "Object.defineProperty.*originalMarkdown" \
 if [ "$MISSING_RENDERER" -eq 1 ]; then
   echo ""
   echo "   ⚠ renderer.js is missing window exports — custom tabs/performance overlays will break."
-  echo "     See CUSTOMIZATIONS.md section 'renderer.js exports' for the full block to append."
+  echo "     See docs/CUSTOMIZATIONS.md section 'renderer.js exports' for the full block to append."
 fi
 
 # -----------------------------------------------------------------------------

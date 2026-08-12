@@ -46,9 +46,9 @@ itself (Electron loads the sources directly).
 | `test-*.js` | The suites. Most are Electron programs, not node programs |
 | `.github/workflows/release.yml` | Build + publish for Windows/Linux/macOS |
 
-Docs that are load-bearing, not decoration: `CUSTOMIZATIONS.md` (what the fork
-changed and why, so an upstream merge does not silently undo it), `BUILD.md`
-(build, signing, release procedure), `SECURITY-AUDIT.md`, `PERF-AUDIT.md`,
+Docs that are load-bearing, not decoration: `docs/CUSTOMIZATIONS.md` (what the fork
+changed and why, so an upstream merge does not silently undo it), `docs/BUILD.md`
+(build, signing, release procedure), `docs/SECURITY-AUDIT.md`, `docs/PERF-AUDIT.md`,
 `bench/BASELINE.md` (every measurement, with the method used to get it).
 
 ## Commands
@@ -225,7 +225,7 @@ is at the call site — do not "fix" it.
 
 **Fork-owned files diverge from upstream on purpose.** `custom-tabs.js` and the
 tab-aware parts of `renderer.js` are the fork. When merging upstream commits,
-check `CUSTOMIZATIONS.md` first; an upstream change that looks like an
+check `docs/CUSTOMIZATIONS.md` first; an upstream change that looks like an
 improvement can quietly undo a fix here.
 
 ## Conventions

@@ -1,7 +1,7 @@
 // Regression harness for PERF-01: heavy optional modules must not be required
 // during startup.
 //
-// PERF-AUDIT.md measured require("html-to-docx") at 370.1ms and
+// docs/PERF-AUDIT.md measured require("html-to-docx") at 370.1ms and
 // require("electron-updater") at 174.7ms — 544.8ms of main-thread work before
 // the window could even be created, paid by every launch regardless of whether
 // the session ever exported a DOCX or checked for an update. html-to-docx has

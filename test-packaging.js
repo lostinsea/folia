@@ -383,7 +383,7 @@ function main() {
   }
 
   // The auto-update feed must never point at the parent project. `publish` is
-  // null today (updates deliberately disabled — see BUILD.md), but if it is
+  // null today (updates deliberately disabled — see docs/BUILD.md), but if it is
   // ever enabled it has to target this fork's own releases: pointing it at
   // OmniCoreST would let upstream binaries silently replace a fork build,
   // discarding every fix in this repo. Deliberately permissive about *whether*
@@ -894,6 +894,63 @@ function main() {
         `README H1=${JSON.stringify(h1)} productName=${productName}`,
       );
 
+      // FOUND BY A PROBE, NOT BY THIS SUITE, which is why it is here now: an
+      // edit that inserted two sections above `## Development` consumed that
+      // heading and left its body - the install and test commands - hanging
+      // under the section before it. All 197 assertions passed. Opening the
+      // README in the app and listing the rendered <h2>s is what showed 12
+      // headings where there should have been 13.
+      //
+      // The oracle is the SECTION LIST, not a line count or a total, because
+      // those tolerate exactly the substitution that happened here (one
+      // heading gained, one lost, structure still "plausible"). Renaming a
+      // section is a deliberate act and updating this list with it is correct;
+      // silently absorbing one is not. Headings inside fenced code blocks are
+      // excluded - `# nvm-windows does not read .nvmrc` in the build snippet
+      // is a shell comment, and counting it would make this assertion a
+      // description of the file's punctuation rather than of its structure.
+      {
+        const REQUIRED_SECTIONS = [
+          "What Folia is",
+          "What changed in Folia",
+          "Features",
+          "Installation",
+          "Controls",
+          "Supported files",
+          "Mermaid",
+          "Technology",
+          "Engineering",
+          "Where this is going",
+          "Development",
+          "Contributing",
+          "License",
+        ];
+        let fenced = false;
+        const sections = [];
+        for (const l of readmeLines) {
+          if (/^\s*```/.test(l)) {
+            fenced = !fenced;
+            continue;
+          }
+          if (fenced) continue;
+          const m = /^##\s+(\S.*?)\s*$/.exec(l);
+          if (m) sections.push(m[1]);
+        }
+        const missing = REQUIRED_SECTIONS.filter((s) => !sections.includes(s));
+        check(
+          "every section the shipped README promises a reader is still present",
+          missing.length === 0,
+          `missing: ${missing.join(", ")} | found: ${sections.join(" / ")}`,
+        );
+        // Without this, deleting the whole list above would leave the check
+        // above trivially satisfied.
+        check(
+          "the README section sweep really parsed a document structure",
+          sections.length >= REQUIRED_SECTIONS.length,
+          `parsed only ${sections.length} level-2 headings`,
+        );
+      }
+
       // Embedded images are REDACTED rather than having their whole line
       // dropped: base64 is drawn from an alphabet that can spell anything, so
       // a blob is not evidence of branding - but dropping the line would also
@@ -903,8 +960,17 @@ function main() {
         .split(/\r?\n/)
         .map((l, i) => [i + 1, l.replace(/data:image\/[A-Za-z0-9+/=;,.-]+/g, "data:image/<redacted>")]);
 
+      // What extraResources genuinely ships, read from package.json rather than
+      // restated here. Both the image and the link assertions below judge
+      // against this same list, because both are asking the same question: is
+      // this thing still there after installation?
+      const extraTargets = ((pkg.build && pkg.build.extraResources) || []).map(
+        (e) => (typeof e === "string" ? e : e.to || e.from),
+      );
+
       const provStart = prose.findIndex(([, l]) => /^###\s+Provenance\b/.test(l));
       check(
+
         "the README has a provenance section, which is where upstream attribution belongs",
         provStart !== -1,
         "no '### Provenance' heading found",
@@ -938,26 +1004,81 @@ function main() {
         "provenance section names no upstream vendor",
       );
 
-      // MEASURED, and the reason every image in this file is a data: URI: a
-      // document rendered by this app has baseURI = the app's own index.html,
-      // so a relative <img src> resolves against the asar and never loads. A
-      // probe driving the real open path measured naturalWidth=0 for markdown
-      // image syntax, for './'-prefixed paths and for raw <img src> alike,
-      // against 512 for a data: URI. On GitHub a relative path renders fine,
-      // so this breaks ONLY in the shipped app - invisible to anyone reviewing
-      // the README on the web, which is exactly why it needs an assertion.
-      const relativeImgs = prose
-        .filter(([, l]) => /<img\s[^>]*src="(?!https?:|data:)/i.test(l))
-        .map(([n, l]) => `${n}: ${l.trim().slice(0, 60)}`);
-      check(
-        "README images are embedded, so they still load when the app opens it",
-        relativeImgs.length === 0,
-        relativeImgs.join(" | "),
-      );
+      // The images used to be `data:` URIs, and the comment here used to
+      // explain why: a document rendered by this app had baseURI = the app's
+      // own index.html, so a relative <img src> resolved against the asar and
+      // never loaded (measured: naturalWidth 0 for markdown image syntax, for
+      // './'-prefixed paths and for raw <img src> alike, against 512 for a
+      // data: URI).
+      //
+      // BOTH HALVES OF THAT HAVE SINCE CHANGED, and the fix for one surface was
+      // silently breaking the other. `resolveDocumentRelativeImageSrc()`
+      // (renderer.js) now resolves a relative src against the directory of the
+      // file being viewed, so the app-side reason to embed is gone. Meanwhile
+      // GitHub's markdown sanitizer permits only http(s) in an <img src> and
+      // strips `data:` outright, so every screenshot in this README rendered as
+      // a broken-image icon on the project's own front page - REPORTED BY THE
+      // USER, because nothing here could see it.
+      //
+      // So the rule inverts. It is pinned in both directions on purpose: the
+      // no-data: half is what keeps GitHub working, and the ships-beside half
+      // is what keeps the installed app working, and each is invisible from the
+      // surface the other one serves.
+      {
+        const imgs = prose
+          .flatMap(([n, l]) =>
+            [...l.matchAll(/<img\s[^>]*src="([^"]*)"/gi)].map((m) => [n, m[1]]),
+          );
+        const relImgs = imgs.filter(([, s]) => !/^(https?:|data:)/i.test(s));
+
+        // A vacuity floor, not a specification: without it, a README that had
+        // lost its images entirely would satisfy every assertion below.
+        check(
+          "the README carries images, so the assertions about them have something to judge",
+          relImgs.length >= 4,
+          `found ${relImgs.length} relative images among ${imgs.length} total`,
+        );
+
+        const embedded = imgs
+          .filter(([, s]) => /^data:/i.test(s))
+          .map(([n]) => `line ${n}`);
+        check(
+          "no README image is embedded as a data: URI, which GitHub strips",
+          embedded.length === 0,
+          embedded.join(" | "),
+        );
+
+        const missingOnDisk = relImgs
+          .filter(([, s]) => !fs.existsSync(path.join(ROOT, s.replace(/[?#].*$/, ""))))
+          .map(([n, s]) => `${n}: ${s}`);
+        check(
+          "every README image exists in the repository, so GitHub can serve it",
+          missingOnDisk.length === 0,
+          missingOnDisk.join(" | "),
+        );
+
+        // The installed README sits in resources/ with only what
+        // extraResources put beside it, and the app resolves a relative src
+        // against the README's OWN directory - so an image that is not shipped
+        // at the same relative path is a broken image in the packaged product
+        // while looking perfect on GitHub. Read from extraResources rather than
+        // restated, so adding an image outside a shipped directory fails here.
+        const unshipped = relImgs
+          .filter(([, s]) => {
+            const t = s.replace(/[?#].*$/, "");
+            return !extraTargets.some((e) => t === e || t.startsWith(e + "/"));
+          })
+          .map(([n, s]) => `${n}: ${s}`);
+        check(
+          "every README image also ships beside the installed README, so the app can render it",
+          unshipped.length === 0,
+          `${unshipped.join(" | ")} - not under extraResources (${extraTargets.join(", ")})`,
+        );
+      }
 
       // MEASURED on the real open path, and the reason the shields.io badges
       // were dropped: all three loaded over the network (naturalWidth 210, 78
-      // and 90). `img-src` deliberately permits `https:` - SECURITY-AUDIT.md
+      // and 90). `img-src` deliberately permits `https:` - docs/SECURITY-AUDIT.md
       // records that as a considered trade, because remote images in markdown
       // are a real feature - so the CSP does not stop them and was never meant
       // to. The problem is not the directive, it is that the app's OWN bundled
@@ -993,9 +1114,7 @@ function main() {
       // extraResources genuinely ships, reading that list rather than repeating
       // it, so adding a link to an unshipped doc fails here.
       {
-        const extras = ((pkg.build && pkg.build.extraResources) || []).map((e) =>
-          typeof e === "string" ? e : e.to || e.from,
-        );
+        const extras = extraTargets;
         const linkTargets = [];
         for (const [n, l] of prose) {
           for (const m of l.matchAll(/\]\(([^)\s]+)\)/g)) {
