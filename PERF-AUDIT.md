@@ -363,6 +363,60 @@ renders nothing" fail with `{"count":14,"changed":4}`. The end-to-end supersede
 assertion alone does **not** fail — it is protected by the cancel — which is why
 the guard is also tested directly.
 
+### PERF-08 — `applyTableBreakout()` forced one full-document layout per table
+
+- **File:line:** `renderer.js`, `preferredTableWidth()` — since split into `tablePreferredBegin()` / `tablePreferredRead()` / `tablePreferredRestore()`
+- **Why it is slow:** the function wrote `table.style.width = 'max-content'` and then read `table.getBoundingClientRect()`. A write followed by a read forces a synchronous layout, so doing it once per table costs **one full-document layout per table** — O(n²) in table count.
+- **Diagnostic signature:** the *per-table* cost rises with table count — **3.3 → 5.7 → 12.2 ms** from 0.25 MB to 1 MB. That is layout thrash, not an expensive measurement. A pass that were merely slow would show a flat per-table cost.
+- **Fix:** four batched passes (read all containers, write all tables, read all tables, restore all tables), taking the pass from ~1 forced layout per table to **~4 in total**.
+- **Why batching is layout-equivalent, not an approximation:** `.table-container` is `width:100%; overflow-x:auto`, so a table at `max-content` is contained by its own scroller and cannot change what any other table measures; and `max-content` is an *intrinsic* size, so it does not depend on available space either. This argument is written into the code, because a stylesheet change could invalidate it.
+- **Measured:** `applyTableBreakout` at 1 MB **35.5 s → 2.3 s**. The residual is consistent with ~4 full-document layouts of an 82k-node tree — the floor, not remaining thrash.
+
+### PERF-09 — `patchViewerDOM()` drained the viewer one child at a time
+
+- **File:line:** `renderer.js`, `patchViewerDOM()`
+- **Why it is slow:** in Blink, removing a child costs time proportional to the **container's** size, so draining a container child-by-child is O(n²). Measured: **24.2 s for 29,055 blocks**.
+- **Fix:** bulk drain with `replaceChildren()` (no arguments) before the insert loop, plus a bulk `viewer.replaceChildren()` when nothing at all was matched. Linear — **16 ms** for the same 29k — and it genuinely detaches (`parentNode === null` afterwards, references stay valid).
+- **Measured:** **23,687 ms → 36.2 ms** (654x).
+- **Counter-intuitive, and the reason this needs a permanent guard rather than a comment:** batching the *insert* side does **not** help. `viewer.append(...nodes)`, DocumentFragment-then-append and `replaceChildren(...nodes)` were all measured and are all just as slow (**22.9 / 33.9 / 34.0 s** at 1 MB), because each still detaches every argument from its current parent first. **The detach is the cost, so the detach is what must be batched.** An "optimisation" that replaced the insert loop with any of those would look obviously better and buy nothing.
+- **The incremental path deliberately keeps per-node removal**, and the bulk clear is gated on `!pairs.length` for exactly that reason: a bulk clear would detach and reattach *reused* nodes, discarding state that lives in their layout objects — inner scroll offset, a loaded `@@@html` sandboxed iframe (detaching an iframe destroys and reloads its document), focus, running transitions. Event listeners, Prism highlighting, copy buttons and `<img>` decode state all survive a detach; the layout-object state does not.
+- **Scroll preservation was measured, not assumed:** a bulk clear plus re-append in one task with no intervening layout read gives `before=4000, after=4000`, because layout — and therefore `scrollTop` clamping — is deferred.
+
+### PERF-08/09 combined effect
+
+Same synthetic dense document (~135 nodes/KB), end to end:
+
+| Document | Before | After | Speedup |
+|---|---:|---:|---:|
+| 1 MB | 41.3 s | 5.0 s | 8.2x |
+| 2 MB | 187.1 s | 7.8 s | 24x |
+| 5 MB | 445.6 s | 60.9 s | 7.3x |
+
+Per-phase at 1 MB: total render **45.6 s → 3.8 s**; `applyTableBreakout`
+**35.5 s → 2.3 s**; `patchViewerDOM` **8.45 s → 0.25 s**. Scaling across
+0.25 / 0.5 / 1 MB is now near-linear (1174 / 1978 / 3812 ms).
+
+**The main thread was completely wedged, not merely busy** — and that was
+measured rather than inferred. `executeJavaScript` queues on the renderer's main
+thread, so its round-trip time *is* the block: firing `renderMarkdown()` without
+awaiting it and polling from the main process, only **2 polls** got through an
+entire 187 s render at 2 MB.
+
+**Oracles are structural, not timed** — a timing assertion is how this suite
+would become flaky, and it would not say what broke. `test-table-display.js` §18
+patches `getBoundingClientRect` and counts how many tables are at `max-content`
+on each *table* read (batched ⇒ N, thrashing ⇒ 1). `test-render-patch.js` §16
+patches `insertBefore`/`remove` and asserts every new block is already
+parentless when inserted. R227 is deliberately a **geometrically correct**
+revert — `preferredTableWidth()` is the same measurement taken one table at a
+time — so its `mustPass` list requires the geometry assertions to keep passing;
+the only difference between the two versions is *when* the layouts happen.
+
+**Still open:** the partial-reuse removal path (many removals *with* some reuse)
+has not been measured and is likely still quadratic. The 5 MB leg remains
+super-linear, so something else becomes quadratic at that scale; the render-cost
+guard covers it rather than a fix.
+
 ## Measured and found already fast
 
 - **Custom tab sync I/O is not the current bottleneck.**

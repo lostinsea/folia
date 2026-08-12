@@ -34,6 +34,13 @@ retained in [`LICENSE`](LICENSE.txt) as MIT requires - which is why that file na
 three parties. Folia is maintained separately, with its own name and version
 series, and is **not** published, endorsed or supported by Omnicore.
 
+Folia diverged from its parent at commit **`854bdec`** (2026-02-23, upstream
+v2.0.7). It is a fork, not a downstream branch: upstream commits are reviewed
+and picked deliberately rather than merged wholesale, because a merge that looks
+like a clean improvement can silently undo a fix here. What the fork changed,
+and why, is recorded in [`CUSTOMIZATIONS.md`](https://github.com/lostinsea/folia/blob/main/CUSTOMIZATIONS.md)
+precisely so that the next merge has something to check against.
+
 ---
 
 ## What changed in Folia
@@ -69,12 +76,38 @@ The substantive ones:
 
 ### Performance
 
-Measured before and after; details in [`PERF-AUDIT.md`](https://github.com/lostinsea/folia/blob/main/PERF-AUDIT.md).
+Measured before and after; method and raw numbers in
+[`PERF-AUDIT.md`](https://github.com/lostinsea/folia/blob/main/PERF-AUDIT.md)
+and [`bench/BASELINE.md`](https://github.com/lostinsea/folia/blob/main/bench/BASELINE.md).
 
+**Two of the app's own rendering passes were quadratic.** Nobody had noticed,
+because nobody had measured a large document. On a benchmark corpus that is
+generated deterministically and hash-pinned in this repository, so the numbers
+can be reproduced rather than taken on trust:
+
+| Document | Before | After |
+|---|---:|---:|
+| 1 MB | 41.3 s | 5.0 s |
+| 2 MB | 187.1 s | 7.8 s |
+
+The 2 MB case is the tell: **4.5x the time for 2x the work** is not a slow
+function, it is the wrong shape. Both passes are now near-linear across the
+sizes that matter, so a document twice the size costs roughly twice as much
+rather than four times.
+
+- **Markdown parser upgraded (marked 9 -> 18)**, which removed a cliff of its own: a 2.5 MB table-heavy file went from **34.3 s to 0.40 s** to parse.
 - **~545 ms of blocking startup work removed** - two heavyweight modules were loaded at module scope on every launch and are now loaded on first use.
 - **Mermaid is loaded lazily**, cutting a further ~125 ms from launches of documents that contain no diagrams.
 - **Incremental rendering made to actually work.** Editing now patches only the affected nodes using a keyed diff, so inserting a paragraph mid-document no longer rebuilds everything after it.
 - Search is debounced, and it no longer counts matches in detached nodes after a re-render.
+
+**Folia now estimates what a document will cost before rendering it**, and asks
+first if that looks like more than ten seconds. The estimate deliberately does
+*not* use file size: at an identical 1 MB, documents in the benchmark corpus
+span 260 ms to 3.4 s of render time, which makes bytes a **12.9x-wrong** proxy.
+The obvious replacement - line count - measured *worse* (26.9x). The signal
+actually used is derived from measurement and validated on profiles it was not
+fitted to.
 
 ### Tables
 
@@ -366,7 +399,67 @@ Full licence texts for every shipped dependency are in
 
 ---
 
-## Development
+## Engineering
+
+Folia's test suite is unusual, and it is unusual on purpose. Almost every defect
+in the list above was invisible - the app looked like it was working. A suite
+that only checks for the failures you already imagined will not find those.
+
+**12 suites, ~1,300 assertions**, all driving the real application in a real
+Electron window: real click events, real dialogs, real file writes, with the
+rendered DOM or the bytes on disk as the oracle. Nothing asserts on the
+implementation's own helper functions, because a test that asks the code what it
+thinks it did will always be told it went fine.
+
+**Every fix is proven by reverting it.** `scripts/prove-table-fixes.js` holds
+**189 recorded defects** (R49-R235). Each one re-applies the original bug to the
+source, runs the suite, and requires it to fail on *that fix's own named
+assertions* - not merely to fail. A revert that fails nothing means the test was
+decorative; a revert that fails too much means the test is not specific enough.
+102 of them additionally name assertions that **must keep passing**, so a fix
+cannot be "proven" by a test that simply breaks everything.
+
+This has repeatedly caught tests that could not fail:
+
+- an assertion that judged a geometry formula using **a copy of that same formula**;
+- a probe that measured the same value for every input, because an unrelated CSS rule pinned it;
+- a shipped-documentation check that passed with the mechanism it described **commented out**;
+- a whole block of packaging assertions that silently **stopped running** and still reported green.
+
+Alongside that: a benchmark harness with **315 structural checks** on its own
+measurements (so the instrumentation cannot quietly stop recording, which it
+once did), a console-error sentinel with an audited mute list, a visual-probe
+layer with its own self-check that demonstrates all six of its failure modes,
+and screenshots treated strictly as artifacts for a human to look at - never as
+pass/fail baselines.
+
+The working rule behind all of it: **measure, don't reason.** Several fixes here
+replaced a confident and entirely wrong explanation, including some of my own.
+
+---
+
+## Where this is going
+
+Folia is deliberately narrower than what it forked from. The parent is a
+general-purpose viewer that accumulated diagram engines, document modes and
+export formats; Folia gives that space back. Vendor document modes, the bundled
+VS Code extension, translation, localisation and Word export are gone, and two
+upstream features - a second diagram system and circuit schematics - were
+evaluated and declined rather than skipped. The installer went from **153.6 MB
+to well under a quarter of that**.
+
+The philosophy is **leaner and faster, and offline**. Folia makes no network
+requests: every library it renders with is vendored inside the app, so it works
+identically on an air-gapped machine and there is no telemetry to opt out of.
+
+Planned next:
+
+- Bring the removal-path rendering work to the same linear shape as the rest (a document-to-document swap with partial reuse is still super-linear).
+- Table breakout is now the single most expensive pass on wide documents; it is the next performance target.
+- Signed Windows builds, so installing does not require dismissing SmartScreen.
+- Continue reviewing upstream commits individually - each one measured against this fork before it is taken.
+
+
 
 ```bash
 npm install
@@ -378,10 +471,11 @@ Individual suites are available as `npm run test:tabs`, `test:security`,
 `test:tables`, `test:mermaid`, `test:packaging` and others - see
 `package.json`.
 
-Two conventions in this repository are worth knowing before contributing:
-
-1. **Every fix is proven by reverting it.** `scripts/prove-table-fixes.js` re-applies each historical bug in turn and requires the suite to fail on the specific assertion written for it. A test that cannot fail is treated as a bug in the test.
-2. **Measure, don't reason.** Where a question can be settled by observing the running application, it is - several fixes here replaced a plausible explanation that turned out to be wrong.
+The two conventions described under [Engineering](#engineering) - every fix is
+proven by reverting it, and measure rather than reason - are not aspirations;
+a change that does not follow them will not pass review here. The full working
+guide, including the traps this codebase is known to set, is in
+[`.github/copilot-instructions.md`](https://github.com/lostinsea/folia/blob/main/.github/copilot-instructions.md).
 
 [`CUSTOMIZATIONS.md`](https://github.com/lostinsea/folia/blob/main/CUSTOMIZATIONS.md) documents the overlay files
 (`custom-*.js`) inherited from the intermediate fork.

@@ -98,7 +98,11 @@ CLAUDE.md
 # in that commit are NOT taken - `tests-electronics/` belongs to upstream's
 # tscircuit work, and `ss/` is upstream's screenshot directory, whereas this
 # fork writes test artifacts to `screenshots/` (already ignored above).
+# `.cursor/` was inherited as a TRACKED rules directory and deleted: its rules
+# contradicted how this repo actually works, and .github/copilot-instructions.md
+# is now the single source of agent guidance. Ignored so it cannot drift back.
 .claude/
+.cursor/
 
 # Windows null device files
 nul
