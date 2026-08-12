@@ -1943,6 +1943,132 @@ async function run(win) {
   const errors = await exec(`window.__e2eErrors || []`);
   check("no uncaught renderer errors", errors.length === 0, JSON.stringify(errors));
 
+  // ---- Scenario 10: the size guard on a lazy tab -------------------------
+  // Tabs render lazily: createTab() only stores the text, switchToTab() is
+  // what pays. So a document that arrived by multi-select or session restore
+  // has never passed main.js's open-time guard, and the click on its tab is
+  // the first moment the cost is real. Declining must leave the reader exactly
+  // where they were - which is why the guard runs before snapshotActiveTab().
+  //
+  // The sample is a long run of pipes: the estimator scores it as expensive
+  // (pipes are table cells) while marked renders it as one paragraph, so BOTH
+  // branches are cheap to drive. That divergence is deliberate - a genuinely
+  // 10-second document would make this scenario cost 10 seconds.
+  const fileBig = path.join(dir, "guard-big.md");
+  const fileSmall = path.join(dir, "guard-small.md");
+  const jsBig = JSON.stringify(fileBig);
+  const jsSmall = JSON.stringify(fileSmall);
+  write(fileBig, "|".repeat(260000) + "\n");
+  write(fileSmall, "# Small\n\nGUARD_SMALL_DOC\n");
+
+  const guard = await exec(`
+    (async () => {
+      const out = {};
+      const helpers = require('./file-helpers');
+      out.bigIsLarge = helpers.isLargeDocument(window.fs.readFileSync(${jsBig}, 'utf8')).large;
+      out.smallIsLarge = helpers.isLargeDocument(window.fs.readFileSync(${jsSmall}, 'utf8')).large;
+
+      const realSendSync = window.ipcRenderer.sendSync;
+      let asked = 0;
+      let answer = false;
+      window.ipcRenderer.sendSync = function (channel) {
+        if (channel === 'confirm-large-render') { asked++; return answer; }
+        return realSendSync.apply(this, arguments);
+      };
+      try {
+        const small = window.CustomTabs.createTab(${jsSmall}, window.fs.readFileSync(${jsSmall}, 'utf8'));
+        await new Promise(r => setTimeout(r, 400));
+        out.askedForSmall = asked;
+        out.smallOnScreen = document.getElementById('viewer').textContent.indexOf('GUARD_SMALL_DOC') !== -1;
+
+        // createTab() switches to the new tab, so opening an expensive file is
+        // itself a guarded switch. Declining here must leave the reader on the
+        // document they were already reading - the multi-select case.
+        answer = false;
+        const big = window.CustomTabs.createTab(${jsBig}, window.fs.readFileSync(${jsBig}, 'utf8'));
+        await new Promise(r => setTimeout(r, 400));
+        out.askedOnCreate = asked - out.askedForSmall;
+        out.activeAfterCreate = window.CustomTabs.getActiveTabId() === small.id;
+
+        let mark = asked;
+        window.CustomTabs.switchToTab(big.id);
+        await new Promise(r => setTimeout(r, 400));
+        out.askedOnDecline = asked - mark;
+        out.activeAfterDecline = window.CustomTabs.getActiveTabId() === small.id;
+        out.viewerAfterDecline = document.getElementById('viewer').textContent.indexOf('GUARD_SMALL_DOC') !== -1;
+
+        mark = asked;
+        answer = true;
+        window.CustomTabs.switchToTab(big.id);
+        await new Promise(r => setTimeout(r, 800));
+        out.askedOnAccept = asked - mark;
+        out.activeAfterAccept = window.CustomTabs.getActiveTabId() === big.id;
+
+        mark = asked;
+        window.CustomTabs.switchToTab(small.id);
+        await new Promise(r => setTimeout(r, 400));
+        window.CustomTabs.switchToTab(big.id);
+        await new Promise(r => setTimeout(r, 400));
+        out.askedOnRevisit = asked - mark;
+        out.activeAfterRevisit = window.CustomTabs.getActiveTabId() === big.id;
+
+        [big.id, small.id].forEach(id => {
+          const t = window.CustomTabs.getTabs().find(x => x.id === id);
+          if (t) t.hasUnsavedChanges = false;
+          window.CustomTabs.closeTab(id);
+        });
+      } finally {
+        window.ipcRenderer.sendSync = realSendSync;
+      }
+      return out;
+    })()
+  `);
+  await sleep(400);
+
+  // Vacuity guards. If the sample stopped tripping the estimator, or the small
+  // document started tripping it, every assertion below would pass for the
+  // wrong reason.
+  check(
+    "the guard sample really is scored as expensive and the control is not",
+    guard.bigIsLarge === true && guard.smallIsLarge === false,
+    JSON.stringify(guard),
+  );
+  check(
+    "an ordinary document is never asked about",
+    guard.askedForSmall === 0 && guard.smallOnScreen === true,
+    JSON.stringify(guard),
+  );
+  check(
+    "opening an expensive file asks, and declining leaves the reader put",
+    guard.askedOnCreate === 1 && guard.activeAfterCreate === true,
+    JSON.stringify(guard),
+  );
+  check(
+    "switching to an expensive tab asks first",
+    guard.askedOnDecline === 1,
+    JSON.stringify(guard),
+  );
+  check(
+    "declining leaves the reader on the tab they were viewing",
+    guard.activeAfterDecline === true,
+    JSON.stringify(guard),
+  );
+  check(
+    "declining leaves the document they were reading on screen",
+    guard.viewerAfterDecline === true,
+    JSON.stringify(guard),
+  );
+  check(
+    "accepting switches to the expensive tab",
+    guard.askedOnAccept === 1 && guard.activeAfterAccept === true,
+    JSON.stringify(guard),
+  );
+  check(
+    "a cost already accepted is not asked about again",
+    guard.askedOnRevisit === 0 && guard.activeAfterRevisit === true,
+    JSON.stringify(guard),
+  );
+
   // Prove the watcher was actually watching. Without this, "no errors were
   // recorded" and "the watcher silently stopped working" are the same result -
   // the exact vacuity this harness exists to eliminate. Both detection paths

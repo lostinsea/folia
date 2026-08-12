@@ -3458,6 +3458,47 @@ const REVERTS = [
       /every new block is already detached when it is inserted/,
     ],
   },
+  {
+    id: "R234",
+    suite: "test:tabs",
+    // The decline path. A guard that always proceeds still ASKS, so an oracle
+    // that only counted dialogs would call this fixed; what breaks is that the
+    // answer is ignored, and the reader is dragged onto a document they
+    // declined. Note it also stops asking on the second and third visits,
+    // because the memo records an acceptance that never happened.
+    what: "ignore the reader's answer and switch to the expensive tab anyway",
+    file: TABS,
+    from: "    if (tabId !== activeTabId && !confirmLargeTab(tab)) {",
+    to: "    if (false) {",
+    expect: [
+      /opening an expensive file asks, and declining leaves the reader put/,
+      /switching to an expensive tab asks first/,
+      /declining leaves the reader on the tab they were viewing/,
+      /declining leaves the document they were reading on screen/,
+      /accepting switches to the expensive tab/,
+    ],
+    mustPass: [
+      /the guard sample really is scored as expensive and the control is not/,
+      /an ordinary document is never asked about/,
+    ],
+  },
+  {
+    id: "R235",
+    suite: "test:tabs",
+    // The memo. Without it the reader is asked about the same document every
+    // time they come back to its tab, which is the same mistake as guarding
+    // the refresh path: a confirmation that fires dozens of times a session is
+    // one the reader learns to dismiss without reading.
+    what: "ask again about a document whose cost was already accepted",
+    file: TABS,
+    from: "    if (largeConfirmed.has(tab.id)) return true;",
+    to: "    // memo disabled",
+    expect: [/a cost already accepted is not asked about again/],
+    mustPass: [
+      /declining leaves the reader on the tab they were viewing/,
+      /accepting switches to the expensive tab/,
+    ],
+  },
 ];
 
 const only = process.argv.slice(2);
