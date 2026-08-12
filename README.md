@@ -57,7 +57,7 @@ rather than pixel offset, so the position survives the document reflowing.
 ### Security
 
 A full audit produced 27 findings, all of which are resolved or recorded as
-measured, justified deferrals in [`SECURITY-AUDIT.md`](https://github.com/lostinsea/markdown-viewer/blob/main/SECURITY-AUDIT.md).
+measured, justified deferrals in [`SECURITY-AUDIT.md`](https://github.com/lostinsea/folia/blob/main/SECURITY-AUDIT.md).
 The substantive ones:
 
 - Every HTML sink that took document-controlled text was rebuilt from DOM nodes and `textContent`. In a Node-privileged renderer these are code execution, not defacement.
@@ -69,7 +69,7 @@ The substantive ones:
 
 ### Performance
 
-Measured before and after; details in [`PERF-AUDIT.md`](https://github.com/lostinsea/markdown-viewer/blob/main/PERF-AUDIT.md).
+Measured before and after; details in [`PERF-AUDIT.md`](https://github.com/lostinsea/folia/blob/main/PERF-AUDIT.md).
 
 - **~545 ms of blocking startup work removed** - two heavyweight modules were loaded at module scope on every launch and are now loaded on first use.
 - **Mermaid is loaded lazily**, cutting a further ~125 ms from launches of documents that contain no diagrams.
@@ -197,7 +197,7 @@ The menu adapts to the mode you are in.
 ### Download
 
 Releases are published at
-[lostinsea/markdown-viewer/releases](https://github.com/lostinsea/markdown-viewer/releases).
+[lostinsea/folia/releases](https://github.com/lostinsea/folia/releases).
 
 | Platform | File | Description |
 |----------|------|-------------|
@@ -240,7 +240,7 @@ at all.
 ### Build from source
 
 **Prerequisite: Node.js 24.18.1 or newer.** The exact version this project is
-developed against is in [`.nvmrc`](https://github.com/lostinsea/markdown-viewer/blob/main/.nvmrc).
+developed against is in [`.nvmrc`](https://github.com/lostinsea/folia/blob/main/.nvmrc).
 
 Electron 43 downloads its binary lazily on first run using a downloader that
 is ESM-only and needs Node >= 22.12. So that this does not surface as a confusing
@@ -280,8 +280,8 @@ npm run build-linux      # AppImage + .deb
 npm run build-mac        # .dmg
 ```
 
-Output lands in `dist/`. See [`BUILD.md`](https://github.com/lostinsea/markdown-viewer/blob/main/BUILD.md) for the full guide and
-[`RELEASE.md`](https://github.com/lostinsea/markdown-viewer/blob/main/RELEASE.md) for the release process.
+Output lands in `dist/`. See [`BUILD.md`](https://github.com/lostinsea/folia/blob/main/BUILD.md) for the full guide and
+[`RELEASE.md`](https://github.com/lostinsea/folia/blob/main/RELEASE.md) for the release process.
 
 ---
 
@@ -383,7 +383,7 @@ Two conventions in this repository are worth knowing before contributing:
 1. **Every fix is proven by reverting it.** `scripts/prove-table-fixes.js` re-applies each historical bug in turn and requires the suite to fail on the specific assertion written for it. A test that cannot fail is treated as a bug in the test.
 2. **Measure, don't reason.** Where a question can be settled by observing the running application, it is - several fixes here replaced a plausible explanation that turned out to be wrong.
 
-[`CUSTOMIZATIONS.md`](https://github.com/lostinsea/markdown-viewer/blob/main/CUSTOMIZATIONS.md) documents the overlay files
+[`CUSTOMIZATIONS.md`](https://github.com/lostinsea/folia/blob/main/CUSTOMIZATIONS.md) documents the overlay files
 (`custom-*.js`) inherited from the intermediate fork.
 
 ---

@@ -44,10 +44,10 @@
     "name": "lostinsea"
   },
   "license": "MIT",
-  "homepage": "https://github.com/lostinsea/markdown-viewer#readme",
+  "homepage": "https://github.com/lostinsea/folia#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/lostinsea/markdown-viewer.git"
+    "url": "https://github.com/lostinsea/folia.git"
   },
   "devDependencies": {
     "ajv": "^8.20.0",
@@ -72,7 +72,7 @@
       {
         "provider": "github",
         "owner": "lostinsea",
-        "repo": "markdown-viewer"
+        "repo": "folia"
       }
     ],
     "directories": {

@@ -142,7 +142,7 @@ electron-builder therefore writes `app-update.yml` into the package and emits
 `latest.yml` (plus `latest-linux.yml` / `latest-mac.yml`) alongside the
 installers. `electron-updater` reads the former at runtime and fetches the
 latter from the release assets. Verified on a real build: `app-update.yml`
-resolves to `github.com/lostinsea/markdown-viewer`, and until the first release
+resolves to `github.com/lostinsea/folia`, and until the first release
 is published the check simply returns 404 and is swallowed by the existing
 handler.
 
@@ -189,8 +189,8 @@ Dispatch **on the tag ref**, not on a branch:
 ```bash
 git tag -a v0.1.0 -m "Folia 0.1.0"
 git push origin v0.1.0
-gh workflow run release.yml --repo lostinsea/markdown-viewer --ref v0.1.0
-gh run watch <id> --repo lostinsea/markdown-viewer --exit-status
+gh workflow run release.yml --repo lostinsea/folia --ref v0.1.0
+gh run watch <id> --repo lostinsea/folia --exit-status
 ```
 
 The `--ref v0.1.0` is load-bearing. `create-release` is gated on

@@ -1789,7 +1789,7 @@ function applyNoteStyles() {
 // Logo link - open website
 logoLink.addEventListener('click', (e) => {
   e.preventDefault();
-  shell.openExternal('https://github.com/lostinsea/markdown-viewer');
+  shell.openExternal('https://github.com/lostinsea/folia');
 });
 
 // Extension policy for links that resolve to a local file (SEC-12).

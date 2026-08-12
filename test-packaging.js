@@ -457,7 +457,7 @@ function main() {
     );
     check(
       "auto-update publishes to this fork's own GitHub releases",
-      github.length === 1 && github[0].owner === "lostinsea" && github[0].repo === "markdown-viewer",
+      github.length === 1 && github[0].owner === "lostinsea" && github[0].repo === "folia",
       `build.publish=${JSON.stringify(pkg.build && pkg.build.publish)} - electron-builder writes no app-update.yml without it, so installed builds can never see a release`,
     );
 
@@ -1050,17 +1050,19 @@ function main() {
       branded.join("; "),
     );
 
-    // Fields exempt from the stale-name sweep, each for a distinct reason:
-    //   homepage      - the GitHub repository really is still named
-    //                   markdown-viewer, so this must keep that slug or it
-    //                   points at nothing. Renaming the repo is an
-    //                   owner-only decision, separate from the product rename.
+    // Fields exempt from the stale-name sweep:
     //   description   - "markdown viewer" is the product CATEGORY, and saying
     //                   what the app is is the field's entire job. Sweeping it
     //                   would force prose that avoids naming its own category.
+    // `homepage` used to be exempt too, because the GitHub repository was
+    // still named markdown-viewer and the URL had to keep that slug to point
+    // at anything. The repository is now lostinsea/folia, so the exemption is
+    // gone and the URL is swept like every other identifier. GitHub keeps the
+    // old slug redirecting, which is exactly why this needs an oracle: a stale
+    // homepage would go on working indefinitely and nothing would notice.
     // Everything left is used as an IDENTIFIER by Electron, electron-builder
     // or the OS, and none of those may still say the old name.
-    const STALE_EXEMPT = new Set(["homepage", "description"]);
+    const STALE_EXEMPT = new Set(["description"]);
     const stale = Object.entries(identityFields)
       .filter(([k]) => !STALE_EXEMPT.has(k))
       .filter(([, v]) => typeof v === "string" && STALE_PRODUCT.test(v))
@@ -1748,7 +1750,7 @@ function main() {
               "the packaged app carries an update feed config",
               /provider:\s*github/.test(updateCfg) &&
                 /owner:\s*lostinsea/.test(updateCfg) &&
-                /repo:\s*markdown-viewer/.test(updateCfg),
+                /repo:\s*folia/.test(updateCfg),
               `app-update.yml does not name this fork: ${updateCfg.replace(/\s+/g, " ").trim()}`,
             );
           }
