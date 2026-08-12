@@ -179,14 +179,14 @@ function main() {
   };
 
   for (const [name, size] of PNG_OUTPUTS) {
-    const out = path.join(ROOT, name);
+    const out = path.join(ROOT, "assets", name);
     fs.writeFileSync(out, pngAt(size));
     console.log(`  ${name}  ${size}x${size}  (${(pngAt(size).length / 1024).toFixed(1)} KB)`);
   }
 
   const ico = encodeICO(ICO_SIZES.map((size) => ({ size, png: pngAt(size) })));
   for (const name of ["logo.ico", "file-icon.ico"]) {
-    fs.writeFileSync(path.join(ROOT, name), ico);
+    fs.writeFileSync(path.join(ROOT, "assets", name), ico);
     console.log(`  ${name}  ${ICO_SIZES.join("/")}  (${(ico.length / 1024).toFixed(1)} KB)`);
   }
 

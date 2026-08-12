@@ -17,7 +17,7 @@ const RENDERER = path.join(ROOT, "renderer.js");
 const TABS = path.join(ROOT, "custom-tabs.js");
 const COLLAPSE = path.join(ROOT, "custom-collapse.js");
 const MAIN = path.join(ROOT, "main.js");
-const VISUAL = path.join(ROOT, "test-visual-utils.js");
+const VISUAL = path.join(ROOT, "test", "test-visual-utils.js");
 const RELEASE = path.join(ROOT, "scripts", "release.js");
 const PKG = path.join(ROOT, "package.json");
 const NOTICES = path.join(ROOT, "THIRD-PARTY-NOTICES.md");
@@ -1679,7 +1679,7 @@ const REVERTS = [
     what: "reference a README image from a directory the installer does not ship",
     file: path.join(ROOT, "README.md"),
     from: '<img src="docs/images/folia.png"',
-    to: '<img src="app-icon.png"',
+    to: '<img src="assets/app-icon.png"',
     expect: [/ships beside the installed README/],
     mustPass: [/every README image exists in the repository/],
   },
@@ -1834,7 +1834,23 @@ const REVERTS = [
     // points at nobody, so nothing caught the regression on the way back.
     what: "disable auto-update again by nulling build.publish, so no update feed is packaged",
     file: path.join(ROOT, "package.json"),
-    from: '"publish": [{ "provider": "github", "owner": "lostinsea", "repo": "markdown-viewer" }],',
+    // ROTTED ONCE, SILENTLY, AND THAT IS THE LESSON. The original anchor
+    // quoted this block as a single line naming `"repo": "markdown-viewer"`.
+    // Renaming the fork to Folia changed the repo name AND reformatted the
+    // block across seven lines, so this revert had been reporting
+    // SETUP-FAILED - i.e. proving nothing - from the rename onward, and would
+    // have gone on doing so until the next multi-hour full run. Found in one
+    // second by `node scripts/prove-table-fixes.js --anchors`, which does the
+    // string half of every revert's setup and runs no suite; use it after any
+    // rename, move or reformat.
+    from:
+      '"publish": [\n' +
+      "      {\n" +
+      '        "provider": "github",\n' +
+      '        "owner": "lostinsea",\n' +
+      '        "repo": "folia"\n' +
+      "      }\n" +
+      "    ],",
     to: '"publish": null,',
     expect: [
       /auto-update publishes to this fork's own GitHub releases/,
@@ -3538,7 +3554,18 @@ const REVERTS = [
   },
 ];
 
-const only = process.argv.slice(2);
+const argv = process.argv.slice(2);
+// A refactor cannot break a revert's ASSERTIONS without also running its suite,
+// but it breaks a revert's ANCHOR - the text the harness perturbs - for free,
+// silently, and the report only arrives hours later at the end of a full run.
+// Moving files between directories does it wholesale. `--anchors` does just the
+// string half of the setup for every revert and runs no suite at all, so the
+// class of damage a refactor actually causes is checkable in a second.
+// It is deliberately NOT a substitute for a real run: an anchor that still
+// matches proves nothing about whether the assertions it is paired with still
+// fail.
+const anchorsOnly = argv.includes("--anchors");
+const only = argv.filter((a) => a !== "--anchors");
 const chosen = only.length ? REVERTS.filter((r) => only.includes(r.id)) : REVERTS;
 // Fail loud rather than silently reporting success on an empty set. A typo in
 // an id (or a `--only R1,R2` that this script does not accept) otherwise ends
@@ -3595,7 +3622,12 @@ for (const r of chosen) {
   if (r.also) touched.add(r.also.file || r.file);
 }
 const snapshots = new Map();
-for (const f of touched) snapshots.set(f, fs.readFileSync(f, "utf8"));
+// A file that has MOVED is the other half of the refactor hazard, and it used
+// to surface as an unhandled ENOENT that killed the whole run before the first
+// revert. Report it per-revert instead, so one stale path cannot hide the state
+// of the other 190.
+const absentFiles = [...touched].filter((f) => !fs.existsSync(f));
+for (const f of touched) if (!absentFiles.includes(f)) snapshots.set(f, fs.readFileSync(f, "utf8"));
 
 for (const r of chosen) {
   // A revert may need more than one paired edit - sometimes in DIFFERENT files
@@ -3605,13 +3637,17 @@ for (const r of chosen) {
   const edits = [{ file: r.file, from: r.from, to: r.to }].concat(
     r.also ? [Object.assign({ file: r.file }, r.also)] : [],
   );
+  let setupFailed = null;
   const originals = new Map();
   for (const e of edits) {
+    if (absentFiles.includes(e.file)) {
+      setupFailed = `file does not exist: ${path.relative(ROOT, e.file)}`;
+      break;
+    }
     if (!originals.has(e.file)) originals.set(e.file, fs.readFileSync(e.file, "utf8"));
   }
   const working = new Map(originals);
-  let setupFailed = null;
-  for (const e of edits) {
+  for (const e of setupFailed ? [] : edits) {
     // `to` is written with plain \n and expanded to the file's own EOL below.
     // A literal \r\n therefore becomes \r\r\n - a lone CR, which silently marks
     // the file `-text` in git and defeats EOL normalisation for it. That is the
@@ -3641,6 +3677,10 @@ for (const r of chosen) {
   if (setupFailed) {
     console.log(`${r.id}  SETUP-FAILED  ${setupFailed}`);
     bad += 1;
+    continue;
+  }
+  if (anchorsOnly) {
+    console.log(`${r.id}  anchor OK  (${path.relative(ROOT, r.file)})`);
     continue;
   }
   for (const [file, text] of working) fs.writeFileSync(file, text);
@@ -3686,5 +3726,13 @@ for (const [f, before] of snapshots) {
   }
 }
 
-console.log(bad === 0 ? "\nALL REVERTS PROVEN" : `\n${bad} revert(s) did not prove their fix`);
+console.log(
+  anchorsOnly
+    ? bad === 0
+      ? `\nALL ${chosen.length} ANCHORS RESOLVE - nothing is proven; run without --anchors for that`
+      : `\n${bad} revert(s) can no longer find what they perturb`
+    : bad === 0
+      ? "\nALL REVERTS PROVEN"
+      : `\n${bad} revert(s) did not prove their fix`,
+);
 process.exit(bad === 0 && dirty === 0 ? 0 : 1);

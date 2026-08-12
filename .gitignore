@@ -39,23 +39,17 @@ yarn-error.log*
 yarn.lock
 pnpm-lock.yaml
 
-# Test files
-test-*.md
-test-*.js
-# ...but the tab-overlay regression harness is a real, committed test.
-!test-tab-refresh.js
-!test-render-security.js
-!test-popup-security.js
-!test-packaging.js
-!test-mermaid-render.js
-!test-visual-utils.js
-!test-visual-utils-selfcheck.js
-!test-startup-perf.js
-!test-search.js
-!test-render-patch.js
-!test-table-display.js
-!test-translate-network.js
-!test-userdata-migration.js
+# Scratch test documents and one-off probe scripts, which get written at the
+# repo root constantly and must never be committed. Anchored with a leading
+# slash so they apply to the ROOT ONLY: the real suites live in test/ and are
+# tracked normally. That replaced a blanket `test-*.js` plus a growing list of
+# `!test-whatever.js` exceptions, which was one forgotten line away from
+# silently leaving a new suite untracked - and did once list a suite
+# (test-translate-network.js) that no longer exists.
+/test-*.md
+/test-*.js
+/probe-*.js
+/tmp-*.js
 
 # Written by the popup and mermaid suites so a redirected run is still
 # inspectable - Electron drops buffered stdout on app.exit().

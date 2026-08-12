@@ -19,7 +19,11 @@ const path = require("path");
 const os = require("os");
 const { execFileSync } = require("child_process");
 
-const ROOT = __dirname;
+// The repository root, which is this suite's subject - it reads package.json,
+// build.files, the shipped sources and the docs. It is one level up now that
+// the suites live in test/, and every path here goes through ROOT rather than
+// __dirname so that stays true in one place.
+const ROOT = path.join(__dirname, "..");
 let pass = 0;
 let fail = 0;
 const skipped = [];
@@ -525,7 +529,7 @@ function main() {
   // silently DOWNGRADES Electron and reintroduces the advisories the upgrade
   // cleared. Nothing else in the repo ties these two numbers together.
   {
-    const scriptPath = path.join(__dirname, "scripts", "post-upstream-merge.sh");
+    const scriptPath = path.join(ROOT, "scripts", "post-upstream-merge.sh");
     const declared =
       (pkg.devDependencies && pkg.devDependencies.electron) || "";
     if (!fs.existsSync(scriptPath)) {
@@ -1213,7 +1217,7 @@ function main() {
     // literal here would drift the moment appId changed, silently splitting
     // one app into two Windows identities - the failure mode is invisible in
     // the UI, so only a structural assertion catches it.
-    const mainSrc = fs.readFileSync(path.join(__dirname, "main.js"), "utf8");
+    const mainSrc = fs.readFileSync(path.join(ROOT, "main.js"), "utf8");
     check(
       "main.js sets an explicit AppUserModelId, so Windows groups and notifies as Folia",
       /app\.setAppUserModelId\(/.test(mainSrc),
@@ -1256,7 +1260,7 @@ function main() {
     // to download files that were never produced.
     {
       const rel = fs.readFileSync(
-        path.join(__dirname, "scripts", "release.js"),
+        path.join(ROOT, "scripts", "release.js"),
         "utf8",
       );
       check(
@@ -1373,7 +1377,7 @@ function main() {
             body,
           )(
             require,
-            path.join(__dirname, "scripts"),
+            path.join(ROOT, "scripts"),
             process,
             console,
           );
@@ -1390,7 +1394,7 @@ function main() {
               captured.length = 0;
               api.createGitHubRelease(
                 "9.9.9",
-                files.map((f) => path.join(__dirname, "dist", f)),
+                files.map((f) => path.join(ROOT, "dist", f)),
               );
               return captured.join("\n");
             };
@@ -1531,7 +1535,7 @@ function main() {
     // "v2.0.0" and was still claiming it after the 1.0 rebrand, because nothing
     // made the two agree.
     {
-      const html = fs.readFileSync(path.join(__dirname, "index.html"), "utf8");
+      const html = fs.readFileSync(path.join(ROOT, "index.html"), "utf8");
       const m = html.match(
         /id="welcomeVersion"[^>]*>([^<]*)</,
       );
@@ -1603,7 +1607,7 @@ function main() {
       let genErr = null;
       let gen = null;
       try {
-        gen = require("./scripts/generate-notices");
+        gen = require("../scripts/generate-notices");
         regenerated = gen.build();
       } catch (e) {
         genErr = e;
@@ -2432,7 +2436,7 @@ function main() {
     // exist, using a collector that has never been shown to detect anything,
     // is two vacuous checks agreeing with each other.
     {
-      const gen = require("./scripts/generate-notices");
+      const gen = require("../scripts/generate-notices");
       const probe = fs.mkdtempSync(path.join(os.tmpdir(), "folia-notice-"));
       try {
         const withNotice = path.join(probe, "with");

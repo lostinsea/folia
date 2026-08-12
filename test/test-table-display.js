@@ -31,7 +31,7 @@ const { app, BrowserWindow } = require("electron");
 const fs = require("fs");
 const path = require("path");
 
-require("./main.js");
+require("../main.js");
 
 const { captureScreenshot, startErrorSentinel, proveSentinelAlive, trapExternalOpens } = require("./test-visual-utils");
 
@@ -445,7 +445,7 @@ async function run(win) {
   // (b) requires a real FontFace registered as 'loaded' for each, and
   // (c) requires the glyphs to measure differently from a deliberately absent
   // family, which is the part that cannot be satisfied by fallback.
-  const cssText = fs.readFileSync(path.join(__dirname, "styles.css"), "utf8");
+  const cssText = fs.readFileSync(path.join(__dirname, "..", "styles.css"), "utf8");
   // Pin the exact {weight, file} pairs, not just "some weights". Deriving the
   // expectation from the stylesheet keeps it self-maintaining, but a loose
   // derivation can SHRINK SILENTLY: extracting only /font-weight:\s*(\d+)/ and
@@ -483,7 +483,7 @@ async function run(win) {
   // TTF was never copied into the gitignored fonts/ build output.
   const missingFiles = declaredFaces
     .map((f) => f.file)
-    .filter((f) => f && !fs.existsSync(path.join(__dirname, "fonts", f)));
+    .filter((f) => f && !fs.existsSync(path.join(__dirname, "..", "fonts", f)));
   check(
     "every Fira Code file styles.css names exists in the vendored fonts/ output",
     missingFiles.length === 0,

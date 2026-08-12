@@ -166,6 +166,7 @@ app.whenReady().then(async () => {
     const path = require("path");
     const stalePath = path.join(
       __dirname,
+      "..",
       "screenshots",
       "selfcheck-stale-artifact.png",
     );

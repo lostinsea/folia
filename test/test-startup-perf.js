@@ -58,7 +58,7 @@ const watchdog = setTimeout(() => {
 }, 120000);
 
 // Loading main.js starts the real application in this process.
-require("./main.js");
+require("../main.js");
 
 app.whenReady().then(async () => {
   // Let the ready handlers, window creation and any deferred startup work run.

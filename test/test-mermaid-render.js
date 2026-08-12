@@ -28,7 +28,7 @@ const os = require("os");
 const path = require("path");
 const { VISUAL_PROBE_SOURCE, inspectVisual, captureScreenshot, startErrorSentinel, proveSentinelAlive, LIVENESS_MUTE_REASON, trapExternalOpens, waitForExternalTrap } = require("./test-visual-utils");
 
-require("./main.js");
+require("../main.js");
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mdv-mermaid-"));
 const fileM = path.join(dir, "diagrams.md");
@@ -222,7 +222,7 @@ async function run(win) {
   // mermaid 11 dropped the `version()` helper, so ask the vendored bundle what
   // it is (that file is what actually ships) and assert the runtime is live.
   const vendored = JSON.parse(
-    fs.readFileSync(path.join(__dirname, "libs", "vendor", "VERSIONS.json"), "utf8"),
+    fs.readFileSync(path.join(__dirname, "..", "libs", "vendor", "VERSIONS.json"), "utf8"),
   ).versions;
   check(
     "vendored mermaid is version 11",

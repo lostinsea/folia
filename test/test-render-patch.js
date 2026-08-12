@@ -33,7 +33,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-require("./main.js");
+require("../main.js");
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mdv-patch-"));
 
@@ -1808,7 +1808,7 @@ async function run(win) {
     // fails the run for - quite rightly. Copying a real PNG in means the note
     // is attached to an image that actually painted, which is the stronger
     // measurement anyway.
-    const realPng = path.join(__dirname, "app-icon.png");
+    const realPng = path.join(__dirname, "..", "assets", "app-icon.png");
     for (const name of ["pic.png", "raw.png"]) {
       try {
         fs.copyFileSync(realPng, path.join(dir, name));
@@ -2271,7 +2271,7 @@ async function run(win) {
   // is measured, or somebody has to say in this file why it cannot be.
   // ---------------------------------------------------------------------
   {
-    const readmeText = fs.readFileSync(path.join(__dirname, "README.md"), "utf8");
+    const readmeText = fs.readFileSync(path.join(__dirname, "..", "README.md"), "utf8");
     // Bounded at the next heading. An unbounded split runs on into the
     // provenance table much further down the file and silently classifies
     // "Electron" and "Fira Code" as undocumented keyboard shortcuts - caught

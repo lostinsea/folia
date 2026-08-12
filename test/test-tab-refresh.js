@@ -16,7 +16,7 @@ const {
   trapExternalOpens,
 } = require("./test-visual-utils");
 
-require("./main.js");
+require("../main.js");
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mdv-e2e-"));
 const fileA = path.join(dir, "alpha.md");
@@ -1964,6 +1964,9 @@ async function run(win) {
   const guard = await exec(`
     (async () => {
       const out = {};
+      // NOTE: this require is evaluated in the RENDERER, so it resolves against
+      // the renderer's own directory (beside file-helpers.js), not against this
+      // test file. It stays './' even though this suite lives in test/.
       const helpers = require('./file-helpers');
       out.bigIsLarge = helpers.isLargeDocument(window.fs.readFileSync(${jsBig}, 'utf8')).large;
       out.smallIsLarge = helpers.isLargeDocument(window.fs.readFileSync(${jsSmall}, 'utf8')).large;

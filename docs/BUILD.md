@@ -89,7 +89,7 @@ The portable .exe file can be:
   `electron-builder\Cache` folder and `dist/`, then rebuild.
 
 **Missing icon?**
-- Ensure `logo.png` is in the project root folder
+- Ensure `assets/logo.png` is present (regenerate with `node scripts/generate-logo.js`)
 
 **Antivirus blocks exe?**
 - This is normal for unsigned executables

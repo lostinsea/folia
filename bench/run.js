@@ -802,17 +802,26 @@ app.whenReady().then(async () => {
 
   const versions = process.versions;
   // Fail loud and immediately if the window did not actually load the app.
-  // main.js resolves index.html against app.getAppPath(), so launching this
-  // file directly rather than through the root bench.js entry leaves a blank
-  // window in which every renderer symbol is undefined. Without this check the
+  //
+  // This used to be caused by the entry point: main.js resolved index.html
+  // against app.getAppPath(), which Electron derives from the ENTRY SCRIPT's
+  // directory, so `electron bench/run.js` looked for bench/index.html and left
+  // a blank window in which every renderer symbol was undefined. A one-line
+  // bench.js at the repo root existed solely to work around it. main.js now
+  // resolves index.html against its own __dirname, so this file is launched
+  // directly and bench.js is gone.
+  //
+  // The check stays regardless, because it is not really about the entry point:
+  // it proves the renderer is alive before anything is timed. Without it the
   // symptom is 900 seconds of watchdog followed by an unhandled rejection that
-  // names renderMarkdown rather than the real cause.
+  // names renderMarkdown rather than the real cause - and a benchmark that
+  // measured a blank window would otherwise report numbers rather than fail.
   const ready = await exec(
     "typeof renderMarkdown === 'function' && !!document.getElementById('viewer')",
   );
   if (!ready) {
     say("ABORT: the renderer did not load the application.");
-    say("  Run `npm run bench` (or `electron bench.js`) from the repo root, not `electron bench/run.js`.");
+    say("  Run `npm run bench` from the repo root.");
     clearTimeout(watchdog);
     return finish(1, "RENDERER_NOT_READY");
   }

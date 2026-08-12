@@ -498,7 +498,7 @@ function createWindow() {
       enableRemoteModule: true,
       backgroundThrottling: true, // Throttle background renderers to save CPU
     },
-    icon: path.join(__dirname, "app-icon.png"),
+    icon: path.join(__dirname, "assets", "app-icon.png"),
   });
 
   // The main window runs with nodeIntegration: true, so a navigation away from
@@ -536,7 +536,20 @@ function createWindow() {
     return { action: "deny" };
   });
 
-  mainWindow.loadFile("index.html");
+  // path.join(__dirname, ...) rather than the bare "index.html" this used to
+  // pass. loadFile resolves a relative path against app.getAppPath(), which
+  // Electron derives from the directory of the ENTRY SCRIPT - so the app booted
+  // correctly only when whatever required this file happened to sit beside
+  // index.html. That made the harness layout a load-bearing part of the
+  // product: `electron bench/run.js` looked for bench/index.html, got
+  // ERR_FILE_NOT_FOUND, and left a blank window in which every renderer symbol
+  // was undefined. Silent from the main process, so it cost a full 900s
+  // watchdog timeout to diagnose, and it is why every suite had to live at the
+  // repo root and why bench.js existed as a one-line shim.
+  //
+  // __dirname is where main.js actually is, which is what "index.html next to
+  // main.js" means. The app now boots the same from any entry point.
+  mainWindow.loadFile(path.join(__dirname, "index.html"));
 
   // Hide the menu bar
   mainWindow.setMenu(null);
@@ -1284,7 +1297,7 @@ ipcMain.on("open-mermaid-popup", (event, data) => {
     autoHideMenuBar: true,
     webPreferences: popupWebPreferences("mermaid"),
     title: "Mermaid Diagram - Zoom with mouse wheel, Pan by dragging",
-    icon: path.join(__dirname, "app-icon.png"),
+    icon: path.join(__dirname, "assets", "app-icon.png"),
   });
 
   registerPopup(popupWindow, "mermaid");
@@ -1648,7 +1661,7 @@ ipcMain.on("open-image-popup", (event, data) => {
     autoHideMenuBar: true,
     webPreferences: popupWebPreferences("image"),
     title,
-    icon: path.join(__dirname, "app-icon.png"),
+    icon: path.join(__dirname, "assets", "app-icon.png"),
   });
 
   registerPopup(popupWindow, "image");
@@ -1960,7 +1973,7 @@ ipcMain.on("open-table-popup", (event, data) => {
       contextIsolation: true,
     },
     title: "Interactive Table - Sort, Filter, Export",
-    icon: path.join(__dirname, "app-icon.png"),
+    icon: path.join(__dirname, "assets", "app-icon.png"),
   });
 
   registerPopup(popupWindow, "table");
@@ -2438,7 +2451,7 @@ if (!gotTheLock) {
     // Set dock icon on macOS (applies in dev mode where the .icns bundle isn't used)
     if (process.platform === "darwin" && app.dock) {
       try {
-        app.dock.setIcon(path.join(__dirname, "app-icon.png"));
+        app.dock.setIcon(path.join(__dirname, "assets", "app-icon.png"));
       } catch (e) {
         // Non-fatal: window still opens even if icon file is missing
       }

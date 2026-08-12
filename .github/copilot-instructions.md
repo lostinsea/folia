@@ -42,8 +42,8 @@ itself (Electron loads the sources directly).
 | `scripts/vendor-libs.js` | Copies vendored libs out of `node_modules` (runs on `postinstall`) |
 | `scripts/prove-table-fixes.js` | The revert harness. See below — this is the most important file in the repo |
 | `scripts/generate-notices.js` | Regenerates `THIRD-PARTY-NOTICES.md` (licence compliance is enforced by tests) |
-| `bench/` | The benchmark corpus, its generator, and `verify.js` — the corpus's own oracle |
-| `test-*.js` | The suites. Most are Electron programs, not node programs |
+| `bench/` | The benchmark corpus, its generator, `run.js` (the runner) and `verify.js` — the corpus's own oracle |
+| `test/` | The suites. Most are Electron programs, not node programs. Fixtures in `test/fixtures/` |
 | `.github/workflows/release.yml` | Build + publish for Windows/Linux/macOS |
 
 Docs that are load-bearing, not decoration: `docs/CUSTOMIZATIONS.md` (what the fork
@@ -59,7 +59,7 @@ npm test                  # everything. ~9 minutes. 12 suites, ~1290 assertions
 npm run test:tabs         # the fork's core loop - run this for any tab/refresh change
 npm run test:packaging    # node, not electron. Fast. Identity, licences, asar contents
 npm run test:corpus       # node --check on bench sources, then bench/verify.js (~1s, 315 checks)
-npm run bench             # electron bench.js. ~8 min. --profiles= --sizes= --reps=
+npm run bench             # electron bench/run.js. ~8 min. --profiles= --sizes= --reps=
 node scripts/prove-table-fixes.js R229 R234   # prove specific fixes are load-bearing
 npm run build-all         # electron-builder, Windows portable + NSIS
 ```

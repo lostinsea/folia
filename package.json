@@ -17,21 +17,21 @@
     "build-linux-deb": "electron-builder --linux deb --publish never",
     "build-mac": "electron-builder --mac --publish never",
     "release": "node scripts/release.js",
-    "test:tabs": "electron test-tab-refresh.js",
+    "test:tabs": "electron test/test-tab-refresh.js",
     "start-dev": "NODE_ENV=development electron .",
-    "test:security": "electron test-render-security.js",
-    "test:popups": "electron test-popup-security.js",
-    "test:packaging": "node test-packaging.js",
-    "test:migration": "node test-userdata-migration.js",
-    "test:mermaid": "electron test-mermaid-render.js",
-    "test:visual": "electron test-visual-utils-selfcheck.js",
-    "test:startup": "electron test-startup-perf.js",
-    "test:search": "electron test-search.js",
-    "test:patch": "electron test-render-patch.js",
+    "test:security": "electron test/test-render-security.js",
+    "test:popups": "electron test/test-popup-security.js",
+    "test:packaging": "node test/test-packaging.js",
+    "test:migration": "node test/test-userdata-migration.js",
+    "test:mermaid": "electron test/test-mermaid-render.js",
+    "test:visual": "electron test/test-visual-utils-selfcheck.js",
+    "test:startup": "electron test/test-startup-perf.js",
+    "test:search": "electron test/test-search.js",
+    "test:patch": "electron test/test-render-patch.js",
     "test:corpus": "node --check bench/run.js && node --check bench/corpus.js && node bench/verify.js",
-    "bench": "electron bench.js",
+    "bench": "electron bench/run.js",
     "test": "npm run test:packaging && npm run test:migration && npm run test:corpus && npm run test:startup && npm run test:tabs && npm run test:security && npm run test:popups && npm run test:visual && npm run test:search && npm run test:mermaid && npm run test:patch && npm run test:tables",
-    "test:tables": "node --check test-table-display.js && electron test-table-display.js"
+    "test:tables": "node --check test/test-table-display.js && electron test/test-table-display.js"
   },
   "keywords": [
     "markdown",
@@ -84,12 +84,12 @@
       "renderer.js",
       "popup-preload.js",
       "styles.css",
-      "logo.ico",
-      "logo.png",
-      "logo_dark.png",
-      "app-icon.png",
-      "file-icon.png",
-      "file-icon.ico",
+      "assets/logo.ico",
+      "assets/logo.png",
+      "assets/logo_dark.png",
+      "assets/app-icon.png",
+      "assets/file-icon.png",
+      "assets/file-icon.ico",
       "libs/**/*",
       "fonts/**/*",
       "utils.js",
@@ -129,28 +129,28 @@
           ]
         }
       ],
-      "icon": "logo.ico",
+      "icon": "assets/logo.ico",
       "signtoolOptions": null,
       "fileAssociations": [
         {
           "ext": "md",
           "name": "Markdown Document",
           "description": "Markdown Document",
-          "icon": "file-icon.ico",
+          "icon": "assets/file-icon.ico",
           "role": "Viewer"
         },
         {
           "ext": "mmd",
           "name": "Mermaid Diagram",
           "description": "Mermaid Diagram File",
-          "icon": "file-icon.ico",
+          "icon": "assets/file-icon.ico",
           "role": "Viewer"
         },
         {
           "ext": "mermaid",
           "name": "Mermaid Diagram",
           "description": "Mermaid Diagram File",
-          "icon": "file-icon.ico",
+          "icon": "assets/file-icon.ico",
           "role": "Viewer"
         }
       ],
@@ -160,7 +160,7 @@
       "target": [
         "dmg"
       ],
-      "icon": "app-icon.png",
+      "icon": "assets/app-icon.png",
       "fileAssociations": [
         {
           "ext": "md",
@@ -189,28 +189,28 @@
       ],
       "category": "Utility",
       "maintainer": "lostinsea <lostinsea@users.noreply.github.com>",
-      "icon": "app-icon.png",
+      "icon": "assets/app-icon.png",
       "fileAssociations": [
         {
           "ext": "md",
           "name": "Markdown Document",
           "description": "Markdown Document",
           "mimeType": "text/markdown",
-          "icon": "file-icon.png"
+          "icon": "assets/file-icon.png"
         },
         {
           "ext": "mmd",
           "name": "Mermaid Diagram",
           "description": "Mermaid Diagram File",
           "mimeType": "text/x-mermaid",
-          "icon": "file-icon.png"
+          "icon": "assets/file-icon.png"
         },
         {
           "ext": "mermaid",
           "name": "Mermaid Diagram",
           "description": "Mermaid Diagram File",
           "mimeType": "text/x-mermaid",
-          "icon": "file-icon.png"
+          "icon": "assets/file-icon.png"
         }
       ]
     },
@@ -237,9 +237,9 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "allowElevation": true,
-      "installerIcon": "logo.ico",
-      "uninstallerIcon": "logo.ico",
-      "installerHeaderIcon": "logo.ico",
+      "installerIcon": "assets/logo.ico",
+      "uninstallerIcon": "assets/logo.ico",
+      "installerHeaderIcon": "assets/logo.ico",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "Folia",

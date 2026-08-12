@@ -16,7 +16,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-require("./main.js");
+require("../main.js");
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mdv-sec-"));
 
@@ -1992,7 +1992,7 @@ async function run(win) {
       { text: 'hello', targetLang: 'fr' })
       .then(() => 'resolved', (e) => String(e && e.message))
   `);
-  const mainSrc = fs.readFileSync(path.join(__dirname, "main.js"), "utf8");
+  const mainSrc = fs.readFileSync(path.join(__dirname, "..", "main.js"), "utf8");
   // Deliberately matches the host in code, not the word "translation": the
   // comment recording this removal names the endpoint in prose, and an oracle
   // that its own documentation can break is not an oracle. A live reference

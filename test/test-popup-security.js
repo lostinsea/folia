@@ -64,7 +64,7 @@ function installNetSentinel() {
   }
 }
 
-require("./main.js");
+require("../main.js");
 
 const results = [];
 

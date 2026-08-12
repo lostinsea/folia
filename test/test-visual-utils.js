@@ -391,7 +391,7 @@ async function inspectVisual(win, selector, options) {
   );
 }
 
-const SHOT_DIR = path.join(__dirname, "screenshots");
+const SHOT_DIR = path.join(__dirname, "..", "screenshots");
 
 // Tunable because UnknownVizError is a load-sensitive transient: if CI starts
 // flaking, raise these rather than concluding capture is permanently broken.

@@ -21,7 +21,7 @@ const os = require("os");
 const path = require("path");
 const { inspectVisual, captureScreenshot, startErrorSentinel, proveSentinelAlive, trapExternalOpens } = require("./test-visual-utils");
 
-require("./main.js");
+require("../main.js");
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "mdv-search-"));
 const file = path.join(dir, "searchable.md");
