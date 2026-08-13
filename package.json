@@ -1,6 +1,6 @@
 {
   "name": "folia",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "productName": "Folia",
   "description": "Folia - a fast, offline markdown viewer with tabs, Mermaid diagrams and live reload",
   "main": "src/main.js",
