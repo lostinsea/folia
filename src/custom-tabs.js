@@ -12,7 +12,65 @@
   // Get DOM elements for tabs
   const tabsContainer = document.getElementById("tabsContainer");
   const tabsElement = document.getElementById("tabs");
-  const fileInfoBar = document.getElementById("fileInfoBar");
+
+  // Per-tab context menu. `clipboard` and the positioning helper are required
+  // directly rather than borrowed off renderer.js's script scope so this module
+  // stays self-contained.
+  const { clipboard, ipcRenderer: tabIpc } = require("electron");
+  const {
+    positionContextMenu: positionTabMenu,
+    hideContextMenu: hideTabMenuEl,
+  } = require("./context-menu-utils");
+  const tabContextMenu = document.getElementById("tabContextMenu");
+  const ctxTabCopyPath = document.getElementById("ctxTabCopyPath");
+  const ctxTabOpenFolder = document.getElementById("ctxTabOpenFolder");
+  let tabContextPath = null;
+
+  function showTabContextMenu(x, y, filePath) {
+    if (!tabContextMenu || !filePath) return;
+    tabContextPath = filePath;
+    positionTabMenu(tabContextMenu, x, y);
+  }
+
+  function hideTabContextMenu() {
+    if (!tabContextMenu) return;
+    hideTabMenuEl(tabContextMenu);
+    tabContextPath = null;
+  }
+
+  if (tabContextMenu) {
+    document.addEventListener("click", (e) => {
+      if (!tabContextMenu.contains(e.target)) hideTabContextMenu();
+    });
+    document.addEventListener("scroll", hideTabContextMenu, true);
+    window.addEventListener("resize", hideTabContextMenu);
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") hideTabContextMenu();
+    });
+  }
+
+  ctxTabCopyPath &&
+    ctxTabCopyPath.addEventListener("click", () => {
+      const p = tabContextPath;
+      hideTabContextMenu();
+      if (!p) return;
+      clipboard.writeText(p);
+      if (typeof window.showNotification === "function") {
+        window.showNotification(
+          typeof window.i18n === "function"
+            ? window.i18n("notif.pathCopied")
+            : "Path copied to clipboard",
+          1500,
+        );
+      }
+    });
+
+  ctxTabOpenFolder &&
+    ctxTabOpenFolder.addEventListener("click", () => {
+      const p = tabContextPath;
+      hideTabContextMenu();
+      if (p) tabIpc.send("open-folder-in-explorer", p);
+    });
 
   // Tab management state
   let tabs = [];
@@ -413,18 +471,17 @@
 
     if (tabs.length === 0) {
       tabsContainer.style.display = "none";
-      fileInfoBar.style.display = "none";
       return;
     }
 
-    // Show tabs when 2+ files open, otherwise show file info bar
-    if (tabs.length >= 2) {
-      tabsContainer.style.display = "flex";
-      fileInfoBar.style.display = "none";
-    } else {
-      tabsContainer.style.display = "none";
-      fileInfoBar.style.display = "flex";
-    }
+    // A lone document is still a tab.
+    //
+    // This used to swap between the tab strip and the file-info bar on a
+    // `tabs.length >= 2` test, so opening one file showed a path bar and no
+    // tab at all - the tab only appeared once a second file arrived. The bar
+    // is gone and the strip is now the single place a document is named, so
+    // there is one presentation for every count.
+    tabsContainer.style.display = "flex";
 
     // Clear and rebuild tabs
     tabsElement.innerHTML = "";
@@ -433,6 +490,11 @@
       const tabElement = document.createElement("div");
       tabElement.className = "tab" + (tab.id === activeTabId ? " active" : "");
       tabElement.dataset.tabId = tab.id;
+      // The whole tab carries the location, not just the label: the label is
+      // narrower than the tab and stops at the ellipsis, so hovering the
+      // padding, the unsaved dot or the gap next to the close button used to
+      // produce no tooltip at all.
+      tabElement.title = tab.filePath;
 
       const titleSpan = document.createElement("span");
       titleSpan.className = "tab-title";
@@ -462,8 +524,23 @@
         switchToTab(tab.id);
       });
 
+      tabElement.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        showTabContextMenu(e.clientX, e.clientY, tab.filePath);
+      });
+
       tabsElement.appendChild(tabElement);
     });
+
+    // Keep the active tab reachable. The strip scrolls horizontally once the
+    // tabs outgrow it, and nothing else moves it, so opening or switching to a
+    // document whose tab sits past the right edge left the reader looking at a
+    // strip in which the document they are reading is not visible at all.
+    const activeEl = tabsElement.querySelector(".tab.active");
+    if (activeEl && typeof activeEl.scrollIntoView === "function") {
+      activeEl.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
   }
 
   // Fold whatever the renderer currently holds back into the tab record.
@@ -1232,90 +1309,24 @@
 })();
 
 // ============================================
-// Header Integration
-// Merges the file-info-bar into the header row,
-// hides back/forward nav buttons, shortens the
-// home-dir portion of the path to ~, and adds
-// responsive compact mode for narrow windows.
+// Responsive compact mode
+//
+// This block used to do far more: it moved the file-info bar into the header,
+// hid the back/forward buttons, and ran a MutationObserver that recombined the
+// separately-rendered filename and directory back into one ~-shortened string.
+// All of that existed to make a SECOND header row presentable. There is only
+// one row now and it carries no path, so the observer, the path shortener and
+// the .header-integrated class went with it. What is left is the part that was
+// never about the file-info bar at all.
 // ============================================
-(function initHeaderIntegration() {
+(function initCompactHeader() {
   "use strict";
 
-  const os = require("os");
-  const homeDir = os.homedir();
-
-  function shortenPath(text) {
-    if (text && text.startsWith(homeDir)) {
-      return text.replace(homeDir, "~");
-    }
-    return text;
+  function applyCompact() {
+    document.body.classList.toggle("compact-header", window.innerWidth < 780);
   }
 
-  function integrateFileInfoBar() {
-    const header = document.querySelector(".header");
-    const controls = document.querySelector(".controls");
-    const fileInfoBarEl = document.getElementById("fileInfoBar");
-
-    if (!header || !controls || !fileInfoBarEl) return;
-
-    // Move fileInfoBar into .header before the controls group
-    header.insertBefore(fileInfoBarEl, controls);
-    header.classList.add("header-integrated");
-
-    // Hide back / forward navigation buttons (tabs replace this workflow)
-    const navBack = document.getElementById("navBackBtn");
-    const navForward = document.getElementById("navForwardBtn");
-    if (navBack) navBack.style.display = "none";
-    if (navForward) navForward.style.display = "none";
-
-    // Watch #filePath for text changes.
-    // renderer.js sets filePath = directory and fileName = filename separately.
-    // We combine them into a single "~/dir/filename.md" string so the tab name
-    // is not repeated in the bar. Clicking still copies the full path (handled
-    // by the existing click listener in renderer.js which uses currentFilePath).
-    const filePathEl = document.getElementById("filePath");
-    const fileNameEl = document.getElementById("fileName");
-
-    function buildFullPath() {
-      const dir = filePathEl ? filePathEl.textContent : "";
-      const name = fileNameEl ? fileNameEl.textContent : "";
-      // Only combine when the dir looks like a real path.
-      // Notification strings (e.g. "✓ Path copied to clipboard") start with
-      // neither "/" nor "~", so we leave them untouched.
-      if (!name || !dir || (!dir.startsWith("/") && !dir.startsWith("~")))
-        return dir;
-      // Guard: already ends with the filename — nothing to do
-      if (dir.endsWith("/" + name)) return dir;
-      return dir + "/" + name;
-    }
-
-    if (filePathEl) {
-      const observerOpts = {
-        childList: true,
-        characterData: true,
-        subtree: true,
-      };
-
-      const observer = new MutationObserver(() => {
-        const combined = shortenPath(buildFullPath());
-        if (combined !== filePathEl.textContent) {
-          observer.disconnect();
-          filePathEl.textContent = combined;
-          observer.observe(filePathEl, observerOpts);
-        }
-      });
-      observer.observe(filePathEl, observerOpts);
-
-      // Apply immediately if a path is already set
-      if (filePathEl.textContent) {
-        filePathEl.textContent = shortenPath(buildFullPath());
-      }
-    }
-
-    // Responsive compact mode: narrow window → "MV" + icon-only buttons
-    function applyCompact() {
-      document.body.classList.toggle("compact-header", window.innerWidth < 780);
-    }
+  function start() {
     applyCompact();
     window.addEventListener("resize", applyCompact);
   }
@@ -1324,8 +1335,8 @@
     document.readyState === "complete" ||
     document.readyState === "interactive"
   ) {
-    setTimeout(integrateFileInfoBar, 150);
+    start();
   } else {
-    document.addEventListener("DOMContentLoaded", integrateFileInfoBar);
+    document.addEventListener("DOMContentLoaded", start);
   }
 })();

@@ -1566,12 +1566,16 @@ const REVERTS = [
     suite: "test:packaging",
     what: "reintroduce an abbreviated second copy of the product name in the header",
     file: HTML,
-    from: '<span class="app-title">Folia</span>',
-    to: '<span class="app-title">Folia</span>\n            <span class="app-title-short">MV</span>',
+    // Anchored at <title> because the single-row header redesign DELETED the
+    // in-header `.app-title` this used to quote. <title> is now the only place
+    // the product name appears in the markup, so it is also the only stable
+    // insertion point - and it cannot rot without the product being renamed.
+    from: "<title>Folia</title>",
+    to: '<title>Folia</title>\n    <span class="app-title-short">MV</span>',
     expect: [/header carries no abbreviated second copy of the product name/],
     mustPass: [
-      /the visible header title is the product name/,
       /the window title is the product name/,
+      /the single-row header carries no in-header product name at all/,
     ],
   },
   {
@@ -2664,9 +2668,9 @@ const REVERTS = [
     suite: "test:packaging",
     what: "put a language-selector attribute back into the toolbar markup",
     file: HTML,
-    from: '            <div class="tools-menu" id="viewMenu">',
+    from: '            <div class="tools-menu tools-submenu" id="viewMenu">',
     to:
-      '            <div class="tools-menu" id="viewMenu" data-lang="en">',
+      '            <div class="tools-menu tools-submenu" id="viewMenu" data-lang="en">',
     expect: [/the language switcher is gone from every shipped script/],
     // The overlay-file and Tools-menu oracles must not notice this: markup
     // attributes and file registration are separate failure modes.
@@ -2695,10 +2699,10 @@ const REVERTS = [
     suite: "test:packaging",
     what: "reintroduce the emptied Tools menu container in the toolbar markup",
     file: HTML,
-    from: '            <div class="tools-menu" id="viewMenu">',
+    from: '            <div class="tools-menu tools-submenu" id="viewMenu">',
     to:
       '            <div class="tools-menu" id="toolsMenu"></div>\n' +
-      '            <div class="tools-menu" id="viewMenu">',
+      '            <div class="tools-menu tools-submenu" id="viewMenu">',
     expect: [/the emptied Tools menu was removed rather than left as a dead button/],
     mustPass: [
       /the language switcher is gone from every shipped script/,
@@ -3599,6 +3603,143 @@ const REVERTS = [
       /declining leaves the reader on the tab they were viewing/,
       /accepting switches to the expensive tab/,
     ],
+  },
+
+  // ---- the single-row top bar (R240-R246) ---------------------------------
+  {
+    id: "R240",
+    suite: "test:tabs",
+    // The old strip only rendered at 2+ tabs and swapped in the file-info bar
+    // below that. That bar is deleted, so restoring the swap leaves a lone
+    // document with no tab and its location shown nowhere at all.
+    what: "restore the two-tab minimum, so a single document gets no tab",
+    file: TABS,
+    from: '    tabsContainer.style.display = "flex";',
+    to: '    tabsContainer.style.display = tabs.length >= 2 ? "flex" : "none";',
+    expect: [/a single open document is still shown as a tab/],
+    mustPass: [
+      /the toolbar is a single row and the tab strip lives inside it/,
+      /the removed header surfaces are really gone from the DOM/,
+    ],
+  },
+  {
+    id: "R241",
+    suite: "test:tabs",
+    // The path used to have a dedicated row. Losing the tooltip loses the only
+    // hover affordance that says which file a tab is.
+    what: "drop the full path from the tab tooltip",
+    file: TABS,
+    from: "      tabElement.title = tab.filePath;",
+    to: "      // tooltip removed",
+    expect: [/the tab carries the document's full path as its tooltip/],
+    mustPass: [/a single open document is still shown as a tab/],
+  },
+  {
+    id: "R242",
+    suite: "test:tabs",
+    // The strip shrinks because it is a SCROLL CONTAINER, whose automatic
+    // minimum size is zero - `min-width: 0` alone is measurably redundant
+    // while the overflow declarations stand (identical 980.67px width with
+    // `min-width: auto`). So the fix being reverted is the whole unit: take
+    // the overflow away as well and the item's `min-width: auto` resolves to
+    // its content's min-content size, which is the width of all eight tabs.
+    what: "make the strip an ordinary, unshrinkable flex item again",
+    file: CUSTOM_CSS,
+    from:
+      "  overflow-x: scroll;\n  overflow-y: hidden;\n  white-space: nowrap;\n" +
+      "  flex: 1 1 0;",
+    to: "  white-space: nowrap;\n  flex: 1 1 0;\n  min-width: auto;",
+    expect: [
+      /an overflowing strip scrolls instead of pushing the buttons off the bar/,
+      /the active tab is scrolled into view/,
+      /the hamburger's File flyout opens fully on screen/,
+      /the hamburger's View flyout opens fully on screen/,
+      /the tabs, reload and hamburger stay usable while search is open/,
+    ],
+    mustPass: [
+      /a single open document is still shown as a tab/,
+      /the toolbar is a single row and the tab strip lives inside it/,
+      /enough tabs are open to overflow the strip, so the scroll assertions bite/,
+    ],
+  },
+  {
+    id: "R243",
+    suite: "test:tabs",
+    // Making the strip scroll created this defect: nothing else moves the
+    // strip, so the tab of the document just opened sits past the right edge.
+    what: "stop scrolling the active tab into view",
+    file: TABS,
+    from: '      activeEl.scrollIntoView({ block: "nearest", inline: "nearest" });',
+    to: "      /* not scrolled into view */",
+    expect: [/the active tab is scrolled into view/],
+    mustPass: [
+      /enough tabs are open to overflow the strip, so the scroll assertions bite/,
+      /an overflowing strip scrolls instead of pushing the buttons off the bar/,
+    ],
+  },
+  {
+    id: "R244",
+    suite: "test:tabs",
+    // `auto` only creates the scrollbar once it is needed, and a classic
+    // (non-overlay) scrollbar takes layout space, so the whole bar grows the
+    // moment a tab overflows and the document under it jumps.
+    what: "let the strip's scrollbar appear on demand, changing the bar's height",
+    file: CUSTOM_CSS,
+    from: "  overflow-x: scroll;",
+    to: "  overflow-x: auto;",
+    expect: [/the bar does not change height when the strip gains its scrollbar/],
+    mustPass: [
+      /enough tabs are open to overflow the strip, so the scroll assertions bite/,
+      /the active tab is scrolled into view/,
+    ],
+  },
+  {
+    id: "R245",
+    suite: "test:tabs",
+    // The original positioning. Survivable while the toolbar was two rows - a
+    // 58px panel over a 38px row still left the tab row showing - and fatal
+    // against one bar, which it covers entirely. The vacuity guard is listed
+    // as an EXPECTED failure rather than in mustPass because it stops being
+    // satisfiable under this revert for the right reason: the toolbar paints
+    // over the panel, so the search input the reader is meant to type into is
+    // itself unreachable. That is the defect, not a broken precondition.
+    what: "pin the search panel to the top of the viewport again, covering the bar",
+    file: CSS,
+    from: ".search-panel {\n  position: absolute;\n  top: 0;",
+    to: ".search-panel {\n  position: fixed;\n  top: 0;\n  z-index: 200;",
+    expect: [
+      /the search panel opens below the bar rather than covering it/,
+      /the search panel really opened, so the overlay assertions are not vacuous/,
+      /the retracted search panel really does overlap the bar, so this bites/,
+    ],
+    mustPass: [
+      /the tabs, reload and hamburger stay usable while search is open/,
+      /the toolbar is a single row and the tab strip lives inside it/,
+    ],
+  },
+  // There is deliberately NO revert entry for `.header { position: relative }`.
+  // One was written, came back VACUOUS, and the reason was measured rather than
+  // assumed: the toolbar wins the hit test over the retracted search panel with
+  // the header static, with the tab strip static as well, and with the panel at
+  // `position: fixed; z-index: 200`. `elementsFromPoint` at the bar's centre
+  // returns [.tabs-container, .header, .search-input, .search-container,
+  // .search-panel], so the panel genuinely IS a candidate there and the
+  // assertion is not vacuous - but nothing in this stylesheet decides the
+  // outcome, so nothing here can be reverted to break it. Project precedent
+  // (R110b) is to delete a permanently vacuous entry rather than keep one that
+  // implies a proof it does not have; the assertion stays as a contract.
+  {
+    id: "R247",
+    suite: "test:tabs",
+    // The tab right-click menu is the REPLACEMENT for the deleted
+    // click-to-copy file-path element, so without it the document's location
+    // is not obtainable from the UI at all.
+    what: "stop the tab menu putting the document's path on the clipboard",
+    file: TABS,
+    from: "      clipboard.writeText(p);",
+    to: "      /* path not copied */",
+    expect: [/the tab menu copies that tab's full path and closes itself/],
+    mustPass: [/right-clicking a tab opens its menu on screen/],
   },
 ];
 

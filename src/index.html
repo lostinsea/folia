@@ -67,21 +67,45 @@
   </head>
   <body>
     <div class="container">
+      <!--
+        ONE bar. The tab strip is the left-hand content, then the reload button,
+        then the hamburger - there is no logo, product name or file-path row any
+        more. The product name still reaches the user through <title>, which is
+        what the window frame and the taskbar show, and which test:packaging
+        pins to package.json's productName.
+      -->
       <div class="header">
-        <div class="header-left">
-          <a href="#" id="logoLink" title="Folia">
-            <img src="../assets/logo.png" alt="Logo" class="app-logo logo-light" />
-            <img src="../assets/logo_dark.png" alt="Logo" class="app-logo logo-dark" />
-            <span class="app-title">Folia</span>
-          </a>
+        <div id="tabsContainer" class="tabs-container">
+          <div id="tabs" class="tabs"></div>
         </div>
+        <button
+          id="refreshBtn"
+          class="nav-btn header-reload"
+          data-i18n-title="title.refresh"
+          title="Reload the active document (Ctrl+R)"
+        >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <path
+              d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"
+            ></path>
+          </svg>
+        </button>
         <div class="controls">
-          <div class="tools-dropdown" id="fileDropdown">
+          <div class="tools-dropdown" id="menuDropdown">
             <button
-              class="btn"
-              id="fileBtn"
-              data-i18n-title="title.file"
-              title="File"
+              class="btn hamburger-btn"
+              id="menuBtn"
+              data-i18n-title="title.menu"
+              title="Menu"
+              aria-haspopup="true"
+              aria-expanded="false"
             >
               <svg
                 width="20"
@@ -90,15 +114,35 @@
                 fill="none"
                 stroke="currentColor"
                 stroke-width="2"
+                stroke-linecap="round"
               >
-                <path
-                  d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"
-                ></path>
-                <polyline points="13 2 13 9 20 9"></polyline>
+                <line x1="3" y1="6" x2="21" y2="6"></line>
+                <line x1="3" y1="12" x2="21" y2="12"></line>
+                <line x1="3" y1="18" x2="21" y2="18"></line>
               </svg>
-              <span data-i18n="file">File</span>
             </button>
-            <div class="tools-menu" id="fileMenu">
+            <!--
+              The hamburger panel holds two flyout rows. #fileBtn / #viewBtn and
+              #fileMenu / #viewMenu keep their ids and all their children, so
+              every existing handler in renderer.js - the click-to-toggle wiring
+              and updateFileMenuRecent() included - keeps working untouched.
+              Each panel is a SIBLING of its button rather than a child, because
+              a <button> may not contain interactive content.
+            -->
+            <div class="tools-menu" id="mainMenu">
+              <div class="tools-flyout" id="fileFlyout">
+                <button
+                  class="tools-menu-item has-flyout"
+                  id="fileBtn"
+                  data-i18n-title="title.file"
+                  title="File"
+                  aria-haspopup="true"
+                  aria-expanded="false"
+                >
+                  <span data-i18n="file">File</span>
+                  <span class="submenu-arrow" aria-hidden="true">›</span>
+                </button>
+                <div class="tools-menu tools-submenu" id="fileMenu">
               <div class="tools-menu-item" id="openFile">
                 <span data-i18n="openFile">Open File</span>
                 <span class="tools-shortcut">Ctrl+O</span>
@@ -126,27 +170,19 @@
               </div>
             </div>
           </div>
-          <div class="tools-dropdown" id="viewDropdown">
+          <div class="tools-flyout" id="viewFlyout">
             <button
-              class="btn"
+              class="tools-menu-item has-flyout"
               id="viewBtn"
               data-i18n-title="title.view"
               title="View"
+              aria-haspopup="true"
+              aria-expanded="false"
             >
-              <svg
-                width="20"
-                height="20"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-              >
-                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
-                <circle cx="12" cy="12" r="3"></circle>
-              </svg>
               <span data-i18n="view">View</span>
+              <span class="submenu-arrow" aria-hidden="true">›</span>
             </button>
-            <div class="tools-menu" id="viewMenu">
+            <div class="tools-menu tools-submenu" id="viewMenu">
               <div class="tools-menu-item tools-zoom-row">
                 <span data-i18n="zoom">Zoom</span>
                 <div class="tools-zoom-controls">
@@ -212,6 +248,8 @@
               </div>
             </div>
           </div>
+          </div>
+          </div>
         </div>
       </div>
 
@@ -221,85 +259,34 @@
         <div class="loading-text" data-i18n="loading">Loading...</div>
       </div>
 
-      <!-- File Info Bar -->
-      <div id="fileInfoBar" class="file-info-bar" style="display: none">
-        <button
-          id="navBackBtn"
-          class="nav-btn"
-          data-i18n-title="title.back"
-          title="Back (Left Arrow)"
-          disabled
-        >
-          <svg
-            width="16"
-            height="16"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-          >
-            <path d="M19 12H5M12 19l-7-7 7-7"></path>
-          </svg>
-        </button>
-        <button
-          id="navForwardBtn"
-          class="nav-btn"
-          data-i18n-title="title.forward"
-          title="Forward (Right Arrow)"
-          disabled
-        >
-          <svg
-            width="16"
-            height="16"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-          >
-            <path d="M5 12h14M12 5l7 7-7 7"></path>
-          </svg>
-        </button>
-        <button
-          id="refreshBtn"
-          class="nav-btn"
-          data-i18n-title="title.refresh"
-          title="Refresh Document (Ctrl+R)"
-        >
-          <svg
-            width="16"
-            height="16"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-          >
-            <path
-              d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"
-            ></path>
-          </svg>
-        </button>
-        <span class="nav-separator"></span>
-        <svg
-          class="file-icon"
-          width="16"
-          height="16"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="2"
-        >
-          <path
-            d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"
-          ></path>
-          <polyline points="13 2 13 9 20 9"></polyline>
-        </svg>
-        <span id="fileName" class="file-name"></span>
-        <span class="file-separator">•</span>
-        <span id="filePath" class="file-path" title="Click to copy path"></span>
-      </div>
+      <!--
+        The File Info Bar is gone. It used to be a second row carrying the
+        back/forward buttons, a file icon, the filename and the full path, and
+        custom-tabs.js swapped between it and the tab strip depending on how
+        many documents were open - which is why a single document did not show
+        as a tab. The tab strip now covers every case: the filename is the tab
+        label and the full path is the tab tooltip. Its one surviving control,
+        the reload button, moved into the header next to the hamburger.
+      -->
 
-      <!-- Search Panel -->
-      <div id="searchPanel" class="search-panel">
+      <!--
+        Search Panel
+
+        Wrapped in a zero-height anchor so the panel is positioned against the
+        BOTTOM EDGE OF THE HEADER rather than against the viewport. It used to
+        be `position: fixed; top: 0`, which was survivable while the toolbar was
+        two rows tall - the 58px panel covered the first row and left the tab
+        strip below it visible. With one 55px bar the panel covered the whole
+        thing, so opening search hid every tab, the reload button and the menu,
+        and gave no indication which document was being searched.
+
+        The anchor has no height, so it costs the layout nothing; the panel
+        inside it is absolutely positioned and still slides on `transform`,
+        now retracting upward BEHIND the header (which owns the higher
+        stacking order) instead of covering it.
+      -->
+      <div class="search-anchor">
+        <div id="searchPanel" class="search-panel">
         <div class="search-container">
           <input
             type="text"
@@ -362,11 +349,7 @@
             </svg>
           </button>
         </div>
-      </div>
-
-      <!-- Custom Tabs Container - required by custom-tabs.js -->
-      <div id="tabsContainer" class="tabs-container" style="display: none">
-        <div id="tabs" class="tabs"></div>
+        </div>
       </div>
 
       <div class="main-content">
@@ -1362,6 +1345,48 @@
           ></path>
         </svg>
         <span data-i18n="ctx.removeRecent">Remove from Recent</span>
+      </div>
+    </div>
+
+    <!--
+      Tab Context Menu
+
+      The click-to-copy affordance used to live on the file-path element in the
+      old second header row. That row is gone, so the same capability is
+      offered here, on the thing that now names the document. Structured as a
+      normal context menu so further per-tab actions can be added.
+    -->
+    <div id="tabContextMenu" class="context-menu">
+      <div class="context-menu-item" id="ctxTabCopyPath">
+        <svg
+          width="16"
+          height="16"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+          <path
+            d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
+          ></path>
+        </svg>
+        <span data-i18n="ctx.copyPath">Copy Path</span>
+      </div>
+      <div class="context-menu-item" id="ctxTabOpenFolder">
+        <svg
+          width="16"
+          height="16"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+        >
+          <path
+            d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+          ></path>
+        </svg>
+        <span data-i18n="ctx.openFolder">Open Containing Folder</span>
       </div>
     </div>
 

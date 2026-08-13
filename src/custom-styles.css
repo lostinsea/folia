@@ -22,118 +22,74 @@ div.container div.header,
   max-height: none !important;
 }
 
-/* Make logo smaller */
-.app-logo {
-  height: 24px !important;
-  width: auto !important;
-}
-
-/* App title next to logo */
-.app-title {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-primary);
-  letter-spacing: 0.01em;
-  white-space: nowrap;
-  margin-left: 8px;
-  vertical-align: middle;
-}
-
-/* No abbreviated variant. The compact header used to swap "Folia" for a short
-   form, which was inherited as the literal string "MV" - an abbreviation of the
-   product's OLD name that survived the rename because it was two letters in a
-   stylesheet rather than a word anyone would grep for. "Folia" measures 44px
-   against the short form's 22px, so the abbreviation was buying 22 horizontal
-   pixels in return for carrying a second copy of the product name that has to
-   be kept in step with the first by discipline alone. */
-
-/* Ensure logo link is flex so logo + title align inline */
-#logoLink {
-  display: inline-flex !important;
-  align-items: center !important;
-  text-decoration: none !important;
-  gap: 0 !important;
-}
-
 /* ============================================
-   CUSTOM: Merged single-row header
-   ============================================ */
+   CUSTOM: Single-row header
+   ============================================
 
-/* | separator between logo area and file info */
-.header-integrated .header-left::after {
-  content: "|";
-  color: var(--border-color, #ccc);
-  opacity: 0.5;
-  margin: 0 8px 0 10px;
-  font-weight: 300;
-  line-height: 1;
-  align-self: center;
+   The bar holds, left to right: the tab strip (which grows and scrolls), the
+   reload button, then the hamburger. There is no logo, product name or
+   file-path row - the product name reaches the user through <title> (window
+   frame + taskbar) and a document's location through its tab tooltip and the
+   tab right-click menu. */
+
+.header {
+  gap: 8px;
 }
 
-/* File info bar becomes an inline flex item inside the header */
-.header-integrated #fileInfoBar {
-  flex: 1 1 0;
-  min-width: 0;
-  align-items: center;
-  background: transparent !important;
-  border: none !important;
-  box-shadow: none !important;
-  padding: 0 !important;
-  margin: 0 !important;
-  animation: none !important;
-}
+/* The strip takes all the space the two buttons do not, and the tab-system
+   block further down owns its appearance - see "CUSTOM: Tab System Styles".
+   Layering a second .tabs-container rule up here would lose to it on source
+   order, which is exactly what happened while building this bar: an earlier
+   override block looked correct in review and was measurably dead. */
 
-/* Hide filename element — it is now merged into the #filePath full-path display */
-.header-integrated #fileName,
-.header-integrated .file-separator {
-  display: none !important;
-}
-
-/* File path: dimmed, truncated, ~-shortened (via JS) */
-.header-integrated #filePath {
-  opacity: 0.6;
-  font-size: 11px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  /* Grow to fill all available space in the flex bar,
-     truncate only when the window is genuinely too narrow */
-  flex: 1 1 0;
-  min-width: 0;
-}
-
-/* Separator dot between name and path */
-.header-integrated .file-separator {
-  opacity: 0.4;
-  margin: 0 4px;
+.header-reload {
   flex-shrink: 0;
 }
 
-/* Refresh button: keep compact */
-.header-integrated #refreshBtn {
+/* Hamburger: icon only, so the .btn horizontal padding is wrong for it. */
+.hamburger-btn {
+  padding: 3px 6px !important;
   flex-shrink: 0;
 }
 
-/* Hide back / forward nav buttons (tabs handle navigation) */
-#navBackBtn,
-#navForwardBtn {
-  display: none !important;
+/* The back / forward nav buttons lived in the removed file-info bar (they were
+   already hidden there); their handlers in renderer.js are null-guarded. */
+
+/* The flyout panels are positioned against their row, so the row must be a
+   containing block. Without this they anchor to #menuDropdown and both land in
+   the same place. */
+.tools-flyout {
+  position: relative;
+}
+
+/* The rows are <button>s (a <button> may not contain interactive content, so
+   the panel has to be a sibling rather than a child). A button does not
+   inherit font or colour and brings its own background and border. */
+.tools-menu-item.has-flyout {
+  width: 100%;
+  background: transparent;
+  border: none;
+  font-family: inherit;
+  font-size: 13px;
+  color: var(--text-primary);
+  text-align: left;
 }
 
 /* ============================================
    CUSTOM: Responsive compact mode (< 780px)
    ============================================ */
-/* The app title needs no compact-mode treatment: "Folia" is 44px wide, which
-   fits at every width the compact header targets. */
-/* Hide text labels from File / View / Tools buttons */
-body.compact-header .btn span[data-i18n] {
+/* Hide text labels from header buttons.
+   Scoped to `.header > *` deliberately: the unscoped form also matched the
+   File / View labels INSIDE the hamburger panel - which is a descendant of
+   .header - leaving two blank rows carrying nothing but a chevron. */
+body.compact-header .header > .controls > .btn span[data-i18n],
+body.compact-header .header > .btn span[data-i18n] {
   display: none !important;
 }
 /* Tighten button padding in compact mode */
 body.compact-header .header .btn {
   padding: 3px 6px !important;
 }
-/* In compact mode the path still grows to fill available space — no change needed */
 
 /* Make buttons more compact */
 .header .btn {
@@ -147,14 +103,7 @@ body.compact-header .header .btn {
   height: 16px !important;
 }
 
-/* Reduce header-left spacing */
-.header-left {
-  gap: 8px !important; /* Reduced from 12px */
-}
-
-.app-title {
-  font-size: 14px !important; /* Slightly smaller */
-}
+/* (Header gap is set in the single-row header section above.) */
 
 /* ============================================
    CUSTOM: Enhanced Scrollbar (Always Visible)
@@ -193,42 +142,85 @@ body.dark-mode ::-webkit-scrollbar-thumb:hover {
 
 /* ============================================
    CUSTOM: Tab System Styles
-   ============================================ */
+   ============================================
+
+   The strip lives INSIDE the single header bar, so it carries no background,
+   no bottom border and no padding of its own - the bar supplies all three.
+
+   `flex: 1 1 0` + `min-width: 0` is what makes it take the space the reload
+   and hamburger buttons do not. The `min-width` half is load-bearing: a flex
+   item's default `min-width: auto` is its content's min-content size, so
+   without it the strip refuses to shrink below the combined width of its tabs
+   and pushes both buttons off the bar instead of scrolling.
+
+   `overflow-x: scroll` rather than `auto` is deliberate and was measured. A
+   classic (non-overlay) scrollbar takes layout space, so under `auto` the
+   strip grew 41px -> 47px the moment the tabs overflowed, jumping the whole
+   header 55px -> 61px and shifting the document underneath it.
+   `scrollbar-gutter: stable` does NOT fix this - measured in this Chromium it
+   reserves the inline-axis gutter only, leaving the horizontal case at 35/41.
+   Reserving the track permanently keeps the bar a constant height, and the
+   track is transparent, so with nothing to scroll there is nothing to see. */
 .tabs-container {
-  background: var(--bg-primary);
-  border-bottom: 1px solid var(--border-color);
-  padding: 0 12px 0;
+  background: transparent;
+  padding: 0;
   display: flex;
-  align-items: flex-end;
-  overflow-x: auto;
+  align-items: center;
+  overflow-x: scroll;
   overflow-y: hidden;
   white-space: nowrap;
-  flex-shrink: 0;
+  flex: 1 1 0;
+  /* MEASURED redundant while the two overflow declarations above stand: a
+     scroll container's automatic minimum size is already zero, so the strip
+     shrinks either way (identical 980.67px width with `min-width: auto`).
+     Kept because it is the declaration that survives if the overflow ever
+     changes, and losing it silently would push both buttons off the bar. */
+  min-width: 0;
   position: relative;
-  z-index: 10;
+  z-index: auto;
+}
+
+/* The bar is only ~34px of usable height, so the 12px scrollbar this
+   stylesheet sets globally would eat a third of it. */
+.tabs-container::-webkit-scrollbar {
+  height: 6px !important;
+  width: 6px !important;
+}
+
+.tabs-container::-webkit-scrollbar-track {
+  background: transparent !important;
+}
+
+.tabs-container::-webkit-scrollbar-thumb {
+  border-width: 1px !important;
+  min-height: 0 !important;
 }
 
 .tabs {
   display: flex;
   gap: 4px;
-  min-height: 40px;
+  min-height: 0;
+  padding: 1px 0;
   align-items: center;
 }
 
+/* Pills, not folder tabs. The old shape had square bottom corners and a
+   negative bottom margin so it could overlap the edge of the bar it sat above.
+   There is no second bar for it to meet any more. */
 .tab {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
+  padding: 4px 10px;
   background: var(--bg-primary);
   border: 1px solid var(--border-color);
-  border-bottom: 1px solid var(--border-color);
-  border-radius: 6px 6px 0 0;
+  border-radius: 6px;
   cursor: pointer;
   max-width: 300px;
   transition: background 0.2s ease;
   position: relative;
-  margin-bottom: -7px;
+  margin-bottom: 0;
+  flex-shrink: 0;
 }
 
 .tab:hover {
@@ -237,8 +229,8 @@ body.dark-mode ::-webkit-scrollbar-thumb:hover {
 
 .tab.active {
   background: var(--bg-secondary);
-  border-bottom: 2px solid var(--primary-color);
-  margin-bottom: -4px;
+  border-color: var(--primary-color);
+  margin-bottom: 0;
   z-index: 1;
 }
 
@@ -307,11 +299,6 @@ body.dark-mode .tab-close:hover {
 
   /* Hide tabs container */
   .tabs-container {
-    display: none !important;
-  }
-
-  /* Hide file info bar */
-  .file-info-bar {
     display: none !important;
   }
 
@@ -425,36 +412,9 @@ body.dark-mode .tab-close:hover {
   }
 }
 
-/* ============================================
-   CUSTOM: File Info Bar - Performance Optimizations
-   The upstream file-info-bar has box-shadow overlapping scrollable
-   content (forces separate compositing layers), a linear-gradient
-   background (expensive repaint), and a transform-based animation
-   (creates/destroys compositing layers). These cause continuous CPU
-   usage in the Renderer process. Replace with cheap equivalents.
-   ============================================ */
-.file-info-bar {
-  /* Replace linear-gradient with solid color - no GPU texture upload */
-  background: var(--bg-secondary) !important;
-  /* Remove box-shadow - already has border-bottom for visual separation */
-  box-shadow: none !important;
-  /* Replace transform-based slideDown with opacity-only fade - no compositing layer */
-  animation: customFadeIn 0.15s ease !important;
-}
-
-body.dark-mode .file-info-bar {
-  background: var(--bg-secondary) !important;
-  box-shadow: none !important;
-}
-
-@keyframes customFadeIn {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
+/* (The file-info-bar performance overrides lived here. The bar itself was
+   removed with the single-row header redesign, and its only consumer went with
+   it, so both the overrides and their `customFadeIn` keyframes are gone.) */
 
 /* ============================================
    CUSTOM: Stop Animations When Window Unfocused (Performance)

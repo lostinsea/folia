@@ -687,7 +687,10 @@ const UI_STRINGS = {
   'title.splitter': 'Drag to resize, double-click to reset',
   'title.zoomOut': 'Zoom Out (Ctrl+-)', 'title.zoomReset': 'Reset Zoom (Ctrl+0)',
   'title.zoomIn': 'Zoom In (Ctrl++)',
-  'title.back': 'Back (Left Arrow)', 'title.forward': 'Forward (Right Arrow)',
+  /* `title.back` / `title.forward` removed with the file-info bar that held the
+     nav buttons, and `notif.pathCopiedCheck` with the click-to-copy path
+     element beside them. The tab right-click menu replaced that element and
+     uses the un-ticked `notif.pathCopied` below. */
   'title.refresh': 'Refresh Document (Ctrl+R)', 'title.save': 'Save (Ctrl+S)',
   'title.searchPrev': 'Previous (Shift+Enter)', 'title.searchNext': 'Next (Enter)',
   'title.searchClose': 'Close (Esc)',
@@ -757,7 +760,6 @@ const UI_STRINGS = {
   'notif.imageProcessFailed': 'Failed to process image',
   'notif.imageDeleted': 'Image deleted',
   'notif.pathCopied': 'Path copied to clipboard',
-  'notif.pathCopiedCheck': '✓ Path copied to clipboard',
   'confirm.unsavedOpen': 'You have unsaved changes. Discard changes and open a new file?',
   'drop.hint': 'Drop file to open',
   'drop.rejected': '${name} is not a markdown file',  'confirm.unsavedRefresh': 'You have unsaved changes. Discard changes and refresh from disk?',
@@ -834,7 +836,6 @@ const fileMenu = document.getElementById('fileMenu');
 const fileMenuRecent = document.getElementById('fileMenuRecent');
 const viewBtn = document.getElementById('viewBtn');
 const viewMenu = document.getElementById('viewMenu');
-const logoLink = document.getElementById('logoLink');
 const searchPanel = document.getElementById('searchPanel');
 const searchInput = document.getElementById('searchInput');
 const searchCounter = document.getElementById('searchCounter');
@@ -852,9 +853,6 @@ const notesList = document.getElementById('notesList');
 const notesSearchToggle = document.getElementById('notesSearchToggle');
 const notesSearchBar = document.getElementById('notesSearchBar');
 const notesSearchInput = document.getElementById('notesSearchInput');
-const fileInfoBar = document.getElementById('fileInfoBar');
-const fileName = document.getElementById('fileName');
-const filePath = document.getElementById('filePath');
 const refreshBtn = document.getElementById('refreshBtn');
 const exportPdfBtn = document.getElementById('exportPdf');
 const toggleEditBtn = document.getElementById('toggleEdit');
@@ -1070,43 +1068,21 @@ let navigationHistory = [];
 let navigationIndex = -1;
 let isNavigating = false; // Flag to prevent adding to history during back/forward
 
-// Update file info display
+// Update the current document path.
+//
+// This used to paint the File Info Bar too - a second row carrying the
+// filename and its directory. That bar is gone: the tab strip is now the only
+// place a document is named, with the filename as the tab label and the full
+// path as the tab's tooltip. What survives is the part the rest of the
+// renderer depends on - currentFilePath - which is why this function is kept
+// rather than deleted along with the bar it used to draw.
 function updateFileInfo(path) {
-  if (!path) {
-    fileInfoBar.style.display = 'none';
-    currentFilePath = null;
-    return;
-  }
-
-  currentFilePath = path;
-  const pathParts = path.split(/[\\/]/);
-  const name = pathParts.pop();
-  const directory = pathParts.join('/');
-
-  fileName.textContent = name;
-  filePath.textContent = directory;
-  fileInfoBar.style.display = 'flex';
+  currentFilePath = path || null;
 }
 
-// Copy path to clipboard on click
-filePath.addEventListener('click', () => {
-  if (currentFilePath) {
-    navigator.clipboard.writeText(currentFilePath).then(() => {
-      // Visual feedback
-      const originalText = filePath.textContent;
-      filePath.textContent = i18n('notif.pathCopiedCheck');
-      filePath.style.color = 'var(--primary-color)';
-      setTimeout(() => {
-        const pathParts = currentFilePath.split(/[\\/]/);
-        pathParts.pop(); // Remove filename
-        filePath.textContent = pathParts.join('/');
-        filePath.style.color = '';
-      }, 1500);
-    }).catch(err => {
-      console.error('Failed to copy path:', err);
-    });
-  }
-});
+// Click-to-copy moved off the removed path display and onto the tab's
+// right-click menu, where it acts on the tab you actually pointed at rather
+// than on whatever happened to be active. See custom-tabs.js.
 
 // Navigation history functions
 const navBackBtn = document.getElementById('navBackBtn');
@@ -1404,36 +1380,74 @@ function patchRemoveFormatInDOM() {
   }
 }
 
-function closeAllDropdowns() {
+// The hamburger panel and the two flyouts it contains.
+//
+// #fileBtn / #viewBtn kept their ids when they became rows inside the panel,
+// so the toggle handlers below are the original ones and still drive the same
+// #fileMenu / #viewMenu elements. What changed is that those two panels are
+// now NESTED inside #mainMenu, which means closing "all" dropdowns before
+// opening a flyout would close the panel the flyout lives in. Hence two
+// functions: closeFlyouts() for the sibling relationship, closeAllDropdowns()
+// for the outside-click case.
+const menuBtn = document.getElementById('menuBtn');
+const mainMenu = document.getElementById('mainMenu');
+
+function closeFlyouts() {
   fileMenu.classList.remove('visible');
   viewMenu.classList.remove('visible');
+  fileBtn.setAttribute('aria-expanded', 'false');
+  viewBtn.setAttribute('aria-expanded', 'false');
 }
 
-// File menu toggle
+function closeAllDropdowns() {
+  closeFlyouts();
+  mainMenu.classList.remove('visible');
+  menuBtn.setAttribute('aria-expanded', 'false');
+}
+
+// Hamburger toggle
+menuBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  const willOpen = !mainMenu.classList.contains('visible');
+  closeAllDropdowns();
+  if (willOpen) {
+    mainMenu.classList.add('visible');
+    menuBtn.setAttribute('aria-expanded', 'true');
+  }
+});
+
+// File flyout toggle
 fileBtn.addEventListener('click', (e) => {
   e.stopPropagation();
   const willOpen = !fileMenu.classList.contains('visible');
-  closeAllDropdowns();
+  closeFlyouts();
   if (willOpen) {
     fileMenu.classList.add('visible');
+    fileBtn.setAttribute('aria-expanded', 'true');
     updateFileMenuRecent();
   }
 });
 
-// View menu toggle
+// View flyout toggle
 viewBtn.addEventListener('click', (e) => {
   e.stopPropagation();
   const willOpen = !viewMenu.classList.contains('visible');
-  closeAllDropdowns();
-  if (willOpen) viewMenu.classList.add('visible');
+  closeFlyouts();
+  if (willOpen) {
+    viewMenu.classList.add('visible');
+    viewBtn.setAttribute('aria-expanded', 'true');
+  }
 });
 
-// Close all menus on outside click
+// Close everything on outside click
 document.addEventListener('click', () => {
   closeAllDropdowns();
 });
 
-// Prevent clicks inside menus from closing them
+// Clicks inside the panel or either flyout must not close them. #mainMenu
+// covers the flyouts too because they are its descendants, but both are kept
+// so that removing the nesting later cannot silently break dismissal.
+mainMenu.addEventListener('click', (e) => { e.stopPropagation(); });
 fileMenu.addEventListener('click', (e) => { e.stopPropagation(); });
 viewMenu.addEventListener('click', (e) => { e.stopPropagation(); });
 
@@ -1789,11 +1803,8 @@ function applyNoteStyles() {
   });
 }
 
-// Logo link - open website
-logoLink.addEventListener('click', (e) => {
-  e.preventDefault();
-  shell.openExternal('https://github.com/lostinsea/folia');
-});
+// The logo link was removed with the single-row header redesign; the project
+// URL now lives only in README.md and package.json.
 
 // Extension policy for links that resolve to a local file (SEC-12).
 //

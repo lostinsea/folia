@@ -216,50 +216,22 @@ body {
   align-items: center;
   border-bottom: 2px solid var(--border-color);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  /* MEASURED, and it contradicts the obvious reading: the toolbar wins the hit
+     test over the retracted search panel whether or not this is here. The
+     panel really is a hit-test candidate at the bar's centre point
+     (elementsFromPoint returns .search-panel and its input below .header), so
+     the guard in the suite is not vacuous - but no declaration found here is
+     what decides it. `position` is kept because `z-index` below is ignored
+     outright on a static box, and a z-index that cannot apply is worse than
+     none. Do NOT restate this as "load-bearing": it was, and the measurement
+     said otherwise. */
+  position: relative;
   z-index: 100;
 }
 
-.header-left {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-#logoLink {
-  display: flex;
-  align-items: center;
-  cursor: pointer;
-  transition: opacity 0.2s ease;
-}
-
-#logoLink:hover {
-  opacity: 0.8;
-}
-
-.app-logo {
-  height: 32px;
-  width: auto;
-  object-fit: contain;
-}
-
-/* Logo toggle for dark mode */
-.logo-dark {
-  display: none !important;
-}
-
-body.dark-mode .logo-light {
-  display: none !important;
-}
-
-body.dark-mode .logo-dark {
-  display: inline-block !important;
-}
-
-.title {
-  font-size: 18px;
-  font-weight: 600;
-  color: var(--primary-color);
-}
+/* The header no longer has a left-hand group: the tab strip is the left-hand
+   content. `.header-left`, `#logoLink`, `.app-logo`, `.logo-light`/`.logo-dark`
+   and `.title` went with the elements they styled. */
 
 .controls {
   display: flex;
@@ -293,40 +265,10 @@ body.dark-mode .logo-dark {
   transform: translateY(0);
 }
 
-/* File Info Bar */
-.file-info-bar {
-  background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
-  padding: 8px 20px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  border-bottom: 1px solid var(--border-color);
-  font-size: 12px;
-  color: var(--text-secondary);
-  animation: slideDown 0.3s ease;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-}
-
-body.dark-mode .file-info-bar {
-  background: linear-gradient(135deg, #2d2d2d 0%, #242424 100%);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
-}
-
-@keyframes slideDown {
-  from {
-    opacity: 0;
-    transform: translateY(-10px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.file-icon {
-  color: var(--primary-color);
-  flex-shrink: 0;
-}
+/* The file-info bar, its `slideDown` animation and the `.file-icon` /
+   `.file-name` / `.file-separator` / `.file-path` elements inside it were
+   removed with the single-row header redesign. A document's location now
+   reaches the reader through its tab tooltip and the tab right-click menu. */
 
 /* Navigation buttons */
 .nav-btn {
@@ -367,33 +309,6 @@ body.dark-mode .file-info-bar {
 body.dark-mode .nav-btn:hover:not(:disabled) {
   background: rgba(61, 189, 198, 0.15);
   color: #3DBDC6;
-}
-
-.file-name {
-  font-weight: 600;
-  color: var(--text-primary);
-  font-size: 13px;
-}
-
-.file-separator {
-  color: var(--border-color);
-  font-weight: 300;
-}
-
-.file-path {
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: color 0.2s ease;
-  user-select: all;
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.file-path:hover {
-  color: var(--primary-color);
-  text-decoration: underline;
 }
 
 /* Loading Screen */
@@ -1177,9 +1092,22 @@ html {
   scroll-behavior: smooth;
 }
 
-/* Search Panel */
+/* Search Panel
+ *
+ * Positioned against the bottom edge of `.header` via the zero-height
+ * `.search-anchor` wrapper, so it opens BELOW the toolbar rather than over it.
+ * `top: 100%` on a zero-height anchor is 0, i.e. the header's bottom edge.
+ * The retracted panel translates up behind the header, which is why `.header`
+ * carries the higher z-index of the two.
+ */
+.search-anchor {
+  position: relative;
+  height: 0;
+  z-index: 1;
+}
+
 .search-panel {
-  position: fixed;
+  position: absolute;
   top: 0;
   left: 0;
   right: 0;
@@ -1189,7 +1117,6 @@ html {
   justify-content: center;
   align-items: center;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
-  z-index: 200;
   transform: translateY(-100%);
   transition: transform 0.3s ease;
 }
@@ -1581,7 +1508,6 @@ html {
 @media print {
   /* Hide all UI elements */
   .header,
-  .file-info-bar,
   .search-panel,
   .notes-panel,
   .index-panel,

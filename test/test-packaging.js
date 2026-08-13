@@ -913,36 +913,48 @@ function main() {
       `build.productName=${JSON.stringify(pkg.build && pkg.build.productName)}`,
     );
 
-    // The name a USER SEES, which is a third place the product name lives and
-    // was the one left behind by the rename. index.html carried BOTH a full
-    // title and an abbreviated `.app-title-short` shown by the compact header
+    // The name a USER SEES. index.html once carried a full `.app-title` in the
+    // header AND an abbreviated `.app-title-short` shown by the compact header
     // below 780px, and the abbreviation still read "MV" - Markdown Viewer.
     // It survived the rename because a two-letter string in markup is not
     // something anyone greps for, which is the argument for deriving the
     // assertion from package.json rather than hard-coding "Folia" again here:
     // a fourth copy checked against a third copy proves only that two files
     // agree.
+    //
+    // The single-row header redesign DELETED the in-header title outright, so
+    // the assertion that the header shows the product name has been retired
+    // rather than left to rot against an element that no longer exists. The
+    // product name now reaches the user through <title> alone (window frame and
+    // taskbar), which is exactly why that assertion is the one that stays - it
+    // went from a second line of defence to the only one. The "no abbreviated
+    // copy" assertion is kept and WIDENED: with no header title at all, neither
+    // spelling may come back.
     {
       const html = fs.readFileSync(path.join(SRC, "index.html"), "utf8");
       const productName = (pkg.build && pkg.build.productName) || pkg.productName;
       const titleTag = /<title>([^<]*)<\/title>/i.exec(html);
-      const appTitle = /<span class="app-title">([^<]*)<\/span>/i.exec(html);
       check(
         "the window title is the product name",
         Boolean(titleTag) && titleTag[1].trim() === productName,
         `<title>=${titleTag && JSON.stringify(titleTag[1])} productName=${productName}`,
       );
-      check(
-        "the visible header title is the product name",
-        Boolean(appTitle) && appTitle[1].trim() === productName,
-        `.app-title=${appTitle && JSON.stringify(appTitle[1])} productName=${productName}`,
-      );
-      // No second, abbreviated copy of the name to keep in step by hand.
+      // No second copy of the name, abbreviated or otherwise, to keep in step
+      // by hand. Covers the markup and the stylesheet that styled it.
+      const customCss = fs.readFileSync(path.join(SRC, "custom-styles.css"), "utf8");
+      const baseCss = fs.readFileSync(path.join(SRC, "styles.css"), "utf8");
       check(
         "the header carries no abbreviated second copy of the product name",
         !/app-title-short/.test(html) &&
-          !/app-title-short/.test(fs.readFileSync(path.join(SRC, "custom-styles.css"), "utf8")),
+          !/app-title-short/.test(customCss),
         "app-title-short still present",
+      );
+      check(
+        "the single-row header carries no in-header product name at all",
+        !/class="app-title"/.test(html) &&
+          !/\.app-title\b/.test(customCss) &&
+          !/\.app-title\b/.test(baseCss),
+        "an .app-title element or rule is back in the header",
       );
     }
 

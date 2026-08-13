@@ -2076,6 +2076,399 @@ async function run(win) {
     JSON.stringify(guard),
   );
 
+  // ---- Scenario 11: the single-row top bar --------------------------------
+  // The header was two rows (logo + product name + menu items, then a file
+  // location bar, then a separate tab strip that only appeared at 2+ tabs).
+  // It is now ONE bar: [tab strip] [reload] [hamburger]. Every assertion here
+  // guards a property that was measured to be wrong at some point while
+  // building it, so none of them is decorative.
+  //
+  // This is a GEOMETRIC block, so it pins the window itself. main.js persists
+  // window bounds on every resize, which means a suite that measures without
+  // pinning is measuring whatever the last run left behind.
+  {
+    const setInner = async (w, h) => {
+      for (let i = 0; i < 40; i++) {
+        if (i % 10 === 0) {
+          win.unmaximize();
+          win.setBounds({ x: 40, y: 40, width: w, height: h });
+        }
+        await sleep(100);
+        // getBounds() reports the size that was REQUESTED, so it lies during a
+        // transition and after a request a maximized window silently swallowed.
+        // innerWidth is the number the layout actually used.
+        const ok = await exec(`Math.abs(window.innerWidth - ${w}) <= 24`);
+        if (ok) return true;
+      }
+      return false;
+    };
+
+    const sized = await setInner(1400, 900);
+    check(
+      "the layout block could pin the window, so its geometry is not inherited",
+      sized === true,
+      "window never reached the requested inner width",
+    );
+
+    // Clean slate: earlier scenarios leave tabs behind and the strip's overflow
+    // state is the thing under test.
+    await exec(`
+      window.CustomTabs.getTabs().forEach(t => { t.hasUnsavedChanges = false; });
+      window.CustomTabs.getTabs().slice().forEach(t => window.CustomTabs.closeTab(t.id));
+      null;
+    `);
+    await sleep(300);
+
+    const layoutFiles = [];
+    for (let i = 0; i < 8; i++) {
+      const p = path.join(dir, `bar-document-${i}-with-a-long-name.md`);
+      write(p, `# Bar ${i}\n\nBAR_BODY_${i}\n`);
+      layoutFiles.push(p);
+    }
+
+    // --- one document ---
+    await exec(
+      `window.CustomTabs.createTab(${JSON.stringify(layoutFiles[0])},
+        window.fs.readFileSync(${JSON.stringify(layoutFiles[0])}, 'utf8')); null`,
+    );
+    await sleep(500);
+
+    const one = await exec(`(() => {
+      const px = (el) => { const r = el.getBoundingClientRect();
+        return { x: r.x, y: r.y, w: r.width, h: r.height }; };
+      const header = document.querySelector('.header');
+      const strip = document.getElementById('tabsContainer');
+      const tab = document.querySelector('.tab');
+      return {
+        headerCount: document.querySelectorAll('.header').length,
+        stripInsideHeader: !!(header && strip && header.contains(strip)),
+        reloadInsideHeader: !!(header && header.contains(document.getElementById('refreshBtn'))),
+        menuInsideHeader: !!(header && header.contains(document.getElementById('menuBtn'))),
+        // The deleted surfaces. Their absence is the redesign.
+        fileInfoBar: !!document.getElementById('fileInfoBar'),
+        appTitle: !!document.querySelector('.app-title'),
+        logoLink: !!document.getElementById('logoLink'),
+        tabCount: document.querySelectorAll('.tab').length,
+        // Counting elements is NOT enough: the old two-tab minimum hid the
+        // whole strip with display:none, which leaves every tab element in the
+        // DOM and made this assertion pass with no tab on screen at all.
+        // Observed visibility is the only thing that answers "shown".
+        tabShown: tab
+          ? tab.offsetParent !== null &&
+            (typeof tab.checkVisibility === 'function'
+              ? tab.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
+              : true) &&
+            tab.getBoundingClientRect().width > 0
+          : false,
+        tabTitle: tab ? tab.querySelector('.tab-title').textContent : null,
+        tabTooltip: tab ? tab.getAttribute('title') : null,
+        header: header ? px(header) : null,
+      };
+    })()`);
+
+    check(
+      "the toolbar is a single row and the tab strip lives inside it",
+      one.headerCount === 1 &&
+        one.stripInsideHeader === true &&
+        one.reloadInsideHeader === true &&
+        one.menuInsideHeader === true,
+      JSON.stringify(one),
+    );
+    // Each of these three elements was removed, and each left a live reference
+    // behind. The logo's was the expensive one: a surviving
+    // `logoLink.addEventListener` threw at renderer.js top level, which aborts
+    // the REST of that script, so every handler registered after it silently
+    // never registered. The visible symptom was "the tab strip does not work".
+    check(
+      "the removed header surfaces are really gone from the DOM",
+      one.fileInfoBar === false && one.appTitle === false && one.logoLink === false,
+      JSON.stringify(one),
+    );
+    // The old strip swapped itself out below 2 tabs and showed the file-info
+    // bar instead. That bar no longer exists, so a lone document would have had
+    // no tab and no location shown anywhere.
+    check(
+      "a single open document is still shown as a tab",
+      one.tabCount === 1 &&
+        one.tabShown === true &&
+        /bar-document-0/.test(String(one.tabTitle)),
+      JSON.stringify(one),
+    );
+    // The location moved from a dedicated row onto the tab. The tooltip is on
+    // the whole tab, not just the label - the label stops at the ellipsis, so
+    // hovering the padding or the close-button gap produced nothing.
+    check(
+      "the tab carries the document's full path as its tooltip",
+      one.tabTooltip === layoutFiles[0],
+      JSON.stringify(one),
+    );
+
+    // --- many documents: the strip must scroll, not push the buttons off ---
+    for (let i = 1; i < layoutFiles.length; i++) {
+      await exec(
+        `window.CustomTabs.createTab(${JSON.stringify(layoutFiles[i])},
+          window.fs.readFileSync(${JSON.stringify(layoutFiles[i])}, 'utf8')); null`,
+      );
+      await sleep(150);
+    }
+    await sleep(500);
+
+    const many = await exec(`(() => {
+      const px = (el) => { const r = el.getBoundingClientRect();
+        return { x: r.x, y: r.y, w: r.width, h: r.height, right: r.right }; };
+      const strip = document.getElementById('tabsContainer');
+      const active = document.querySelector('.tab.active');
+      const sr = strip.getBoundingClientRect();
+      const ar = active ? active.getBoundingClientRect() : null;
+      return {
+        tabCount: document.querySelectorAll('.tab').length,
+        scrollWidth: strip.scrollWidth,
+        clientWidth: strip.clientWidth,
+        overflows: strip.scrollWidth > strip.clientWidth,
+        header: px(document.querySelector('.header')),
+        strip: px(strip),
+        reload: px(document.getElementById('refreshBtn')),
+        menu: px(document.getElementById('menuBtn')),
+        menuOnScreen: px(document.getElementById('menuBtn')).right <= window.innerWidth,
+        innerW: window.innerWidth,
+        activeWithinStrip: ar
+          ? (ar.left >= sr.left - 1 && ar.right <= sr.right + 1)
+          : null,
+        activeTitle: active ? active.querySelector('.tab-title').textContent : null,
+      };
+    })()`);
+
+    check(
+      "enough tabs are open to overflow the strip, so the scroll assertions bite",
+      many.tabCount === 8 && many.overflows === true,
+      JSON.stringify(many),
+    );
+    // The strip shrinks because it is a SCROLL CONTAINER (its automatic
+    // minimum size is zero); `min-width: 0` says the same thing a second time.
+    // Without that, the item's min-content size is the width of all eight tabs
+    // and the bar outgrows the window. MEASURED: the overflow goes LEFT, not
+    // right - header.x = -1054 on a 1336px window - so a right-edge check
+    // alone reported this as fine. Both edges, and the bar's own width.
+    check(
+      "an overflowing strip scrolls instead of pushing the buttons off the bar",
+      many.menuOnScreen === true &&
+        many.reload.x > many.strip.x &&
+        many.header.x >= -1 &&
+        many.strip.x >= -1 &&
+        many.header.w <= many.innerW + 1,
+      JSON.stringify(many),
+    );
+    check(
+      "the reload button sits between the tab strip and the hamburger",
+      many.strip.x < many.reload.x && many.reload.x < many.menu.x,
+      JSON.stringify(many),
+    );
+    // Making the strip scroll introduced this: the newly-opened document's tab
+    // is past the right edge, so opening a file showed a strip that did not
+    // contain it.
+    check(
+      "the active tab is scrolled into view",
+      many.activeWithinStrip === true &&
+        /bar-document-7/.test(String(many.activeTitle)),
+      JSON.stringify(many),
+    );
+    // A classic (non-overlay) scrollbar takes layout space, so under
+    // `overflow-x: auto` the bar grew 6px the moment the tabs overflowed and
+    // shifted the document underneath it. `scrollbar-gutter: stable` does not
+    // help - measured, it reserves the inline-axis gutter only.
+    check(
+      "the bar does not change height when the strip gains its scrollbar",
+      one.header && many.header && Math.abs(one.header.h - many.header.h) < 1,
+      `oneTab=${one.header && one.header.h} manyTabs=${many.header && many.header.h}`,
+    );
+
+    // --- the hamburger and its two flyouts ---
+    await exec(`document.getElementById('menuBtn').click(); null`);
+    await sleep(300);
+    await exec(`document.getElementById('fileBtn').click(); null`);
+    await sleep(350);
+    const fileOpen = await exec(`(() => {
+      const vis = (id) => {
+        const el = document.getElementById(id);
+        const r = el.getBoundingClientRect();
+        return { painted: r.width > 0 && r.height > 0, left: r.left, right: r.right,
+                 top: r.top, bottom: r.bottom };
+      };
+      const f = vis('fileMenu');
+      return { file: f, view: vis('viewMenu'),
+        onScreen: f.left >= 0 && f.right <= window.innerWidth &&
+                  f.top >= 0 && f.bottom <= window.innerHeight };
+    })()`);
+    await exec(`document.getElementById('viewBtn').click(); null`);
+    await sleep(350);
+    const viewOpen = await exec(`(() => {
+      const vis = (id) => {
+        const el = document.getElementById(id);
+        const r = el.getBoundingClientRect();
+        return { painted: r.width > 0 && r.height > 0, left: r.left, right: r.right,
+                 top: r.top, bottom: r.bottom };
+      };
+      const v = vis('viewMenu');
+      return { file: vis('fileMenu'), view: v,
+        onScreen: v.left >= 0 && v.right <= window.innerWidth &&
+                  v.top >= 0 && v.bottom <= window.innerHeight };
+    })()`);
+    await exec(`document.body.click(); null`);
+    await sleep(250);
+
+    check(
+      "the hamburger's File flyout opens fully on screen",
+      fileOpen.file.painted === true && fileOpen.onScreen === true,
+      JSON.stringify(fileOpen),
+    );
+    // The flyouts are driven by the ORIGINAL, unmodified fileBtn/viewBtn click
+    // handlers. They are marked `has-flyout`, not `has-submenu`, precisely so
+    // opening stays click-driven: the inherited `.has-submenu:hover` rule would
+    // let hover open one while a click held the other open, and two panels
+    // could be visible at once.
+    check(
+      "only one flyout is open at a time",
+      fileOpen.file.painted === true && fileOpen.view.painted === false &&
+        viewOpen.view.painted === true && viewOpen.file.painted === false,
+      JSON.stringify({ fileOpen, viewOpen }),
+    );
+    check(
+      "the hamburger's View flyout opens fully on screen",
+      viewOpen.onScreen === true,
+      JSON.stringify(viewOpen),
+    );
+
+    // --- the search panel must not cover the bar it used to sit beside ---
+    // This is a REGRESSION guard, not a new feature. The panel was
+    // `position: fixed; top: 0`, survivable while the toolbar was two rows
+    // (the 58px panel covered the 38px row and left the tab row showing).
+    // Against one bar it covered the whole thing: no tabs, no reload, no
+    // hamburger, and nothing saying which document was being searched.
+    // Driven through the product's own toggle rather than by adding the class
+    // by hand, so what is measured is the real open path.
+    await exec(`window.toggleSearchPanel(); null`);
+    await sleep(500);
+    const search = await exec(`(() => {
+      const rect = (el) => el.getBoundingClientRect();
+      const sp = document.getElementById('searchPanel');
+      const header = document.querySelector('.header');
+      const sr = rect(sp), hr = rect(header);
+      // Hit-test rather than trust the rectangles: an element can be inside the
+      // viewport and still be covered.
+      const reachable = (el) => {
+        const r = rect(el);
+        const hit = document.elementFromPoint(
+          Math.round(r.x + r.width / 2), Math.round(r.y + r.height / 2));
+        return !!(hit && (hit === el || el.contains(hit) || hit.contains(el)));
+      };
+      return {
+        panelPainted: sr.width > 0 && sr.height > 0,
+        panelBelowHeader: sr.top >= hr.bottom - 1,
+        overlapsHeader: !(sr.top >= hr.bottom || sr.bottom <= hr.top),
+        activeTabReachable: reachable(document.querySelector('.tab.active')),
+        reloadReachable: reachable(document.getElementById('refreshBtn')),
+        menuReachable: reachable(document.getElementById('menuBtn')),
+        searchInputReachable: reachable(document.getElementById('searchInput')),
+      };
+    })()`);
+    check(
+      "the search panel really opened, so the overlay assertions are not vacuous",
+      search.panelPainted === true && search.searchInputReachable === true,
+      JSON.stringify(search),
+    );
+    check(
+      "the search panel opens below the bar rather than covering it",
+      search.panelBelowHeader === true && search.overlapsHeader === false,
+      JSON.stringify(search),
+    );
+    check(
+      "the tabs, reload and hamburger stay usable while search is open",
+      search.activeTabReachable === true &&
+        search.reloadReachable === true &&
+        search.menuReachable === true,
+      JSON.stringify(search),
+    );
+    await exec(`window.toggleSearchPanel(); null`);
+    await sleep(600);
+
+    // The CLOSED state is a separate failure mode and needs its own assertion.
+    // The retracted panel translates up and lands exactly over the bar, so the
+    // bar is only clickable because `.header` establishes a stacking context
+    // that paints above it. `.header` carried `z-index: 100` with NO
+    // `position`, where z-index is ignored outright - it painted on top purely
+    // by DOM order, which the `.search-anchor` wrapper reversed.
+    const closed = await exec(`(() => {
+      const rect = (el) => el.getBoundingClientRect();
+      const reachable = (el) => {
+        const r = rect(el);
+        const hit = document.elementFromPoint(
+          Math.round(r.x + r.width / 2), Math.round(r.y + r.height / 2));
+        return !!(hit && (hit === el || el.contains(hit) || hit.contains(el)));
+      };
+      const sr = rect(document.getElementById('searchPanel'));
+      const hr = rect(document.querySelector('.header'));
+      return {
+        panelClosed: !document.getElementById('searchPanel').classList.contains('visible'),
+        // The whole point: retracted, it really is on top of the bar.
+        retractedOverBar: !(sr.top >= hr.bottom || sr.bottom <= hr.top),
+        activeTabReachable: reachable(document.querySelector('.tab.active')),
+        reloadReachable: reachable(document.getElementById('refreshBtn')),
+        menuReachable: reachable(document.getElementById('menuBtn')),
+      };
+    })()`);
+    check(
+      "the retracted search panel really does overlap the bar, so this bites",
+      closed.panelClosed === true && closed.retractedOverBar === true,
+      JSON.stringify(closed),
+    );
+    check(
+      "the bar stays clickable underneath the retracted search panel",
+      closed.activeTabReachable === true &&
+        closed.reloadReachable === true &&
+        closed.menuReachable === true,
+      JSON.stringify(closed),
+    );
+
+    // --- the tab right-click menu ---
+    // This replaces the deleted click-to-copy file-path element, so the path is
+    // still obtainable now that the location bar is gone.
+    const ctxPath = layoutFiles[layoutFiles.length - 1];
+    const ctx = await exec(`(() => {
+      const t = document.querySelector('.tab.active');
+      const r = t.getBoundingClientRect();
+      t.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true,
+        clientX: Math.round(r.x + r.width / 2), clientY: Math.round(r.y + r.height / 2) }));
+      const m = document.getElementById('tabContextMenu');
+      const mr = m.getBoundingClientRect();
+      require('electron').clipboard.writeText('CLIPBOARD_NOT_WRITTEN');
+      document.getElementById('ctxTabCopyPath').click();
+      return {
+        painted: mr.width > 0 && mr.height > 0,
+        onScreen: mr.left >= 0 && mr.top >= 0 &&
+                  mr.right <= window.innerWidth && mr.bottom <= window.innerHeight,
+        copied: require('electron').clipboard.readText(),
+        dismissed: !m.classList.contains('visible'),
+      };
+    })()`);
+    check(
+      "right-clicking a tab opens its menu on screen",
+      ctx.painted === true && ctx.onScreen === true,
+      JSON.stringify(ctx),
+    );
+    check(
+      "the tab menu copies that tab's full path and closes itself",
+      ctx.copied === ctxPath && ctx.dismissed === true,
+      JSON.stringify(ctx),
+    );
+
+    await exec(`
+      window.CustomTabs.getTabs().forEach(t => { t.hasUnsavedChanges = false; });
+      window.CustomTabs.getTabs().slice().forEach(t => window.CustomTabs.closeTab(t.id));
+      null;
+    `);
+    await sleep(300);
+  }
+
   // Prove the watcher was actually watching. Without this, "no errors were
   // recorded" and "the watcher silently stopped working" are the same result -
   // the exact vacuity this harness exists to eliminate. Both detection paths
