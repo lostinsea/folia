@@ -1695,6 +1695,100 @@ async function run(win) {
     JSON.stringify(zoomed.filter((z) => z.overflows)),
   );
 
+  // --- 12b. Zoom coalesces the per-table remeasure, and stays correct ------
+  // MEASURED before this was split: one zoom step on a 248 KB / 150-table
+  // document cost 250-276ms, of which applyTableBreakout was 235-264ms (~95%,
+  // ~1.6ms per table). A held key or a repeated click throws all but the last
+  // of those away. The remeasure is therefore coalesced - but the CSS budget
+  // clamp, which is the half correctness depends on, is published on EVERY
+  // step, so nothing can run off the window while a remeasure is pending.
+  //
+  // Both assertions are STRUCTURAL. A timing assertion ("a zoom step takes
+  // under Nms") is how this suite becomes flaky on a loaded machine, and it
+  // would not say what broke.
+  const coalesce = JSON.parse(
+    await exec(`(async () => {
+      const c = document.querySelectorAll('#viewer .table-container')[4];
+      const real = window.applyTableBreakout;
+      let calls = 0;
+      window.applyTableBreakout = function () { calls++; return real.apply(this, arguments); };
+      const zoomBtn = document.getElementById('zoomIn');
+      const startLevel = document.getElementById('zoomReset').textContent;
+
+      // A burst: six steps with no task boundary between them, which is what a
+      // held key produces. The rect is read SYNCHRONOUSLY after the last click,
+      // so no timer can have run - only what updateZoom() itself did is visible.
+      for (let i = 0; i < 6; i++) zoomBtn.click();
+      const burstCalls = calls;
+      const rSync = c.getBoundingClientRect();
+      const sync = {
+        left: Math.round(rSync.left),
+        right: Math.round(rSync.right),
+        width: Math.round(rSync.width),
+        overflows: rSync.left < -1 || rSync.right > window.innerWidth + 1,
+        brokenOut: c.classList.contains('table-breakout'),
+        budget: getComputedStyle(document.getElementById('viewer')).getPropertyValue('--mv-breakout-budget').trim(),
+      };
+
+      // Let the coalesced remeasure land.
+      await new Promise(r => setTimeout(r, 400));
+      const settledCalls = calls;
+      const settledWidth = Math.round(c.getBoundingClientRect().width);
+
+      // The coalesced run must leave FINAL geometry, not an approximation:
+      // forcing another full pass may not move anything.
+      real();
+      await new Promise(r => setTimeout(r, 60));
+      const forcedWidth = Math.round(c.getBoundingClientRect().width);
+
+      window.applyTableBreakout = real;
+      const endLevel = document.getElementById('zoomReset').textContent;
+      document.getElementById('zoomReset').click();
+      await new Promise(r => setTimeout(r, 300));
+      return JSON.stringify({
+        burstCalls, settledCalls, sync, settledWidth, forcedWidth,
+        startLevel, endLevel,
+        viewportWidth: window.innerWidth,
+      });
+    })()`),
+  );
+  // Vacuity guards. Without these, "few remeasures" is satisfied by a burst
+  // that never zoomed, and "does not overflow" by a table that never widened.
+  check(
+    "the zoom burst really moved the zoom level",
+    coalesce.startLevel !== coalesce.endLevel,
+    JSON.stringify([coalesce.startLevel, coalesce.endLevel]),
+  );
+  check(
+    "the burst table really is broken out of the reading column",
+    coalesce.sync.brokenOut === true && coalesce.sync.width > 0,
+    JSON.stringify(coalesce.sync),
+  );
+  check(
+    "the coalesced remeasure really ran",
+    coalesce.settledCalls >= 1,
+    `burst=${coalesce.burstCalls} settled=${coalesce.settledCalls}`,
+  );
+  // The fix itself: six steps must not buy six full per-table remeasures.
+  check(
+    "a burst of six zoom steps does not remeasure every table six times",
+    coalesce.burstCalls === 0 && coalesce.settledCalls >= 1 && coalesce.settledCalls <= 2,
+    `burst=${coalesce.burstCalls} settled=${coalesce.settledCalls} (expected 0, then 1)`,
+  );
+  // The correctness half, and the reason the remeasure MAY be deferred: the
+  // budget is published synchronously, so CSS clamps every stale width in the
+  // same frame the zoom lands. Read with no task boundary, so no timer has run.
+  check(
+    "a table does not leave the window in the frame a zoom burst lands",
+    coalesce.sync.overflows === false && coalesce.sync.budget !== "",
+    JSON.stringify(coalesce.sync) + ` viewport=${coalesce.viewportWidth}`,
+  );
+  check(
+    "the coalesced remeasure leaves final geometry, not an approximation",
+    Math.abs(coalesce.settledWidth - coalesce.forcedWidth) <= 1,
+    `settled=${coalesce.settledWidth} forced=${coalesce.forcedWidth}`,
+  );
+
   // --- 13. The reading measure is typographic, not a distance -------------
   // The prose cap exists to stop one long column stretching a line past the
   // point where it is comfortable to read - a property of CHARACTERS, not of

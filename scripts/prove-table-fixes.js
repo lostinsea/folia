@@ -81,13 +81,8 @@ const REVERTS = [
     // the call has moved out of addTableMaximizeButtons() and into both
     // pipelines. Neutralising the function itself covers every call site,
     // present and future, and cannot rot when a call site moves again.
-    from:
-      "function applyTableBreakout() {\n" +
-      "  const containers = viewer.querySelectorAll('.table-container');",
-    to:
-      "function applyTableBreakout() {\n" +
-      "  if (true) return; /* reverted for proof */\n" +
-      "  const containers = viewer.querySelectorAll('.table-container');",
+    from: "function applyTableBreakout() {\n",
+    to: "function applyTableBreakout() {\n  if (true) return; /* reverted for proof */\n",
     expect: [/table too wide for the reading column is widened/],
   },
   {
@@ -226,8 +221,8 @@ const REVERTS = [
     id: "R60",
     what: "do not recalculate on zoom (a width set at 100% is 4x too wide at 400%)",
     file: RENDERER,
-    from: "  applyTableBreakout();\n}\n\n// ============================================\n// ZOOM CONTROLS",
-    to: "}\n\n// ============================================\n// ZOOM CONTROLS",
+    from: "  republishBreakoutBudgetForZoom(zoomLevel / 100);\n  viewer.style.zoom = `${zoomLevel / 100}`;\n  zoomResetBtn.textContent = `${zoomLevel}%`;\n  scheduleTableBreakout();",
+    to: "  viewer.style.zoom = `${zoomLevel / 100}`;\n  zoomResetBtn.textContent = `${zoomLevel}%`;",
     expect: [/never leaves the window at any zoom level/],
   },
   {
@@ -3864,6 +3859,40 @@ const REVERTS = [
       /the frame-freshness probe really captured every frame it asked for/,
       /the frame-freshness probe read colours it understands/,
     ],
+  },
+  {
+    id: "R257",
+    // A GEOMETRICALLY CORRECT revert, deliberately: running the full pass on
+    // every step is what shipped before, and it produces exactly the same final
+    // layout. The only difference is HOW MUCH WORK a burst costs - measured at
+    // 235-264ms per step on a 248 KB / 150-table document, all of it thrown away
+    // except the last. A suite that could not tell these two apart would let
+    // this regress silently, so the geometry assertions are required to keep
+    // passing and only the coalescing count may fail.
+    what: "remeasure every table on every zoom step instead of coalescing the burst",
+    file: RENDERER,
+    from: "  zoomResetBtn.textContent = `${zoomLevel}%`;\n  scheduleTableBreakout();",
+    to: "  zoomResetBtn.textContent = `${zoomLevel}%`;\n  applyTableBreakout();",
+    expect: [/does not remeasure every table six times/],
+    mustPass: [
+      /a widened table never leaves the window at any zoom level/,
+      /a table does not leave the window in the frame a zoom burst lands/,
+      /the coalesced remeasure leaves final geometry, not an approximation/,
+    ],
+  },
+  {
+    id: "R258",
+    // The other half, and the one that makes deferring the remeasure legitimate
+    // at all. The budget is what the stylesheet clamps every stored breakout
+    // width against (see R70), so publishing it synchronously is what stops a
+    // width measured at 100% painting off the window at 400% during the ~120ms
+    // the coalesced remeasure is pending. Drop it and the clamp is stale for
+    // exactly as long as the deferral lasts.
+    what: "defer the budget publish along with the remeasure (a stale width paints off the window until the timer lands)",
+    file: RENDERER,
+    from: "  republishBreakoutBudgetForZoom(zoomLevel / 100);\n",
+    to: "",
+    expect: [/a table does not leave the window in the frame a zoom burst lands/],
   },
 ];
 

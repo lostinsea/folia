@@ -1183,7 +1183,28 @@ function updateZoom() {
   // Zooming changes how much of the window a table can occupy, and does not
   // fire `resize`. Without this a table widened at 100% keeps that width in
   // zoomed pixels and runs off the window at 400%.
-  applyTableBreakout();
+  //
+  // Three things are separated here, and the separation is the whole point.
+  // MEASURED on a 248 KB / 150-table document: one zoom step cost 250-276ms.
+  //
+  //  1. The zoom itself. Chromium must relayout the document under the new
+  //     scale before it can paint, ~190ms on that document. That is the floor
+  //     and nothing here can move it - but it is the FRAME's work, not the
+  //     click handler's, unless JS asks for a layout-dependent value first.
+  //  2. Republishing the CSS budget. This is the half CORRECTNESS depends on:
+  //     the stylesheet clamps every stored breakout width against it (R70), so
+  //     a width measured at 100% cannot paint off the window at 400%. It must
+  //     therefore happen on EVERY step, synchronously - and it does, without
+  //     reading layout back, because the only term that changed is the zoom
+  //     factor and that is already known here. Reading `--mv-breakout-budget`
+  //     back off the DOM after writing `zoom` was itself forcing the 190ms
+  //     relayout INTO the handler, six times over during a held-key burst.
+  //  3. Remeasuring every table. ~40ms on that document, ~1.6ms per table, and
+  //     only the last step's result is ever seen. Coalesced.
+  republishBreakoutBudgetForZoom(zoomLevel / 100);
+  viewer.style.zoom = `${zoomLevel / 100}`;
+  zoomResetBtn.textContent = `${zoomLevel}%`;
+  scheduleTableBreakout();
 }
 
 // ============================================
@@ -4834,20 +4855,42 @@ function addTableMaximizeButtons() {
 // rather than expressed as `100vw` in the stylesheet: `100vw` includes the
 // vertical scrollbar (so it overflows the page by its width) and ignores
 // split-view, where the viewer shares the window with the editor panel.
-function applyTableBreakout() {
-  const containers = viewer.querySelectorAll('.table-container');
-  if (!containers.length) return;
+// Coalesces the expensive half of applyTableBreakout(). Zoom arrives in bursts -
+// a held key or a repeated click - and only the final state is ever seen, so
+// running the per-table measurement once per step is work that is thrown away.
+// Deliberately NOT used by the split-view transition call sites: R55/R56 pin
+// that those run AT the transition, and a debounce there shows a wrong layout
+// for the length of the delay in a place the reader is looking.
+let tableBreakoutCoalesceTimer = null;
+const TABLE_BREAKOUT_COALESCE_MS = 120;
 
+function scheduleTableBreakout() {
+  clearTimeout(tableBreakoutCoalesceTimer);
+  tableBreakoutCoalesceTimer = setTimeout(() => {
+    tableBreakoutCoalesceTimer = null;
+    applyTableBreakout();
+  }, TABLE_BREAKOUT_COALESCE_MS);
+}
+
+// The reading area's width in VIEWPORT pixels, as last measured by
+// publishBreakoutBudget(). Cached so the zoom path can republish the budget
+// without reading layout back - see republishBreakoutBudgetForZoom.
+let lastBreakoutAvailable = null;
+
+// The cheap half of applyTableBreakout(), split out so the zoom path can keep
+// the safety net synchronous while deferring the measurement. ONE implementation
+// on purpose: a second copy of this arithmetic that drifted from the one the
+// measurement pass uses would clamp tables against a budget no measurement ever
+// agreed with.
+function publishBreakoutBudget() {
   const wrapper = document.querySelector('.content-wrapper');
   const editorPane = document.getElementById('editorPanel');
   // In split view #viewer is `width: 50%; max-width: none` and is its own
   // scroller. The 900px reading column that breakout exists to escape is not
   // in effect there - tables already get the whole pane - and an element cannot
   // paint outside its own scroll container anyway, so a breakout would simply
-  // be clipped. Any breakout carried in from the wide layout is cleared below
-  // and this returns before applying a new one.
+  // be clipped.
   const splitView = !!wrapper && wrapper.classList.contains('split-view');
-
   const paneWidth = editorPane ? editorPane.offsetWidth : 0;
   // Two coordinate spaces meet here, and conflating them is the whole hazard.
   // #viewer is scaled with CSS `zoom` (100-400%, see updateZoom):
@@ -4865,23 +4908,72 @@ function applyTableBreakout() {
   // That is precisely what the reading measure exists to prevent.
   const zoomFactor = parseFloat(getComputedStyle(viewer).zoom) || 1;
   const available = wrapper ? wrapper.clientWidth - paneWidth - TABLE_BREAKOUT_GUTTER * 2 : 0;
+  lastBreakoutAvailable = available;
 
-  // Published as an inherited custom property BEFORE the visibility bail-out
-  // below, because the case it exists for is exactly the one that bails: every
-  // container hidden inside a collapsed section while the window is resized.
-  // (Note the EARLIER `!containers.length` return does skip this. That one is
-  // sound: with no containers at all there is no stored width to clamp, and the
-  // paths that can create one - renderTableInDOM, and every render - call this
-  // again afterwards.)
-  // The stylesheet clamps each breakout to this, so a width that has gone stale
-  // is capped at the current budget the instant its section is expanded,
-  // without waiting for JS. Removed in split view so the stylesheet's 100%
-  // fallback (the container's own containing block) takes over.
+  // Published as an inherited custom property BEFORE applyTableBreakout's
+  // visibility bail-out, because the case it exists for is exactly the one that
+  // bails: every container hidden inside a collapsed section while the window is
+  // resized. The stylesheet clamps each breakout to this, so a width that has
+  // gone stale is capped at the current budget the instant its section is
+  // expanded - or the instant the zoom changes - without waiting for JS.
+  // Removed in split view so the stylesheet's 100% fallback (the container's own
+  // containing block) takes over.
   if (splitView) {
     viewer.style.removeProperty('--mv-breakout-budget');
   } else {
     viewer.style.setProperty('--mv-breakout-budget', available / zoomFactor + 'px');
   }
+  return { splitView, available, zoomFactor };
+}
+
+// The zoom path's budget publish. Deliberately reads NO layout: `available` is
+// in viewport pixels and is measured OUTSIDE the zoom-scaled subtree, so a zoom
+// step does not change it - only the divisor changes, and the new factor is
+// already known at the call site. Reading it back off the DOM instead (which is
+// what publishBreakoutBudget does, correctly, when it is about to measure
+// tables anyway) forces a full relayout of the document into the click handler:
+// MEASURED at 190-235ms per step on a 150-table document, and 1207ms for a
+// six-step burst, all of it blocking.
+//
+// The cached width is refreshed by every full pass, including the coalesced one
+// scheduled by this same zoom step, so the widest window in which it can be
+// stale is the coalescing delay - and it can only be stale at all if the window
+// or the editor pane moved without a recompute in between, which is itself what
+// the resize debounce and the ResizeObserver exist to prevent.
+function republishBreakoutBudgetForZoom(zoomFactor) {
+  // A classList read is not a layout read, so this stays free and stays current.
+  const wrapper = document.querySelector('.content-wrapper');
+  if (wrapper && wrapper.classList.contains('split-view')) {
+    viewer.style.removeProperty('--mv-breakout-budget');
+    return;
+  }
+  // Nothing has measured yet (no table has ever been laid out): fall back to
+  // the measuring version rather than publishing a budget derived from nothing.
+  if (lastBreakoutAvailable === null) {
+    publishBreakoutBudget();
+    return;
+  }
+  viewer.style.setProperty(
+    '--mv-breakout-budget',
+    lastBreakoutAvailable / (zoomFactor || 1) + 'px',
+  );
+}
+
+function applyTableBreakout() {
+  // A pending coalesced run is now redundant: this call recomputes everything
+  // it would have.
+  clearTimeout(tableBreakoutCoalesceTimer);
+  tableBreakoutCoalesceTimer = null;
+
+  const containers = viewer.querySelectorAll('.table-container');
+  // Note this returns BEFORE publishing the budget, and that is sound: with no
+  // containers at all there is no stored width to clamp, and the paths that can
+  // create one - renderTableInDOM, and every render - call this again
+  // afterwards. The zoom path publishes unconditionally because it is not
+  // creating containers, only changing what the existing ones may occupy.
+  if (!containers.length) return;
+
+  const { splitView, available, zoomFactor } = publishBreakoutBudget();
 
   // Read pass. A container inside a collapsed section (display: none) has zero
   // width and cannot be measured; clearing it would drop a breakout that could
