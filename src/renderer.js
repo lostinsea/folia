@@ -732,6 +732,7 @@ const UI_STRINGS = {
   'notif.copyFailed': 'Failed to copy to clipboard',
   'notif.fileDeleted': 'Warning: The opened file has been deleted from disk',
   'notif.fileReloaded': 'File reloaded successfully',
+  'notif.largeDocumentRestored': '"${name}" is large - it may take about ${seconds}s to display',
   'notif.reloadFailed': 'Failed to reload file: ',
   'notif.noTextSelected': 'No text selected',
   'notif.copied': 'Copied to clipboard',

@@ -3573,7 +3573,7 @@ const REVERTS = [
     // because the memo records an acceptance that never happened.
     what: "ignore the reader's answer and switch to the expensive tab anyway",
     file: TABS,
-    from: "    if (tabId !== activeTabId && !confirmLargeTab(tab)) {",
+    from: "    if (tabId !== activeTabId && !confirmLargeTab(tab, options && options.silent)) {",
     to: "    if (false) {",
     expect: [
       /opening an expensive file asks, and declining leaves the reader put/,
@@ -3740,6 +3740,107 @@ const REVERTS = [
     to: "      /* path not copied */",
     expect: [/the tab menu copies that tab's full path and closes itself/],
     mustPass: [/right-clicking a tab opens its menu on screen/],
+  },
+
+  // --- Scenario 12: batch paths must not interrogate the reader ------------
+  // Restoring a session used to raise one "Large document" modal per expensive
+  // tab and render every restored document. Each entry below neutralises one
+  // half of the fix, so a future edit cannot quietly reinstate either.
+  {
+    id: "R250",
+    suite: "test:tabs",
+    // createTab() switching to every tab it creates is what made a restore
+    // both render N documents and ask N questions.
+    what: "make a session restore switch to every tab it creates",
+    file: TABS,
+    from: "                const tab = createTab(tabData.filePath, content, {\n                  activate: false,\n                });",
+    to: "                const tab = createTab(tabData.filePath, content);",
+    expect: [
+      /a session restore asks nothing, however many expensive tabs it holds/,
+      /a session restore renders the active document only, not every tab/,
+    ],
+    mustPass: [/a session restore really did restore every tab/],
+  },
+  {
+    id: "R251",
+    suite: "test:tabs",
+    // The single switch a restore performs. Without silent:true the reader is
+    // asked about the document they were already reading, before the window is
+    // usable - and the scenario answers "no", so the restore loses it.
+    what: "make the one switch a restore performs raise the modal",
+    file: TABS,
+    from: "          switchToTab(restored.id, { silent: true });",
+    to: "          switchToTab(restored.id);",
+    expect: [
+      /restoring an expensive active document asks nothing and still renders it/,
+      /restoring an expensive document says so passively, naming the file/,
+    ],
+    mustPass: [
+      /a session restore asks nothing, however many expensive tabs it holds/,
+    ],
+  },
+  {
+    id: "R252",
+    suite: "test:tabs",
+    // main.js runs confirmLargeDocument() before it emits 'file-opened', so
+    // anything the tab layer asks is the SECOND identical dialog for one open.
+    what: "ask again about a document main.js has already asked about",
+    file: TABS,
+    from: "      createTab(filePath, content, { confirmed: true });",
+    to: "      createTab(filePath, content);",
+    expect: [/a file main.js already asked about is not asked about again/],
+    mustPass: [
+      /a multi-select opens every file but renders only the chosen one/,
+    ],
+  },
+  {
+    id: "R253",
+    suite: "test:tabs",
+    // The trailing files of a multi-select are a batch: switching to each in
+    // turn renders every document and asks about every expensive one, then
+    // leaves the reader on the last file rather than the one they chose.
+    what: "make a multi-select switch to every extra file it opens",
+    file: TABS,
+    from: "              createTab(extraPath, readFromDisk(extraPath), {\n                activate: false,\n              });",
+    to: "              createTab(extraPath, readFromDisk(extraPath));",
+    expect: [
+      /a multi-select opens every file but renders only the chosen one/,
+      /a file main.js already asked about is not asked about again/,
+    ],
+    mustPass: [/a session restore really did restore every tab/],
+  },
+  {
+    id: "R254",
+    suite: "test:tabs",
+    // The already-open branch of 'file-opened' returns early, so it never
+    // reaches createTab's confirmed flag and needs the acceptance recorded
+    // separately.
+    what: "ask again when a link re-opens a file that is already open",
+    file: TABS,
+    from: "        largeConfirmed.add(existingTab.id);",
+    to: "        /* acceptance not carried over */",
+    expect: [/re-opening a file that is already open does not ask a second time/],
+    mustPass: [
+      /a multi-select opens every file but renders only the chosen one/,
+    ],
+  },
+  {
+    id: "R255",
+    suite: "test:tabs",
+    // The silent path renders the document, so it must also RECORD that the
+    // cost was accepted. Without this the reader is asked, with a modal, about
+    // the document that is already on their screen - the moment they come back
+    // to it from another tab.
+    what: "restore a document silently but do not record the acceptance",
+    file: TABS,
+    from: "      largeConfirmed.add(tab.id);\n      notify(",
+    to: "      notify(",
+    expect: [
+      /a document restored and already on screen is never asked about later/,
+    ],
+    mustPass: [
+      /restoring an expensive active document asks nothing and still renders it/,
+    ],
   },
 ];
 

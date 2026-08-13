@@ -191,8 +191,10 @@
   // either is missing. Note for the dead-string sweep in test-packaging.js:
   // keys reached only through this wrapper are NOT written as i18n('...'),
   // so the sweep matches t('...') as well.
-  function t(key, fallback) {
-    return typeof window.i18n === "function" ? window.i18n(key) : fallback;
+  function t(key, fallback, params) {
+    return typeof window.i18n === "function"
+      ? window.i18n(key, params)
+      : fallback;
   }
 
   function notify(message, duration = 3000) {
@@ -435,7 +437,24 @@
   // Tab Management Functions
   // ============================================
 
-  function createTab(filePath, content) {
+  /**
+   * @param {string} filePath
+   * @param {string} content
+   * @param {{activate?: boolean, confirmed?: boolean}} [options]
+   *   activate  - false for BATCH creation (session restore, the trailing
+   *               files of a multi-select). Creating a tab used to switch to
+   *               it unconditionally, so restoring four tabs rendered four
+   *               documents and only the last was ever seen - measured at 5
+   *               renders for 4 tabs - and asked the large-document question
+   *               once per expensive file before the app was usable.
+   *   confirmed - the cost of this document has ALREADY been accepted, so the
+   *               per-tab guard must not ask again. main.js runs
+   *               confirmLargeDocument() before it emits `file-opened`, and
+   *               without this the reader answered the identical dialog twice
+   *               for a single open (measured).
+   */
+  function createTab(filePath, content, options) {
+    const opts = options || {};
     const tabId = ++tabIdCounter;
     const pathParts = filePath.split(/[\\/]/);
     const filename = pathParts[pathParts.length - 1];
@@ -459,8 +478,11 @@
       "Total tabs:",
       tabs.length,
     );
+    // Must precede the switch below, or the switch asks a question main.js has
+    // already had answered.
+    if (opts.confirmed) largeConfirmed.add(tabId);
     renderTabs();
-    switchToTab(tabId);
+    if (opts.activate !== false) switchToTab(tabId);
     saveTabs();
 
     return tab;
@@ -594,9 +616,15 @@
    * guard in main.js, and clicking its tab is the first moment the cost is
    * real. This is that guard, at the point where the work actually happens.
    *
+   * @param {object} tab
+   * @param {boolean} silent - true on a BATCH path (session restore), where a
+   *   modal is wrong: the reader did not ask for anything, the dialog appears
+   *   before the app is usable, and there is one per expensive file. The
+   *   document is restored anyway - it is the one they were reading when they
+   *   closed the app - and the cost is reported passively instead.
    * @returns {boolean} true if the switch should proceed
    */
-  function confirmLargeTab(tab) {
+  function confirmLargeTab(tab, silent) {
     if (!fileHelpers || typeof fileHelpers.isLargeDocument !== "function") return true;
     if (largeConfirmed.has(tab.id)) return true;
 
@@ -610,11 +638,28 @@
     }
     if (!verdict.large) return true;
 
+    const seconds = Math.round(verdict.estimatedMs / 1000);
+
+    if (silent) {
+      // Rendering it is the point, so record the acceptance: being asked later
+      // about a document already on screen would be nonsense.
+      largeConfirmed.add(tab.id);
+      notify(
+        t(
+          "notif.largeDocumentRestored",
+          `"${tab.filename}" is large - it may take about ${seconds}s to display`,
+          { name: tab.filename, seconds: seconds },
+        ),
+        6000,
+      );
+      return true;
+    }
+
     let proceed = true;
     try {
       proceed = window.ipcRenderer.sendSync("confirm-large-render", {
         name: tab.filename,
-        seconds: Math.round(verdict.estimatedMs / 1000),
+        seconds: seconds,
       });
     } catch (error) {
       console.error("[CustomTabs] size confirmation failed:", error);
@@ -624,10 +669,16 @@
     return proceed;
   }
 
-  function switchToTab(tabId) {
+  /**
+   * @param {number} tabId
+   * @param {{silent?: boolean}} [options] - silent suppresses the large-document
+   *   MODAL only (see confirmLargeTab). Batch paths pass it; every switch a
+   *   reader actually asks for does not.
+   */
+  function switchToTab(tabId, options) {
     const tab = tabs.find((t) => t.id === tabId);
     if (!tab) return;
-    if (tabId !== activeTabId && !confirmLargeTab(tab)) {
+    if (tabId !== activeTabId && !confirmLargeTab(tab, options && options.silent)) {
       // Declining means the switch does not happen: the reader stays where
       // they were, with the document they were reading still on screen. This
       // runs BEFORE snapshotActiveTab() and before any state is mutated, so
@@ -826,7 +877,13 @@
             try {
               if (window.fs.existsSync(tabData.filePath)) {
                 const content = readFromDisk(tabData.filePath);
-                const tab = createTab(tabData.filePath, content);
+                // activate:false - a restore must not switch to every tab it
+                // creates. It used to, so restoring N tabs rendered N
+                // documents and raised the large-document dialog once per
+                // expensive file, all before the window was usable.
+                const tab = createTab(tabData.filePath, content, {
+                  activate: false,
+                });
                 tab.scrollPosition = tabData.scrollPosition || 0;
                 tab.anchor = tabData.anchor || null;
                 console.log("[CustomTabs] Restored tab:", tabData.filePath);
@@ -850,7 +907,11 @@
             const restored =
               (savedActiveTabPath && findTabByPath(savedActiveTabPath)) ||
               tabs[0];
-            switchToTab(restored.id);
+          // The one switch a restore performs. silent:true because the reader
+          // did not ask for it: this is the document they left open, so it is
+          // restored and its cost reported passively rather than behind a
+          // modal that blocks the app before it is even visible.
+          switchToTab(restored.id, { silent: true });
           }
         } else {
           console.log("[CustomTabs] No fs module or no tabs to restore");
@@ -893,19 +954,30 @@
       const existingTab = findTabByPath(filePath);
       if (existingTab) {
         console.log("[CustomTabs] File already open, switching to tab");
+        // main.js has already asked about this document's cost on the way
+        // here, so the per-tab guard must not ask a second time.
+        largeConfirmed.add(existingTab.id);
         switchToTab(existingTab.id);
         return;
       }
 
-      // Create new tab
-      createTab(filePath, content);
+      // confirmed:true - `file-opened` is only emitted after main.js's
+      // confirmLargeDocument() has had its answer. Without this the reader saw
+      // the identical "Large document" dialog twice for one open (measured).
+      createTab(filePath, content, { confirmed: true });
 
-      // If multiple files selected, open them all
+      // If multiple files selected, open them all. activate:false - the
+      // trailing files of a multi-select are a BATCH: switching to each one in
+      // turn renders every document, leaves only the last visible, and asks
+      // about each expensive file separately. The reader's chosen document is
+      // the first, which is the one already active.
       if (allPaths && allPaths.length > 1) {
         allPaths.slice(1).forEach((extraPath) => {
           if (!findTabByPath(extraPath) && window.fs) {
             try {
-              createTab(extraPath, readFromDisk(extraPath));
+              createTab(extraPath, readFromDisk(extraPath), {
+                activate: false,
+              });
             } catch (error) {
               console.error(
                 "[CustomTabs] Error loading file:",
@@ -1278,6 +1350,12 @@
     // targets the element the engine actually scrolls, rather than re-deriving
     // that guess in the test and proving nothing.
     __getScroller: getScroller,
+    // Session restore runs on DOMContentLoaded, so the only way to drive the
+    // real batch path without reloading the window - which would destroy the
+    // suite's error sentinel and its state - is to call it. Same test-seam
+    // convention as __getScroller: assert on the real function, never on a
+    // re-implementation of it.
+    __loadSavedTabs: loadSavedTabs,
     closeTab,
     updateTabContent,
     renderTabs,

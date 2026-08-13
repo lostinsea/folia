@@ -2469,6 +2469,274 @@ async function run(win) {
     await sleep(300);
   }
 
+  // ---- Scenario 12: batch paths must not interrogate the reader ----------
+  // Two defects, both MEASURED on the pre-fix tree before anything was
+  // changed. Restoring four tabs (three of them expensive) raised THREE
+  // "Large document" modals before the window was usable, and performed FIVE
+  // renders for four tabs - every restored document was rendered and only the
+  // last was ever seen. Cause: createTab() switched to every tab it created,
+  // and switchToTab() is both the thing that renders and the thing that asks.
+  //
+  // The recorded decision is that batch paths (session restore, the trailing
+  // files of a multi-select) skip the dialog and report passively, while every
+  // switch a reader actually asks for keeps it. Scenario 10 owns that second
+  // half; this scenario owns the first, and deliberately re-checks that the
+  // explicit path still asks so a fix here cannot disable the guard outright.
+  //
+  // Sample shape is borrowed from Scenario 10: a long run of pipes scores as
+  // expensive (pipes are table cells) but marked renders it as one paragraph,
+  // so the scenario does not cost the ten seconds it is describing.
+  const restoreBigA = path.join(dir, "restore-big-a.md");
+  const restoreBigB = path.join(dir, "restore-big-b.md");
+  const restoreBigC = path.join(dir, "restore-big-c.md");
+  const restoreSmall = path.join(dir, "restore-small.md");
+  write(restoreBigA, "|".repeat(260000) + "\nRESTORE_BIG_A\n");
+  write(restoreBigB, "|".repeat(260000) + "\nRESTORE_BIG_B\n");
+  write(restoreBigC, "|".repeat(260000) + "\nRESTORE_BIG_C\n");
+  write(restoreSmall, "# Small\n\nRESTORE_SMALL_DOC\n");
+  const jsRestoreBigA = JSON.stringify(restoreBigA);
+  const jsRestoreSmall = JSON.stringify(restoreSmall);
+  const restoreSession = JSON.stringify(
+    JSON.stringify(
+      [restoreBigA, restoreBigB, restoreBigC, restoreSmall].map((p) => ({
+        filePath: p,
+        scrollPosition: 0,
+        anchor: null,
+      })),
+    ),
+  );
+
+  const batch = await exec(`
+    (async () => {
+      const out = {};
+      const helpers = require('./file-helpers');
+      out.bigIsLarge = helpers.isLargeDocument(window.fs.readFileSync(${JSON.stringify(restoreBigA)}, 'utf8')).large;
+      out.smallIsLarge = helpers.isLargeDocument(window.fs.readFileSync(${jsRestoreSmall}, 'utf8')).large;
+
+      const realSendSync = window.ipcRenderer.sendSync;
+      const realRender = window.renderMarkdown;
+      let asked = 0;
+      let answer = true;
+      const renders = [];
+      const toasts = [];
+      window.ipcRenderer.sendSync = function (channel) {
+        if (channel === 'confirm-large-render') { asked++; return answer; }
+        return realSendSync.apply(this, arguments);
+      };
+      // switchToTab renders through window.renderMarkdown, so counting here
+      // counts the work a restore actually performs rather than restating the
+      // number of tabs.
+      window.renderMarkdown = function (text) {
+        renders.push(String(text || '').slice(0, 24));
+        return realRender.apply(this, arguments);
+      };
+      const toastEl = document.getElementById('notificationMessage');
+      const toastObserver = new MutationObserver(() => toasts.push(toastEl.textContent));
+      if (toastEl) toastObserver.observe(toastEl, { childList: true, characterData: true, subtree: true });
+
+      try {
+        window.CustomTabs.getTabs().forEach(t => { t.hasUnsavedChanges = false; });
+        window.CustomTabs.getTabs().slice().forEach(t => window.CustomTabs.closeTab(t.id));
+        await new Promise(r => setTimeout(r, 200));
+
+        // ---- restore, with an ORDINARY document as the active one ----
+        localStorage.setItem('openTabs', ${restoreSession});
+        localStorage.setItem('activeTabPath', ${jsRestoreSmall});
+        asked = 0; renders.length = 0; toasts.length = 0;
+        window.CustomTabs.__loadSavedTabs();
+        await new Promise(r => setTimeout(r, 900));
+        out.askedOnRestore = asked;
+        out.rendersOnRestore = renders.length;
+        out.tabsAfterRestore = window.CustomTabs.getTabs().length;
+        out.restoredActiveIsSmall =
+          (window.CustomTabs.getActiveTab() || {}).filePath === ${jsRestoreSmall};
+        out.smallOnScreen =
+          document.getElementById('viewer').textContent.indexOf('RESTORE_SMALL_DOC') !== -1;
+
+        // A tab restored but never activated is still guarded: clicking it is
+        // an explicit act. Without this the fix could be "delete the guard".
+        const bigTab = window.CustomTabs.findTabByPath(${jsRestoreBigA});
+        let mark = asked;
+        answer = false;
+        window.CustomTabs.switchToTab(bigTab.id);
+        await new Promise(r => setTimeout(r, 400));
+        out.askedOnExplicitClick = asked - mark;
+        out.declineKeptReaderPut =
+          (window.CustomTabs.getActiveTab() || {}).filePath === ${jsRestoreSmall};
+
+        window.CustomTabs.getTabs().forEach(t => { t.hasUnsavedChanges = false; });
+        window.CustomTabs.getTabs().slice().forEach(t => window.CustomTabs.closeTab(t.id));
+        await new Promise(r => setTimeout(r, 200));
+
+        // ---- restore, with an EXPENSIVE document as the active one ----
+        // The recorded decision: restore it rather than leaving the reader
+        // staring at nothing, and say so passively instead of behind a modal.
+        localStorage.setItem('openTabs', ${restoreSession});
+        localStorage.setItem('activeTabPath', ${jsRestoreBigA});
+        asked = 0; renders.length = 0; toasts.length = 0;
+        answer = false; // would DECLINE if anything asked
+        window.CustomTabs.__loadSavedTabs();
+        await new Promise(r => setTimeout(r, 900));
+        out.askedOnBigRestore = asked;
+        out.rendersOnBigRestore = renders.length;
+        out.bigRestoredActive =
+          (window.CustomTabs.getActiveTab() || {}).filePath === ${jsRestoreBigA};
+        out.bigOnScreen =
+          document.getElementById('viewer').textContent.indexOf('RESTORE_BIG_A') !== -1;
+        out.toastNamedIt = toasts.some(m => /restore-big-a\\.md/.test(m) && /large/i.test(m));
+        // Already on screen, so revisiting it must never raise the question.
+        //
+        // Two traps here, both hit for real. (1) If the restore's switch was
+        // declined - which is exactly what a revert of silent:true produces -
+        // nothing is active and getActiveTab() is undefined. Dereferencing it
+        // makes the PROBE throw, and a probe that throws reports "harness
+        // threw" with no named assertion, which is indistinguishable from a
+        // broken test. Record the miss instead. (2) switchToTab() returns
+        // early when the target is already active, so if the move AWAY is
+        // declined the return trip is a no-op and the count is vacuous. The
+        // scenario therefore accepts the question it raises on the way out,
+        // and asserts the move really happened.
+        const restoredBig = window.CustomTabs.getActiveTab();
+        const otherTab = restoredBig
+          ? window.CustomTabs.getTabs().find(t => t.id !== restoredBig.id)
+          : null;
+        if (restoredBig && otherTab) {
+          answer = true;
+          window.CustomTabs.switchToTab(otherTab.id);
+          await new Promise(r => setTimeout(r, 300));
+          out.revisitMovedAway =
+            (window.CustomTabs.getActiveTab() || {}).id === otherTab.id;
+          mark = asked;
+          window.CustomTabs.switchToTab(restoredBig.id);
+          await new Promise(r => setTimeout(r, 300));
+          out.askedOnRevisitAfterRestore = asked - mark;
+        } else {
+          out.revisitMovedAway = false;
+          out.askedOnRevisitAfterRestore = -1;
+        }
+
+        window.CustomTabs.getTabs().forEach(t => { t.hasUnsavedChanges = false; });
+        window.CustomTabs.getTabs().slice().forEach(t => window.CustomTabs.closeTab(t.id));
+        await new Promise(r => setTimeout(r, 200));
+
+        // ---- multi-select, and the double-ask on a single open ----
+        // main.js runs confirmLargeDocument() before it emits 'file-opened',
+        // so anything this side asks is a SECOND dialog for one open. It was
+        // measured at two identical dialogs before the fix.
+        asked = 0; renders.length = 0;
+        // ACCEPT here, deliberately. Declining masks the very work this leg
+        // measures: a switch that is refused neither renders nor moves the
+        // reader, so a revert that switches to every extra file would leave
+        // the render count and the active tab looking correct. MEASURED -
+        // R253 came back WRONG-GUARD for exactly this reason.
+        answer = true;
+        window.ipcRenderer.emit('file-opened', {}, {
+          content: window.fs.readFileSync(${JSON.stringify(restoreBigA)}, 'utf8'),
+          path: ${JSON.stringify(restoreBigA)},
+          allPaths: [${JSON.stringify(restoreBigA)}, ${JSON.stringify(restoreBigB)}, ${JSON.stringify(restoreBigC)}],
+        });
+        await new Promise(r => setTimeout(r, 900));
+        out.askedOnMultiOpen = asked;
+        out.multiOpenTabs = window.CustomTabs.getTabs().length;
+        out.multiOpenActiveIsFirst =
+          (window.CustomTabs.getActiveTab() || {}).filePath === ${JSON.stringify(restoreBigA)};
+        out.rendersOnMultiOpen = renders.length;
+
+        // The same file arriving again - a markdown link to a document that is
+        // already open. main.js has asked about it on the way here, so this
+        // side must not ask a second time either.
+        mark = asked;
+        window.ipcRenderer.emit('file-opened', {}, {
+          content: window.fs.readFileSync(${JSON.stringify(restoreBigB)}, 'utf8'),
+          path: ${JSON.stringify(restoreBigB)},
+          allPaths: [${JSON.stringify(restoreBigB)}],
+        });
+        await new Promise(r => setTimeout(r, 700));
+        out.askedOnReopen = asked - mark;
+        out.reopenSwitched =
+          (window.CustomTabs.getActiveTab() || {}).filePath === ${JSON.stringify(restoreBigB)};
+        out.tabsAfterReopen = window.CustomTabs.getTabs().length;
+
+        window.CustomTabs.getTabs().forEach(t => { t.hasUnsavedChanges = false; });
+        window.CustomTabs.getTabs().slice().forEach(t => window.CustomTabs.closeTab(t.id));
+      } finally {
+        window.ipcRenderer.sendSync = realSendSync;
+        window.renderMarkdown = realRender;
+        toastObserver.disconnect();
+      }
+      return out;
+    })()
+  `);
+  await sleep(400);
+
+  // Vacuity guards first: if the sample stopped scoring as expensive, or the
+  // restore stopped restoring, every "0 dialogs" assertion below would pass
+  // for the worst possible reason.
+  check(
+    "the restore samples really are scored expensive and the control is not",
+    batch.bigIsLarge === true && batch.smallIsLarge === false,
+    JSON.stringify(batch),
+  );
+  check(
+    "a session restore really did restore every tab",
+    batch.tabsAfterRestore === 4 && batch.restoredActiveIsSmall === true,
+    JSON.stringify(batch),
+  );
+  check(
+    "a session restore asks nothing, however many expensive tabs it holds",
+    batch.askedOnRestore === 0,
+    JSON.stringify(batch),
+  );
+  check(
+    "a session restore renders the active document only, not every tab",
+    batch.rendersOnRestore === 1 && batch.smallOnScreen === true,
+    JSON.stringify(batch),
+  );
+  check(
+    "a restored-but-unvisited expensive tab still asks when it is clicked",
+    batch.askedOnExplicitClick === 1 && batch.declineKeptReaderPut === true,
+    JSON.stringify(batch),
+  );
+  check(
+    "restoring an expensive active document asks nothing and still renders it",
+    batch.askedOnBigRestore === 0 &&
+      batch.bigRestoredActive === true &&
+      batch.bigOnScreen === true,
+    JSON.stringify(batch),
+  );
+  check(
+    "restoring an expensive document says so passively, naming the file",
+    batch.toastNamedIt === true,
+    JSON.stringify(batch),
+  );
+  check(
+    "a restore renders one document even when that document is expensive",
+    batch.rendersOnBigRestore === 1,
+    JSON.stringify(batch),
+  );
+  check(
+    "a document restored and already on screen is never asked about later",
+    batch.askedOnRevisitAfterRestore === 0 && batch.revisitMovedAway === true,
+    JSON.stringify(batch),
+  );
+  check(
+    "a file main.js already asked about is not asked about again",
+    batch.askedOnMultiOpen === 0 && batch.multiOpenActiveIsFirst === true,
+    JSON.stringify(batch),
+  );
+  check(
+    "a multi-select opens every file but renders only the chosen one",
+    batch.multiOpenTabs === 3 && batch.rendersOnMultiOpen === 1,
+    JSON.stringify(batch),
+  );
+  check(
+    "re-opening a file that is already open does not ask a second time",
+    batch.askedOnReopen === 0 &&
+      batch.reopenSwitched === true &&
+      batch.tabsAfterReopen === 3,
+    JSON.stringify(batch),
+  );
+
   // Prove the watcher was actually watching. Without this, "no errors were
   // recorded" and "the watcher silently stopped working" are the same result -
   // the exact vacuity this harness exists to eliminate. Both detection paths
