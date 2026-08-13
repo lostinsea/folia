@@ -3842,6 +3842,29 @@ const REVERTS = [
       /restoring an expensive active document asks nothing and still renders it/,
     ],
   },
+  {
+    id: "R256",
+    suite: "test:visual",
+    // capturePage() hands back the last COMPOSITED frame, so without a settle
+    // a screenshot taken right after a change can show the state before it.
+    // MEASURED at ~27% of captures (8 of 30 focused, 8 of 30 with another
+    // window on top; 0 of 60 with the settle). The artifact is fresh and looks
+    // right, which is why this needs a permanent assertion rather than a
+    // comment - several defects in this project were found by looking at a
+    // screenshot, and a one-in-four chance of being shown the previous frame
+    // quietly undermines all of them.
+    what: "capture without waiting for a frame that reflects the current DOM",
+    file: VISUAL,
+    from: "        await settleFrame(win);\n",
+    to: "",
+    expect: [/a screenshot shows the frame as it is now, not the one before it/],
+    mustPass: [
+      // If the captures stopped happening at all, "it showed the previous
+      // frame" and "there was nothing to show" are the same result.
+      /the frame-freshness probe really captured every frame it asked for/,
+      /the frame-freshness probe read colours it understands/,
+    ],
+  },
 ];
 
 const argv = process.argv.slice(2);

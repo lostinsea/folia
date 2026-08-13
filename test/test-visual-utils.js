@@ -402,6 +402,48 @@ const SHOT_DIR = path.join(__dirname, "..", "screenshots");
 // flaking, raise these rather than concluding capture is permanently broken.
 const CAPTURE_RETRIES = 4;
 const CAPTURE_RETRY_DELAY_MS = 250;
+// Measured max wait for two animation frames on a visible window: 35ms. This
+// is 7x that, and it is a CEILING rather than a delay - see settleFrame().
+const FRAME_SETTLE_TIMEOUT_MS = 250;
+
+/**
+ * Wait for the compositor to have produced a frame that reflects the DOM as it
+ * now stands, before asking for a copy of it.
+ *
+ * capturePage() hands back the last frame the compositor produced, which is not
+ * necessarily the current one. MEASURED on this machine by flipping a
+ * full-window background colour and capturing immediately: 8 of 30 captures
+ * came back showing the PREVIOUS colour with the window focused, and 8 of 30
+ * with another window on top - about 27% either way. Every wrong frame was
+ * exactly the previous colour rather than a blend, so these are whole stale
+ * frames, not tearing. Awaiting two animation frames first drove it to 0 of 60.
+ *
+ * Two things this deliberately does NOT do, both decided by measurement:
+ *
+ *  - it does not raise or focus the window. `showInactive()` + `moveTop()` +
+ *    `focus()` + 350ms was the recipe carried in from an earlier investigation;
+ *    measured against the double rAF it fixed nothing further (0 of 12 either
+ *    way), while costing 350ms per shot and stealing focus from whatever the
+ *    reader is doing - the same harm trapExternalOpens exists to prevent.
+ *
+ *  - it never awaits those frames unconditionally. On a HIDDEN window
+ *    requestAnimationFrame never fires at all (measured: still pending after
+ *    2s), so an unraced await would hang a suite forever, inside a function
+ *    whose whole contract is that it cannot take a run down with it.
+ */
+async function settleFrame(win) {
+  try {
+    await Promise.race([
+      win.webContents.executeJavaScript(
+        "new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))",
+        true,
+      ),
+      new Promise((r) => setTimeout(r, FRAME_SETTLE_TIMEOUT_MS)),
+    ]);
+  } catch (e) {
+    // Best effort: a capture with no settle is still better than no capture.
+  }
+}
 
 /**
  * Capture a screenshot as a debugging artifact.
@@ -439,6 +481,7 @@ async function captureScreenshot(win, name) {
           break;
         }
         fs.mkdirSync(SHOT_DIR, { recursive: true });
+        await settleFrame(win);
         const img = await win.webContents.capturePage();
         // A capture can succeed and still be empty if no frame was produced.
         if (img.isEmpty()) throw new Error("captured an empty frame");

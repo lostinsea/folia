@@ -51,7 +51,7 @@ app.whenReady().then(async () => {
     console.log("TIMED OUT");
     lines.push("TIMED OUT");
     done(1);
-  }, 30000);
+  }, 90000);
 
   try {
     // ---------------------------------------------------------------------
@@ -194,6 +194,115 @@ app.whenReady().then(async () => {
       "a failed capture deletes the stale artifact rather than leaving it to be misread",
       fs.existsSync(stalePath) === false,
       "file still present at " + stalePath,
+    );
+
+    // FRAME FRESHNESS. capturePage() returns the last frame the compositor
+    // produced, not necessarily one that reflects the DOM as it stands - so a
+    // screenshot taken right after a change can silently show the state
+    // BEFORE it. That is the same disease as the stale artifact above wearing
+    // a different coat, and it is worse: the file is fresh, so nothing about
+    // it looks wrong. MEASURED at ~27% of captures before settleFrame() was
+    // added (8 of 30 focused, 8 of 30 with another window on top), and 0 of 60
+    // after. Screenshots are a primary verification step in this project, and
+    // several defects here were found by looking at one; a 1-in-4 chance of
+    // being shown the previous frame undermines every one of those findings.
+    //
+    // The oracle READS THE PNG BACK rather than trusting the capture call,
+    // because what is being defended is the content of the file a human ends
+    // up looking at.
+    //
+    // THE PAGE SHAPE IS LOAD-BEARING AND WAS CHOSEN BY MEASUREMENT. The first
+    // version of this section used a 400x300 solid colour and R256 came back
+    // VACUOUS: a trivial page composites faster than the capture round-trip,
+    // so it is never stale and the assertion could not fail. Measured stale
+    // rates with the settle removed, 24 samples each: 400x300 plain 0/24,
+    // 1200x900 plain 1/24, 1200x900 blurred 15/24, and 1200x900 blurred over a
+    // re-rastering layer 23/24. The last is what is used here - anything
+    // cheaper turns this back into decoration.
+    const { nativeImage } = require("electron");
+    const HEAVY_CELLS = 4000;
+    const freshWin = new BrowserWindow({ show: false, width: 1200, height: 900 });
+    await freshWin.loadURL(
+      "data:text/html;charset=utf-8," +
+        encodeURIComponent(
+          `<html><body style="margin:0">` +
+            `<div id="p" style="position:fixed;inset:0;background:red;filter:blur(12px)"></div>` +
+            `<div id="h" style="position:fixed;inset:0;opacity:0.02">` +
+            Array.from(
+              { length: HEAVY_CELLS },
+              (_, i) =>
+                `<div style="display:inline-block;width:9px;height:9px;background:hsl(${i % 360},50%,50%)"></div>`,
+            ).join("") +
+            `</div></body></html>`,
+        ),
+    );
+    // Visible, because a hidden window composites nothing - but deliberately
+    // NOT focused, so running the suite does not steal the reader's keyboard.
+    freshWin.showInactive();
+    await new Promise((r) => setTimeout(r, 500));
+
+    const FRESH_N = 24;
+    let captured = 0;
+    let staleFrames = 0;
+    let otherWrong = 0;
+    const observed = [];
+    for (let i = 0; i < FRESH_N; i++) {
+      const colour = i % 2 === 0 ? "red" : "blue";
+      const want = i % 2 === 0 ? "RED" : "BLUE";
+      const previous = i === 0 ? null : i % 2 === 0 ? "BLUE" : "RED";
+      await freshWin.webContents.executeJavaScript(
+        `document.getElementById('p').style.background = '${colour}';` +
+          `document.getElementById('h').style.transform = 'translateZ(0) rotate(${i}deg)';` +
+          ` true`,
+        true,
+      );
+      const shotFile = await captureScreenshot(freshWin, "selfcheck-frame-freshness");
+      if (!shotFile) continue;
+      captured++;
+      const img = nativeImage.createFromPath(shotFile);
+      const size = img.getSize();
+      const bits = img
+        .crop({
+          x: Math.floor(size.width / 2),
+          y: Math.floor(size.height / 2),
+          width: 1,
+          height: 1,
+        })
+        .toBitmap(); // BGRA
+      const got =
+        bits[2] > 180 && bits[1] < 80 && bits[0] < 80
+          ? "RED"
+          : bits[0] > 180 && bits[2] < 80 && bits[1] < 80
+            ? "BLUE"
+            : `other(${bits[2]},${bits[1]},${bits[0]})`;
+      observed.push(got);
+      if (got !== want) {
+        if (got === previous) staleFrames++;
+        else otherWrong++;
+      }
+    }
+    freshWin.destroy();
+
+    // Vacuity guard: with no captures at all, "no stale frames" is true for
+    // the worst possible reason.
+    expect(
+      "the frame-freshness probe really captured every frame it asked for",
+      captured === FRESH_N,
+      `captured ${captured} of ${FRESH_N}`,
+    );
+    expect(
+      "a screenshot shows the frame as it is now, not the one before it",
+      staleFrames === 0,
+      `${staleFrames} of ${captured} captures showed the PREVIOUS frame: ${observed.join(",")}`,
+    );
+    // Kept separate: a colour that is neither the current nor the previous one
+    // is a broken probe (wrong sample point, scaling, colour space), not the
+    // staleness this section exists to catch, and diagnosing it as staleness
+    // would send the next reader in the wrong direction.
+    expect(
+      "the frame-freshness probe read colours it understands",
+      otherWrong === 0,
+      `unrecognised frames: ${observed.join(",")}`,
     );
   } catch (e) {
     expect("selfcheck ran without throwing", false, String(e && e.stack));
