@@ -48,6 +48,22 @@ libs/tabulator/LICENSE text eol=lf
 # "bad interpreter" error when the shebang line ends in a stray carriage return.
 *.sh text eol=lf
 
+# Written by scripts/capture-theme-golden.js (JSON.stringify + "\n", LF on every
+# platform), and read back byte-for-byte by test:theme. Same trap as
+# bench/manifest.json above: without the pin, a CRLF checkout shows the golden
+# as permanently modified and re-capturing cannot clean it up, because the
+# capture writes LF and git converts it straight back.
+test/fixtures/theme-golden.json text eol=lf
+
+# The census fixture is the INPUT the golden was captured from, so both sides of
+# that comparison want to be byte-stable across checkouts. Measured, not
+# assumed: converting this file from CRLF to LF and re-running test:theme
+# reproduces all 74 token records in both modes (76/76), so marked and Prism
+# normalise line endings and the golden is not EOL-sensitive. It is pinned for
+# determinism rather than correctness - and so that the "any edit here requires
+# a full golden re-capture" rule is never triggered by a checkout.
+test/fixtures/syntax-census.md text eol=lf
+
 # Binary assets: never apply end-of-line conversion.
 *.png binary
 *.ico binary
