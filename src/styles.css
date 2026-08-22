@@ -73,6 +73,229 @@ body.dark-mode {
   --border-color: #404040;
 }
 
+/* ───────────────────────────────────────────────────────────────────────────
+   THEME TOKENS
+   ───────────────────────────────────────────────────────────────────────────
+   Two tiers, and the split was derived by measurement rather than chosen.
+
+   A census of every .token element rendered from a 12-language fixture (see
+   test/fixtures/syntax-census.md) found that light and dark each use exactly 8
+   colours, but they GROUP the rendered tokens DIFFERENTLY - e.g. `keyword` and
+   `builtin` are one colour in dark and two in light; `string` and `regex`
+   likewise. So a single set of role variables cannot reproduce both default
+   themes exactly. The coarsest set that can is the common refinement of the two
+   groupings.
+
+   Hence:
+     --syn-*  (10) COARSE roles. This is the surface a new scheme fills in.
+     --tok-* (25)  FINE, one per refinement cell, each declared in terms of a
+                   coarse role. The fine->coarse mapping is declared SEPARATELY
+                   PER MODE because it genuinely differs - 15 of the 25 cells
+                   resolve differently in light than in dark. A scheme may also
+                   override any --tok-* directly when it wants a distinction the
+                   mode's default mapping collapses.
+
+   NOT EVERY FINE CELL READS FROM A ROLE, and the ones that do not are listed in
+   ROLE_FREE_CELLS in test/test-theme.js, which asserts the set is exactly that.
+   Two kinds live there legitimately: cells declared `inherit`, which record
+   that the source theme wrote NO rule (a structural fact, not a colour), and
+   --tok-namespace-opacity, which is not a palette entry. The rest - dark's
+   --tok-inserted and --tok-function-name - are Tomorrow Night colours outside
+   its role palette, and a scheme that fills only the roles KEEPS them. That is
+   deliberate but it is a trap, so the ledger names each one and a new role-free
+   cell fails rather than silently inheriting a default scheme's colour.
+
+   The census keys each token on its class-set PLUS its ancestor token chain,
+   because several of these cells are CONTEXT-DEPENDENT in light mode - Solarized
+   writes no rule for `operator` or a colour for `namespace`, so both inherit,
+   and a namespace is cyan inside `attr-name`, blue inside `tag` and base00 when
+   bare. Keying on the class-set alone collapsed those into one cell and hid a
+   real regression; the golden records 74 keys per mode, not 51.
+
+   A cell is named for the PRIMARY class it paints, not the only one - both
+   default themes give several classes one colour, so e.g. --tok-comment also
+   paints prolog/doctype/cdata, and --tok-regex also paints .token.variable. The rules block at the END of this file is the authoritative
+   statement of which classes each cell reaches; override a cell knowing that.
+
+   THESE MUST BE DECLARED ON `body`, NEVER ON `:root`. A custom property whose
+   value contains var() is substituted at computed-value time ON THE ELEMENT
+   WHERE IT IS DECLARED. `:root` is <html>, so a mapping declared there resolves
+   against html's roles and a body[data-theme] override of a role would be
+   SILENTLY IGNORED - every scheme would render default syntax colours while its
+   chrome changed, with no error anywhere. Measured in Electron 43.
+
+   Scheme blocks must also appear AFTER the body.dark-mode block below:
+   body.dark-mode and body[data-theme="id"] are both specificity (0,1,1), so
+   source order decides. */
+
+body {
+  /* Solarized Light, by Ethan Schoonover; ported for PrismJS by Hector Matos.
+     http://ethanschoonover.com/solarized - these are the exact values Folia
+     shipped when syntax highlighting came from the vendored stylesheet. */
+  --syn-comment: #93a1a1; /* base1 */
+  --syn-punctuation: #586e75; /* base01 */
+  --syn-operator: #657b83; /* base00 */
+  --syn-keyword: #859900; /* green */
+  --syn-string: #2aa198; /* cyan */
+  --syn-literal: #268bd2; /* blue */
+  --syn-tag: #268bd2; /* blue */
+  --syn-function: #b58900; /* yellow */
+  --syn-variable: #cb4b16; /* orange */
+  /* A BACKGROUND swatch, and the only role that is not a foreground colour.
+     It earns a role because a scheme that filled the nine colour roles and
+     nothing else would still paint entities on Solarized cream - the exact
+     defect the dark block below records as amendment 1, reproduced for every
+     future scheme instead of for one mode. */
+  --syn-entity-bg: #eee8d5; /* base2 */
+
+  /* Light fine -> coarse mapping. */
+  --tok-comment: var(--syn-comment);
+  /* Solarized Light writes no `.token.block-comment` rule, so it INHERITED,
+     while the dark theme groups it with `comment` at #999. One of the cells
+     where the two defaults disagree about whether a rule exists at all - and
+     folding it into the comment group repainted it base1 in light. No bundled
+     grammar emits `block-comment`, so neither the golden nor a wiring check can
+     see the difference; test-theme.js section 9 pins the value against the
+     shipped source. */
+  --tok-block-comment: inherit;
+  --tok-punctuation: var(--syn-punctuation);
+  /* Solarized Light writes NO `.token.operator` rule and gives `.token.namespace`
+     opacity but no colour, so both inherited from whatever enclosed them. That
+     is not a detail: a nested operator (inside `class-name`) was yellow, and a
+     namespace was cyan inside `attr-name`, blue inside `tag` and base00 bare in
+     C#. Pinning either to an absolute silently repainted five elements. Tomorrow
+     Night DOES declare both (#67cdcc / #e2777a), which is why only this block
+     inherits. `--syn-operator` is still real here - Solarized declares it for
+     `.token.entity`. */
+  --tok-operator: inherit;
+  --tok-entity: var(--syn-operator);
+  --tok-keyword: var(--syn-keyword);
+  --tok-attr-value: var(--syn-keyword);
+  --tok-string: var(--syn-string);
+  --tok-builtin: var(--syn-string);
+  --tok-attr-name: var(--syn-string);
+  --tok-url: var(--syn-string);
+  --tok-inserted: var(--syn-string);
+  --tok-constant: var(--syn-literal);
+  --tok-number: var(--syn-literal);
+  --tok-deleted: var(--syn-literal);
+  --tok-tag: var(--syn-tag);
+  --tok-namespace: inherit;
+  --tok-function: var(--syn-function);
+  --tok-class-name: var(--syn-function);
+  --tok-builtin-class: var(--syn-function);
+  --tok-regex: var(--syn-variable);
+  --tok-important: var(--syn-variable);
+  /* Solarized Light writes no rule for function-name, so it inherits whatever
+     encloses it. `inherit` reproduces that exactly, whatever that turns out to
+     be, rather than guessing a value. */
+  --tok-function-name: inherit;
+
+  /* Non-colour parts of the two cells that are NOT distinguished by colour.
+     `entity` is separated from `operator` only by its background and cursor,
+     and `namespace` from `tag` only by opacity. A colour-only theme system
+     would silently lose both. */
+  --tok-entity-bg: var(--syn-entity-bg);
+  --tok-namespace-opacity: 0.7;
+
+  /* The code box COLOURS. These are per-mode - all five are re-declared in the
+     body.dark-mode block below. It is the box GEOMETRY (padding, margin,
+     radius, tab-size, white-space, hyphens) that was measured identical in both
+     modes; it lived in the vendored light stylesheet, so dark mode depended on
+     the light theme for it and it is now stated once, mode-agnostically, in the
+     syntax block at the end of this file. */
+  --code-bg: #fdf6e3; /* base3 */
+  --code-fg: #657b83; /* base00 */
+  --code-inline-bg: var(--bg-tertiary);
+  --code-inline-fg: var(--secondary-color);
+  /* The background of a <code> inside a <pre>. Transparent in light because
+     light `pre code` was always transparent; opaque in dark because the old
+     `body.dark-mode .markdown-body code` rule painted the <code>. MEASURED on
+     the census fixture rather than reasoned about: PrismJS stamps
+     `language-none` on an un-marked <pre>, so in the SETTLED DOM the dark
+     <code> merely repeats the colour of the <pre> behind it and the difference
+     is invisible. It is the state BEFORE Prism runs - and the permanent
+     `typeof Prism === "undefined"` fallback - where the <pre> paints nothing
+     and this is the only panel the reader gets. See .markdown-body pre code. */
+  --code-pre-code-bg: none;
+  --code-selection-bg: #073642; /* base02 */
+}
+
+body.dark-mode {
+  /* Tomorrow Night, as ported into Folia. Scheme by Chris Kempson, PrismJS port
+     by Rose Pritchard - see the attribution block in the syntax section. */
+  --syn-comment: #999;
+  --syn-punctuation: #ccc;
+  --syn-operator: #67cdcc;
+  --syn-keyword: #cc99cd;
+  --syn-string: #7ec699;
+  --syn-literal: #f8c555;
+  --syn-tag: #e2777a;
+  --syn-function: #f08d49;
+  --syn-variable: #7ec699;
+  /* Dark's entity swatch. Tomorrow Night has no such colour of its own - the
+     old dark block declared no background rule at all, so this value is the
+     amendment recorded below rather than an inherited default. */
+  --syn-entity-bg: #3a3a3a;
+
+  /* Dark fine -> coarse mapping. 15 of the 25 fine cells map from a DIFFERENT
+     coarse role than they do in light; those are the lines that make the
+     per-mode indirection necessary rather than decorative. The count is not
+     decorative either - test:theme pins it, because --syn-entity-bg's promotion
+     silently took it from 16 to 15 and neither --anchors nor --expects can see
+     a stale number in a comment. */
+  --tok-comment: var(--syn-comment);
+  --tok-block-comment: var(--syn-comment);
+  --tok-punctuation: var(--syn-punctuation);
+  --tok-operator: var(--syn-operator);
+  --tok-entity: var(--syn-operator);
+  --tok-url: var(--syn-operator);
+  --tok-keyword: var(--syn-keyword);
+  --tok-builtin: var(--syn-keyword);
+  --tok-important: var(--syn-keyword);
+  --tok-builtin-class: var(--syn-keyword);
+  --tok-string: var(--syn-string);
+  --tok-regex: var(--syn-variable);
+  --tok-attr-value: var(--syn-string);
+  --tok-constant: var(--syn-literal);
+  --tok-class-name: var(--syn-literal);
+  --tok-number: var(--syn-function);
+  --tok-function: var(--syn-function);
+  --tok-tag: var(--syn-tag);
+  --tok-attr-name: var(--syn-tag);
+  --tok-namespace: var(--syn-tag);
+  --tok-deleted: var(--syn-tag);
+  /* Two Tomorrow Night colours that sit outside its nine-role palette. The fine
+     tier exists precisely so a scheme can carry values a role set cannot. */
+  --tok-inserted: #8fa876;
+  --tok-function-name: #6196cc;
+
+  /* THREE DELIBERATE DEPARTURES from what Folia shipped before the theme
+     system, and they are all the same defect: index.html linked exactly one
+     PrismJS theme, the LIGHT prism-solarizedlight.css, and the dark block
+     overrode `color` ONLY - so everything else in that light stylesheet leaked
+     into dark mode. Each is recorded as an amendment in test/test-theme.js,
+     with its old value asserted against the golden, so it is reviewable rather
+     than silent - and so a FOURTH deviation that nobody decided on fails loudly
+     instead of hiding among three that were.
+       1. entity background was Solarized cream #eee8d5 - a light swatch on a
+          dark page.
+       2. namespace opacity was .7, leaked from Solarized. The dark block
+          declared no opacity rule at all, so the value was never a dark-theme
+          decision; full opacity is.
+       3. code-block ::selection was Solarized navy #073642, which is nearly
+          invisible against the #2d2d2d code background. */
+  --tok-entity-bg: var(--syn-entity-bg);
+  --tok-namespace-opacity: 1;
+
+  --code-bg: #2d2d2d;
+  --code-fg: #ccc;
+  --code-inline-bg: #2d2d2d;
+  --code-inline-fg: #ccc;
+  --code-pre-code-bg: #2d2d2d;
+  --code-selection-bg: rgba(61, 189, 198, 0.35);
+}
+
 /* Dark mode specific overrides */
 body.dark-mode .mermaid {
   background: #2d2d2d;
@@ -114,85 +337,7 @@ body.dark-mode .search-btn:hover {
   border-color: #3DBDC6;
 }
 
-/* PrismJS Dark Mode - Tomorrow Night theme */
-body.dark-mode code[class*=language-],
-body.dark-mode pre[class*=language-] {
-  color: #ccc;
-  background: none;
-}
 
-body.dark-mode :not(pre) > code[class*=language-],
-body.dark-mode pre[class*=language-] {
-  background: #2d2d2d;
-}
-
-body.dark-mode .token.block-comment,
-body.dark-mode .token.cdata,
-body.dark-mode .token.comment,
-body.dark-mode .token.doctype,
-body.dark-mode .token.prolog {
-  color: #999;
-}
-
-body.dark-mode .token.punctuation {
-  color: #ccc;
-}
-
-body.dark-mode .token.attr-name,
-body.dark-mode .token.deleted,
-body.dark-mode .token.namespace,
-body.dark-mode .token.tag {
-  color: #e2777a;
-}
-
-body.dark-mode .token.function-name {
-  color: #6196cc;
-}
-
-body.dark-mode .token.boolean,
-body.dark-mode .token.function,
-body.dark-mode .token.number {
-  color: #f08d49;
-}
-
-body.dark-mode .token.class-name,
-body.dark-mode .token.constant,
-body.dark-mode .token.property,
-body.dark-mode .token.symbol {
-  color: #f8c555;
-}
-
-body.dark-mode .token.atrule,
-body.dark-mode .token.builtin,
-body.dark-mode .token.important,
-body.dark-mode .token.keyword,
-body.dark-mode .token.selector {
-  color: #cc99cd;
-}
-
-body.dark-mode .token.attr-value,
-body.dark-mode .token.char,
-body.dark-mode .token.regex,
-body.dark-mode .token.string,
-body.dark-mode .token.variable {
-  color: #7ec699;
-}
-
-body.dark-mode .token.entity,
-body.dark-mode .token.operator,
-body.dark-mode .token.url {
-  color: #67cdcc;
-}
-
-body.dark-mode .token.inserted {
-  color: #8fa876;
-}
-
-/* Dark mode inline code styling */
-body.dark-mode .markdown-body code {
-  background: #2d2d2d;
-  color: #ccc;
-}
 
 body {
   font-family: 'Fira Code Local', 'Fira Code', 'Segoe UI', Calibri, Arial, sans-serif;
@@ -653,9 +798,12 @@ body.splitter-dragging * {
   border-bottom-color: var(--accent-main);
 }
 
+/* Inline code. The colour pair deliberately is NOT here: it is declared once,
+   from --code-inline-bg / --code-inline-fg, immediately before the syntax
+   highlighting block at the end of this file, so that a scheme has a single
+   place to move it. Repeating it here would be dead - that rule has the
+   identical selector and comes later - and would read as the place to edit. */
 .markdown-body code {
-  background: var(--bg-tertiary);
-  color: var(--secondary-color);
   padding: 2px 6px;
   border-radius: 3px;
   font-family: 'Fira Code Local', 'Fira Code', 'Consolas', 'Courier New', monospace;
@@ -671,7 +819,21 @@ body.splitter-dragging * {
 }
 
 .markdown-body pre code {
-  background: none;
+  /* NOT `none`, and the difference is per-mode. Before the theme port the dark
+     panel for a code block carrying no `language-*` class came entirely from
+     `body.dark-mode .markdown-body code { background: #2d2d2d }`, whose (0,3,1)
+     specificity beat this rule's (0,1,2). The replacement declares the pair
+     once at (0,1,1), which loses here - so such a <pre><code> lost its dark
+     panel altogether. `.markdown-body pre` cannot carry it instead: light
+     --code-bg is Solarized cream and light `pre` was always transparent, so
+     painting the pre would regress light mode. Reproducing the old rule means
+     painting the CODE element, per mode.
+     Scope, measured: PrismJS normalises a missing language to `none` and stamps
+     `language-none` on the <pre> too, so once highlighting has landed the <pre>
+     paints itself and this declaration is an invisible duplicate. What it
+     really defends is the pre-highlight transient and the
+     `typeof Prism === "undefined"` fallback, where the <pre> paints nothing. */
+  background: var(--code-pre-code-bg);
   padding: 0;
   font-size: 0.9em;
 }
@@ -3093,3 +3255,239 @@ body.dark-mode .context-menu {
   display: none;
 }
 
+/* Inline code outside a highlighted block. Placed BEFORE the syntax section
+   so that a Prism-highlighted <code class="language-x"> inside a <pre>,
+   which matches both this and code[class*="language-"] at equal
+   specificity, is decided by the later rule. */
+.markdown-body code {
+  background: var(--code-inline-bg);
+  color: var(--code-inline-fg);
+}
+/* ───────────────────────────────────────────────────────────────────────────
+   SYNTAX HIGHLIGHTING
+   ───────────────────────────────────────────────────────────────────────────
+   These rules used to live in two places: the code box, base colours and
+   light-mode token colours came from a vendored copy of PrismJS's
+   prism-solarizedlight.css, and dark mode overrode `color` on top of it under
+   body.dark-mode. Both vendored theme files have been deleted - they are dead
+   weight in the installer now that nothing links them - so the values here are
+   the only copy. Their history is in git if the provenance is ever needed.
+
+   That arrangement is gone for two reasons. First, the vendored file was linked
+   AFTER this stylesheet, so any token rule written here lost the specificity
+   tie - which is why every dark rule needed a body.dark-mode prefix, and why a
+   theme system built alongside the file would need manufactured specificity
+   forever. Second, dark mode silently depended on the light file for the whole
+   code box (padding, margin, radius, tab-size, white-space, hyphens) and for
+   ::selection, so those had to be brought here anyway or dropping the link
+   would have degraded both themes.
+
+   So the rules below are now MODE-AGNOSTIC and read their colours from the
+   --tok-* variables above. The Solarized values live in the `body` block as the
+   default light scheme; the Tomorrow Night values live in `body.dark-mode` as
+   the default dark scheme.
+
+   Solarized colour scheme by Ethan Schoonover (http://ethanschoonover.com/
+   solarized), ported for PrismJS by Hector Matos (https://krakendev.io).
+   Tomorrow Night colour scheme by Chris Kempson
+   (https://github.com/chriskempson/tomorrow-theme), ported for PrismJS by
+   Rose Pritchard. Both ports are MIT-licensed, as recorded in
+   THIRD-PARTY-NOTICES.md under prismjs. The attribution lives here because the
+   vendored theme files these values came from were deleted when the rules were
+   inlined, and deleting a file must not delete its credit. */
+
+code[class*="language-"],
+pre[class*="language-"] {
+  color: var(--code-fg);
+  /* Load-bearing, and it does NOT mean "leave the size alone". `.markdown-body
+     code` sets 0.9em at the same specificity (0,1,1), so for an INLINE
+     highlighted span - `<code class="language-js">`, which is reachable because
+     `class` is in the sanitizer's ADD_ATTR and PrismJS supports that shape - the
+     tie is broken by source order. The vendored theme loaded last and declared
+     1em, so it won. Dropping this declaration silently shrank inline
+     highlighted code to 0.9em, and with it lineHeight, padding and radius,
+     which are all em-relative. Block code is unaffected either way:
+     `.markdown-body pre code` is (0,1,2) and outranks both.
+     font-family is deliberately NOT restored alongside it - the rule at the top
+     of this file forces Fira Code with !important. */
+  font-size: 1em;
+  text-align: left;
+  white-space: pre;
+  word-spacing: normal;
+  word-break: normal;
+  word-wrap: normal;
+  line-height: 1.5;
+  -moz-tab-size: 4;
+  -o-tab-size: 4;
+  tab-size: 4;
+  -webkit-hyphens: none;
+  -moz-hyphens: none;
+  -ms-hyphens: none;
+  hyphens: none;
+}
+
+pre[class*="language-"]::-moz-selection,
+pre[class*="language-"] ::-moz-selection,
+code[class*="language-"]::-moz-selection,
+code[class*="language-"] ::-moz-selection {
+  background: var(--code-selection-bg);
+}
+
+pre[class*="language-"]::selection,
+pre[class*="language-"] ::selection,
+code[class*="language-"]::selection,
+code[class*="language-"] ::selection {
+  background: var(--code-selection-bg);
+}
+
+/* Code blocks */
+pre[class*="language-"] {
+  padding: 1em;
+  margin: 0.5em 0;
+  overflow: auto;
+  border-radius: 0.3em;
+}
+
+:not(pre) > code[class*="language-"],
+pre[class*="language-"] {
+  background-color: var(--code-bg);
+}
+
+/* Inline code */
+:not(pre) > code[class*="language-"] {
+  padding: 0.1em;
+  border-radius: 0.3em;
+}
+
+.token.comment,
+.token.prolog,
+.token.doctype,
+.token.cdata {
+  color: var(--tok-comment);
+}
+
+/* Separate from the group above on purpose: the light default declares no rule
+   for this class at all and the dark one does, so it cannot share a cell. */
+.token.block-comment {
+  color: var(--tok-block-comment);
+}
+
+.token.punctuation {
+  color: var(--tok-punctuation);
+}
+
+.token.namespace {
+  color: var(--tok-namespace);
+  opacity: var(--tok-namespace-opacity);
+}
+
+.token.property,
+.token.constant,
+.token.symbol {
+  color: var(--tok-constant);
+}
+
+/* deleted/inserted are emitted by no grammar bundled here (there is no diff
+   component), so these two rules are unreachable today and the golden cannot
+   cover them. Ported anyway, with the values both source themes declared, so
+   that adding a diff grammar later does not silently arrive unthemed. */
+.token.deleted {
+  color: var(--tok-deleted);
+}
+
+.token.boolean,
+.token.number {
+  color: var(--tok-number);
+}
+
+.token.tag {
+  color: var(--tok-tag);
+}
+
+.token.selector,
+.token.builtin {
+  color: var(--tok-builtin);
+}
+
+.token.attr-name {
+  color: var(--tok-attr-name);
+}
+
+.token.string,
+.token.char {
+  color: var(--tok-string);
+}
+
+.token.inserted {
+  color: var(--tok-inserted);
+}
+
+.token.url {
+  color: var(--tok-url);
+}
+
+.token.entity {
+  color: var(--tok-entity);
+  background: var(--tok-entity-bg);
+  cursor: help;
+}
+
+.token.atrule,
+.token.keyword {
+  color: var(--tok-keyword);
+}
+
+.token.attr-value {
+  color: var(--tok-attr-value);
+}
+
+/* Before .token.function deliberately. The only grammar bundled here that emits
+   function-name is bash, and both of its patterns carry alias: "function", so
+   the element matches BOTH rules and the later one wins. The pre-existing dark
+   theme declared function-name first for the same reason, which made its
+   #6196cc unreachable in practice. Reproduced rather than corrected: this is a
+   default scheme whose job is to look exactly as it did. */
+.token.function-name {
+  color: var(--tok-function-name);
+}
+
+.token.function {
+  color: var(--tok-function);
+}
+
+.token.class-name {
+  color: var(--tok-class-name);
+}
+
+.token.regex,
+.token.variable {
+  color: var(--tok-regex);
+}
+
+.token.important {
+  color: var(--tok-important);
+}
+
+.token.operator {
+  color: var(--tok-operator);
+}
+
+.token.important,
+.token.bold {
+  font-weight: bold;
+}
+
+.token.italic {
+  font-style: italic;
+}
+
+/* Specificity, not source order, decides this one. In Solarized Light `builtin`
+   is declared before `class-name`, so class-name wins; in Tomorrow Night the
+   order is reversed and builtin wins. An element carrying BOTH classes
+   therefore has to be named explicitly, or one of the two defaults could not be
+   reproduced without breaking the other. This is the reason --tok-builtin-class
+   exists as its own cell. */
+.token.builtin.class-name {
+  color: var(--tok-builtin-class);
+}
+/* SYNTAX HIGHLIGHTING END */

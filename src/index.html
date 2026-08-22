@@ -44,10 +44,12 @@
     <title>Folia</title>
     <link rel="stylesheet" href="styles.css" />
     <link rel="stylesheet" href="custom-styles.css" />
-    <link
-      rel="stylesheet"
-      href="../libs/prismjs/themes/prism-solarizedlight.css"
-    />
+    <!--
+      There is deliberately no <link> to a PrismJS theme here. Syntax colours
+      and the code box now live in styles.css, expressed as --syn-*/--tok-*
+      variables so themes can restyle them. See the SYNTAX HIGHLIGHTING section
+      there for why a vendored stylesheet loaded after ours could not work.
+    -->
     <!--
       Runtime libraries are vendored locally by scripts/vendor-libs.js (run on
       postinstall). They were previously fetched from a public CDN, which in a

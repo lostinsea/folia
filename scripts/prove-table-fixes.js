@@ -28,6 +28,10 @@ const NOTICES_GEN = path.join(ROOT, "scripts", "generate-notices.js");
 const ATTRS = path.join(ROOT, ".gitattributes");
 const HTML = path.join(SRC, "index.html");
 const CUSTOM_CSS = path.join(SRC, "custom-styles.css");
+const CENSUS = path.join(ROOT, "test", "theme-census.js");
+const GOLDEN = path.join(ROOT, "test", "fixtures", "theme-golden.json");
+const THEME_TEST = path.join(ROOT, "test", "test-theme.js");
+const PKG_TEST = path.join(ROOT, "test", "test-packaging.js");
 
 const REVERTS = [
   {
@@ -1429,7 +1433,19 @@ const REVERTS = [
     ],
     mustPass: [
       /dompurify's entry names the licence Folia elects/,
-      /jszip's reproduced licence text is the one elected/,
+      // A SECOND package's election used to be listed here (jszip's
+      // `(MIT OR GPL-3.0-or-later)`), so the proof could show this revert was
+      // scoped to dompurify's marker rather than breaking election handling
+      // outright. jszip left the tree with html-to-docx's 70-package closure and
+      // test-packaging.js dropped it from `elections` at the same time; this
+      // line was not updated, so from then on it named an assertion that no
+      // longer existed. An orphaned `mustPass` FAILS OPEN - it can never match,
+      // so COLLATERAL can never fire - which is this project's recurring
+      // "an absence check fails open" disease in a new place. Found by
+      // `node scripts/prove-table-fixes.js --expects`, which is exactly what
+      // that mode exists for. Not retargeted: dompurify is the only dual-
+      // licensed package left, and the election machinery's own sensitivity is
+      // covered by the synthetic probe in test-packaging.js instead.
     ],
   },
   {
@@ -1712,10 +1728,17 @@ const REVERTS = [
     // and by name.
     id: "R238",
     suite: "test:startup",
+    // ANCHOR MOVED when the wipe gained a retry. The call is no longer a
+    // one-liner (Node retries EPERM/EBUSY itself given maxRetries, which is how
+    // a Windows lock race is meant to be handled) and it now sits inside a
+    // try/catch, so deleting the statement outright would leave an empty try.
+    // Short-circuiting it with `false &&` disables the wipe while keeping the
+    // block syntactically intact, which is what this revert has always been
+    // about: the profile stays isolated, it just stops starting clean.
     what: "keep the isolated test profile but stop wiping it between runs",
     file: path.join(ROOT, "test", "test-userdata-isolation.js"),
-    from: "  fs.rmSync(USER_DATA_DIR, { recursive: true, force: true });\n",
-    to: "",
+    from: "    fs.rmSync(USER_DATA_DIR, {",
+    to: "    false && fs.rmSync(USER_DATA_DIR, {",
     expect: [/booted from a profile with no inherited session/],
     mustPass: [
       /runs against an isolated userData directory/,
@@ -1880,6 +1903,13 @@ const REVERTS = [
     // parent" assertion passes just as happily in that state, because null
     // points at nobody, so nothing caught the regression on the way back.
     what: "disable auto-update again by nulling build.publish, so no update feed is packaged",
+    // The assertion this revert expects does not exist on a clean tree: it names
+    // itself "may include update manifests because publishing is configured"
+    // while publish IS configured, and only becomes the name below once this
+    // revert has nulled it (test-packaging.js:1426). So `--expects` cannot find
+    // it in a clean-tree catalogue, and this records that as a decision rather
+    // than leaving a permanent false alarm in the audit.
+    nameVariesWithState: "test-packaging.js:1426 picks its name from build.publish",
     file: path.join(ROOT, "package.json"),
     // ROTTED ONCE, SILENTLY, AND THAT IS THE LESSON. The original anchor
     // quoted this block as a single line naming `"repo": "markdown-viewer"`.
@@ -3894,6 +3924,812 @@ const REVERTS = [
     to: "",
     expect: [/a table does not leave the window in the frame a zoom burst lands/],
   },
+
+  // ─── item 5: the theme token system ──────────────────────────────────────
+  // These all run test:theme, whose oracle is a golden captured from commit
+  // 4bbde83 - i.e. from the tree BEFORE any of this landed. That is what makes
+  // them meaningful: each one asks "does breaking this piece stop the two
+  // default schemes from reproducing what actually shipped?"
+  {
+    id: "R259",
+    // THE FOOTGUN THIS WHOLE ARRANGEMENT EXISTS TO AVOID, and the top finding of
+    // both independent reviews. A custom property whose value contains var() is
+    // substituted at computed-value time ON THE ELEMENT WHERE IT IS DECLARED.
+    // :root is <html>, so with the mapping declared there a body-level scheme
+    // override of a coarse role never reaches the fine variables - and nothing
+    // errors. Every scheme would change the chrome and leave the syntax colours
+    // at their defaults. Note the fidelity assertions must KEEP PASSING here:
+    // moving the block to :root does not change the DEFAULT appearance at all,
+    // which is exactly why this could ship unnoticed without a probe for it.
+    //
+    // TWO ASSERTIONS ARE NAMED, AND THE PAIR IS THE DESIGN. The scope one
+    // reports the CAUSE (the cells are declared at :root); the behavioural one
+    // reports the CONSEQUENCE (a body-level override resolves to the original
+    // palette instead of the sentinel). This revert is also what exposed a
+    // defect in the probe itself: an earlier version read the cell list OUT OF
+    // the body rule, so cells moved to :root did not fail - they silently left
+    // the checked set, the behavioural assertion iterated nothing and passed,
+    // and only a count guard fired, under a name that described the symptom as
+    // "cells are missing". The cell list is now scope-independent.
+    what: "declare the fine token variables on :root instead of body",
+    file: CSS,
+    from: "body {\n  /* Solarized Light, by Ethan Schoonover",
+    to: ":root {\n  /* Solarized Light, by Ethan Schoonover",
+    suite: "test:theme",
+    expect: [
+      /light: every fine cell is declared at body scope, not :root/,
+      /light: a body-level role override reaches every fine cell it names/,
+    ],
+    mustPass: [
+      /light: token appearance reproduces the golden exactly/,
+      /dark: token appearance reproduces the golden exactly/,
+      /dark: a body-level role override reaches every fine cell it names/,
+    ],
+  },
+  {
+    id: "R265",
+    // The dark half of R259, and the entry that CORRECTED THE PROBE ITSELF.
+    //
+    // The first version of the section-8 probe read `--tok-keyword`, which both
+    // modes map identically from --syn-keyword. Under this revert the dark
+    // mapping moves to :root, the LIGHT block - still declared on body - becomes
+    // the winning declaration for --tok-keyword, and the override still lands.
+    // The dark leg passed while the thing it was named for was broken:
+    // WRONG-GUARD, not PROVEN.
+    //
+    // THE PROBE HAS SINCE BEEN REWRITTEN AGAIN and this note used to describe
+    // the intermediate version ("now reads --tok-builtin, the one fine variable
+    // the two modes map from DIFFERENT coarse roles"). That design is retired.
+    // Section 8 now installs a DISTINCT SENTINEL PER COARSE ROLE and checks all
+    // 25 cells against the role each one names, so it no longer depends on
+    // picking a single lucky cell - and it draws the cell list from every
+    // --tok-* declaration in the document rather than out of the block under
+    // test, which is what R259 exists to keep honest. Corrected here because
+    // --anchors and --expects are both structurally blind to comment rot: this
+    // entry kept reporting PROVEN while its stated mechanism no longer existed.
+    //
+    // Deliberately broad on the APPEARANCE axis, and that asymmetry is itself
+    // the finding: for LIGHT, relocating the mapping to :root changes nothing
+    // visible (the same coarse values are substituted one level up), so only
+    // this probe can see it. For DARK the light body block immediately
+    // out-scopes the inherited values and the palette visibly collapses, so the
+    // appearance assertions fail too. No mustPass is listed for that reason.
+    what: "declare the dark fine token variables on :root instead of body.dark-mode",
+    file: CSS,
+    // ANCHORED ON THE SELECTOR PLUS THE FIRST THREE WORDS OF ITS COMMENT, not
+    // on the whole comment: `body.dark-mode {` alone is not unique (there is an
+    // unrelated one earlier in the file), and quoting the full comment rotted
+    // this anchor the moment the Tomorrow Night attribution was added to it.
+    from: "body.dark-mode {\n  /* Tomorrow Night",
+    to: ":root {\n  /* Tomorrow Night",
+    suite: "test:theme",
+    expect: [
+      /dark: a body-level role override reaches every fine cell it names/,
+    ],
+  },
+  {
+    id: "R260",
+    // The plain sensitivity control. If changing a default colour does not fail,
+    // the golden comparison is decorative and every other entry here is worth
+    // nothing.
+    what: "change one hex in the default light scheme",
+    file: CSS,
+    from: "  --syn-keyword: #859900; /* green */",
+    to: "  --syn-keyword: #7f0000; /* green */",
+    suite: "test:theme",
+    expect: [/light: token appearance reproduces the golden exactly/],
+  },
+  {
+    id: "R261",
+    // The census originally measured `color` only, keyed on the class-set
+    // alone, and reported 18 cells. Over the full visual tuple that same keying
+    // gives 20, because `namespace` is separated from `tag` by NOTHING BUT
+    // opacity. (Context-aware keying, which is what ships, gives 20 and 23.)
+    // Dropping the ported rule leaves light-mode namespaces at full opacity,
+    // which a colour-only baseline cannot see.
+    what: "drop the ported namespace opacity (a difference no colour comparison can detect)",
+    file: CSS,
+    from: "  opacity: var(--tok-namespace-opacity);\n",
+    to: "",
+    suite: "test:theme",
+    expect: [/light: token appearance reproduces the golden exactly/],
+  },
+  {
+    id: "R262",
+    // Source order cannot satisfy both defaults here and specificity must. In
+    // Solarized Light `builtin` is declared before `class-name` so class-name
+    // wins; Tomorrow Night declares them the other way round so builtin wins. An
+    // element carrying both classes therefore has to be named explicitly. Remove
+    // the compound selector and light stays correct while dark silently regresses
+    // - the asymmetric failure is the point.
+    what: "remove the explicit .token.builtin.class-name rule and let source order decide",
+    file: CSS,
+    from: ".token.builtin.class-name {",
+    to: ".token.builtin.__disabled__.class-name {",
+    suite: "test:theme",
+    expect: [/dark: token appearance reproduces the golden exactly/],
+    mustPass: [/light: token appearance reproduces the golden exactly/],
+  },
+  {
+    id: "R263",
+    // An amendment must describe a REAL change. Restoring the leaked Solarized
+    // cream makes dark mode match the golden again, so the difference the
+    // amendment excuses stops existing - and the suite fails on "exactly the
+    // decided amendments applied", not on fidelity. That is the assertion that
+    // stops an amendment from quietly becoming a licence to differ.
+    //
+    // ANCHOR MOVED when --tok-entity-bg was promoted to read from a coarse role
+    // (--syn-entity-bg) so a future scheme could restyle it: the literal now
+    // lives in the role, not the cell. Perturbing the role is the better anchor
+    // anyway - it is the palette entry a scheme author edits.
+    what: "restore the Solarized cream entity background that leaked into dark mode",
+    file: CSS,
+    from: "  --syn-entity-bg: #3a3a3a;",
+    to: "  --syn-entity-bg: #eee8d5;",
+    suite: "test:theme",
+    expect: [/dark: exactly the decided amendments applied, no more and no fewer/],
+  },
+  {
+    id: "R264",
+    // ::selection is not reachable from an element's own computed style, so it
+    // needs its own oracle. Chromium DOES answer
+    // getComputedStyle(el, '::selection') - measured, and section 5 uses exactly
+    // that as its end-to-end half - but a plain element census reads no
+    // pseudo-element at all, so without a dedicated probe a code selection that
+    // is nearly invisible against its own background ships green.
+    what: "restore the Solarized navy code ::selection in dark mode",
+    file: CSS,
+    from: "  --code-selection-bg: rgba(61, 189, 198, 0.35);",
+    to: "  --code-selection-bg: #073642;",
+    suite: "test:theme",
+    expect: [/dark: ::selection paints what the golden recorded/],
+  },
+  {
+    id: "R266",
+    // THE FIDELITY REGRESSION AN INDEPENDENT REVIEW CAUGHT, and the reason the
+    // census key had to change. Solarized Light declares NO `.token.operator`
+    // rule at all (verified against `git show 4bbde83:libs/prismjs/themes/
+    // prism-solarizedlight.css`), so operators INHERITED. Pinning them to
+    // --syn-operator repaints every operator nested inside a coloured parent -
+    // a `<` inside a TypeScript class-name went yellow -> base00. The old
+    // class-set-keyed golden could not see it, because it kept only the FIRST
+    // operator in the document and that one was top-level.
+    what: "pin light operators to an absolute colour instead of inheriting",
+    file: CSS,
+    from: "  --tok-operator: inherit;",
+    to: "  --tok-operator: var(--syn-operator);",
+    suite: "test:theme",
+    expect: [/light: token appearance reproduces the golden exactly/],
+    mustPass: [/dark: token appearance reproduces the golden exactly/],
+  },
+  {
+    id: "R267",
+    // Same defect, worse: Solarized gives `.token.namespace` opacity and NO
+    // colour, so a namespace took its colour from context - cyan inside
+    // attr-name, blue inside tag, base00 bare in C#. One class-set, THREE
+    // colours. Any single absolute is wrong for at least two of them.
+    what: "pin light namespaces to an absolute colour instead of inheriting",
+    file: CSS,
+    from: "  --tok-namespace: inherit;",
+    to: "  --tok-namespace: var(--syn-tag);",
+    suite: "test:theme",
+    expect: [/light: token appearance reproduces the golden exactly/],
+    mustPass: [/dark: token appearance reproduces the golden exactly/],
+  },
+  {
+    id: "R268",
+    // The measuring instrument itself. Drop the ancestor chain from the census
+    // key and the probe collapses those three namespaces back into one cell,
+    // which is precisely the blindness that let R266/R267 ship. The golden is
+    // keyed WITH the chain, so the keys stop matching and coverage fails - the
+    // instrument cannot be quietly downgraded.
+    what: "key the census on the class-set alone, discarding token context",
+    file: CENSUS,
+    from: "const key = (classSet(t) || '(bare)') + '@' + tokenPath(t);",
+    to: "const key = (classSet(t) || '(bare)');",
+    suite: "test:theme",
+    expect: [/light: every token key in the golden still renders/],
+  },
+  {
+    id: "R269",
+    // ::selection is the one part of the appearance no element-based census can
+    // reach, so it gets a dedicated pseudo-element oracle. Swapping the property
+    // keeps the variable referenced - the old text-matching assertions stayed
+    // green through exactly this - while the selection silently falls back to
+    // the app-wide accent.
+    what: "make the code ::selection rule set color instead of background",
+    file: CSS,
+    from: 'code[class*="language-"] ::selection {\n  background: var(--code-selection-bg);',
+    to: 'code[class*="language-"] ::selection {\n  color: var(--code-selection-bg);',
+    suite: "test:theme",
+    expect: [/light: ::selection paints what the golden recorded/],
+  },
+  {
+    id: "R270",
+    // The baseline's independence. Restamping the golden with a different
+    // commit is the cheap half of forging one, and the pin is what refuses it.
+    // The suite ALSO gates on an intrinsic property of the data (its code
+    // ::selection must be a baked colour, which only the pre-refactor tree
+    // produces), so a forged stamp alone cannot get past both.
+    what: "restamp the golden as having been captured from a different commit",
+    file: GOLDEN,
+    from: '"capturedFromCommit": "4bbde83aa92a1c1a360925b183308b477254667b"',
+    to: '"capturedFromCommit": "0123456789abcdef0123456789abcdef01234567"',
+    suite: "test:theme",
+    expect: [/the golden was captured from the pinned baseline commit/],
+  },
+  {
+    id: "R271",
+    // Section 9's SELECTOR half. These four classes render nowhere in the
+    // fixture, so the golden comparison cannot see them at all - their rules
+    // could be deleted outright and every other assertion in the suite would
+    // stay green. This drops the selector while leaving the variable and the
+    // declaration intact, which is what a careless tidy-up of "unreachable"
+    // CSS looks like.
+    what: "stop `.token.deleted` from matching, leaving its variable in place",
+    file: CSS,
+    from: ".token.deleted {",
+    to: ".token.deleted-does-not-match {",
+    suite: "test:theme",
+    expect: [/rules for token classes no grammar emits paint the shipped default's value/],
+  },
+  {
+    id: "R272",
+    // Section 9's LINKAGE half, and it is a different failure from R271. The
+    // rule still applies and still paints a colour from the token system, so
+    // nothing looks broken and no selector is missing - it just consumes the
+    // WRONG cell, which is precisely the error a copy-pasted rule makes. Note
+    // that changing the VALUE of --tok-inserted would be vacuous here by
+    // design: the probe reads the declared variable and the painted colour, so
+    // both move together. Only the linkage can be broken.
+    what: "point the `.token.inserted` rule at a different fine cell",
+    file: CSS,
+    from: "  color: var(--tok-inserted);",
+    to: "  color: var(--tok-comment);",
+    suite: "test:theme",
+    expect: [/rules for token classes no grammar emits paint the shipped default's value/],
+  },
+  {
+    id: "R273",
+    // The regression a second reviewer found and the golden could not see,
+    // because until now the census had no INLINE highlighted code element to
+    // measure. `.markdown-body code` sets 0.9em at the same specificity, so the
+    // tie is decided by source order - the vendored theme loaded last and
+    // declared 1em. Dropping this one declaration shrinks inline highlighted
+    // code and, with it, its em-relative line-height, padding and radius.
+    // Block code is unaffected, which is exactly why nothing else caught it.
+    what: "drop `font-size: 1em` from the language-class rule",
+    file: CSS,
+    from: "  font-size: 1em;\n  text-align: left;",
+    to: "  text-align: left;",
+    suite: "test:theme",
+    expect: [/code box "inlineLangCode" reproduces the golden exactly/],
+  },
+  {
+    id: "R274",
+    // The suite asserts that no PrismJS theme <link> remains, which is what
+    // makes deleting the two vendored files safe. Nothing proved that assertion
+    // could fail, so a re-added link - the obvious way this regresses, by
+    // someone "restoring" highlighting after a bad merge - was unguarded.
+    what: "put the vendored PrismJS theme <link> back into index.html",
+    file: HTML,
+    from: '    <link rel="stylesheet" href="custom-styles.css" />',
+    to:
+      '    <link rel="stylesheet" href="custom-styles.css" />\n' +
+      '    <link rel="stylesheet" href="../libs/prismjs/themes/prism-solarizedlight.css" />',
+    suite: "test:theme",
+    expect: [/no PrismJS theme stylesheet is linked/],
+  },
+  {
+    id: "R275",
+    // `bold` and `italic` are the two shipped rules that are not about colour,
+    // and no bundled grammar emits either. Section 9 compared only `color`
+    // until this pair was added, so both could have been deleted outright with
+    // the suite staying green. This one also checks the MULTI-SELECTOR form:
+    // `.token.important` shares the declaration, so dropping just `.token.bold`
+    // leaves a rule that still exists and still bolds something else.
+    what: "drop `.token.bold` from the shared font-weight rule",
+    file: CSS,
+    from: ".token.bold {",
+    to: ".token.bold-does-not-match {",
+    suite: "test:theme",
+    expect: [/rules for token classes no grammar emits paint the shipped default's value/],
+  },
+  {
+    id: "R276",
+    // The same gap on the other non-colour property, and on a rule that stands
+    // alone rather than sharing its declaration.
+    what: "change what the `.token.italic` rule declares",
+    file: CSS,
+    from: ".token.italic {\n  font-style: italic;",
+    to: ".token.italic {\n  font-style: normal;",
+    suite: "test:theme",
+    expect: [/rules for token classes no grammar emits paint the shipped default's value/],
+  },
+  {
+    id: "R277",
+    // The careless "these look the same, fold them together" edit. Solarized
+    // Light declares NO `.token.block-comment` rule, so in the shipped light
+    // default it INHERITS; the dark theme groups it with `comment` at #999. One
+    // class, two different arrangements, so it cannot share the --tok-comment
+    // cell. No bundled grammar emits `block-comment`, so neither the golden nor
+    // any wiring check can see this - only section 9's value pin can.
+    what: "fold light `block-comment` into the comment group (repaints it base1)",
+    file: CSS,
+    from: "  --tok-block-comment: inherit;",
+    to: "  --tok-block-comment: var(--syn-comment);",
+    suite: "test:theme",
+    expect: [/light: cells whose default declares no rule are pinned to inherit/],
+  },
+  {
+    id: "R278",
+    // The other half of the same fix, and a DIFFERENT failure mode: R277 breaks
+    // the VALUE while the selector still matches; this breaks the SELECTOR while
+    // both values stay correct. Dark then loses its #999 and inherits, which is
+    // the "tidy up a rule that appears to duplicate the one above it" error.
+    what: "stop `.token.block-comment` matching (dark loses its own colour)",
+    file: CSS,
+    from: ".token.block-comment {",
+    to: ".token.block-comment-does-not-match {",
+    suite: "test:theme",
+    expect: [/dark: rules for token classes no grammar emits paint the shipped default's value/],
+  },
+  {
+    id: "R279",
+    // THE REGRESSION THIS PROBE WAS BUILT FOR. The deleted
+    // `body.dark-mode .markdown-body code { background: #2d2d2d }` was (0,3,1)
+    // and beat `.markdown-body pre code { background: none }` at (0,1,2); its
+    // replacement `.markdown-body code` is (0,1,1) and loses.
+    // WHAT THIS REVERT ACTUALLY MEASURES, stated honestly because the fixture
+    // does NOT reach the visible failure: Prism stamps `language-none` on an
+    // un-marked <pre> too, so in the settled DOM `pre[class*=language-]` paints
+    // the panel and the <code> background is an invisible duplicate. So the
+    // failing assertion is a BYTE-EXACT FIDELITY failure, not a visible one.
+    // The visible failure lives in the states this census cannot capture - the
+    // pre-highlight transient and the permanent `typeof Prism === 'undefined'`
+    // fallback - where the <pre> paints nothing at all; that was measured
+    // separately by stripping the class and reading both elements back.
+    // mustPass carries the LIGHT leg: the naive fix (paint every `pre`) would
+    // have repainted light code blocks, so the proof has to show this one is
+    // per-mode rather than just dark-correct.
+    what: "drop the per-mode background from `.markdown-body pre code`",
+    file: CSS,
+    from: "  background: var(--code-pre-code-bg);",
+    to: "  background: none;",
+    suite: "test:theme",
+    expect: [/dark: code box "preNoLangCode" reproduces the golden exactly/],
+    mustPass: [/light: code box "preNoLangCode" reproduces the golden exactly/],
+  },
+  {
+    id: "R280",
+    // BAKING A CELL TO ITS OWN RESOLVED LITERAL. Nothing about the appearance
+    // changes - light comments still paint #93a1a1 - so the golden comparison,
+    // the census and every fidelity assertion stay green. What is destroyed is
+    // the SURFACE A SCHEME FILLS IN: --syn-comment now reaches nothing in light,
+    // so no scheme could ever restyle comments through the coarse role. An
+    // earlier section 8 read ONE fine cell and would have waved this through.
+    what: "sever a coarse role by baking its only consumer to a literal",
+    file: CSS,
+    from: "  --tok-comment: var(--syn-comment);\n  /* Solarized Light writes no",
+    to: "  --tok-comment: #93a1a1;\n  /* Solarized Light writes no",
+    suite: "test:theme",
+    expect: [/light: every coarse role is still reached by at least one fine cell/],
+    // The per-cell half must survive: a literal cell is not itself a defect, and
+    // if that assertion fired too this would be proving the wrong thing.
+    mustPass: [/light: a body-level role override reaches every fine cell it names/],
+  },
+  {
+    id: "R281",
+    // THE LEDGER. Every "applied exactly the decided amendments" assertion is
+    // structurally unfailable for a coordinate with no declared amendment: it
+    // compares [] against []. So a maintainer who un-does a deviation and
+    // deletes its amendment leaves the suite entirely green with a recorded
+    // DECISION silently gone from the file. This reproduces the OUTPUT of that
+    // scenario - one coordinate stops being declared - with no other side
+    // effect, so exactly one assertion may fail.
+    what: "let a recorded amendment disappear from the declared set",
+    file: THEME_TEST,
+    from: '  if (DARK_CODE_SELECTION) out.push("dark/::selection.background");',
+    to: '  if (false) out.push("dark/::selection.background");',
+    suite: "test:theme",
+    expect: [/the amendment tables declare exactly the decided deviations/],
+  },
+  {
+    id: "R282",
+    // THE GEOMETRY PORT, and it is the one part of dropping the vendored link
+    // that has nothing to do with colour. `pre { padding: 1em; margin: .5em 0;
+    // border-radius: .3em }` came from the LIGHT Solarized file, so DARK mode
+    // silently depended on it too. Deleting the link without carrying it over
+    // hands every code block back to `.markdown-body pre` (16px / 1em / 8px) in
+    // both modes - a change no token-colour comparison can see.
+    what: "drop the ported code-box geometry (both modes fall back to .markdown-body pre)",
+    file: CSS,
+    from: 'pre[class*="language-"] {\n  padding: 1em;',
+    to: 'pre[class*="language-does-not-match"] {\n  padding: 1em;',
+    suite: "test:theme",
+    expect: [
+      /light: code box "pre" reproduces the golden exactly/,
+      /dark: code box "pre" reproduces the golden exactly/,
+    ],
+  },
+  {
+    id: "R283",
+    // THE DARK LEG OF THE SCOPE ASSERTION, and it has to be a SINGLE cell.
+    // R265 moves the whole dark block to :root, which the light `body` block
+    // then out-scopes wholesale - the palette visibly collapses and fifteen
+    // assertions fail, so it proves the appearance side but says nothing
+    // narrow about scope. The realistic accident is one hand-edited line.
+    //
+    // --tok-comment is chosen because it is the rare cell BOTH modes map from
+    // the same coarse role. Moved to :root, the light declaration (which
+    // matches <body> and therefore outbids an inherited one) answers instead -
+    // and since it names --syn-comment too, and the dark block still declares
+    // --syn-comment: #999, the substitution happens on <body> and paints the
+    // IDENTICAL colour. So the appearance is byte-exact and every fidelity
+    // assertion keeps passing: this revert can only be caught by a probe that
+    // asks WHERE a cell is declared, which is the whole point of it.
+    // ANCHOR MOVED when the dark mapping comment gained a sentence explaining
+    // that its cell count is now pinned by test:theme. The anchor has to be
+    // prose because the line it guards - `--tok-comment: var(--syn-comment);` -
+    // is identical in both blocks, and it is the comment above it that makes
+    // the dark one addressable.
+    what: "declare one dark fine cell on :root instead of body.dark-mode",
+    file: CSS,
+    from:
+      "a stale number in a comment. */\n" +
+      "  --tok-comment: var(--syn-comment);",
+    to:
+      "a stale number in a comment. */\n" +
+      "}\n:root {\n  --tok-comment: var(--syn-comment);\n}\nbody.dark-mode {",
+    suite: "test:theme",
+    expect: [/dark: every fine cell is declared at body scope, not :root/],
+    mustPass: [
+      /dark: token appearance reproduces the golden exactly/,
+      /dark: a body-level role override reaches every fine cell it names/,
+      /light: every fine cell is declared at body scope, not :root/,
+    ],
+  },
+  {
+    id: "R284",
+    // THE GUARD THAT REPLACED TWO ASSERTIONS THAT VANISHED. Before the inlining
+    // the Solarized rules shipped as libs/prismjs/themes/prism-solarizedlight.css
+    // and test-packaging.js asserted that file existed and was in build.files.
+    // Deleting the file deleted both assertions with it - no failure, because an
+    // assertion that stops existing cannot fail. It was found only by diffing
+    // this suite's assertion NAME SET across the change.
+    //
+    // The credit now survives as prose in a stylesheet, which is the weakest
+    // possible carrier: a reformat, a minifier or an over-zealous tidy of a long
+    // header comment drops it and nothing downstream notices. This revert IS
+    // that tidy - it keeps the comment syntactically valid and merely stops it
+    // naming anyone, which is exactly what an accidental trim looks like.
+    //
+    // It cannot fail the two companion assertions: neither reads styles.css.
+    // One counts the credit list, the other validates that list against the
+    // upstream PrismJS headers in node_modules - so this stays narrow.
+    //
+    // IT TOOK TWO EDITS, AND THE FIRST ATTEMPT CAME BACK VACUOUS. Every one of
+    // the four names appears TWICE in styles.css - once beside the values it
+    // describes (the `body` and `body.dark-mode` scheme comments) and once in
+    // the attribution block - so trimming the block alone left all four still
+    // present and the suite stayed green. That is the recurring shape in this
+    // project: an assertion whose subject can be supplied by more than one
+    // source reports the disjunction. The assertion is RIGHT to ask "does the
+    // shipped stylesheet credit this person, anywhere" - both copies are real
+    // attribution - so the revert has to remove a credit outright rather than
+    // relocate it. Trimming the Solarized pair from both sites does that, and
+    // the failure names them. Proving one pair proves the mechanism: all four
+    // run through the same filter over the same list.
+    what: "trim the author names out of the inlined-theme attribution comment",
+    file: CSS,
+    from:
+      "   Solarized colour scheme by Ethan Schoonover (http://ethanschoonover.com/\n" +
+      "   solarized), ported for PrismJS by Hector Matos (https://krakendev.io).\n" +
+      "   Tomorrow Night colour scheme by Chris Kempson\n" +
+      "   (https://github.com/chriskempson/tomorrow-theme), ported for PrismJS by\n" +
+      "   Rose Pritchard. Both ports are MIT-licensed, as recorded in\n" +
+      "   THIRD-PARTY-NOTICES.md under prismjs. The attribution lives here because the\n" +
+      "   vendored theme files these values came from were deleted when the rules were\n" +
+      "   inlined, and deleting a file must not delete its credit. */",
+    to: "   Colour values come from the upstream PrismJS themes. */",
+    also: {
+      from: "  /* Solarized Light, by Ethan Schoonover; ported for PrismJS by Hector Matos.",
+      to: "  /* Solarized Light.",
+    },
+    suite: "test:packaging",
+    expect: [/the inlined PrismJS colour schemes keep their upstream attribution/],
+    mustPass: [
+      /the inlined-theme attribution oracle has credits to police/,
+      /every inlined theme credit is one upstream PrismJS really gives/,
+      /every library vendored into libs\/ has a notice/,
+    ],
+  },
+  {
+    id: "R285",
+    // THE GOLDEN'S SHAPE, and the hole was found by review rather than by any
+    // sweep. Section 2 iterates the GOLDEN's own property list for each token,
+    // so a record that loses a property is simply compared for fewer of them -
+    // silently, and passing. A record emptied altogether compares nothing at
+    // all. Neither the ">= 40 keys" gate nor section 1's key symmetry can see
+    // INSIDE a record, so before the shape gate the golden could be hollowed
+    // out and the whole fidelity argument with it.
+    //
+    // Removes ONE property from ONE record, which is the smallest form of the
+    // damage and the one no other assertion can notice: fidelity still passes,
+    // because it now compares the five properties that remain and they all
+    // still match.
+    what: "drop one measured property from one golden token record",
+    file: GOLDEN,
+    from:
+      '      "keyword@": {\n' +
+      '        "color": "rgb(133, 153, 0)",\n' +
+      '        "backgroundColor": "rgba(0, 0, 0, 0)",\n' +
+      '        "opacity": "1",\n' +
+      '        "fontWeight": "400",\n' +
+      '        "fontStyle": "normal",\n' +
+      '        "cursor": "auto"\n' +
+      "      },",
+    to:
+      '      "keyword@": {\n' +
+      '        "color": "rgb(133, 153, 0)",\n' +
+      '        "backgroundColor": "rgba(0, 0, 0, 0)",\n' +
+      '        "opacity": "1",\n' +
+      '        "fontWeight": "400",\n' +
+      '        "fontStyle": "normal"\n' +
+      "      },",
+    suite: "test:theme",
+    expect: [/every golden record carries every property the census measures/],
+    mustPass: [
+      /light: token appearance reproduces the golden exactly/,
+      /light: no token key appears that the golden never measured/,
+    ],
+  },
+  {
+    id: "R286",
+    // A FINE CELL THAT NAMES NO ROLE, and it is invisible to every other
+    // assertion by construction. Section 8 walked roles->cells only, so a cell
+    // reading an absolute literal never joined `rolesSeen` and was simply not
+    // looked at. That is a live trap for the scheme work: a scheme fills the
+    // advertised roles, and any cell reading a literal keeps the DEFAULT
+    // scheme's colour underneath it. Entities on Solarized cream is exactly
+    // that bug, already recorded as amendment 1 in the dark block.
+    //
+    // The literal chosen is Solarized's own green - the SAME colour --syn-keyword
+    // resolves to - so the page is byte-identical and no fidelity assertion can
+    // see it. --syn-keyword also stays reached (light --tok-attr-value still
+    // names it), so the roles->cells assertion cannot fire either. Only the
+    // cells->roles ledger can, which is the whole point.
+    what: "hard-code one light fine cell to its current literal instead of its role",
+    file: CSS,
+    // Two lines, because "--tok-keyword: var(--syn-keyword);" alone appears in
+    // BOTH mode blocks. The preceding line differs (dark inserts --tok-url
+    // between entity and keyword), so this pair is unique to light.
+    from:
+      "  --tok-entity: var(--syn-operator);\n" +
+      "  --tok-keyword: var(--syn-keyword);",
+    to:
+      "  --tok-entity: var(--syn-operator);\n" +
+      "  --tok-keyword: #859900;",
+    suite: "test:theme",
+    expect: [/light: exactly the listed fine cells read from no coarse role/],
+    mustPass: [
+      /light: token appearance reproduces the golden exactly/,
+      /light: every coarse role is still reached by at least one fine cell/,
+      /light: a body-level role override reaches every fine cell it names/,
+      /dark: exactly the listed fine cells read from no coarse role/,
+    ],
+  },
+  {
+    id: "R287",
+    // THE CLOSURE OVER STYLED CLASSES. The suite's coverage argument is "every
+    // styled token class is either measured by the golden or pinned in the
+    // REACHLESS ledger", and until this assertion existed nothing checked it:
+    // `symbol` was styled, reachable by no grammar and absent from the ledger,
+    // while `char`/`prolog`/`cdata` were styled and REACHABLE but absent from
+    // the fixture. All four could have been deleted from their selector lists
+    // with every assertion staying green.
+    //
+    // Models the realistic future edit - a class is added to a selector group
+    // and nobody adds a fixture snippet for it - rather than a deletion.
+    // Adding rather than removing keeps `symbol` styled, so the ledger's own
+    // vacuity guard cannot fire and this stays at one assertion.
+    what: "style a token class that nothing measures",
+    file: CSS,
+    from: ".token.symbol {",
+    to: ".token.symbol,\n.token.unmeasured-newcomer {",
+    suite: "test:theme",
+    expect: [
+      /every styled token class is either measured by the golden or listed as unreachable/,
+    ],
+    mustPass: [
+      /every class in the unreachable ledger is really styled by the shipped CSS/,
+      /light: token appearance reproduces the golden exactly/,
+    ],
+  },
+  {
+    id: "R288",
+    // A FIX THAT COULD NOT FAIL UNTIL IT WAS GIVEN SOMETHING TO PROTECT.
+    // Section 8's probe parks body's dark-mode class and restores it, but for
+    // data-theme it used to setAttribute its own value and then removeAttribute
+    // unconditionally - the prior value was never captured. Nothing sets
+    // data-theme yet, so that asymmetry was INERT, and an inert fix is
+    // indistinguishable from no fix: it can only be asserted by its author.
+    // The suite now parks a sentinel before the probe runs, which matches no
+    // rule and therefore disturbs no measurement, and asserts it survives. This
+    // revert restores the old unconditional delete, so the latent bug becomes a
+    // present one and the assertion catches it. Once the scheme blocks land,
+    // the same delete would silently drop every later section back to the
+    // DEFAULT scheme while still reporting the active scheme's name.
+    what: "delete body's data-theme in the scope probe instead of restoring it",
+    file: THEME_TEST,
+    from:
+      "        if (hadTheme === null) document.body.removeAttribute('data-theme');\n" +
+      "        else document.body.setAttribute('data-theme', hadTheme);",
+    to: "        document.body.removeAttribute('data-theme');",
+    suite: "test:theme",
+    expect: [
+      /the scope probe restores the data-theme it found instead of deleting it/,
+    ],
+    mustPass: [
+      /light: every fine cell is declared at body scope, not :root/,
+      /dark: a body-level role override reaches every fine cell it names/,
+    ],
+  },
+  {
+    id: "R289",
+    // AN ORACLE THAT POLICES AN EMPTY LIST REPORTS FULL COMPLIANCE. The two
+    // attribution assertions are both `filter(...).length === 0` over
+    // INLINED_THEME_CREDITS, so an emptied list makes BOTH of them true while
+    // checking nothing whatsoever - the vacuity that this project has now been
+    // bitten by three times. The floor exists for exactly that, and this revert
+    // is what demonstrates the floor can fail; it was flagged in review as an
+    // assertion that had never been shown to fail, which is the adjacent risk to
+    // the one the assertion itself was written to close.
+    //
+    // Deliberately NOT listing the other two as mustPass: they DO still pass
+    // under this revert, but only vacuously, and recording that as expected
+    // behaviour would endorse the very thing being guarded against.
+    what: "empty the inlined-theme credit list the attribution oracle polices",
+    file: PKG_TEST,
+    from: "        const INLINED_THEME_CREDITS = [",
+    to: "        const INLINED_THEME_CREDITS = [];\n        const __emptied = [",
+    suite: "test:packaging",
+    expect: [/the inlined-theme attribution oracle has credits to police/],
+  },
+  {
+    id: "R290",
+    // THE STALENESS HALF. The credit list is hand-written rather than scraped
+    // (upstream credits its authors in four different shapes, and a scraper
+    // matching three of them would report full compliance), so the risk moves
+    // from "misses a pattern" to "goes stale against upstream". The assertion
+    // that closes that reads each upstream theme file and looks for the exact
+    // string upstream uses - which for Tomorrow Night is the project URL
+    // github.com/chriskempson/..., not the person's name.
+    //
+    // Splitting "chriskempson" into "chris kempson" is the realistic accident:
+    // it is what a well-meaning tidy of a name does, it still LOOKS right, and
+    // it still satisfies the third assertion, because "Chris Kempson" continues
+    // to appear in styles.css. Only the upstream check can see it.
+    what: "tidy an upstream credit string into a form upstream never uses",
+    file: PKG_TEST,
+    from: 'as: "chriskempson" }',
+    to: 'as: "chris kempson" }',
+    suite: "test:packaging",
+    expect: [/every inlined theme credit is one upstream PrismJS really gives/],
+    mustPass: [
+      /the inlined-theme attribution oracle has credits to police/,
+      /the inlined PrismJS colour schemes keep their upstream attribution/,
+    ],
+  },
+  {
+    id: "R291",
+    // A NUMBER IN A COMMENT THAT NOTHING COULD FALSIFY. src/styles.css justifies
+    // declaring the fine->coarse mapping twice by claiming a specific number of
+    // the 25 cells resolve differently per mode. Promoting --tok-entity-bg to a
+    // coarse role made both blocks agree on that cell and took the count from 16
+    // to 15 - and neither the suite, nor --anchors, nor --expects could see the
+    // stale 16, because all three are structurally blind to prose.
+    //
+    // The anchor is chosen so the edit is invisible to every OTHER assertion:
+    // --syn-string and --syn-variable are both #7ec699 in dark, so re-pointing
+    // --tok-string between them repaints nothing, and --syn-string keeps
+    // --tok-attr-value as a consumer so no role goes unreached. What it does
+    // change is that light and dark stop agreeing on --tok-string, taking the
+    // count to 16 - which is the one thing the new assertion measures.
+    what: "map a dark fine cell from a different, identically-valued coarse role",
+    file: CSS,
+    from:
+      "  --tok-builtin-class: var(--syn-keyword);\n" +
+      "  --tok-string: var(--syn-string);",
+    to:
+      "  --tok-builtin-class: var(--syn-keyword);\n" +
+      "  --tok-string: var(--syn-variable);",
+    suite: "test:theme",
+    expect: [
+      /the per-mode mapping differs in exactly the number of cells the stylesheet claims/,
+    ],
+    mustPass: [
+      /dark: token appearance reproduces the golden exactly/,
+      /dark: every coarse role is still reached by at least one fine cell/,
+      /dark: exactly the listed fine cells read from no coarse role/,
+    ],
+  },
+  {
+    id: "R292",
+    // THE EXPECTATION AND THE PROBE CAME FROM THE SAME MODULE. The golden-shape
+    // gate compares the golden against TOKEN_PROPS - imported from
+    // theme-census.js, which is ALSO what drives the capture. Narrow the list
+    // there and re-capture (this golden has been re-captured five times, and the
+    // recipe is written down) and the probe measures less, the golden records
+    // less, the gate compares less, and everything stays green. Found in review
+    // as the third instance of this project's recurring defect: an expectation
+    // drawn from the thing under test is not an expectation.
+    //
+    // FOUR assertions fail here, not one, and the reason matters: the token half
+    // of the shape gate is an EQUALITY test, and section 2 compares the golden
+    // against the LIVE census, so a narrowed tuple also makes every live record
+    // come back short against a golden that still carries the property.
+    // Measured, not predicted - the first draft of this comment claimed two.
+    //
+    // None of that makes the pin redundant. All four failures depend on the
+    // golden still being wide; narrow the tuple AND re-capture and they go green
+    // together, because both sides shrink in step. That is the case no single
+    // revert can express, and it is the only case the pin exists for.
+    what: "drop a property from the census's token tuple",
+    file: CENSUS,
+    from: '  "fontStyle",\n  "cursor",\n];',
+    to: '  "fontStyle",\n];',
+    suite: "test:theme",
+    expect: [/the census measures exactly the token properties this suite pins/],
+    mustPass: [
+      /the census measures exactly the code-box properties this suite pins/,
+      /the census measures exactly the reading surfaces this suite pins/,
+    ],
+  },
+  {
+    id: "R293",
+    // The box half. The box comparison fails alongside the pin, because it asks
+    // the live census for what the golden recorded and a narrowed BOX_PROPS
+    // makes the live record come back short. This revert was first written
+    // asserting those comparisons would still PASS, on the theory that section 3
+    // iterates BOX_PROPS; the harness returned COLLATERAL and corrected it. The
+    // theory was wrong in the safe direction - coverage is better than assumed -
+    // but the pin is still what covers the narrow-and-re-capture case.
+    //
+    // textShadow is a real loss to take: it carries Prism's text shadow, one of
+    // the things the two default themes genuinely disagree about.
+    what: "drop a property from the census's code-box tuple",
+    file: CENSUS,
+    from: '  "color",\n  "textShadow",\n];',
+    to: '  "color",\n];',
+    suite: "test:theme",
+    expect: [
+      /the census measures exactly the code-box properties this suite pins/,
+    ],
+    mustPass: [
+      /the census measures exactly the token properties this suite pins/,
+      /the census measures exactly the reading surfaces this suite pins/,
+    ],
+  },
+  {
+    id: "R294",
+    // The surface half, and the same correction as R293 applies: the surface
+    // comparison fails alongside the pin, for the same reason. Body text colour
+    // is the single most visible thing a scheme can get wrong, and this is the
+    // edit that would stop anyone measuring it.
+    what: "stop the census measuring body text colour",
+    file: CENSUS,
+    from: '  "#viewer p": ["color"],',
+    to: '  "#viewer p": [],',
+    suite: "test:theme",
+    expect: [
+      /the census measures exactly the reading surfaces this suite pins/,
+    ],
+    mustPass: [
+      /the census measures exactly the token properties this suite pins/,
+      /every golden record carries every property the census measures/,
+    ],
+  },
 ];
 
 const argv = process.argv.slice(2);
@@ -3907,7 +4743,25 @@ const argv = process.argv.slice(2);
 // matches proves nothing about whether the assertions it is paired with still
 // fail.
 const anchorsOnly = argv.includes("--anchors");
-const only = argv.filter((a) => a !== "--anchors");
+// THE OTHER HALF OF ROT, and `--anchors` is structurally blind to it. A revert
+// is a pair: the ANCHOR it perturbs and the ASSERTION NAMES it expects to see
+// fail. Renaming an assertion breaks the second half while leaving the first
+// intact, so the sweep reports "anchor OK" and the pairing is silently dead.
+// Measured, not supposed: rewriting two sections of test-theme.js orphaned SEVEN
+// expect regexes across R259/R265/R271/R272/R275/R276 at once.
+//
+// The two halves fail differently, and the `mustPass` half is the dangerous one.
+// An orphaned `expect` eventually reports WRONG-GUARD - loud, but only hours
+// into a full run. An orphaned `mustPass` can never match, so COLLATERAL can
+// never fire and the revert reports PROVEN while its collateral guard has
+// quietly stopped existing. That is this project's recurring "an assertion of
+// ABSENCE fails open" disease in a new place.
+//
+// So this runs each referenced suite ONCE on the clean tree and checks every
+// regex names a live assertion. Deliberately separate from --anchors: that is a
+// one-second string sweep, this costs one suite run per distinct suite.
+const expectsOnly = argv.includes("--expects");
+const only = argv.filter((a) => a !== "--anchors" && a !== "--expects");
 const chosen = only.length ? REVERTS.filter((r) => only.includes(r.id)) : REVERTS;
 // Fail loud rather than silently reporting success on an empty set. A typo in
 // an id (or a `--only R1,R2` that this script does not accept) otherwise ends
@@ -3942,6 +4796,66 @@ function failedNames(out) {
     .split(/\r?\n/)
     .filter((l) => l.trim().startsWith("FAIL"))
     .map((l) => l.trim());
+}
+
+// Every assertion the suite emitted, rendered in the SAME shape failedNames()
+// produces, so the audit tests each regex against exactly the string the real
+// matching would see rather than against a hand-normalised approximation.
+function assertionNames(out) {
+  return out
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => /^(PASS|FAIL)\s/.test(l))
+    .map((l) => "FAIL  " + l.replace(/^(PASS|FAIL)\s+/, ""));
+}
+
+if (expectsOnly) {
+  const suites = [...new Set(chosen.map((r) => r.suite || "test:tables"))].sort();
+  const catalogue = new Map();
+  for (const s of suites) {
+    const names = assertionNames(runSuite(s));
+    catalogue.set(s, names);
+    console.log(`${s}  ${names.length} assertion(s)`);
+    // A suite that emitted nothing would make every regex under it look like an
+    // orphan, which is a confident wrong answer rather than a finding.
+    if (!names.length) {
+      console.error(`  ^ emitted no assertions at all; the audit below is meaningless.`);
+      process.exit(2);
+    }
+  }
+  let orphans = 0;
+  let excused = 0;
+  for (const r of chosen) {
+    const names = catalogue.get(r.suite || "test:tables");
+    for (const [label, list] of [
+      ["expect", r.expect || []],
+      ["mustPass", r.mustPass || []],
+    ]) {
+      for (const re of list) {
+        if (names.some((n) => re.test(n))) continue;
+        // A FALSE POSITIVE THIS AUDIT REALLY HAS, and excusing it explicitly is
+        // the only honest option - a check that cries wolf is a check people
+        // learn to skip. A few assertions choose their own NAME from the state
+        // they find (test-packaging.js:1426 names itself one way when
+        // build.publish is configured and another when it is not), so the name a
+        // revert expects exists only once that revert has been applied and can
+        // never appear in a clean-tree catalogue.
+        if (r.nameVariesWithState) {
+          excused += 1;
+          console.log(`${r.id}  EXCUSED  ${label}  ${re}  (${r.nameVariesWithState})`);
+          continue;
+        }
+        orphans += 1;
+        console.log(`${r.id}  ORPHANED ${label}  ${re} names no assertion in ${r.suite || "test:tables"}`);
+      }
+    }
+  }
+  console.log(
+    orphans === 0
+      ? `\nEvery expect/mustPass regex names a live assertion (${chosen.length} reverts, ${suites.length} suite(s), ${excused} excused).`
+      : `\n${orphans} ORPHANED regex(es). These reverts cannot prove what they claim.`,
+  );
+  process.exit(orphans === 0 ? 0 : 1);
 }
 
 // The CSS in this repo is CRLF and the JS is LF. Matching a literal multi-line

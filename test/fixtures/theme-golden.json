@@ -1,0 +1,1694 @@
+{
+  "capturedFromCommit": "4bbde83aa92a1c1a360925b183308b477254667b",
+  "note": "Frozen pre-theme-system appearance. Regenerate ONLY by hand via scripts/capture-theme-golden.js, never from a test run.",
+  "light": {
+    "tokens": {
+      "keyword@": {
+        "color": "rgb(133, 153, 0)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "string@": {
+        "color": "rgb(42, 161, 152)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "punctuation@": {
+        "color": "rgb(88, 110, 117)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "comment@": {
+        "color": "rgb(147, 161, 161)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "constant@": {
+        "color": "rgb(38, 139, 210)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "operator@": {
+        "color": "rgb(101, 123, 131)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "regex@": {
+        "color": "rgb(203, 75, 22)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "regex-delimiter@regex": {
+        "color": "rgb(203, 75, 22)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "language-regex.regex-source@regex": {
+        "color": "rgb(203, 75, 22)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "regex-flags@regex": {
+        "color": "rgb(203, 75, 22)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "function@": {
+        "color": "rgb(181, 137, 0)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "parameter@": {
+        "color": "rgb(101, 123, 131)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "punctuation@parameter": {
+        "color": "rgb(88, 110, 117)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "operator@parameter": {
+        "color": "rgb(101, 123, 131)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "number@parameter": {
+        "color": "rgb(38, 139, 210)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "literal-property.property@": {
+        "color": "rgb(38, 139, 210)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "boolean@": {
+        "color": "rgb(38, 139, 210)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "number@": {
+        "color": "rgb(38, 139, 210)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "template-string@": {
+        "color": "rgb(101, 123, 131)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "string.template-punctuation@template-string": {
+        "color": "rgb(42, 161, 152)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "string@template-string": {
+        "color": "rgb(42, 161, 152)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "interpolation@template-string": {
+        "color": "rgb(101, 123, 131)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "interpolation-punctuation.punctuation@template-string>interpolation": {
+        "color": "rgb(88, 110, 117)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "class-name@": {
+        "color": "rgb(181, 137, 0)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "annotation.decorator.punctuation@": {
+        "color": "rgb(88, 110, 117)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "builtin@": {
+        "color": "rgb(42, 161, 152)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "string-interpolation@": {
+        "color": "rgb(101, 123, 131)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "string@string-interpolation": {
+        "color": "rgb(42, 161, 152)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "interpolation@string-interpolation": {
+        "color": "rgb(101, 123, 131)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "punctuation@string-interpolation>interpolation": {
+        "color": "rgb(88, 110, 117)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "conversion-option.punctuation@string-interpolation>interpolation": {
+        "color": "rgb(88, 110, 117)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "atrule@": {
+        "color": "rgb(133, 153, 0)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "rule@atrule": {
+        "color": "rgb(133, 153, 0)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "selector@": {
+        "color": "rgb(42, 161, 152)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "property@": {
+        "color": "rgb(38, 139, 210)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "important@": {
+        "color": "rgb(203, 75, 22)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "700",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "url@": {
+        "color": "rgb(42, 161, 152)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "function@url": {
+        "color": "rgb(181, 137, 0)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "punctuation@url": {
+        "color": "rgb(88, 110, 117)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "string.url@url": {
+        "color": "rgb(42, 161, 152)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "prolog@": {
+        "color": "rgb(147, 161, 161)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "doctype@": {
+        "color": "rgb(147, 161, 161)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "punctuation@doctype": {
+        "color": "rgb(88, 110, 117)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "doctype-tag@doctype": {
+        "color": "rgb(147, 161, 161)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "name@doctype": {
+        "color": "rgb(147, 161, 161)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "tag@": {
+        "color": "rgb(38, 139, 210)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "tag@tag": {
+        "color": "rgb(38, 139, 210)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "punctuation@tag>tag": {
+        "color": "rgb(88, 110, 117)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "attr-name@tag": {
+        "color": "rgb(42, 161, 152)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "attr-value@tag": {
+        "color": "rgb(133, 153, 0)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "attr-equals.punctuation@tag>attr-value": {
+        "color": "rgb(88, 110, 117)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "punctuation@tag>attr-value": {
+        "color": "rgb(88, 110, 117)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "punctuation@tag": {
+        "color": "rgb(88, 110, 117)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "entity.named-entity@": {
+        "color": "rgb(101, 123, 131)",
+        "backgroundColor": "rgb(238, 232, 213)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "help"
+      },
+      "namespace@tag>tag": {
+        "color": "rgb(38, 139, 210)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "0.7",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "namespace@tag>attr-name": {
+        "color": "rgb(42, 161, 152)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "0.7",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "cdata@": {
+        "color": "rgb(147, 161, 161)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "keyword.null@": {
+        "color": "rgb(133, 153, 0)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "important.shebang@": {
+        "color": "rgb(203, 75, 22)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "700",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "function.function-name@": {
+        "color": "rgb(181, 137, 0)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "builtin.class-name@": {
+        "color": "rgb(181, 137, 0)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "variable@string": {
+        "color": "rgb(203, 75, 22)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "parameter.variable@": {
+        "color": "rgb(203, 75, 22)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "constant.environment@string": {
+        "color": "rgb(38, 139, 210)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "constant@class-name": {
+        "color": "rgb(38, 139, 210)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "operator@class-name": {
+        "color": "rgb(181, 137, 0)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "namespace@": {
+        "color": "rgb(101, 123, 131)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "0.7",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "class-name.return-type@": {
+        "color": "rgb(181, 137, 0)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "keyword@class-name.return-type": {
+        "color": "rgb(133, 153, 0)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "macro.property@": {
+        "color": "rgb(38, 139, 210)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "directive-hash@macro.property": {
+        "color": "rgb(38, 139, 210)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "directive.keyword@macro.property": {
+        "color": "rgb(133, 153, 0)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "string@macro.property": {
+        "color": "rgb(42, 161, 152)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "char@": {
+        "color": "rgb(42, 161, 152)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      }
+    },
+    "box": {
+      "pre": {
+        "fontFamily": "\"Fira Code Local\", \"Fira Code\", Consolas, \"Courier New\", monospace",
+        "fontSize": "13px",
+        "lineHeight": "19.5px",
+        "tabSize": "4",
+        "whiteSpace": "pre",
+        "hyphens": "none",
+        "wordBreak": "normal",
+        "overflowWrap": "normal",
+        "textAlign": "left",
+        "wordSpacing": "0px",
+        "padding": "13px",
+        "margin": "6.5px 0px",
+        "borderRadius": "3.9px",
+        "borderTopWidth": "0.666667px",
+        "borderRightWidth": "0.666667px",
+        "borderBottomWidth": "0.666667px",
+        "borderLeftWidth": "0.666667px",
+        "borderTopStyle": "solid",
+        "borderRightStyle": "solid",
+        "borderBottomStyle": "solid",
+        "borderLeftStyle": "solid",
+        "borderTopColor": "rgb(208, 208, 208)",
+        "borderRightColor": "rgb(208, 208, 208)",
+        "borderBottomColor": "rgb(208, 208, 208)",
+        "borderLeftColor": "rgb(208, 208, 208)",
+        "boxShadow": "none",
+        "overflow": "auto",
+        "backgroundColor": "rgb(253, 246, 227)",
+        "color": "rgb(101, 123, 131)",
+        "textShadow": "none"
+      },
+      "preCode": {
+        "fontFamily": "\"Fira Code Local\", \"Fira Code\", Consolas, \"Courier New\", monospace",
+        "fontSize": "11.7px",
+        "lineHeight": "17.55px",
+        "tabSize": "4",
+        "whiteSpace": "pre",
+        "hyphens": "none",
+        "wordBreak": "normal",
+        "overflowWrap": "normal",
+        "textAlign": "left",
+        "wordSpacing": "0px",
+        "padding": "0px",
+        "margin": "0px",
+        "borderRadius": "3px",
+        "borderTopWidth": "0px",
+        "borderRightWidth": "0px",
+        "borderBottomWidth": "0px",
+        "borderLeftWidth": "0px",
+        "borderTopStyle": "none",
+        "borderRightStyle": "none",
+        "borderBottomStyle": "none",
+        "borderLeftStyle": "none",
+        "borderTopColor": "rgb(101, 123, 131)",
+        "borderRightColor": "rgb(101, 123, 131)",
+        "borderBottomColor": "rgb(101, 123, 131)",
+        "borderLeftColor": "rgb(101, 123, 131)",
+        "boxShadow": "none",
+        "overflow": "visible",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "color": "rgb(101, 123, 131)",
+        "textShadow": "none"
+      },
+      "inlineCode": {
+        "fontFamily": "\"Fira Code Local\", \"Fira Code\", Consolas, \"Courier New\", monospace",
+        "fontSize": "11.7px",
+        "lineHeight": "21.06px",
+        "tabSize": "8",
+        "whiteSpace": "normal",
+        "hyphens": "manual",
+        "wordBreak": "normal",
+        "overflowWrap": "normal",
+        "textAlign": "start",
+        "wordSpacing": "0px",
+        "padding": "2px 6px",
+        "margin": "0px",
+        "borderRadius": "3px",
+        "borderTopWidth": "0px",
+        "borderRightWidth": "0px",
+        "borderBottomWidth": "0px",
+        "borderLeftWidth": "0px",
+        "borderTopStyle": "none",
+        "borderRightStyle": "none",
+        "borderBottomStyle": "none",
+        "borderLeftStyle": "none",
+        "borderTopColor": "rgb(31, 50, 68)",
+        "borderRightColor": "rgb(31, 50, 68)",
+        "borderBottomColor": "rgb(31, 50, 68)",
+        "borderLeftColor": "rgb(31, 50, 68)",
+        "boxShadow": "none",
+        "overflow": "visible",
+        "backgroundColor": "rgb(232, 232, 232)",
+        "color": "rgb(31, 50, 68)",
+        "textShadow": "none"
+      },
+      "inlineLangCode": {
+        "fontFamily": "\"Fira Code Local\", \"Fira Code\", Consolas, \"Courier New\", monospace",
+        "fontSize": "13px",
+        "lineHeight": "19.5px",
+        "tabSize": "4",
+        "whiteSpace": "pre",
+        "hyphens": "none",
+        "wordBreak": "normal",
+        "overflowWrap": "normal",
+        "textAlign": "left",
+        "wordSpacing": "0px",
+        "padding": "1.3px",
+        "margin": "0px",
+        "borderRadius": "3.9px",
+        "borderTopWidth": "0px",
+        "borderRightWidth": "0px",
+        "borderBottomWidth": "0px",
+        "borderLeftWidth": "0px",
+        "borderTopStyle": "none",
+        "borderRightStyle": "none",
+        "borderBottomStyle": "none",
+        "borderLeftStyle": "none",
+        "borderTopColor": "rgb(101, 123, 131)",
+        "borderRightColor": "rgb(101, 123, 131)",
+        "borderBottomColor": "rgb(101, 123, 131)",
+        "borderLeftColor": "rgb(101, 123, 131)",
+        "boxShadow": "none",
+        "overflow": "visible",
+        "backgroundColor": "rgb(253, 246, 227)",
+        "color": "rgb(101, 123, 131)",
+        "textShadow": "none"
+      },
+      "preNoLang": {
+        "fontFamily": "\"Fira Code Local\", \"Fira Code\", Consolas, \"Courier New\", monospace",
+        "fontSize": "13px",
+        "lineHeight": "19.5px",
+        "tabSize": "4",
+        "whiteSpace": "pre",
+        "hyphens": "none",
+        "wordBreak": "normal",
+        "overflowWrap": "normal",
+        "textAlign": "left",
+        "wordSpacing": "0px",
+        "padding": "13px",
+        "margin": "6.5px 0px",
+        "borderRadius": "3.9px",
+        "borderTopWidth": "0.666667px",
+        "borderRightWidth": "0.666667px",
+        "borderBottomWidth": "0.666667px",
+        "borderLeftWidth": "0.666667px",
+        "borderTopStyle": "solid",
+        "borderRightStyle": "solid",
+        "borderBottomStyle": "solid",
+        "borderLeftStyle": "solid",
+        "borderTopColor": "rgb(208, 208, 208)",
+        "borderRightColor": "rgb(208, 208, 208)",
+        "borderBottomColor": "rgb(208, 208, 208)",
+        "borderLeftColor": "rgb(208, 208, 208)",
+        "boxShadow": "none",
+        "overflow": "auto",
+        "backgroundColor": "rgb(253, 246, 227)",
+        "color": "rgb(101, 123, 131)",
+        "textShadow": "none"
+      },
+      "preNoLangCode": {
+        "fontFamily": "\"Fira Code Local\", \"Fira Code\", Consolas, \"Courier New\", monospace",
+        "fontSize": "11.7px",
+        "lineHeight": "17.55px",
+        "tabSize": "4",
+        "whiteSpace": "pre",
+        "hyphens": "none",
+        "wordBreak": "normal",
+        "overflowWrap": "normal",
+        "textAlign": "left",
+        "wordSpacing": "0px",
+        "padding": "0px",
+        "margin": "0px",
+        "borderRadius": "3px",
+        "borderTopWidth": "0px",
+        "borderRightWidth": "0px",
+        "borderBottomWidth": "0px",
+        "borderLeftWidth": "0px",
+        "borderTopStyle": "none",
+        "borderRightStyle": "none",
+        "borderBottomStyle": "none",
+        "borderLeftStyle": "none",
+        "borderTopColor": "rgb(101, 123, 131)",
+        "borderRightColor": "rgb(101, 123, 131)",
+        "borderBottomColor": "rgb(101, 123, 131)",
+        "borderLeftColor": "rgb(101, 123, 131)",
+        "boxShadow": "none",
+        "overflow": "visible",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "color": "rgb(101, 123, 131)",
+        "textShadow": "none"
+      }
+    },
+    "surfaces": {
+      "body": {
+        "backgroundColor": "rgb(245, 245, 245)",
+        "color": "rgb(31, 50, 68)"
+      },
+      "#viewer": {
+        "color": "rgb(31, 50, 68)"
+      },
+      "#viewer h1": {
+        "color": "rgb(39, 158, 167)",
+        "borderBottomColor": "rgb(39, 158, 167)"
+      },
+      "#viewer h2": {
+        "color": "rgb(31, 50, 68)",
+        "borderBottomColor": "rgb(208, 208, 208)"
+      },
+      "#viewer p": {
+        "color": "rgb(31, 50, 68)"
+      },
+      "#viewer a": {
+        "color": "rgb(39, 158, 167)"
+      },
+      "#viewer blockquote": {
+        "backgroundColor": "rgb(250, 250, 250)",
+        "color": "rgb(90, 107, 125)",
+        "borderLeftColor": "rgb(39, 158, 167)"
+      },
+      "#viewer th": {
+        "backgroundColor": "rgb(31, 50, 68)",
+        "color": "rgb(255, 255, 255)",
+        "borderBottomColor": "rgb(208, 208, 208)"
+      },
+      "#viewer td": {
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "color": "rgb(31, 50, 68)"
+      },
+      "#viewer tbody tr:first-child td": {
+        "borderBottomColor": "rgb(208, 208, 208)"
+      }
+    },
+    "selection": [
+      {
+        "selector": "::selection",
+        "css": "background: var(--primary-color); color: rgb(255, 255, 255);"
+      },
+      {
+        "selector": "pre[class*=\"language-\"]::selection, pre[class*=\"language-\"] ::selection, code[class*=\"language-\"]::selection, code[class*=\"language-\"] ::selection",
+        "css": "background: rgb(7, 54, 66);"
+      }
+    ],
+    "selectionComputed": {
+      "pre": "rgb(7, 54, 66)",
+      "preCode": "rgb(7, 54, 66)",
+      "body": "rgb(39, 158, 167)"
+    }
+  },
+  "dark": {
+    "tokens": {
+      "keyword@": {
+        "color": "rgb(204, 153, 205)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "string@": {
+        "color": "rgb(126, 198, 153)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "punctuation@": {
+        "color": "rgb(204, 204, 204)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "comment@": {
+        "color": "rgb(153, 153, 153)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "constant@": {
+        "color": "rgb(248, 197, 85)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "operator@": {
+        "color": "rgb(103, 205, 204)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "regex@": {
+        "color": "rgb(126, 198, 153)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "regex-delimiter@regex": {
+        "color": "rgb(126, 198, 153)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "language-regex.regex-source@regex": {
+        "color": "rgb(126, 198, 153)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "regex-flags@regex": {
+        "color": "rgb(126, 198, 153)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "function@": {
+        "color": "rgb(240, 141, 73)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "parameter@": {
+        "color": "rgb(204, 204, 204)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "punctuation@parameter": {
+        "color": "rgb(204, 204, 204)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "operator@parameter": {
+        "color": "rgb(103, 205, 204)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "number@parameter": {
+        "color": "rgb(240, 141, 73)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "literal-property.property@": {
+        "color": "rgb(248, 197, 85)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "boolean@": {
+        "color": "rgb(240, 141, 73)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "number@": {
+        "color": "rgb(240, 141, 73)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "template-string@": {
+        "color": "rgb(204, 204, 204)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "string.template-punctuation@template-string": {
+        "color": "rgb(126, 198, 153)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "string@template-string": {
+        "color": "rgb(126, 198, 153)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "interpolation@template-string": {
+        "color": "rgb(204, 204, 204)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "interpolation-punctuation.punctuation@template-string>interpolation": {
+        "color": "rgb(204, 204, 204)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "class-name@": {
+        "color": "rgb(248, 197, 85)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "annotation.decorator.punctuation@": {
+        "color": "rgb(204, 204, 204)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "builtin@": {
+        "color": "rgb(204, 153, 205)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "string-interpolation@": {
+        "color": "rgb(204, 204, 204)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "string@string-interpolation": {
+        "color": "rgb(126, 198, 153)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "interpolation@string-interpolation": {
+        "color": "rgb(204, 204, 204)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "punctuation@string-interpolation>interpolation": {
+        "color": "rgb(204, 204, 204)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "conversion-option.punctuation@string-interpolation>interpolation": {
+        "color": "rgb(204, 204, 204)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "atrule@": {
+        "color": "rgb(204, 153, 205)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "rule@atrule": {
+        "color": "rgb(204, 153, 205)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "selector@": {
+        "color": "rgb(204, 153, 205)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "property@": {
+        "color": "rgb(248, 197, 85)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "important@": {
+        "color": "rgb(204, 153, 205)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "700",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "url@": {
+        "color": "rgb(103, 205, 204)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "function@url": {
+        "color": "rgb(240, 141, 73)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "punctuation@url": {
+        "color": "rgb(204, 204, 204)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "string.url@url": {
+        "color": "rgb(103, 205, 204)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "prolog@": {
+        "color": "rgb(153, 153, 153)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "doctype@": {
+        "color": "rgb(153, 153, 153)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "punctuation@doctype": {
+        "color": "rgb(204, 204, 204)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "doctype-tag@doctype": {
+        "color": "rgb(153, 153, 153)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "name@doctype": {
+        "color": "rgb(153, 153, 153)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "tag@": {
+        "color": "rgb(226, 119, 122)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "tag@tag": {
+        "color": "rgb(226, 119, 122)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "punctuation@tag>tag": {
+        "color": "rgb(204, 204, 204)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "attr-name@tag": {
+        "color": "rgb(226, 119, 122)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "attr-value@tag": {
+        "color": "rgb(126, 198, 153)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "attr-equals.punctuation@tag>attr-value": {
+        "color": "rgb(204, 204, 204)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "punctuation@tag>attr-value": {
+        "color": "rgb(204, 204, 204)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "punctuation@tag": {
+        "color": "rgb(204, 204, 204)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "entity.named-entity@": {
+        "color": "rgb(103, 205, 204)",
+        "backgroundColor": "rgb(238, 232, 213)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "help"
+      },
+      "namespace@tag>tag": {
+        "color": "rgb(226, 119, 122)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "0.7",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "namespace@tag>attr-name": {
+        "color": "rgb(226, 119, 122)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "0.7",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "cdata@": {
+        "color": "rgb(153, 153, 153)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "keyword.null@": {
+        "color": "rgb(204, 153, 205)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "important.shebang@": {
+        "color": "rgb(204, 153, 205)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "700",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "function.function-name@": {
+        "color": "rgb(240, 141, 73)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "builtin.class-name@": {
+        "color": "rgb(204, 153, 205)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "variable@string": {
+        "color": "rgb(126, 198, 153)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "parameter.variable@": {
+        "color": "rgb(126, 198, 153)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "constant.environment@string": {
+        "color": "rgb(248, 197, 85)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "constant@class-name": {
+        "color": "rgb(248, 197, 85)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "operator@class-name": {
+        "color": "rgb(103, 205, 204)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "namespace@": {
+        "color": "rgb(226, 119, 122)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "0.7",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "class-name.return-type@": {
+        "color": "rgb(248, 197, 85)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "keyword@class-name.return-type": {
+        "color": "rgb(204, 153, 205)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "macro.property@": {
+        "color": "rgb(248, 197, 85)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "directive-hash@macro.property": {
+        "color": "rgb(248, 197, 85)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "directive.keyword@macro.property": {
+        "color": "rgb(204, 153, 205)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "string@macro.property": {
+        "color": "rgb(126, 198, 153)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      },
+      "char@": {
+        "color": "rgb(126, 198, 153)",
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "opacity": "1",
+        "fontWeight": "400",
+        "fontStyle": "normal",
+        "cursor": "auto"
+      }
+    },
+    "box": {
+      "pre": {
+        "fontFamily": "\"Fira Code Local\", \"Fira Code\", Consolas, \"Courier New\", monospace",
+        "fontSize": "13px",
+        "lineHeight": "19.5px",
+        "tabSize": "4",
+        "whiteSpace": "pre",
+        "hyphens": "none",
+        "wordBreak": "normal",
+        "overflowWrap": "normal",
+        "textAlign": "left",
+        "wordSpacing": "0px",
+        "padding": "13px",
+        "margin": "6.5px 0px",
+        "borderRadius": "3.9px",
+        "borderTopWidth": "0.666667px",
+        "borderRightWidth": "0.666667px",
+        "borderBottomWidth": "0.666667px",
+        "borderLeftWidth": "0.666667px",
+        "borderTopStyle": "solid",
+        "borderRightStyle": "solid",
+        "borderBottomStyle": "solid",
+        "borderLeftStyle": "solid",
+        "borderTopColor": "rgb(64, 64, 64)",
+        "borderRightColor": "rgb(64, 64, 64)",
+        "borderBottomColor": "rgb(64, 64, 64)",
+        "borderLeftColor": "rgb(64, 64, 64)",
+        "boxShadow": "none",
+        "overflow": "auto",
+        "backgroundColor": "rgb(45, 45, 45)",
+        "color": "rgb(204, 204, 204)",
+        "textShadow": "none"
+      },
+      "preCode": {
+        "fontFamily": "\"Fira Code Local\", \"Fira Code\", Consolas, \"Courier New\", monospace",
+        "fontSize": "11.7px",
+        "lineHeight": "17.55px",
+        "tabSize": "4",
+        "whiteSpace": "pre",
+        "hyphens": "none",
+        "wordBreak": "normal",
+        "overflowWrap": "normal",
+        "textAlign": "left",
+        "wordSpacing": "0px",
+        "padding": "0px",
+        "margin": "0px",
+        "borderRadius": "3px",
+        "borderTopWidth": "0px",
+        "borderRightWidth": "0px",
+        "borderBottomWidth": "0px",
+        "borderLeftWidth": "0px",
+        "borderTopStyle": "none",
+        "borderRightStyle": "none",
+        "borderBottomStyle": "none",
+        "borderLeftStyle": "none",
+        "borderTopColor": "rgb(204, 204, 204)",
+        "borderRightColor": "rgb(204, 204, 204)",
+        "borderBottomColor": "rgb(204, 204, 204)",
+        "borderLeftColor": "rgb(204, 204, 204)",
+        "boxShadow": "none",
+        "overflow": "visible",
+        "backgroundColor": "rgb(45, 45, 45)",
+        "color": "rgb(204, 204, 204)",
+        "textShadow": "none"
+      },
+      "inlineCode": {
+        "fontFamily": "\"Fira Code Local\", \"Fira Code\", Consolas, \"Courier New\", monospace",
+        "fontSize": "11.7px",
+        "lineHeight": "21.06px",
+        "tabSize": "8",
+        "whiteSpace": "normal",
+        "hyphens": "manual",
+        "wordBreak": "normal",
+        "overflowWrap": "normal",
+        "textAlign": "start",
+        "wordSpacing": "0px",
+        "padding": "2px 6px",
+        "margin": "0px",
+        "borderRadius": "3px",
+        "borderTopWidth": "0px",
+        "borderRightWidth": "0px",
+        "borderBottomWidth": "0px",
+        "borderLeftWidth": "0px",
+        "borderTopStyle": "none",
+        "borderRightStyle": "none",
+        "borderBottomStyle": "none",
+        "borderLeftStyle": "none",
+        "borderTopColor": "rgb(204, 204, 204)",
+        "borderRightColor": "rgb(204, 204, 204)",
+        "borderBottomColor": "rgb(204, 204, 204)",
+        "borderLeftColor": "rgb(204, 204, 204)",
+        "boxShadow": "none",
+        "overflow": "visible",
+        "backgroundColor": "rgb(45, 45, 45)",
+        "color": "rgb(204, 204, 204)",
+        "textShadow": "none"
+      },
+      "inlineLangCode": {
+        "fontFamily": "\"Fira Code Local\", \"Fira Code\", Consolas, \"Courier New\", monospace",
+        "fontSize": "13px",
+        "lineHeight": "19.5px",
+        "tabSize": "4",
+        "whiteSpace": "pre",
+        "hyphens": "none",
+        "wordBreak": "normal",
+        "overflowWrap": "normal",
+        "textAlign": "left",
+        "wordSpacing": "0px",
+        "padding": "1.3px",
+        "margin": "0px",
+        "borderRadius": "3.9px",
+        "borderTopWidth": "0px",
+        "borderRightWidth": "0px",
+        "borderBottomWidth": "0px",
+        "borderLeftWidth": "0px",
+        "borderTopStyle": "none",
+        "borderRightStyle": "none",
+        "borderBottomStyle": "none",
+        "borderLeftStyle": "none",
+        "borderTopColor": "rgb(204, 204, 204)",
+        "borderRightColor": "rgb(204, 204, 204)",
+        "borderBottomColor": "rgb(204, 204, 204)",
+        "borderLeftColor": "rgb(204, 204, 204)",
+        "boxShadow": "none",
+        "overflow": "visible",
+        "backgroundColor": "rgb(45, 45, 45)",
+        "color": "rgb(204, 204, 204)",
+        "textShadow": "none"
+      },
+      "preNoLang": {
+        "fontFamily": "\"Fira Code Local\", \"Fira Code\", Consolas, \"Courier New\", monospace",
+        "fontSize": "13px",
+        "lineHeight": "19.5px",
+        "tabSize": "4",
+        "whiteSpace": "pre",
+        "hyphens": "none",
+        "wordBreak": "normal",
+        "overflowWrap": "normal",
+        "textAlign": "left",
+        "wordSpacing": "0px",
+        "padding": "13px",
+        "margin": "6.5px 0px",
+        "borderRadius": "3.9px",
+        "borderTopWidth": "0.666667px",
+        "borderRightWidth": "0.666667px",
+        "borderBottomWidth": "0.666667px",
+        "borderLeftWidth": "0.666667px",
+        "borderTopStyle": "solid",
+        "borderRightStyle": "solid",
+        "borderBottomStyle": "solid",
+        "borderLeftStyle": "solid",
+        "borderTopColor": "rgb(64, 64, 64)",
+        "borderRightColor": "rgb(64, 64, 64)",
+        "borderBottomColor": "rgb(64, 64, 64)",
+        "borderLeftColor": "rgb(64, 64, 64)",
+        "boxShadow": "none",
+        "overflow": "auto",
+        "backgroundColor": "rgb(45, 45, 45)",
+        "color": "rgb(204, 204, 204)",
+        "textShadow": "none"
+      },
+      "preNoLangCode": {
+        "fontFamily": "\"Fira Code Local\", \"Fira Code\", Consolas, \"Courier New\", monospace",
+        "fontSize": "11.7px",
+        "lineHeight": "17.55px",
+        "tabSize": "4",
+        "whiteSpace": "pre",
+        "hyphens": "none",
+        "wordBreak": "normal",
+        "overflowWrap": "normal",
+        "textAlign": "left",
+        "wordSpacing": "0px",
+        "padding": "0px",
+        "margin": "0px",
+        "borderRadius": "3px",
+        "borderTopWidth": "0px",
+        "borderRightWidth": "0px",
+        "borderBottomWidth": "0px",
+        "borderLeftWidth": "0px",
+        "borderTopStyle": "none",
+        "borderRightStyle": "none",
+        "borderBottomStyle": "none",
+        "borderLeftStyle": "none",
+        "borderTopColor": "rgb(204, 204, 204)",
+        "borderRightColor": "rgb(204, 204, 204)",
+        "borderBottomColor": "rgb(204, 204, 204)",
+        "borderLeftColor": "rgb(204, 204, 204)",
+        "boxShadow": "none",
+        "overflow": "visible",
+        "backgroundColor": "rgb(45, 45, 45)",
+        "color": "rgb(204, 204, 204)",
+        "textShadow": "none"
+      }
+    },
+    "surfaces": {
+      "body": {
+        "backgroundColor": "rgb(26, 26, 26)",
+        "color": "rgb(232, 232, 232)"
+      },
+      "#viewer": {
+        "color": "rgb(232, 232, 232)"
+      },
+      "#viewer h1": {
+        "color": "rgb(61, 189, 198)",
+        "borderBottomColor": "rgb(61, 189, 198)"
+      },
+      "#viewer h2": {
+        "color": "rgb(232, 232, 232)",
+        "borderBottomColor": "rgb(64, 64, 64)"
+      },
+      "#viewer p": {
+        "color": "rgb(232, 232, 232)"
+      },
+      "#viewer a": {
+        "color": "rgb(61, 189, 198)"
+      },
+      "#viewer blockquote": {
+        "backgroundColor": "rgb(45, 45, 45)",
+        "color": "rgb(160, 160, 160)",
+        "borderLeftColor": "rgb(61, 189, 198)"
+      },
+      "#viewer th": {
+        "backgroundColor": "rgb(31, 50, 68)",
+        "color": "rgb(61, 189, 198)",
+        "borderBottomColor": "rgb(64, 64, 64)"
+      },
+      "#viewer td": {
+        "backgroundColor": "rgba(0, 0, 0, 0)",
+        "color": "rgb(232, 232, 232)"
+      },
+      "#viewer tbody tr:first-child td": {
+        "borderBottomColor": "rgb(64, 64, 64)"
+      }
+    },
+    "selection": [
+      {
+        "selector": "::selection",
+        "css": "background: var(--primary-color); color: rgb(255, 255, 255);"
+      },
+      {
+        "selector": "pre[class*=\"language-\"]::selection, pre[class*=\"language-\"] ::selection, code[class*=\"language-\"]::selection, code[class*=\"language-\"] ::selection",
+        "css": "background: rgb(7, 54, 66);"
+      }
+    ],
+    "selectionComputed": {
+      "pre": "rgb(7, 54, 66)",
+      "preCode": "rgb(7, 54, 66)",
+      "body": "rgb(61, 189, 198)"
+    }
+  }
+}

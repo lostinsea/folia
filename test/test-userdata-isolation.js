@@ -43,8 +43,37 @@
 // app.setPath("userData", ...) only relocates the profile if it runs before the
 // app is ready. Called too late it is silently ignored - an absence assertion
 // that fails open, the exact class of defect this project keeps finding. So
-// this module THROWS if it is required after app.isReady(), and throws again if
+// this module ABORTS if it is required after app.isReady(), and aborts again if
 // the path did not actually move.
+//
+// "FAILS LOUD" MUST NOT MEAN `throw`, AND THAT IS NOT A STYLE POINT
+// -----------------------------------------------------------------
+// This module used to throw. Electron converts an exception raised while the
+// main process is loading into dialog.showErrorBox - a MODAL, owned by the
+// process that is failing. In a headless run nobody clicks it, so the suite
+// does not fail: it HANGS, forever, holding the whole chain. Measured: a run
+// stalled 42 minutes on a window titled "Error" and had to be killed by PID;
+// `npm test` then reported exit=-1 with no totals. That is the precise opposite
+// of failing loud, and it is the same modal-blocks-the-only-process shape this
+// file's own header already documents for confirm-large-render.
+// So every fatal path below writes to fd 2 with writeSync - process.exit can
+// truncate a buffered stderr write on Windows - and exits non-zero.
+//
+// WHY THE WIPE RETRIES
+// --------------------
+// The directory name is per-suite but FIXED, so a still-dying Electron process
+// from an earlier run - or any other process that boots Electron against this
+// repo at the same time - can hold a handle inside it and turn the wipe into
+// EPERM. Node's own rmSync retries exactly this error class (EBUSY, EMFILE,
+// ENFILE, ENOTEMPTY, EPERM) with linear backoff when given maxRetries, which is
+// the ecosystem's answer to Windows lock races and is used here in preference
+// to a hand-rolled sleep loop.
+//
+// The name deliberately stays fixed rather than becoming unique per run. A
+// unique directory is always empty, which would make test-startup-perf.js's
+// "the suite booted from a profile with no inherited session" assertion
+// (POST_WIPE_ENTRIES === 0) true by construction and therefore incapable of
+// failing - trading a race for a permanently vacuous assertion.
 
 const fs = require("fs");
 const os = require("os");
@@ -73,18 +102,46 @@ let USER_DATA_DIR = null;
 let REAL_USER_DATA = null;
 let POST_WIPE_ENTRIES = null;
 
+// See "FAILS LOUD MUST NOT MEAN throw" above: under Electron a throw here is a
+// modal, and a modal is a hang. Write synchronously to fd 2, then exit.
+function fatal(message) {
+  try {
+    fs.writeSync(2, `\ntest-userdata-isolation: ${message}\n`);
+  } catch {
+    // A closed or broken fd 2 must not turn a diagnostic into a second, worse
+    // failure; the non-zero exit below is what the caller actually keys on.
+  }
+  process.exit(1);
+}
+
 if (app) {
   if (app.isReady()) {
-    throw new Error(
-      "test-userdata-isolation must be required BEFORE the Electron app is " +
-        "ready - app.setPath('userData') is ignored afterwards, which would " +
-        "silently run the suite against the developer's real profile.",
+    fatal(
+      "must be required BEFORE the Electron app is ready - " +
+        "app.setPath('userData') is ignored afterwards, which would silently " +
+        "run the suite against the developer's real profile.",
     );
   }
 
   USER_DATA_DIR = path.join(os.tmpdir(), "folia-test-userdata", suiteName());
 
-  fs.rmSync(USER_DATA_DIR, { recursive: true, force: true });
+  try {
+    fs.rmSync(USER_DATA_DIR, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 100,
+    });
+  } catch (err) {
+    fatal(
+      `could not wipe ${USER_DATA_DIR}: ${err.message}\n` +
+        "Something still holds a handle inside that profile. The usual cause " +
+        "is another process running Electron against this repo at the same " +
+        "time - a second suite, the revert harness, or a stray probe. Test " +
+        "suites must not run concurrently with each other or with anything " +
+        "else that boots Electron.",
+    );
+  }
   fs.mkdirSync(USER_DATA_DIR, { recursive: true });
 
   // Observed AFTER the wipe, so it is the profile the suite actually boots
@@ -98,15 +155,14 @@ if (app) {
 
   const now = app.getPath("userData");
   if (path.resolve(now) !== path.resolve(USER_DATA_DIR)) {
-    throw new Error(
-      `test-userdata-isolation failed to relocate userData: wanted ` +
-        `${USER_DATA_DIR}, got ${now}`,
+    fatal(
+      `failed to relocate userData: wanted ${USER_DATA_DIR}, got ${now}`,
     );
   }
   if (path.resolve(now) === path.resolve(REAL_USER_DATA)) {
-    throw new Error(
-      "test-userdata-isolation resolved to the real profile - the suite would " +
-        "read and write the developer's session.",
+    fatal(
+      "resolved to the real profile - the suite would read and write the " +
+        "developer's session.",
     );
   }
 

@@ -548,9 +548,13 @@ function main() {
     );
 
     // The isolation module only works because it refuses to run late. Without
-    // that throw it would silently no-op and every assertion above would keep
+    // that refusal it would silently no-op and every assertion above would keep
     // passing while the suites ran against a shared profile again - an absence
     // assertion failing open, the defect class this project keeps rediscovering.
+    // The refusal is an explicit stderr-plus-exit rather than a throw: under
+    // Electron a throw during load becomes dialog.showErrorBox, and a modal in
+    // the process that is failing is a hang, not a failure. See the module's
+    // own header, which records a 42-minute stall on exactly that.
     check(
       "the isolation module refuses to run after the app is ready",
       /app\.isReady\(\)/.test(
@@ -1815,6 +1819,74 @@ function main() {
           "every library vendored into libs/ has a notice",
           undocumentedVendored.length === 0,
           `${undocumentedVendored.join(", ")} - code ships inside libs/ but is documented nowhere; how it got there (npm devDependency, or committed by hand like Tabulator) does not change the obligation`,
+        );
+
+        // THE ATTRIBUTION THAT USED TO SHIP AS A FILE. Solarized Light and
+        // Tomorrow Night were vendored as libs/prismjs/themes/*.css, each
+        // carrying its own author header, and this suite asserted those files
+        // shipped. Inlining their rules into src/styles.css deleted both files
+        // and, with them, both assertions - silently. A name-set diff of this
+        // suite across that change shows the two simply gone: nothing failed,
+        // because an assertion that stops existing cannot fail. The obligation
+        // did not go anywhere, so the guard is restored in the form the code
+        // now takes - a comment in a stylesheet, which is precisely the kind of
+        // thing a reformat or a minifier drops without anyone noticing.
+        //
+        // The names are listed rather than scraped. Upstream credits its
+        // authors in four different shapes ("originally by", "Ported for
+        // PrismJS by", "@author", and a bare github URL), so a scraper needs
+        // four patterns and one that quietly matches three of them reports full
+        // compliance. Listing moves the risk to STALENESS instead, which the
+        // first assertion below removes by checking every listed name against
+        // the upstream header it claims to come from.
+        const INLINED_THEME_CREDITS = [
+          { name: "Ethan Schoonover", upstream: "prism-solarizedlight.css", as: "Ethan Schoonover" },
+          { name: "Hector Matos", upstream: "prism-solarizedlight.css", as: "Hector Matos" },
+          // Upstream credits Tomorrow Night only through the project URL
+          // github.com/chriskempson/tomorrow-theme, so what must appear
+          // upstream and what must appear in our own prose are different
+          // strings for the same person.
+          { name: "Chris Kempson", upstream: "prism-tomorrow.css", as: "chriskempson" },
+          { name: "Rose Pritchard", upstream: "prism-tomorrow.css", as: "Rose Pritchard" },
+        ];
+        check(
+          "the inlined-theme attribution oracle has credits to police",
+          INLINED_THEME_CREDITS.length >= 4,
+          `${INLINED_THEME_CREDITS.length} credits listed - emptying this list would make both assertions below pass over nothing`,
+        );
+        const prismThemeDir = path.join(ROOT, "node_modules", "prismjs", "themes");
+        const creditsWithoutUpstream = INLINED_THEME_CREDITS.filter(
+          (c) => !fs.existsSync(path.join(prismThemeDir, c.upstream)),
+        );
+        if (creditsWithoutUpstream.length > 0) {
+          skip(
+            "every inlined theme credit is one upstream PrismJS really gives",
+            `node_modules/prismjs/themes is missing ${[
+              ...new Set(creditsWithoutUpstream.map((c) => c.upstream)),
+            ].join(", ")} - run \`npm install\` so the list can be validated against its source`,
+          );
+        } else {
+          const notCreditedUpstream = INLINED_THEME_CREDITS.filter(
+            (c) => !fs.readFileSync(path.join(prismThemeDir, c.upstream), "utf8").includes(c.as),
+          );
+          check(
+            "every inlined theme credit is one upstream PrismJS really gives",
+            notCreditedUpstream.length === 0,
+            `${notCreditedUpstream
+              .map((c) => `${c.name} (looked for "${c.as}" in ${c.upstream})`)
+              .join(", ")} - the list has gone stale against upstream, so the notice below is crediting from memory`,
+          );
+        }
+        const inlinedThemeStyles = read("src/styles.css");
+        const missingThemeCredits = INLINED_THEME_CREDITS.filter(
+          (c) => !inlinedThemeStyles.includes(c.name),
+        );
+        check(
+          "the inlined PrismJS colour schemes keep their upstream attribution",
+          missingThemeCredits.length === 0,
+          `${missingThemeCredits
+            .map((c) => c.name)
+            .join(", ")} uncredited in src/styles.css - their rules ship inlined there, and deleting the file they came from must not delete the credit`,
         );
 
         // VERSION-level, and not merely a stricter version of the check above.
