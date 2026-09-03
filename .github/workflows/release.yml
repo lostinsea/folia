@@ -104,6 +104,7 @@ jobs:
             dist/*.AppImage
             dist/*.deb
             dist/latest-linux.yml
+          if-no-files-found: error
 
       - name: Upload Windows artifacts
         if: matrix.os == 'windows-latest'
@@ -114,6 +115,7 @@ jobs:
             dist/*.exe
             dist/*.blockmap
             dist/latest.yml
+          if-no-files-found: error
 
       - name: Upload macOS artifacts
         if: matrix.os == 'macos-latest'
@@ -123,9 +125,47 @@ jobs:
           path: |
             dist/*.dmg
             dist/latest-mac.yml
+          if-no-files-found: error
+
+  attest:
+    needs: release
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    # This job only needs to read the completed build artifacts and publish
+    # their provenance; publishing the GitHub release remains separate below.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+
+      - name: Attest Linux AppImage
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          # Runtime binaries are attested; updater metadata and blockmaps are excluded.
+          subject-path: linux-builds/*.AppImage
+
+      - name: Attest Linux deb
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: linux-builds/*.deb
+
+      - name: Attest Windows executable
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: windows-builds/*.exe
+
+      - name: Attest macOS disk image
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: mac-builds/*.dmg
 
   create-release:
-    needs: release
+    needs: [release, attest]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
 

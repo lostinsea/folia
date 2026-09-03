@@ -1886,6 +1886,358 @@ async function main() {
     );
   }
 
+  // F43: releases are built on three hosted runners, then a separate,
+  // dependency-free job publishes provenance for the binaries those runners
+  // produced. Keep this node-only: it checks the workflow's declarative
+  // boundary without needing an Electron build or a GitHub token.
+  {
+    const workflowDir = path.join(ROOT, ".github", "workflows");
+    const workflowFiles = fs.existsSync(workflowDir)
+      ? fs.readdirSync(workflowDir).filter((f) => /\.ya?ml$/i.test(f)).sort()
+      : [];
+    const workflowTexts = workflowFiles.map((f) => [
+      f,
+      fs.readFileSync(path.join(workflowDir, f), "utf8"),
+    ]);
+    const useLines = workflowTexts.flatMap(([file, text]) =>
+      text.split(/\r?\n/).flatMap((line, lineNumber) =>
+        /^\s*uses\s*:/.test(line) ? [[file, lineNumber + 1, line]] : [],
+      ),
+    );
+    const parsedUses = useLines.flatMap(([file, lineNumber, line]) => {
+      const match = line.match(
+        /^\s*uses\s*:\s*([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)@([0-9a-f]{40})\s+#\s+(v\d+\.\d+\.\d+)\s*$/,
+      );
+      return match ? [[file, lineNumber, match[1], match[2], match[3]]] : [];
+    });
+    check(
+      "the workflow action-pin parser found actions to verify",
+      workflowFiles.length > 0 && parsedUses.length > 0 && parsedUses.length === useLines.length,
+      `${workflowFiles.length} workflow file(s), ${useLines.length} uses line(s), ` +
+        `${parsedUses.length} fully parsed`,
+    );
+    check(
+      "every workflow action uses an immutable SHA with a release-version comment",
+      useLines.length > 0 && parsedUses.length === useLines.length,
+      useLines
+        .filter(([file, lineNumber]) => !parsedUses.some(([parsedFile, n]) => parsedFile === file && n === lineNumber))
+        .map(([file, lineNumber, line]) => `${file}:${lineNumber}: ${line.trim()}`)
+        .join(" | "),
+    );
+
+    const releaseWorkflow = read(".github/workflows/release.yml");
+    const workflowLines = releaseWorkflow.split(/\r?\n/);
+    const escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const jobsAt = workflowLines.findIndex((line) => /^jobs\s*:\s*$/.test(line));
+    const jobLines = jobsAt === -1 ? [] : workflowLines.slice(jobsAt + 1);
+    const jobNames = jobLines
+      .map((line) => (line.match(/^ {2}([A-Za-z0-9_-]+)\s*:\s*(?:#.*)?$/) || [])[1])
+      .filter(Boolean);
+    const jobBlock = (name) => {
+      const start = jobLines.findIndex((line) =>
+        new RegExp(`^ {2}${escapeRe(name)}\\s*:\\s*(?:#.*)?$`).test(line),
+      );
+      if (start === -1) return [];
+      let end = start + 1;
+      while (
+        end < jobLines.length &&
+        !/^ {2}[A-Za-z0-9_-]+\s*:\s*(?:#.*)?$/.test(jobLines[end])
+      ) {
+        end++;
+      }
+      return jobLines.slice(start, end);
+    };
+    const directValue = (block, key) => {
+      const line = block.find((entry) =>
+        new RegExp(`^ {4}${escapeRe(key)}\\s*:\\s*(.*)$`).test(entry),
+      );
+      return line ? line.replace(new RegExp(`^ {4}${escapeRe(key)}\\s*:\\s*`), "").trim() : "";
+    };
+    const permissionValue = (value) =>
+      value
+        .replace(/\s+#.*$/, "")
+        .trim()
+        .replace(/^(["'])(.*)\1$/, "$2");
+    const permissionsAt = (lines, indent) => {
+      const start = lines.findIndex((line) =>
+        new RegExp(`^ {${indent}}permissions\\s*:\\s*(.*)$`).test(line),
+      );
+      const permissions = {};
+      if (start === -1) return permissions;
+      const inline = permissionValue(
+        lines[start].replace(new RegExp(`^ {${indent}}permissions\\s*:\\s*`), ""),
+      );
+      if (inline) {
+        if (inline === "write-all" || inline === "read-all") {
+          return { contents: inline.slice(0, -4), "id-token": inline.slice(0, -4), attestations: inline.slice(0, -4) };
+        }
+        const entries = inline.match(/^\{(.*)\}$/);
+        if (!entries) return { __unparseable_permissions__: inline };
+        if (!entries[1].trim()) return { __explicit_empty_permissions__: true };
+        for (const entry of entries[1].split(",")) {
+          const match = entry.trim().match(/^([A-Za-z-]+)\s*:\s*(.+)$/);
+          if (!match) return { __unparseable_permissions__: inline };
+          permissions[match[1]] = permissionValue(match[2]);
+        }
+        return permissions;
+      }
+      for (let i = start + 1; i < lines.length; i++) {
+        if (!lines[i].trim() || new RegExp(`^ {${indent + 2}}#`).test(lines[i])) continue;
+        if (!new RegExp(`^ {${indent + 2}}\\S`).test(lines[i])) break;
+        const match = lines[i].match(new RegExp(`^ {${indent + 2}}([A-Za-z-]+)\\s*:\\s*(.+)$`));
+        if (!match) return { __unparseable_permissions__: lines[i].trim() };
+        permissions[match[1]] = permissionValue(match[2]);
+      }
+      return permissions;
+    };
+    const permissionsOf = (block) => permissionsAt(block, 4);
+    const workflowPermissions = permissionsAt(workflowLines, 0);
+    const effectivePermissionsOf = (block) => {
+      const jobPermissions = permissionsOf(block);
+      return Object.keys(jobPermissions).length ? jobPermissions : workflowPermissions;
+    };
+    const needsOf = (block) => {
+      const value = directValue(block, "needs");
+      if (/^\[.*\]$/.test(value)) {
+        return value.slice(1, -1).split(",").map((name) => name.trim()).filter(Boolean);
+      }
+      if (value) return [value.replace(/\s+#.*$/, "").trim()];
+      const at = block.findIndex((line) => /^ {4}needs\s*:\s*$/.test(line));
+      return at === -1
+        ? []
+        : block.slice(at + 1).flatMap((line) => {
+            const match = line.match(/^ {6}-\s*([A-Za-z0-9_-]+)\s*$/);
+            return match ? [match[1]] : [];
+          });
+    };
+    const subjectPathsOf = (block) => {
+      const paths = [];
+      for (let i = 0; i < block.length; i++) {
+        const match = block[i].match(/^ {10}subject-path\s*:\s*(\S+)\s*$/);
+        if (!match) continue;
+        if (match[1] !== "|") {
+          paths.push(match[1]);
+          continue;
+        }
+        for (i += 1; i < block.length && /^ {12}\S/.test(block[i]); i++) {
+          paths.push(block[i].trim());
+        }
+        i -= 1;
+      }
+      return paths;
+    };
+
+    const attest = jobBlock("attest");
+    const release = jobBlock("release");
+    const createRelease = jobBlock("create-release");
+    const attestPermissions = permissionsOf(attest);
+    const releasePermissions = effectivePermissionsOf(release);
+    const jobPermissions = new Map(jobNames.map((name) => [name, effectivePermissionsOf(jobBlock(name))]));
+    const contentsWriteJobs = jobNames.filter((name) => jobPermissions.get(name).contents === "write");
+    const unparseablePermissionJobs = jobNames.filter((name) =>
+      Object.hasOwn(jobPermissions.get(name), "__unparseable_permissions__"),
+    );
+    check(
+      "the release workflow parser found all publication jobs",
+      new Set(jobNames).size === jobNames.length &&
+        jobNames.includes("release") &&
+        jobNames.includes("attest") &&
+        jobNames.includes("create-release"),
+      JSON.stringify(jobNames),
+    );
+    check(
+      "the attest job's permissions are exactly contents read, id-token write, and attestations write",
+      Object.keys(attestPermissions).sort().join(",") === "attestations,contents,id-token" &&
+        attestPermissions.contents === "read" &&
+        attestPermissions["id-token"] === "write" &&
+        attestPermissions.attestations === "write",
+      JSON.stringify(attestPermissions),
+    );
+    check(
+      "the workflow default permission is contents read only",
+      Object.keys(workflowPermissions).length === 1 && workflowPermissions.contents === "read",
+      JSON.stringify(workflowPermissions),
+    );
+    check(
+      "every release-job permission declaration is parseable",
+      unparseablePermissionJobs.length === 0,
+      JSON.stringify(unparseablePermissionJobs),
+    );
+    check(
+      "the release build matrix receives neither id-token nor attestations permission",
+      releasePermissions.contents === "read" &&
+        !Object.hasOwn(releasePermissions, "id-token") &&
+        !Object.hasOwn(releasePermissions, "attestations"),
+      JSON.stringify(releasePermissions),
+    );
+    check(
+      "only create-release grants contents write",
+      contentsWriteJobs.length === 1 &&
+        contentsWriteJobs[0] === "create-release" &&
+        Object.keys(permissionsOf(createRelease)).length === 1 &&
+        permissionsOf(createRelease).contents === "write",
+      JSON.stringify({ contentsWriteJobs, createRelease: permissionsOf(createRelease) }),
+    );
+    check(
+      "the provenance attestation and release publication are both gated to tags",
+      directValue(attest, "if") === "startsWith(github.ref, 'refs/tags/')" &&
+        directValue(createRelease, "if") === "startsWith(github.ref, 'refs/tags/')",
+      JSON.stringify({ attest: directValue(attest, "if"), createRelease: directValue(createRelease, "if") }),
+    );
+    const createNeeds = needsOf(createRelease);
+    const attestNeeds = needsOf(attest);
+    check(
+      "the release publication waits for builds and provenance attestations",
+      createNeeds.includes("release") && createNeeds.includes("attest"),
+      JSON.stringify(createNeeds),
+    );
+    check(
+      "the provenance attestation waits for the completed release matrix",
+      attestNeeds.includes("release"),
+      JSON.stringify(attestNeeds),
+    );
+
+    const targetExtension = {
+      win: { portable: "exe", nsis: "exe" },
+      mac: { dmg: "dmg" },
+      linux: { AppImage: "AppImage", deb: "deb" },
+    };
+    const uploadArtifactNames = {};
+    const uploadsWithoutFailureGuard = [];
+    for (const step of release.join("\n").split(/^ {6}- /m)) {
+      if (!/^\s*uses\s*:\s*actions\/upload-artifact@/m.test(step)) continue;
+      const name = (step.match(/^ {10}name\s*:\s*(\S+)\s*$/m) || [])[1];
+      if (!/^ {10}if-no-files-found\s*:\s*error\s*$/m.test(step)) {
+        uploadsWithoutFailureGuard.push(name || "<unnamed upload>");
+      }
+      for (const extension of ["AppImage", "deb", "exe", "dmg"]) {
+        if (new RegExp(`^ {12}dist/\\*\\.${escapeRe(extension)}\\s*$`, "m").test(step)) {
+          uploadArtifactNames[extension] = name;
+        }
+      }
+    }
+    check(
+      "every release artifact upload fails when it produces no configured file",
+      uploadsWithoutFailureGuard.length === 0,
+      JSON.stringify(uploadsWithoutFailureGuard),
+    );
+    const artifactNameFor = (build, platform, target) => {
+      const targetKey = target === "AppImage" ? "appImage" : target;
+      if (build[targetKey] && build[targetKey].artifactName) {
+        return { value: build[targetKey].artifactName, source: `build.${targetKey}.artifactName` };
+      }
+      if (build[platform] && build[platform].artifactName) {
+        return { value: build[platform].artifactName, source: `build.${platform}.artifactName` };
+      }
+      if (build.artifactName) return { value: build.artifactName, source: "build.artifactName" };
+      return { value: undefined, source: "electron-builder default" };
+    };
+    const targetRecords = [];
+    for (const platform of ["win", "mac", "linux"]) {
+      for (const configured of (pkg.build[platform] || {}).target || []) {
+        const target = typeof configured === "string" ? configured : configured.target;
+        const extension = targetExtension[platform] && targetExtension[platform][target];
+        const glob = extension && uploadArtifactNames[extension] && `${uploadArtifactNames[extension]}/*.${extension}`;
+        if (glob) {
+          const artifactName = artifactNameFor(pkg.build, platform, target);
+          targetRecords.push({
+            platform,
+            target,
+            glob,
+            artifactName: artifactName.value,
+            artifactNameSource: artifactName.source,
+          });
+        }
+      }
+    }
+    const expectedSubjects = [...new Set(targetRecords.map((record) => record.glob))].sort();
+    const subjectPaths = subjectPathsOf(attest).sort();
+    const badArtifactNames = targetRecords
+      .filter(({ artifactName, glob }) => {
+        const extension = glob.slice(glob.lastIndexOf(".") + 1);
+        return artifactName && !new RegExp(`(?:\\$\\{ext\\}|\\.${escapeRe(extension)})$`).test(artifactName);
+      })
+      .map(({ platform, target, artifactName }) => `${platform}/${target}=${artifactName}`);
+    check(
+      "the configured release targets resolve to known user-facing artifact globs",
+      targetRecords.length > 0 &&
+        targetRecords.length ===
+          ["win", "mac", "linux"].flatMap((platform) => (pkg.build[platform] || {}).target || []).length &&
+        badArtifactNames.length === 0,
+      JSON.stringify({ targets: targetRecords, uploadArtifactNames, badArtifactNames }),
+    );
+    check(
+      "artifact-name derivation prefers target settings over platform and global settings",
+      (() => {
+        const probe = artifactNameFor(
+          {
+            artifactName: "global.${ext}",
+            win: { artifactName: "platform.${ext}" },
+            nsis: { artifactName: "target.${ext}" },
+          },
+          "win",
+          "nsis",
+        );
+        return probe.value === "target.${ext}" && probe.source === "build.nsis.artifactName";
+      })(),
+      "the target-level name must win over both fallbacks",
+    );
+    check(
+      "artifact-name derivation retains platform and global fallbacks",
+      (() => {
+        const platform = artifactNameFor(
+          { artifactName: "global.${ext}", win: { artifactName: "platform.${ext}" } },
+          "win",
+          "nsis",
+        );
+        const global = artifactNameFor({ artifactName: "global.${ext}" }, "win", "nsis");
+        return (
+          platform.value === "platform.${ext}" &&
+          platform.source === "build.win.artifactName" &&
+          global.value === "global.${ext}" &&
+          global.source === "build.artifactName"
+        );
+      })(),
+      "platform and global names must be used when a target-specific name is absent",
+    );
+    check(
+      "the attestation subjects cover every user-facing package built for release",
+      expectedSubjects.length > 0 &&
+        expectedSubjects.length === subjectPaths.length &&
+        expectedSubjects.every((glob, index) => glob === subjectPaths[index]),
+      JSON.stringify({ expectedSubjects, subjectPaths }),
+    );
+    const excludedUpdateFiles = subjectPaths.filter((subject) => /\.blockmap$|(?:^|\/)latest[^/]*\.ya?ml$/i.test(subject));
+    check(
+      "the attestation deliberately excludes updater metadata and blockmaps",
+      excludedUpdateFiles.length === 0,
+      JSON.stringify(excludedUpdateFiles),
+    );
+    const attestStepUses = attest
+      .flatMap((line) => {
+        const match = line.match(/^\s*uses\s*:\s*([^@\s]+)@/);
+        return match ? [match[1]] : [];
+      });
+    const attestUses = [...attestStepUses].sort();
+    const attestRuns = attest.filter((line) => /^\s*run\s*:/.test(line));
+    check(
+      "the attest job runs only the download and attestation actions, not repository code",
+      attestRuns.length === 0 &&
+        attestUses.length === 5 &&
+        attestUses[0] === "actions/attest" &&
+        attestUses.slice(0, 4).every((action) => action === "actions/attest") &&
+        attestUses[4] === "actions/download-artifact",
+      JSON.stringify({ attestRuns, attestUses }),
+    );
+    check(
+      "the attest job downloads matrix artifacts before publishing their provenance",
+      attestStepUses.length === 5 &&
+        attestStepUses[0] === "actions/download-artifact" &&
+        attestStepUses.slice(1).every((action) => action === "actions/attest"),
+      JSON.stringify(attestStepUses),
+    );
+  }
+
   // F21: DevTools is a Node REPL while the renderer runs nodeIntegration: true,
   // and main.js bound it to F12 in EVERY build with no gate at all. The
   // accelerator half of that surface is asserted behaviourally by

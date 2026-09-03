@@ -16807,6 +16807,80 @@ const REVERTS = [
     requireMustPassAssertions: true,
   },
 
+        {
+          id: "R663",
+          suite: "test:packaging",
+          what: "drop the attestations write permission needed to publish provenance",
+          file: path.join(ROOT, ".github", "workflows", "release.yml"),
+          from: "      attestations: write",
+          to: "      attestations: read",
+          expect: [
+            /^the attest job's permissions are exactly contents read, id-token write, and attestations write$/,
+          ],
+          mustPass: [
+            /^the attestation subjects cover every user-facing package built for release$/,
+            /^only create-release grants contents write$/,
+          ],
+        },
+        {
+          id: "R664",
+          suite: "test:packaging",
+          what: "narrow the provenance subjects to Windows executables only",
+          file: path.join(ROOT, ".github", "workflows", "release.yml"),
+          from: "          subject-path: linux-builds/*.AppImage",
+          to: "          subject-path: windows-builds/*.exe",
+          also: [
+            {
+              from: "          subject-path: linux-builds/*.deb",
+              to: "          subject-path: windows-builds/*.exe",
+            },
+            {
+              from: "          subject-path: mac-builds/*.dmg",
+              to: "          subject-path: windows-builds/*.exe",
+            },
+          ],
+          expect: [
+            /^the attestation subjects cover every user-facing package built for release$/,
+          ],
+          mustPass: [
+            /^the attest job's permissions are exactly contents read, id-token write, and attestations write$/,
+            /^the attestation deliberately excludes updater metadata and blockmaps$/,
+          ],
+        },
+        {
+          id: "R665",
+          suite: "test:packaging",
+          what: "replace the immutable attestation action pin with the floating v4 tag",
+          file: path.join(ROOT, ".github", "workflows", "release.yml"),
+          from:
+            "      - name: Attest Linux AppImage\n" +
+            "        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2",
+          to:
+            "      - name: Attest Linux AppImage\n" +
+            "        uses: actions/attest@v4 # v4.2.2",
+          expect: [
+            /^the workflow action-pin parser found actions to verify$/,
+            /^every workflow action uses an immutable SHA with a release-version comment$/,
+          ],
+          mustPass: [
+            /^the attest job runs only the download and attestation actions, not repository code$/,
+          ],
+        },
+        {
+          id: "R666",
+          suite: "test:packaging",
+          what: "let release publication start without waiting for the provenance attestation",
+          file: path.join(ROOT, ".github", "workflows", "release.yml"),
+          from: "    needs: [release, attest]",
+          to: "    needs: release",
+          expect: [
+            /^the release publication waits for builds and provenance attestations$/,
+          ],
+          mustPass: [
+            /^the provenance attestation and release publication are both gated to tags$/,
+            /^only create-release grants contents write$/,
+          ],
+        },
       ];
 
 // These are release exceptions, not passing or withdrawn proofs. An explicit
@@ -18403,6 +18477,7 @@ const deferred = new Map();
 // work outside this run was about to be silently overwritten. It still fails
 // the exit code, because the rescued copy needs a human before it is dropped.
 let midRunEdits = 0;
+const additionalEdits = (r) => (r.also ? (Array.isArray(r.also) ? r.also : [r.also]) : []);
 
 // A revert harness that leaves the tree dirty is worse than none at all: the
 // next run would measure a file it had itself corrupted. Snapshot every file
@@ -18412,7 +18487,7 @@ let midRunEdits = 0;
 const touched = new Set();
 for (const r of chosen) {
   touched.add(r.file);
-  if (r.also) touched.add(r.also.file || r.file);
+  for (const edit of additionalEdits(r)) touched.add(edit.file || r.file);
 }
 const snapshots = new Map();
 // A file that has MOVED is the other half of the refactor hazard, and it used
@@ -18428,7 +18503,7 @@ for (const r of chosen) {
   // of it would prove nothing. Originals are keyed by path so every touched
   // file is restored, including when the run throws.
   const edits = [{ file: r.file, from: r.from, to: r.to }].concat(
-    r.also ? [Object.assign({ file: r.file }, r.also)] : [],
+    additionalEdits(r).map((edit) => Object.assign({ file: r.file }, edit)),
   );
   let setupFailed = null;
   const originals = new Map();
