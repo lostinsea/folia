@@ -449,9 +449,10 @@ async function settleFrame(win) {
 /**
  * Capture a screenshot as a debugging artifact.
  *
- * Never compared against a baseline - see the module comment. Failures are
- * swallowed deliberately: a harness must not fail because a screenshot could
- * not be written.
+ * Never compared against a baseline - see the module comment. Capture failures
+ * are swallowed deliberately: a harness must not fail because a screenshot
+ * could not be written. Failure to remove a stale screenshot is the exception:
+ * that leaves false visual evidence and must fail the harness.
  *
  * But a swallowed failure must not leave the PREVIOUS run's image sitting at
  * the destination. That was observed live: `capturePage()` threw
@@ -469,9 +470,8 @@ async function captureScreenshot(win, name) {
   let lastErr = null;
 
   try {
-    // Inside the try because this function's contract is that it NEVER throws -
-    // a harness must not fail because a screenshot could not be written - and a
-    // hostile or non-string `name` would otherwise throw before the loop.
+    // A hostile or non-string name is a capture failure rather than a harness
+    // failure, matching the ordinary capture-error contract.
     safe = String(name).replace(/[^a-z0-9._-]+/gi, "-");
     file = path.join(SHOT_DIR, safe + ".png");
 
@@ -494,9 +494,25 @@ async function captureScreenshot(win, name) {
       }
     }
 
-    if (file && fs.existsSync(file)) fs.unlinkSync(file);
   } catch (e) {
     lastErr = lastErr || e;
+  }
+
+  // Do not report that stale evidence was removed until it really was. A
+  // locked/permission-denied file is still plausible-looking evidence from a
+  // previous run, so returning null (or logging success) would be a false
+  // visual pass. Let it fail the caller before that artifact can be used.
+  if (file && fs.existsSync(file)) {
+    try {
+      fs.unlinkSync(file);
+    } catch (error) {
+      const removalError = new Error(
+        `could not remove stale screenshot ${file}: ${error && error.message ? error.message : error}`,
+      );
+      removalError.code = error && error.code;
+      removalError.cause = error;
+      throw removalError;
+    }
   }
 
   console.log(
@@ -1128,14 +1144,30 @@ function tempDir(prefix) {
  * Remove a registered temp dir early. Suites that already clean up on their
  * happy path keep doing so - removing debris sooner is strictly better - and
  * this de-registers it so the exit sweep does not report work it did not do.
+ *
+ * DE-REGISTER ONLY ONCE THE DIRECTORY IS ACTUALLY GONE. The comment above says
+ * "a later sweep or a manual clean will get it", and for the sweep that was not
+ * true: the delete ran BEFORE the removal, so a removal that failed - a Windows
+ * lock, a child still holding a handle - handed the caller a silent leak with
+ * nothing left owning it. The exit sweep had already been told to forget it.
+ * Removing first and de-registering only on a verified absence keeps the sweep
+ * as the owner of exactly the directories that still exist, which is what makes
+ * TEMP_SWEEP.failed an honest report rather than a subset of the real damage.
  */
 function releaseTempDir(dir) {
-  REGISTERED_TEMP_DIRS.delete(dir);
   try {
     fs.rmSync(dir, { recursive: true, force: true });
   } catch (e) {
-    /* a later sweep or a manual clean will get it */
+    /* ownership stays with the exit sweep; see below */
   }
+  let gone = false;
+  try {
+    gone = !fs.existsSync(dir);
+  } catch (e) {
+    gone = false;
+  }
+  if (gone) REGISTERED_TEMP_DIRS.delete(dir);
+  return gone;
 }
 
 // Reported so the sweep is observable rather than a silent side effect: an
@@ -1146,22 +1178,50 @@ const TEMP_SWEEP = { swept: 0, failed: [], ran: false };
 
 function sweepTempDirs() {
   TEMP_SWEEP.ran = true;
-  for (const dir of REGISTERED_TEMP_DIRS) {
+  const failed = [];
+  // A SNAPSHOT, because the set is mutated below. Iterating a Set while
+  // deleting from it is defined but reads as an accident waiting to happen.
+  for (const dir of [...REGISTERED_TEMP_DIRS]) {
+    let gone = false;
     try {
       fs.rmSync(dir, { recursive: true, force: true });
-      TEMP_SWEEP.swept++;
+      // Re-read rather than inferred from "rmSync did not throw": force:true
+      // swallows ENOENT, and on Windows a removal can return without the
+      // directory actually being gone.
+      gone = !fs.existsSync(dir);
+      if (!gone) {
+        const detail = dir + ": still present after rmSync";
+        TEMP_SWEEP.failed.push(detail);
+        failed.push(detail);
+      }
     } catch (e) {
       // Never throw from an exit handler: under Electron an uncaught
       // exception becomes a modal dialog, i.e. the exact hang the EPIPE guard
       // above exists to prevent, and it would arrive after the summary line
       // where nobody would connect it to cleanup.
-      TEMP_SWEEP.failed.push(dir + ": " + (e && e.code ? e.code : e));
+      const detail = dir + ": " + (e && e.code ? e.code : e);
+      TEMP_SWEEP.failed.push(detail);
+      failed.push(detail);
+    }
+    // DE-REGISTER ONLY WHAT IS ACTUALLY GONE. This used to clear() the whole
+    // set at the end, which threw away the failures too - so the second sweep
+    // (the app.exit wrapper and the process-exit hook are both wired to this)
+    // had nothing left to retry, and the "removal is idempotent, a stale dir
+    // from a killed run is simply removed by force on a later sweep" claim in
+    // the header above was true only for directories that had never failed.
+    // Keeping failures registered is what makes the second call a retry rather
+    // than a no-op, and it is what keeps a leak owned instead of orphaned.
+    if (gone) {
+      REGISTERED_TEMP_DIRS.delete(dir);
+      TEMP_SWEEP.swept++;
     }
   }
-  REGISTERED_TEMP_DIRS.clear();
+  return failed;
 }
 
-process.on("exit", sweepTempDirs);
+process.on("exit", () => {
+  if (sweepTempDirs().length > 0) process.exitCode = 1;
+});
 
 // AND THE HOOK ALONE DOES NOT COVER THE PATH THAT MATTERS MOST. Probe A above
 // was recorded as proving "app.exit() runs process.on('exit')". That is only
@@ -1193,21 +1253,27 @@ process.on("exit", sweepTempDirs);
 // from, and process.on("exit") stays as the backstop for every other exit path
 // (a natural return, process.exit, plain-node use). app.on("will-quit") is NOT
 // an option: app.exit() does not emit it (probe A). The two are idempotent
-// together - sweepTempDirs clears the registry, so the second call finds
-// nothing and the counter cannot double-count.
+// together - each successful removal de-registers that directory, so the
+// second call finds only a prior failed removal to retry and cannot
+// double-count successful cleanup.
 try {
   const electron = require("electron");
   const app = electron && typeof electron === "object" ? electron.app : null;
   if (app && typeof app.exit === "function" && !app.__foliaTempSweepWrapped) {
     const realExit = app.exit.bind(app);
     app.exit = function (...args) {
+      let cleanupFailed = false;
       try {
-        sweepTempDirs();
+        cleanupFailed = sweepTempDirs().length > 0;
       } catch (e) {
         // Cleanup must never stop a suite from terminating, and a throw here
         // would become a modal dialog - the hang the EPIPE guard exists for.
+        cleanupFailed = true;
       }
-      return realExit(...args);
+      // A failed recursive sweep is a test failure, not incidental teardown
+      // noise. In particular, app.exit(0) must not turn leaked state into a
+      // green process result after its suite already printed a success footer.
+      return realExit(cleanupFailed ? 1 : args[0]);
     };
     app.__foliaTempSweepWrapped = true;
   }

@@ -196,6 +196,59 @@ app.whenReady().then(async () => {
       "file still present at " + stalePath,
     );
 
+    // A failed deletion is not equivalent to no screenshot. The file can still
+    // look like current visual evidence, so captureScreenshot must reject
+    // rather than swallow the EPERM and claim it removed the stale image.
+    // Inject through unlinkSync for a deterministic cross-platform lock error,
+    // and restore both globals before cleaning up the planted artifact.
+    fs.writeFileSync(stalePath, Buffer.from("stale evidence that cannot be removed"));
+    const realUnlink = fs.unlinkSync;
+    const realLog = console.log;
+    const removalLogs = [];
+    let removalFailure = null;
+    let staleSurvivedBlockedRemoval = false;
+    try {
+      fs.unlinkSync = (target, ...rest) => {
+        if (path.resolve(String(target)) === path.resolve(stalePath)) {
+          const error = new Error("controlled stale screenshot removal failure");
+          error.code = "EPERM";
+          throw error;
+        }
+        return realUnlink(target, ...rest);
+      };
+      console.log = (...args) => {
+        removalLogs.push(args.join(" "));
+        realLog(...args);
+      };
+      try {
+        await captureScreenshot(dead, "selfcheck-stale-artifact");
+      } catch (error) {
+        removalFailure = error;
+      }
+      staleSurvivedBlockedRemoval = fs.existsSync(stalePath);
+    } finally {
+      fs.unlinkSync = realUnlink;
+      console.log = realLog;
+      if (fs.existsSync(stalePath)) fs.unlinkSync(stalePath);
+    }
+    expect(
+      "a locked stale screenshot fails visual evidence instead of claiming deletion succeeded",
+      removalFailure &&
+        removalFailure.code === "EPERM" &&
+        /could not remove stale screenshot/.test(removalFailure.message) &&
+        /controlled stale screenshot removal failure/.test(removalFailure.message) &&
+        staleSurvivedBlockedRemoval &&
+        !removalLogs.some((line) => line.includes("removed any stale")),
+      `error=${removalFailure && removalFailure.message} ` +
+        `staleSurvived=${staleSurvivedBlockedRemoval} logs=${JSON.stringify(removalLogs)}`,
+    );
+    expect(
+      "the stale-screenshot failure injection restores deletion state and cleans its artifact",
+      fs.unlinkSync === realUnlink && console.log === realLog && !fs.existsSync(stalePath),
+      `unlinkRestored=${fs.unlinkSync === realUnlink} logRestored=${console.log === realLog} ` +
+        `staleExists=${fs.existsSync(stalePath)}`,
+    );
+
     // FRAME FRESHNESS. capturePage() returns the last frame the compositor
     // produced, not necessarily one that reflects the DOM as it stands - so a
     // screenshot taken right after a change can silently show the state
@@ -365,6 +418,114 @@ app.whenReady().then(async () => {
         !REGISTERED_TEMP_DIRS.has(sweptDir),
       `ran=${TEMP_SWEEP.ran} swept=${sweptBefore}->${TEMP_SWEEP.swept} ` +
         `failed=${JSON.stringify(TEMP_SWEEP.failed)} exists=${fsx.existsSync(sweptDir)}`,
+    );
+
+    // A FAILED REMOVAL MUST STAY OWNED. The sweep used to clear() the whole
+    // registry at the end, which discarded the failures with everything else -
+    // so the second sweep (the app.exit wrapper and the process-exit hook are
+    // both wired to the same function) had nothing left to retry, and a
+    // directory that could not be removed was silently orphaned. The failure is
+    // injected through rmSync itself rather than by locking a real handle, so
+    // the case is deterministic on every platform.
+    const stubbornDir = tempDir("mdv-selfcheck-stubborn-");
+    fsx.mkdirSync(pathx.join(stubbornDir, "sub"), { recursive: true });
+    const realRm = fsx.rmSync;
+    const failedBefore = TEMP_SWEEP.failed.length;
+    const sweptBeforeStubborn = TEMP_SWEEP.swept;
+    let retryRemoved = false;
+    try {
+      fsx.rmSync = (target, ...rest) => {
+        if (pathx.resolve(String(target)) === pathx.resolve(stubbornDir)) {
+          const error = new Error("controlled sweep removal failure");
+          error.code = "EPERM";
+          throw error;
+        }
+        return realRm(target, ...rest);
+      };
+      sweepTempDirs();
+    } finally {
+      fsx.rmSync = realRm;
+    }
+    const stillRegistered = REGISTERED_TEMP_DIRS.has(stubbornDir);
+    const reported = TEMP_SWEEP.failed
+      .slice(failedBefore)
+      .some((entry) => entry.startsWith(stubbornDir + ": EPERM"));
+    // Sampled BEFORE the retry: a failure that still counted as swept would be
+    // invisible once the retry has legitimately incremented the counter.
+    const sweptAfterFailure = TEMP_SWEEP.swept;
+    // The retry is the point: with the injection removed, the very next sweep
+    // has to be able to finish the job it was previously told to forget.
+    sweepTempDirs();
+    retryRemoved =
+      !fsx.existsSync(stubbornDir) && !REGISTERED_TEMP_DIRS.has(stubbornDir);
+    expect(
+      "a removal the sweep could not complete stays registered, is reported, and is retried by the next sweep",
+      stillRegistered &&
+        reported &&
+        sweptAfterFailure === sweptBeforeStubborn &&
+        retryRemoved &&
+        TEMP_SWEEP.swept === sweptBeforeStubborn + 1,
+      `stillRegistered=${stillRegistered} reported=${reported} ` +
+        `swept=${sweptBeforeStubborn}->${sweptAfterFailure}->${TEMP_SWEEP.swept} ` +
+        `retryRemoved=${retryRemoved} ` +
+        `failed=${JSON.stringify(TEMP_SWEEP.failed.slice(failedBefore))}`,
+    );
+
+    // NESTED REGISTRATIONS MUST NOT BECOME FALSE FAILURES. A parent and a child
+    // can both be registered - the F22 companions do exactly this - and
+    // whichever is swept first takes the other with it. The second removal then
+    // finds nothing, and with the re-read introduced above that has to read as
+    // "gone" rather than as an unremovable directory that stays registered
+    // forever.
+    const nestedParent = tempDir("mdv-selfcheck-nested-");
+    const nestedChild = pathx.join(nestedParent, "inner");
+    fsx.mkdirSync(nestedChild, { recursive: true });
+    fsx.writeFileSync(pathx.join(nestedChild, "f.txt"), "x");
+    REGISTERED_TEMP_DIRS.add(nestedChild);
+    const sweptBeforeNested = TEMP_SWEEP.swept;
+    const failedBeforeNested = TEMP_SWEEP.failed.length;
+    sweepTempDirs();
+    expect(
+      "a registered directory nested inside another registered one sweeps cleanly rather than reporting a failure",
+      !fsx.existsSync(nestedParent) &&
+        !REGISTERED_TEMP_DIRS.has(nestedParent) &&
+        !REGISTERED_TEMP_DIRS.has(nestedChild) &&
+        TEMP_SWEEP.failed.length === failedBeforeNested &&
+        TEMP_SWEEP.swept === sweptBeforeNested + 2,
+      `parentExists=${fsx.existsSync(nestedParent)} ` +
+        `parentRegistered=${REGISTERED_TEMP_DIRS.has(nestedParent)} ` +
+        `childRegistered=${REGISTERED_TEMP_DIRS.has(nestedChild)} ` +
+        `swept=${sweptBeforeNested}->${TEMP_SWEEP.swept} ` +
+        `failed=${JSON.stringify(TEMP_SWEEP.failed.slice(failedBeforeNested))}`,
+    );
+
+    // releaseTempDir has the same ownership rule and the same injection proves
+    // it: a removal that throws must leave the directory registered so the exit
+    // sweep still owns it, rather than de-registering first and losing it.
+    const heldDir = tempDir("mdv-selfcheck-held-");
+    let heldStillRegistered = false;
+    try {
+      fsx.rmSync = (target, ...rest) => {
+        if (pathx.resolve(String(target)) === pathx.resolve(heldDir)) {
+          const error = new Error("controlled release failure");
+          error.code = "EBUSY";
+          throw error;
+        }
+        return realRm(target, ...rest);
+      };
+      releaseTempDir(heldDir);
+      heldStillRegistered = REGISTERED_TEMP_DIRS.has(heldDir);
+    } finally {
+      fsx.rmSync = realRm;
+    }
+    releaseTempDir(heldDir);
+    expect(
+      "releaseTempDir keeps a directory it could not remove registered for the exit sweep",
+      heldStillRegistered &&
+        !fsx.existsSync(heldDir) &&
+        !REGISTERED_TEMP_DIRS.has(heldDir),
+      `heldStillRegistered=${heldStillRegistered} exists=${fsx.existsSync(heldDir)} ` +
+        `registered=${REGISTERED_TEMP_DIRS.has(heldDir)}`,
     );
 
     // ---------------------------------------------------------------------
@@ -608,8 +769,88 @@ app.whenReady().then(async () => {
         `stillOnDisk=${nodeReported && nodeReported.kept ? fsx.existsSync(nodeReported.kept) : "n/a"}`,
     );
 
-    releaseTempDir(nodeHome);
-    releaseTempDir(childHome);
+    // A cleanup error cannot be demoted to an informational array after the
+    // suite exits. This child keeps its registered directory undeletable and
+    // proves the exit hook turns that failure into a non-zero process status.
+    const failedSweepHome = tempDir("mdv-selfcheck-failed-sweep-");
+    const failedSweepScript = pathx.join(
+      failedSweepHome,
+      "folia-temp-sweep-failure-child.js",
+    );
+    const failedSweepReport = pathx.join(failedSweepHome, "report.json");
+    fsx.writeFileSync(
+      failedSweepScript,
+      [
+        'const fs = require("fs");',
+        "const report = process.argv[process.argv.length - 1];",
+        "const utils = require(" +
+          JSON.stringify(pathx.join(__dirname, "test-visual-utils.js")) +
+          ");",
+        'const kept = utils.tempDir("mdv-sweep-failure-");',
+        "const realRm = fs.rmSync;",
+        "fs.rmSync = (target, ...rest) => {",
+        "  if (String(target) === kept) {",
+        '    const error = new Error("controlled exit-sweep failure");',
+        '    error.code = "EPERM";',
+        "    throw error;",
+        "  }",
+        "  return realRm(target, ...rest);",
+        "};",
+        'process.on("exit", () => {',
+        "  try {",
+        "    fs.writeFileSync(report, JSON.stringify({",
+        "      kept: kept,",
+        "      stillThere: fs.existsSync(kept),",
+        "      sweep: utils.TEMP_SWEEP,",
+        "    }));",
+        "  } catch (e) {}",
+        "});",
+        "",
+      ].join("\n"),
+    );
+    const failedSweepChild = spawnSync(
+      process.execPath,
+      [failedSweepScript, failedSweepReport],
+      { env: nodeEnv, encoding: "utf8", timeout: 60000, windowsHide: true },
+    );
+    let failedSweepReported = null;
+    try {
+      failedSweepReported = JSON.parse(fsx.readFileSync(failedSweepReport, "utf8"));
+    } catch (e) {
+      failedSweepReported = null;
+    }
+    expect(
+      "a failed exit sweep changes suite status instead of producing green evidence",
+      failedSweepChild.status === 1 &&
+        failedSweepReported !== null &&
+        failedSweepReported.stillThere === true &&
+        Array.isArray(failedSweepReported.sweep.failed) &&
+        failedSweepReported.sweep.failed.some((entry) =>
+          entry.includes("EPERM"),
+        ),
+      `status=${failedSweepChild.status} report=${JSON.stringify(failedSweepReported)} ` +
+        `stderr=${String(failedSweepChild.stderr || "").slice(-400)}`,
+    );
+    if (failedSweepReported && failedSweepReported.kept) {
+      fsx.rmSync(failedSweepReported.kept, { recursive: true, force: true });
+    }
+
+    const nodeHomeReleased = releaseTempDir(nodeHome);
+    const childHomeReleased = releaseTempDir(childHome);
+    const failedSweepHomeReleased = releaseTempDir(failedSweepHome);
+    const finalSweepFailures = sweepTempDirs();
+    expect(
+      "the selfcheck completes its registered temp-directory cleanup before its definitive footer",
+      nodeHomeReleased === true &&
+        childHomeReleased === true &&
+      failedSweepHomeReleased === true &&
+        finalSweepFailures.length === 0 &&
+        REGISTERED_TEMP_DIRS.size === 0,
+      `nodeHomeReleased=${nodeHomeReleased} childHomeReleased=${childHomeReleased} ` +
+        `failedSweepHomeReleased=${failedSweepHomeReleased} ` +
+        `sweepFailures=${JSON.stringify(finalSweepFailures)} ` +
+        `remaining=${JSON.stringify([...REGISTERED_TEMP_DIRS])}`,
+    );
   } catch (e) {
     expect("selfcheck ran without throwing", false, String(e && e.stack));
   }

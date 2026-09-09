@@ -7,6 +7,11 @@ below were produced by `npm run bench` against the exact corpus pinned in
 every test run. A future run that disagrees with this table is comparing the
 same six documents at the same three sizes, not a fresh set of samples.
 
+Later sections record measurements taken with **other** harnesses against the
+same standard of evidence — the marked upgrade, the size guard, and the F22
+shutdown-approval gate at the end. Each says which harness produced it; none of
+them is part of the corpus table above.
+
 ## How to compare against it
 
     npm run bench
@@ -1814,3 +1819,132 @@ Cost model: about **47 us per unit** at the conservative end (`lists`, the
 worst of the seven). Predicted against measurement, this over-estimates
 `wide`@1MB by 1.4x and `code`@1MB by 1.3x - it errs toward warning early,
 which is the correct direction for a guard.
+
+## The F22 shutdown-approval gate
+
+A different harness from everything above. `npm run bench:f22` runs
+`bench/run-f22-shutdown.js`, which is a **process-isolated parent** that spawns
+one Electron worker per job; it has nothing to do with the render corpus, does
+not read `bench/manifest.json`, and is deliberately excluded from `npm test`
+because it takes an exclusive machine lock and about six minutes. It is recorded
+here because this file is where measured evidence lives.
+
+**The budget was declared before the run that was judged by it: p95 <= 16.7 ms,
+one frame at 60 Hz.** That ordering is the whole point. The earlier F22 numbers
+in `docs/PLANNED-WORK.md` were withdrawn as characterization precisely because
+no threshold had been fixed in advance, and reading one off an observed result
+is post-hoc acceptance.
+
+### Method
+
+- **Process-isolated parent/worker.** Each job is an envelope written to disk and
+  handed to a fresh Electron process with its own empty `userData` profile; the
+  parent validates the worker's published result against the envelope's token,
+  point, digest and PID before believing any of it.
+- **Matrix**: 50 KB / 500 KB / 2 MB documents across 1 / 10 / 25 tabs.
+- **Cold**: 20 samples, each from a fresh process. **Warm**: 10 warmups then 40
+  samples in one process.
+- **Statistic**: nearest-rank p95 over the **raw** samples. Rounding is applied
+  to the printed form only and never feeds a comparison - a p95 of 16.7004 ms
+  must not pass a 16.7 ms budget by being displayed as 16.7.
+- **No retries, no trimming, no outlier substitution.** Exact fixture byte counts
+  and SHA-256 digests are checked on both sides.
+- **Controls**: a setup/lifecycle control that reaches real application
+  termination, a listener control, and an anti-vacuity control that proves the
+  scan can report a dirty document at all.
+- **Worst case**: all 25 tabs of 2 MB edited late, in **both** LF and CRLF
+  (different paths through the dirty comparison), each observation verified
+  against an **exact filename oracle** - every open document must be named, in
+  tab order. The observation is **recorded before** the oracle is checked, so a
+  mismatch does not erase the timing: it marks the run **failed**, which means
+  the number is **not accepted as a gate result**. Raw diagnostic timing may
+  still appear in the console output and in the durable artifact; what a
+  mismatch withdraws is the number's standing as evidence, not its existence.
+- Lock and cleanup are asserted; the run leaves no residue.
+
+### Run 1 of 3 - the honest failure that drove the fix
+
+Taken **before** the shutdown scan was changed. Runtime **352112 ms**.
+
+| Observation | Raw p95 (ms) | Budget |
+|---|---:|---|
+| Cold, worst of the nine points | 2.538 | pass |
+| Warm, worst of the nine points | 0.993 | pass |
+| Single-dirty CRLF, 2 MB x 25 tabs | 1.048 | pass |
+| **All-dirty LF, 2 MB x 25 tabs** | **22.4936** | **FAIL** |
+| **All-dirty CRLF, 2 MB x 25 tabs** | **98.1947** | **FAIL** |
+
+This is recorded as a **result, not a discarded outlier**. It is the measurement
+that found the defect: the close path was recomputing every open document's
+dirtiness, so a shutdown after editing every tab re-read and re-normalised
+50 MB. See `docs/PERF-AUDIT.md`, PERF-10, for the defect and the fix.
+
+### Run 2 of 3 - after the fix, all observations within budget
+
+Runtime **351318 ms**, **0 failures**. Executed **exactly once**: these are the
+figures of a single run, not an average or a best-of.
+
+| Observation | Raw p95 (ms) |
+|---|---:|
+| Cold, worst of the nine points | 2.5598 |
+| Warm, worst of the nine points | 1.0094 |
+| Single-dirty CRLF, 2 MB x 25 tabs | 0.4962 |
+| All-dirty LF, 2 MB x 25 tabs | 0.9079 |
+| All-dirty CRLF, 2 MB x 25 tabs | 1.1272 |
+| Lifecycle control | 0 |
+
+**Limitation, stated rather than glossed:** this run's raw samples were **not
+persisted**. The durable-output path did not yet exist when it was taken, so the
+figures above are the reported statistics and nothing else - there is no sample
+array behind them to re-derive or re-check. They are reported for what they are:
+a first confirmation, superseded as evidence by run 3.
+
+### Run 3 of 3 - independent attestation, with a durable artifact
+
+Runtime **354850 ms**. Protocol version 1, **0 failures**, budget 16.7 ms.
+Executed **exactly once**, independently of run 2.
+
+| Observation | Raw p95 (ms) |
+|---|---:|
+| Cold, worst of the nine points | 2.5902 |
+| Warm, worst of the nine points | 1.0375 |
+| Single-dirty CRLF, 2 MB x 25 tabs | 0.7076 |
+| All-dirty LF, 2 MB x 25 tabs | 1.002 |
+| All-dirty CRLF, 2 MB x 25 tabs | 1.2792 |
+| Lifecycle control | 0 |
+
+This run carries the evidence the other two could not. The artifact holds the
+**exact raw sample arrays**, each observation's point and mode, its raw and
+rounded statistics, the budget and the per-observation verdict, and the
+**all-dirty filename oracles**:
+
+    f22-final-benchmark-attestation.json
+    f22-final-benchmark-attestation-output.txt   (console transcript)
+
+**What it does not hold, stated so the record is not read as more than it is:**
+the fixture byte counts and SHA-256 digests, the envelope token, and the setup
+and lifecycle validation records are **not fields in this file**. Those checks
+ran - they are how `validateResult()` decides whether to believe a worker at all,
+and a failure in any of them fails the run - but they were performed transiently
+during execution and only their consequence, a run with **0 failures**, survives
+in the artifact. Re-deriving them means re-running the gate.
+
+Both are **machine-local closure artifacts, not repository files**: they live
+under the session state directory on the machine that produced them
+(`C:\Users\vinma\.copilot\session-state\1108e046-14b6-4680-bd70-77359889885a\files\`)
+and are deliberately not committed. A later run can reproduce the shape by
+setting `F22_RESULT_FILE` (see `docs/BUILD.md`); nothing is written by default.
+
+### What this gate deliberately does NOT measure
+
+- **No before/after for the protocol itself.** The approval path did not exist
+  before F22, so there is no prior state to regress against. That is why a
+  predeclared budget carries the verdict rather than a delta.
+- **Bounded at 25 tabs and 2 MB per tab.** Nothing here measures 100 tabs, and
+  the all-dirty worst case is the largest document in the matrix. Any change
+  that raises either bound re-opens this measurement.
+- **The dirty path ends in a modal.** The 16.7 ms budget is a frame budget, and
+  it is applied to the all-dirty observations as well as the clean ones - which
+  is strictly the harder test, since a path that raises a dialog is not bound by
+  a frame in the way a silent close is.
+- **Not a memory measurement.** Nothing here records allocation or retention.

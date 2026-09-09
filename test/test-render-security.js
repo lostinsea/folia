@@ -2187,7 +2187,9 @@ async function run(win) {
     // than a missing nicety. The first draft of this branch polled for
     // `renderMarkdown` to reappear - but nothing in this app or this suite
     // ever navigates the main window back: main.js loads index.html exactly
-    // once at startup and has no did-fail-load handler. Once Chromium commits
+    // once at startup, and its did-fail-load handler (added with the F22
+    // shutdown protocol) only records that the renderer can no longer answer a
+    // close - it does not reload. Once Chromium commits
     // `about:blank#blocked` in this webContents it STAYS there, so the poll
     // could only ever time out. Measured consequence before the fix: R465
     // reported COLLATERAL with "the renderer was destroyed by a link click
@@ -3234,12 +3236,67 @@ async function run(win) {
       const cs = (el) => el ? getComputedStyle(el) : null;
       const a = cs(ps[0]);
       const b = cs(ps[1]);
+      // BORDER WIDTHS ARE SNAPPED TO WHOLE DEVICE PIXELS; padding, font size
+      // and colour are not - which is why every other value here is exact and
+      // this one is not. Measured on a real machine: 3.84px, which is 6 device
+      // pixels at an effective scale of 1.5625, for a declared 4px. An oracle
+      // that demanded the literal string "4px" was asserting that the display
+      // scale divides 4 into whole device pixels, and failed on the platform
+      // rather than on the product.
+      //
+      // THE SCALE IS DERIVED FROM THE PLATFORM, NOT GUESSED. Chromium's
+      // window.devicePixelRatio is deviceScaleFactor x pageZoomFactor when
+      // zoom-for-DSF is on (the Windows default), and webFrame.getZoomFactor()
+      // is the page zoom alone - so multiplying them together DOUBLE-COUNTS the
+      // zoom on that configuration and is correct on the other. Rather than
+      // assume which build this is, both compositions are enumerated and the
+      // observation must match one of them EXACTLY.
+      let zoomFactor = null;
+      try {
+        zoomFactor = require('electron').webFrame.getZoomFactor();
+      } catch (error) {
+        zoomFactor = null;
+      }
+      const dpr = window.devicePixelRatio || 1;
+      const candidates = [];
+      if (Number.isFinite(dpr) && dpr > 0) candidates.push({ how: "devicePixelRatio", scale: dpr });
+      if (Number.isFinite(zoomFactor) && zoomFactor > 0 && Math.abs(zoomFactor - 1) > 1e-9) {
+        candidates.push({ how: "devicePixelRatio*zoomFactor", scale: dpr * zoomFactor });
+      }
+      // What a declared width of n CSS px is actually painted as at scale s.
+      // Chromium snaps the used value to whole device pixels, with a floor of
+      // one device pixel for any non-zero declaration.
+      const usedAt = (n, s) => (n === 0 ? 0 : Math.max(1, Math.round(n * s)) / s);
+      const borderPx = b ? parseFloat(b.borderLeftWidth) : NaN;
+      const near = (x, y) => Math.abs(x - y) < 1e-6;
+      let matched = null;
+      for (const candidate of candidates) {
+        const four = usedAt(4, candidate.scale);
+        if (!near(borderPx, four)) continue;
+        // AND IT IS NOT ALSO WHAT A NARROWER DECLARATION WOULD PAINT AS. This
+        // is what keeps the oracle decisive rather than tolerant: a removed
+        // declaration, a hairline, a 2px or a 3px regression each paint a
+        // different used value at this same scale, and none of them may be
+        // confusable with the one accepted here.
+        const collides = [0, 1, 2, 3].some((n) => near(usedAt(n, candidate.scale), four));
+        if (!collides) matched = { how: candidate.how, scale: candidate.scale, expected: four };
+      }
       return {
         colour: a && a.color,
         size: a && a.fontSize,
         background: b && b.backgroundColor,
         padding: b && b.paddingLeft,
-        border: b && b.borderLeftWidth
+        border: b && b.borderLeftWidth,
+        borderPx: borderPx,
+        devicePixelRatio: dpr,
+        zoomFactor: zoomFactor,
+        candidates: candidates,
+        matched: matched,
+        // Reported so a future mismatch is diagnosable from the FAIL line
+        // alone: these are what a 0/1/2/3 px declaration would have painted.
+        narrowerWidths: candidates.length
+          ? [0, 1, 2, 3].map((n) => usedAt(n, candidates[0].scale))
+          : [],
       };
     })()
   `);
@@ -3251,7 +3308,15 @@ async function run(win) {
       styledLook.size === "20px" &&
       styledLook.background === "rgb(44, 49, 58)" &&
       styledLook.padding === "12px" &&
-      styledLook.border === "4px",
+      // The setup itself has to be sound: a scale that could not be read at all
+      // would make the border term meaningless.
+      Number.isFinite(styledLook.devicePixelRatio) &&
+      styledLook.devicePixelRatio > 0 &&
+      Array.isArray(styledLook.candidates) &&
+      styledLook.candidates.length > 0 &&
+      // A 4px border, painted the way this display paints 4px, and
+      // distinguishable from every narrower declaration at that same scale.
+      !!styledLook.matched,
     JSON.stringify(styledLook),
   );
   await captureScreenshot(win, "security-inline-styles");

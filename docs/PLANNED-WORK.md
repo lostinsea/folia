@@ -142,15 +142,81 @@ pass; `--anchors` resolves clean afterwards; **and the mandatory close-path
 performance gate below is closed — that is, a final benchmark run evaluated
 against a budget declared in advance, not the initial characterization alone.**
 
-**Mandatory close-path measurement — unconditional. Initial characterization
-recorded; the final performance gate is still pending.** This item adds an IPC
+**Criteria status (2026-09-05): all of the above are met.** Suites, revert
+proofs, anchors and the performance gate are executed and recorded below. What
+remains is the final three-reviewer round over the executed state and the
+serialised integration — this item is **not** landed.
+
+**Mandatory close-path measurement — CLOSED (2026-09-05).** This item adds an IPC
 round trip on shutdown and a renderer-side scan of every open tab, so it falls
 squarely inside the *Performance acceptance gates* below: IPC and DOM traversal
 are both named there, and the gate applies whether or not the change looks cheap.
 Predicting the cost instead of measuring it is exactly what this repository's
-*measure; do not reason from the code* rule forbids. A first measurement has been
-taken and is recorded below; under the gate policy it is **characterization, not
-a passing gate**, for the reasons set out after the table.
+*measure; do not reason from the code* rule forbids.
+
+**The budget was declared before the run that was judged by it: raw p95 <=
+16.7 ms**, one frame at 60 Hz, applied to every observation including the
+worst-case dirty ones. The permanent record — full method, all three runs, the
+durability limitation of the second, and what the gate deliberately does not
+measure — is `bench/BASELINE.md`, *The F22 shutdown-approval gate*; the defect
+the gate found and the fix it drove are `docs/PERF-AUDIT.md`, PERF-10.
+
+**Three runs, each executed exactly once. None is an average or a best-of.**
+
+| Run | Runtime | Cold worst | Warm worst | Single CRLF | All-dirty LF | All-dirty CRLF | Verdict |
+|---|---:|---:|---:|---:|---:|---:|---|
+| 1 — pre-optimization | 352112 ms | 2.538 | 0.993 | 1.048 | **22.4936** | **98.1947** | **FAIL** |
+| 2 — optimized | 351318 ms | 2.5598 | 1.0094 | 0.4962 | 0.9079 | 1.1272 | pass, 0 failures |
+| 3 — attestation | 354850 ms | 2.5902 | 1.0375 | 0.7076 | 1.002 | 1.2792 | pass, 0 failures |
+
+All figures are **raw** p95 in milliseconds, nearest-rank, at 2 MB × 25 tabs for
+the dirty rows and worst-of-nine-points for cold and warm. The lifecycle control
+reached real application termination on runs 2 and 3.
+
+**Run 1 is a result, not a discarded outlier.** It is the measurement that found
+the defect — the close path recomputed every open document's dirtiness, so a
+shutdown after editing every tab re-read and re-normalised 50 MB — and it is what
+drove the maintained-dirty-state architecture. Recording only the passing runs
+would hide the reason the passing runs exist.
+
+**Evidence durability, stated rather than glossed.** Run 2's raw samples were
+**not persisted**: the durable-output path did not exist when it was taken, so
+its figures are the reported statistics and nothing else — there is no sample
+array behind them to re-derive. Run 3 carries the exact raw arrays, each
+observation's point and mode, its raw and rounded statistics, the budget and the
+per-observation verdict, and the all-dirty filename oracles, in
+`f22-final-benchmark-attestation.json` with its console transcript alongside.
+**It does not carry** the fixture byte counts and SHA-256 digests, the envelope
+token, or the setup and lifecycle validation records: those checks ran and a
+failure in any of them fails the run, but they were performed transiently during
+`validateResult()` and execution, and only their consequence — **0 failures** —
+survives in the file. Re-deriving them means re-running the gate. The artifacts
+are **machine-local closure artifacts, not repository files**, and are
+deliberately not committed; a later run reproduces the shape via
+`F22_RESULT_FILE` (`docs/BUILD.md`).
+
+**Suites, both before and after the revert harness ran:** `test:tabs` **205/205**
+plus the isolated portable companion **25/25**; `test:security` **189/189**;
+`test:packaging` **265 passed / 0 failed / 1 expected skip**.
+
+**Proofs.** `--expects` audited **545 records across 11 suites** with **3
+excused** and **no orphaned regexes**, over **1,697 assertions**. `--anchors`
+resolved **545/545 before and after**. Every one of the **58 F22 records
+R543–R604** was proven **individually** (R575, R576, R581 and R587 do not exist),
+with the tree byte-restored after each. No leftover processes, markers, locks or
+temp residue; the diff check came back clean.
+
+**No screenshot evidence is claimed for this item, and none exists.** F22 is
+interaction, state-machine and performance work; its visual surface is the
+platform's own modal dialog. The *Wave-2 exit criteria*' `shots` requirement is a
+separate item covering the theme surfaces.
+
+---
+
+**Historical — the withdrawn first characterization (2026-09-02/03).** Kept
+because the reasoning that rejected it is the reason the gate above is
+trustworthy, and because the numbers themselves were never in dispute. It is
+**superseded** by the three runs above.
 
 **Method.** `bench/bench-f22-shutdown.js`, Electron **43.4.1** / Node
 **24.18.1**, **two full runs**. Renderer snapshot + all-tab dirty scan: **n=200**
@@ -180,51 +246,212 @@ state; they are the cost of the new path as measured. That is a real limitation
 of this evidence, not a technicality: with no before-number there is nothing to
 regress against, which is precisely why the gate has to be closed against a
 budget instead. The bare IPC row is included as the floor the protocol cannot go
-below, so the protocol's own share is visible.
+below, so the protocol's own share is visible. **This limitation still stands**;
+it is why the closed gate above is judged against a predeclared budget rather
+than against a delta.
 
-**Why this is characterization and not a passed gate.** Three defects, none of
-them in the numbers themselves:
+**Why that was characterization and not a passed gate — and how each defect was
+closed.** Three defects, none of them in the numbers themselves:
 
-1. **One fixture.** Every figure above uses the repository `README.md` at 25,762
-   characters per tab. The *Performance acceptance gates* call for representative
-   content sizes, and this is a single point.
+1. **One fixture.** Every figure in the historical table uses the repository
+   `README.md` at 25,762 characters per tab. The *Performance acceptance gates*
+   call for representative content sizes, and this is a single point.
+   **Closed:** the gate now runs 50 KB / 500 KB / 2 MB across 1 / 10 / 25 tabs,
+   plus all-dirty worst cases at 2 MB × 25 tabs in both LF and CRLF.
 2. **No before-path and no prior figure** to compare against, as set out above.
+   **Not closed, and it cannot be** — the path did not previously exist. This is
+   why a predeclared budget carries the verdict.
 3. **No budget was declared before the measurement was taken.** Reading a
    threshold off an observed result and then declaring the result acceptable is
    post-hoc acceptance, which the gate policy exists to prevent. The earlier
    framing of these numbers as a pass did exactly that and is withdrawn.
+   **Closed:** 16.7 ms was fixed before the judged runs, and run 1 failing
+   against it is the evidence that the budget was real rather than decorative.
 
-**What closing the gate requires.**
+**What closing the gate required — all met.**
 
-- **Before the next benchmark run, GPT-5.6 Terra records an objective UX budget**
-  for the clean-shutdown close path — derived from what a user can perceive on a
-  path they have already asked to end, and stated **independently of the numbers
-  above**, without reference to the observed result.
-- **Terra expands the fixture matrix** beyond the single README: at minimum the
-  *Performance acceptance gates*' **50 KB / 500 KB / 2 MB** content dimensions
-  where they apply to this path, across **1 / 10 / 25 tabs**.
-- **The final run happens after GPT-5.6 Sol's product fixes** from the review
-  gate land in the working tree, and is evaluated **against that predeclared
-  budget** — pass or fail read off the budget, not off the run.
-- **The budget is not chosen in this document.** It is explicitly pending Terra's
-  proposal and the integration owner's acceptance; recording a number here would
-  reproduce the defect being corrected.
+- **An objective UX budget recorded before the next run** — met: raw p95 <=
+  16.7 ms, one frame at 60 Hz, declared ahead of the runs it judged.
+- **A fixture matrix beyond the single README** — met: **50 KB / 500 KB / 2 MB**
+  across **1 / 10 / 25 tabs**, plus the all-dirty LF and CRLF worst cases.
+- **The final run after the review gate's product fixes are in the working tree**
+  — met: runs 2 and 3 were taken after those fixes.
+- **The budget is not chosen in this document** — respected: it was proposed and
+  accepted before the runs, and appears here only as a record of what was
+  applied.
 
-**Do not overgeneralise this result.** It covers **up to 25 tabs** and a
-**25,762-character** document per tab. The scan is O(tabs) by construction and
-the numbers scale roughly that way across 1 → 10 → 25, but nothing here measures
-100 tabs, or tabs holding the multi-megabyte documents the render fixtures use.
-Any change that raises either bound re-opens this measurement.
+**Do not overgeneralise this result.** The gate covers **up to 25 tabs** and
+documents **up to 2 MB** each. Nothing here measures 100 tabs, or documents
+larger than the matrix. The all-dirty observations are the worst case *within*
+those bounds, not beyond them. Any change that raises either bound re-opens this
+measurement.
 
-**Status.** The implementation and this performance evidence exist in the
-**uncommitted working tree**; they have **not landed on `main`**. `w2-f22`
-remains **ACTIVE**, not done. The performance gate is **not** satisfied — what
-exists is initial characterization, and the final run against a predeclared
-budget is outstanding. That, plus the remaining completion criteria — suites,
-revert proofs, `--anchors`, review — is what still stands between this and DONE.
-The final results must be written into `docs/PERF-AUDIT.md` or
-`bench/BASELINE.md` as part of landing it, since an uncommitted bench file is not
-a permanent record.
+**Status.** The implementation, the executed suites, the proven reverts and the
+closed performance gate all exist in the **uncommitted working tree**; they have
+**not landed on `main`**, and nothing here is merged. `w2-f22` remains
+**ACTIVE**. What is complete: implementation, tests, revert records, the
+execution gates (suites, anchors, `--expects`, individual proofs) and the
+performance gate. What remains: the final three-reviewer round over the executed
+state, and serialised integration. The permanent record required before landing
+is now written — `bench/BASELINE.md` (method and runs) and `docs/PERF-AUDIT.md`
+(PERF-10, the defect and the fix) — so an uncommitted bench file is no longer the
+only place the evidence lives.
+
+**Review round — corrections applied, nothing re-run (2026-09-04).** A sealed
+three-reviewer round returned ten findings against the working tree. All ten
+were validated against the current source and fixed; one carried a mistaken
+mechanism, corrected below, and two implementation decisions taken while fixing
+them are recorded in *Maintainer decisions on record*. The corrections, all
+uncommitted:
+
+- **Product** (`src/main.js`, `src/custom-tabs.js`) — the portable updater now
+  confirms **twice against the live document**: once at the child's `spawn`
+  event, before the release gate is written, so a decline still stops an
+  installer that has not started; and again at the **acknowledgement**, before
+  the quit, because everything between those two points — spawning, polling,
+  `start`, the write-back — is time in which the reader can type. Both are
+  silent on a clean document. It quits only on an acknowledgement written by
+  the batch *after* it has started the installer, carrying a per-hand-off
+  secret, with a fail-closed timeout. Every failure and cancel path now removes
+  the private temp directory. The shutdown state machine gained an `onDeclined`
+  channel so an asynchronous hand-off is told when its intent will never run.
+  The renderer's shutdown snapshot now compares the live document against the
+  **cached** copy rather than the on-disk one — undoing a view-mode edit used to
+  leave the abandoned text in the tab — and its replay cache is bounded to the
+  one answer that can still be replayed.
+- **Benchmark** (`bench/`) — budgets are compared against **raw** p95 samples,
+  with rounding confined to presentation; the worker parent settles exactly once
+  on error/close/timeout, so a failed spawn can no longer crash it and leak the
+  exclusive lock; and two **worst-case all-dirty observations** (2MB × 25 tabs,
+  LF and CRLF) were added, gated against the same budget, each proved
+  non-vacuous by an exact filename oracle.
+- **Verification** — `.github/workflows/ci.yml` gained a second, read-only job
+  running `prove-table-fixes.js --expects`, the audit that catches a renamed
+  assertion; `test/test-packaging.js` asserts both audits run and that no
+  workflow runs the tree-rewriting mode. Thirteen revert records were added
+  (R590–R602), six repaired against moved anchors, and **R560 was replaced** —
+  its previous mutation was behaviourally inert and could not fail anything.
+
+**A second review round found seven more defects, all fixed here.** Two
+independent read-only reviews (Claude Opus 5 and GPT-5.6 Luna) were run over the
+corrections above before they were reported. Both found real defects, and one of
+them was introduced by this round:
+
+- **HIGH, introduced by the snapshot fix** — five test fixtures assigned
+  `tab.content` on the ACTIVE tab and only then called `switchToTab`, leaving
+  `window.originalMarkdown` holding the pristine text. The corrected fold does
+  exactly what it should with that and folds the edit away, so four existing
+  assertions would have measured a clean tab they believed was dirty. The
+  fixtures now move the live copy first; the product change is unchanged.
+- **HIGH** — an acknowledged portable hand-off quit on consent that could by
+  then describe a different document. It now re-asks when a question is already
+  open or the document session has changed.
+- **MEDIUM** — a hand-off that timed out *after* its gate was open cleared the
+  retry latch, so a second Install press could launch a second installer over
+  the first. Only a pre-release cancel or the batch's own failure report — both
+  of which prove nothing started — clear it now.
+- **MEDIUM** — `attachShutdownGuards()` and the `__shutdown.reset()` seam
+  dropped pending and queued intents without declining them, stranding a parked
+  hand-off.
+- **MEDIUM** — the benchmark's `listener` control sent no renderer generation,
+  so every one of its 40 samples timed the handler's stale-request early return
+  rather than the scan. It now passes the generation and refuses to report
+  unless all 50 calls were answered.
+- **MEDIUM** — the benchmark's exclusive lock survived a Ctrl+C or an uncaught
+  exception, making the gate unrunnable until the file was found by hand.
+- **LOW** — a duplicate-replay assertion could no longer distinguish a cache hit
+  from a recompute; the portable `error` handler lacked the terminal-state guard
+  every other path has.
+
+Two of Luna's findings were **rejected**, with reasons recorded in *Maintainer
+decisions on record*: the ack token being readable by another same-user process,
+and `%`-expansion in batch-interpolated paths.
+
+**A third round found one more, and it is the sharpest of them (2026-09-04).**
+Luna, reviewing the post-fix snapshot, blocked on the acknowledgement boundary:
+it quit outright whenever the document *generation* was unchanged and no other
+question was open. That test cannot see the case it most needs to. An edit typed
+after the gate opened and before the acknowledgement came back involves no
+navigation and raises no question, so the generation is unchanged and the edit
+was discarded by a quit that believed it had consent — the same defect `w2-f22`
+exists to remove, moved one boundary later. The acknowledgement now always takes
+a fresh renderer approval, silent on a clean document, with a **quit-only**
+continuation: it never re-enters the installer path, never re-releases the gate,
+and a decline leaves the app running, unauthorized and still latched, because an
+installer that is already running must not be joined by a second one. Covered by
+two new assertions (decline and approve) and by the rewritten **R601**.
+
+**Round 4 — Terra's final execution FAILED, and the correction is architectural
+(2026-09-05).** `npm run test:tabs` returned 200/204 (portable companion 25/25),
+revert record **R567** returned WRONG-GUARD, and the benchmark failed honestly:
+all-dirty 25 × 2MB raw **p95 22.49 ms (LF)** and **98.19 ms (CRLF)** against the
+16.7 ms budget. Cold max 2.538 ms, warm max 0.993 ms, single-dirty CRLF
+1.048 ms. Three root causes, none of them in the numbers:
+
+1. **The fold could not tell which side moved.** Comparing the live document
+   against the *cached* copy fixed the resurrection defect but broke its mirror
+   image: a value written straight into `tab.content` — a reload takeover, a
+   completed background save, a test seam — is *newer* than the live copy, and
+   the fold reverted it, after which the tab read clean and was clobbered by the
+   next disk refresh. Both situations present the identical state, so no pair of
+   values can separate them. The tab now records the live document its fold last
+   observed and adopts only when that witness has moved. All three failing
+   product assertions are this one defect.
+2. **The measurement window did not contain the work.** The `sameDocument`
+   assertions wrapped their scan counters around the *shutdown handler*, but the
+   comparison had already been made — and memoised — by the snapshot inside
+   `switchToTab`, so they counted zero whatever `sameDocument` did. That is why
+   "finds a one-character edit" failed, and why **R567** could delete the
+   CR-free fast path without breaking the assertion that names it. The counters
+   now wrap the **assignment**, which is where the comparison happens.
+3. **Dirtiness was recomputed on the close path.** The memo was keyed on the
+   *values*, so its own validity check was itself a full document comparison —
+   25 × 2MB of scanning and, for CRLF, of re-normalisation, on every shutdown.
+   The answer belongs to the edit, not to the close: `content` and
+   `originalContent` are now accessors that settle dirtiness once, at the moment
+   the text changes, and shutdown reads one boolean per tab plus at most one
+   active-tab reconciliation. Accessors deliberately, not a convention — this
+   file, `renderer.js`, the suites and the benchmark all assign those properties
+   directly, so a rule that had to be called by hand would be one refactor from
+   a stale flag, and a stale flag here reads as "nothing unsaved".
+   `setCleanDocument()` states the clean case atomically instead of comparing
+   twice on the way to an answer that is already known. **The budget, the
+   fixtures, the tab counts, the CRLF observation and the exact filename oracle
+   are unchanged; nothing was trimmed, filtered, or moved out of the timed
+   window.**
+
+**Durable evidence — Terra could not save the raw samples.** The run deleted its
+working directory and printed only rounded figures. Every run now prints one
+greppable `F22-RESULT-JSON` line carrying the **raw** p95 of every observation,
+and `F22_RESULT_FILE` writes the full record — every raw sample, both
+statistics, the budget verdict and the oracle — atomically to a caller-chosen
+path, before the lock is released, so a Ctrl+C still leaves its numbers behind.
+Nothing is written by default and no artefact lands in the repository. Both
+halves are asserted by `test:packaging`.
+
+**One finding's stated mechanism was wrong; its conclusion was not.** The
+benchmark finding attributed the free dirty scan to the cold/warm *fixtures*
+being reference-identical. They are separate files, read separately. What
+actually makes the scan free is `createTab()` storing **one string reference in
+both `content` and `originalContent`** (`src/custom-tabs.js`), so `sameDocument`
+returns on its identity check before reading a byte. The observation stands and
+the worst-case observations were added; the reason recorded here is the measured
+one.
+
+**These corrections have not been executed.** No suite, benchmark, revert
+harness or build was run in the session that made them; static syntax and anchor
+checks only. Treat every claim above as *written*, not *verified*, until Terra
+re-runs the affected suites, `--anchors`, `--expects` and `npm run bench:f22`.
+
+**Two consequences that need a decision when it is re-run.**
+
+1. The all-dirty observations apply the **clean-path** budget to a path that
+   ends in a modal dialog. They may well exceed it; that is a real number to
+   act on, not a defect in the harness, but whether a dirty close is bound by a
+   frame budget at all is the maintainer's call and is still open.
+2. `--expects` has never run in CI. Its first run audits all 500-odd records,
+   not just this item's, so it may surface pre-existing orphaned regexes
+   elsewhere in the register.
 
 **Trap to respect.** A modal dialog raised in the **main** process cannot be
 dismissed by any test — the process that would run the rescue is the process
@@ -896,6 +1123,9 @@ the item entry.
 | **2026-09-02** | **Narrow `w2-privacy` to "off by default", and defer diagnostic-log hardening.** Because the diagnostic file will not be created in packaged/release builds by default, rotation, size/count retention and detailed sanitising need not ship inside the release-blocking item. | `w2-privacy` stays a wave-2 release blocker with minimal, tested scope. Rotation, retention, path/`argv` redaction, safe structured updater-error fields, and the detailed opt-in documentation/tests/reverts move to the new `diagnostic-log-hardening` item, PENDING · DEFERRED and explicitly **not** a wave-2 blocker. **Accepted tradeoff, not an eliminated risk:** a user who sets `FOLIA_DIAGNOSTIC_LOG=1` still gets the unhardened file, which records paths and `argv` and writes updater `err.message` verbatim — and that message can carry response metadata. Documentation must tell users to enable diagnostics only temporarily until hardening lands. |
 | **2026-09-02** | **Fix the model for each role, and make code review three independent reviews rather than two.** GPT-5.6 Sol at high reasoning effort implements product change; GPT-5.6 Terra owns tests, benchmark, screenshot and revert-harness automation; GPT-5.6 Sol, GPT-5.6 Terra and GPT-5.6 Luna review independently in fresh contexts; Claude Opus 5 explores and researches, and no longer owns product implementation. | These assignments apply **going forward** and **supersede every earlier *current-process* model assignment in this register** — the `w2-f22` `code-review` and `design-review` subtasks, the per-stream quality loop, the completion criteria and *Process controls* are all restated accordingly. Explicitly historical records of who did what keep their names and are labelled historical rather than rewritten. The full procedure — the deterministic handoff order, how it composes with the isolated-worktree and file-ownership rules, and who owns which evidence — is in *Model roles and the delivery handoff*. **Accepted cost, not an eliminated one:** a third reviewer plus a mandatory re-review after every material correction adds a round to each unit, and because the agent that produced the work cannot review it, each unit now needs more separate fresh contexts than before. **What it buys:** the reviewer that finds a defect is never the agent that wrote it, and a fix is never blessed by the round that demanded it. **No item status changes because of this decision** — nothing here closes or advances an item, and `w2-f22` remains **ACTIVE** with its review still outstanding. |
 | **2026-09-03** | **Corrections from the first three-reviewer gate, applied to the process documents.** The gate ran fresh, independent reviews by GPT-5.6 Sol, GPT-5.6 Terra and GPT-5.6 Luna over this register and `.github/copilot-instructions.md`. Five findings were accepted. | **Sol (HIGH):** `fullrun` was declared non-blocking while the milestone gates demanded the complete revert harness — a self-contradiction. `fullrun` is now a `w2-release` prerequisite. **Luna (HIGH), same area, independently:** `shots` and `final-cleanup` conflicted with the milestone and visual-verification rules for the same reason; both are now prerequisites too, and `shots` must be **regenerated and viewed**, not captured. **Luna (HIGH):** `w2-f22` could not be called a performance-gate pass — one fixture, no before-path, no budget declared in advance; downgraded to initial characterization with the final gate pending, and GPT-5.6 Terra owes a predeclared UX budget and a wider fixture matrix before the final run. **Terra (MEDIUM):** the instructions still said *"commit directly to `main`"*, contradicting the isolated-worktree and serialized-integration process; replaced. **Luna (MEDIUM):** the instructions hardcoded harness counts that had already rotted; the numbers were removed rather than refreshed, and counts are now derived from the harness. **Where they differed:** each HIGH came from a different reviewer, and only the `fullrun`/`shots`/`final-cleanup` contradiction was found by two independently — evidence that the three-reviewer gate is doing work a two-reviewer one did not. No reviewer contradicted another; nothing was rejected. **These corrections are documentation only** and have not themselves been through a review round — the follow-up three-reviewer pass has not run. |
+| **2026-09-04** | **Two review findings about the portable updater's temp-file surface are rejected as out of scope, not as wrong.** Both are real properties of the design; neither is introduced by this work, and both would need a different mechanism rather than a bigger check. | **Rejected — "the acknowledgement token is readable by another same-user process".** True: it is embedded in `update.bat` inside a `mkdtemp` directory, and `mode: 0o600` does nothing to Windows ACLs, so any process running as the same user can read it and forge an `ack`. The token is what the review round asked for and it does what it can — it makes a *stale* or *blind* marker useless and raises a forgery from "guess the directory name" to "read the directory". It cannot defend against a same-user process, and neither can anything else here: that process can already replace `update.bat` before it runs, replace the downloaded installer, or kill the app. A genuine fix is an OS-protected channel (a named pipe with an ACL, or a helper process), which is a design change, not a hardening tweak. **Residual risk, accepted and recorded:** a same-user local process can make Folia quit without an installer having started. It cannot make it quit with unsaved work, because the commit re-asks whenever the document has moved. **Rejected — "`%` in an interpolated path is expanded by `cmd.exe`".** Also true, also pre-existing: `downloadedUpdatePath` and the batch directory have been interpolated into this script since SEC-20. Nothing in this round widened it, and the `if not exist "<installer>" goto failed` line added here makes the failure mode *observable and fail-closed* where it used to be a silent no-install. A real fix means not building a batch file at all. |
+| **2026-09-04** | **Two implementation decisions taken while fixing the `w2-f22` review findings.** No sealed finding was rejected — all ten were valid — but both of these changed something a reader could reasonably expect to have been left alone, so they are recorded rather than absorbed. | **The portable spawn handler no longer cancels merely because another question is open.** The old guard was `if (pendingShutdown \|\| !isSameShutdownDocumentSession(...))`. The commit now raises its own force-fresh approval, and `requestShutdown` already **queues** a force-fresh intent behind an open question and re-raises it on settle — which is what the installed updater's public commit does, and what *"an updater commit arriving behind another question remains a required fresh question"* already asserts. Cancelling would make the portable path the only one that silently drops a stronger intent. The document-session half of the guard is kept, and the acknowledgement boundary re-checks both. **Cost, not an eliminated risk:** a portable child can now sit parked while an unrelated close question is on screen. It is bounded — the queued intent either runs or is declined, and a decline stands the child down through the new `onDeclined` channel. **R560's id is repurposed, not reused.** Its mutation (`return attempt.committed` → `return false`) is provably inert: `attempt.committed` is true only when the commit fired synchronously, and that path has already revoked the authorization and raised a fresh request, so both return values leave identical state. The record keeps its id and its subject — authorization across the installed updater's deferred-commit gap — and gains a mutation that can actually fail, plus a new assertion written for it. Deleting it and allocating a fresh id instead would have left a silent gap where a record used to be. |
+| **2026-09-05** | **`w2-f22`'s performance gate is CLOSED, and the 2026-09-02 and 2026-09-03 rows above are superseded on that point only.** Neither is rewritten: their reasoning is why the closed gate can be trusted, and the numbers they recorded were never in dispute. | The 2026-09-02 row recorded a first measurement and the 2026-09-03 row correctly refused to call it a pass — one fixture, no before-path, no budget declared in advance. **Two of those three are now closed** (a 50 KB / 500 KB / 2 MB × 1 / 10 / 25 tab matrix plus all-dirty LF and CRLF worst cases at 2 MB × 25 tabs; a **16.7 ms** raw-p95 budget fixed *before* the runs it judged). **The third cannot be closed and is not claimed to be:** the approval path did not previously exist, so there is no before-number, which is exactly why a predeclared budget carries the verdict. Three runs, each executed exactly once: run 1 **failed honestly** at **22.4936 ms (LF)** and **98.1947 ms (CRLF)** and drove the maintained-dirty-state architecture; runs 2 and 3 passed every observation with 0 failures. **Run 1 is retained as a result, not a discarded outlier** — recording only the passing runs would hide the reason they pass. Full method and runs are in `bench/BASELINE.md`; the defect and fix are `docs/PERF-AUDIT.md` PERF-10. **Run 2's raw samples were not persisted** (the durable-output path did not yet exist); run 3's attestation artifact is machine-local and deliberately uncommitted. **No item status changes because of this decision:** `w2-f22` stays **ACTIVE**, is **not landed and not merged**, and still owes the final three-reviewer round over the executed state and serialised integration. |
 
 ---
 
@@ -1143,7 +1373,7 @@ number is a baseline to defend, while an absent one is work to do.
 |---|---|
 | `DOMPurify.sanitize` costs **4.9 ms** on the `mermaid20` fixture (225 KB, 20 diagrams) for a **changed render** after a one-line text edit | **Measured** — `docs/PERF-AUDIT.md`, PERF-04, alongside `renderMarkdownFull()` **93.9 ms**, `marked.parse` **7.8 ms**, `patchViewerDOM` **8.0 ms**, `mermaid.run` **0 calls**. |
 | The cost of CSSOM-based CSS normalisation on style-heavy documents | **Not measured.** No style-heavy fixture exists. |
-| The cost of an `ipcMain` handler, with or without sender validation | **Partially measured.** `bench/bench-f22-shutdown.js` records a bare IPC round trip at **p50 0.165–0.177 ms / p95 0.21–0.30 ms** (Electron 43.4.1, two runs) — a useful floor, but it is *round-trip* cost on one channel with a trivial payload, not per-handler cost and not the cost of adding sender validation. Those remain unmeasured, and nothing is recorded in `docs/PERF-AUDIT.md` or `bench/BASELINE.md` yet. |
+| The cost of an `ipcMain` handler, with or without sender validation | **Partially measured, and now recorded.** `bench/bench-f22-shutdown.js` records a bare IPC round trip at **p50 0.165–0.177 ms / p95 0.21–0.30 ms** (Electron 43.4.1, two runs) — a useful floor, but it is *round-trip* cost on one channel with a trivial payload, not per-handler cost and not the cost of adding sender validation. **Those two remain unmeasured.** What has since been measured and written down is the whole F22 close path, including its IPC round trip, across 50 KB / 500 KB / 2 MB × 1 / 10 / 25 tabs: `bench/BASELINE.md`, *The F22 shutdown-approval gate*, and `docs/PERF-AUDIT.md` PERF-10. |
 | The cost of the `debug.log` write stream | **Not measured.** |
 | Any steady-state cost of `contextIsolation` on the main window | **Not measured.** The popups run isolated with no recorded consequence, but an absence of a record is not a measurement, and a popup workload would not predict the main window's. |
 
@@ -1385,7 +1615,7 @@ substitutes for a before/after measurement.
 | `w2-privacy` logging fix | **Expected neutral to slightly faster** in packaged builds, because the default path stops opening a stream and stops writing to disk. With the scope narrowed on 2026-09-02 this is the whole of the item — no rotation accounting is added here. | `src/main.js` writes to an append-only `debug.log` stream on every `log()` call in packaged builds. No logging measurement exists anywhere in the repository. |
 | `diagnostic-log-hardening` | **Expected confined to the opt-in path.** Rotation adds per-write size accounting and periodic rename/truncate; redaction adds per-call string work. Both are unmeasured, and neither runs in a default packaged build, where no file is opened at all. | The default-off behaviour is established by `w2-privacy`; this item only changes what happens once `FOLIA_DIAGNOSTIC_LOG=1` is set. |
 | `sign-provenance` (free attestations) | **No runtime cost — CI-only.** Attestations are produced by the release workflow and change nothing the user executes. | The work is confined to `.github/workflows/release.yml`. |
-| `w2-f22` | **Close-time only. Initial characterization recorded; final gate pending.** The work runs on shutdown paths — window close, `Ctrl+Q`, quit, update install — and does not touch the render or open path. It adds a shutdown IPC round trip and an all-tab dirty scan, which the gates name explicitly, so it is benchmarked rather than argued. First run: worst p95 **3.09 ms** at 25 tabs, once per shutdown; worst single sample 3.78 ms. Not a pass — one fixture, no before-path, no budget declared in advance. | `bench/bench-f22-shutdown.js`, Electron 43.4.1 / Node 24.18.1, two runs; full table and the outstanding gate requirements in group A. Bounded to ≤25 tabs and a 25,762-character document per tab. |
+| `w2-f22` | **Close-time only. Measured against a predeclared budget; gate CLOSED.** The work runs on shutdown paths — window close, `Ctrl+Q`, quit, update install — and does not touch the render or open path. It adds a shutdown IPC round trip and an all-tab dirty scan, which the gates name explicitly, so it is benchmarked rather than argued. The gate found a real defect and refused it: the first run reached **22.4936 ms (LF)** and **98.1947 ms (CRLF)** at 25 tabs × 2 MB with every tab edited, against a **16.7 ms** budget fixed beforehand. With the dirty answer maintained at the edit instead of recomputed at the close, the same observations are **1.002 ms** and **1.2792 ms**, and every observation clears the budget across two subsequent runs with 0 failures. | `bench/BASELINE.md`, *The F22 shutdown-approval gate* — method and all three runs; `docs/PERF-AUDIT.md` PERF-10 — the defect and the fix. Matrix 50 KB / 500 KB / 2 MB × 1 / 10 / 25 tabs; bounded to ≤25 tabs and ≤2 MB per tab. The earlier one-fixture characterization (worst p95 3.09 ms, worst sample 3.78 ms) is kept as history in group A and is superseded. |
 | CSS normalisation (any sanitizer/theme change) | **Secondary, unmeasured risk.** Per-attribute and per-element CSSOM work on every sanitize; no style-heavy fixture exists to measure it with. | `docs/SECURITY-AUDIT.md` — `style.cssText` round-trip and `new CSSStyleSheet()` + `replaceSync()`. See *Style-heavy fixtures: benchmark CSS normalisation* above. |
 | `w2-hygiene` | **Not classified.** | Dead-code removal has no measured effect recorded here. Payload reductions elsewhere in the fork were measured individually; this item has not been. |
 

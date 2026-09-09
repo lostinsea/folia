@@ -75,3 +75,45 @@ jobs:
       # mode that makes the 460-odd recorded defects silently unprovable.
       - name: Verify every revert anchor still resolves
         run: node scripts/prove-table-fixes.js --anchors
+
+  # THE OTHER HALF OF REVERT ROT, AND IT WAS NEVER CHECKED ANYWHERE. A revert
+  # record is a PAIR: the anchor text it perturbs, and the assertion NAMES it
+  # expects to fail (`expect`) or to keep passing (`mustPass`). The job above
+  # checks only the first half. Renaming an assertion leaves the anchor intact,
+  # so `--anchors` reports a clean sweep while the pairing is silently dead -
+  # and an orphaned `mustPass` is the dangerous one, because it can never match,
+  # so the COLLATERAL guard can never fire and the record reports PROVEN with
+  # its guard quietly gone. This repository has already measured that happening:
+  # rewriting two sections of test-theme.js orphaned seven regexes at once.
+  #
+  # `--expects` is the check for it. It runs each referenced suite ONCE on the
+  # CLEAN tree and verifies every regex names a live assertion. It is READ-ONLY:
+  # it exits before the harness reaches the mutation loop, so it never rewrites
+  # the working tree - which is why it can run in CI at all, and why the full
+  # harness (which does rewrite it, and is machine-exclusive) still cannot.
+  #
+  # A SEPARATE JOB, not a step, and that is deliberate: it runs the same suites
+  # as `npm test`, so appending it there would double the wall clock for no
+  # additional coverage. On its own runner it costs nothing the maintainer waits
+  # for, and the two jobs cannot contend for one machine.
+  revert-audit:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out Git repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify every expect/mustPass regex names a live assertion
+        run: node scripts/prove-table-fixes.js --expects

@@ -50,6 +50,63 @@ Manager and `Get-Process`.
 
 ## Alternative Build Options
 
+### F22 shutdown-performance acceptance gate
+
+Run this separately on an otherwise idle Windows machine:
+
+```bash
+npm run bench:f22
+```
+
+It holds an exclusive performance lock and launches isolated Electron workers,
+so it is intentionally **not** part of `npm test`. The gate checks the shutdown
+path at 50KB, 500KB and 2MB across 1, 10 and 25 tabs, and then two worst cases
+at 2MB x 25 tabs with **every** open document edited — once with LF line
+endings and once with CRLF, which take different paths through the dirty
+comparison. Every observation is judged on its raw p95; the three-decimal
+figures in the output are for reading, not for gating.
+
+Allow appreciably longer than the clean matrix alone: the all-dirty
+observations rebuild and compare 50MB of document text per sample.
+
+**Keeping the numbers.** The run deletes its working directory on the way out,
+so the results have to be captured as they are produced. Every run prints one
+greppable line carrying the **raw** p95 of every observation:
+
+```
+F22-RESULT-JSON {"budgetMs":16.7,"failures":0,"summary":[...]}
+```
+
+and setting `F22_RESULT_FILE` additionally writes the full record — every raw
+sample, both raw and rounded statistics, the budget verdict and the all-dirty
+filename oracle — to a path of your choosing, through a temporary file that is
+renamed into place so a half-written record can never be read as a result:
+
+```bash
+$env:F22_RESULT_FILE = "C:\some\where\f22-run-1.json"; npm run bench:f22
+```
+
+Nothing is written unless that variable is set, and the path is yours: choose
+one outside the repository so a gate run never leaves an artefact to be
+committed by accident. It is written before the lock is released, so a run
+stopped with Ctrl+C still leaves its partial numbers behind.
+
+### CI revert audits
+
+CI runs two read-only audits of the revert harness. `--anchors` is a step of
+the main test job; `--expects` has its own job, because it runs the suites
+again and would otherwise double the wall clock:
+
+```bash
+node scripts/prove-table-fixes.js --anchors   # the text each record perturbs
+node scripts/prove-table-fixes.js --expects   # the assertions each record names
+```
+
+Neither rewrites the working tree. The harness's third mode — a bare
+invocation, which applies each revert in place — **must not** run in CI or
+alongside any edit; see *Parallel delivery without reducing quality* in
+`docs/PLANNED-WORK.md`.
+
 ### Windows Installer (for distribution)
 ```bash
 npm run build-installer

@@ -77,6 +77,17 @@ const VENDOR_MARKED = path.join(ROOT, "libs", "vendor", "marked.min.js");
 const TABULATOR_JS = path.join(ROOT, "libs", "tabulator", "tabulator.min.js");
 const VENDOR_VERSIONS = path.join(ROOT, "libs", "vendor", "VERSIONS.json");
 const BUILD_DOC = path.join(ROOT, "docs", "BUILD.md");
+// The machine-exclusive F22 gate. Not shipped and not part of `npm test`, but
+// its controls are real: a runner that releases its exclusivity over a live
+// worker makes the NEXT run's numbers a measurement of a busy machine, and a
+// worker that cannot die holds the gate closed. Same reasoning as the vendored
+// artifacts above - the harness restores from its own pre-run snapshot, so a
+// file git does not track is as recoverable as one it does.
+const BENCH_RUN = path.join(ROOT, "bench", "run-f22-shutdown.js");
+const BENCH_WORKER = path.join(ROOT, "bench", "bench-f22-shutdown.js");
+// This file. The revert audit's own guards are controls like any other, and the
+// harness restoring itself from its pre-run snapshot is what makes that safe.
+const HARNESS = path.join(ROOT, "scripts", "prove-table-fixes.js");
 
 const REVERTS = [
   {
@@ -332,7 +343,7 @@ const REVERTS = [
     what:
       "infer the split-view scroller from a class name again, then move the scroller " +
       "to .content-wrapper (the pairing drifts and every tab's reading position is lost)",
-    file: TABS,
+    file: MAIN,
     from:
       "    if (typeof getViewerScroller === \"function\") return getViewerScroller();\n" +
       "    const wrapper = document.querySelector(\".content-wrapper\");\n" +
@@ -792,7 +803,7 @@ const REVERTS = [
     suite: "test:tabs",
     what: "skip re-baselining when the active document changes while edit mode stays on",
     file: TABS,
-    from: "    if (window.isEditMode && window.rebaseEditSession) {\n      window.rebaseEditSession();\n    }",
+    from: "    if (inEditMode() && window.rebaseEditSession) {\n      window.rebaseEditSession();\n    }",
     to: "    /* baseline not rebased on tab switch */",
     expect: [/undo cannot resurrect content discarded on a tab the session did not start on/],
   },
@@ -875,8 +886,8 @@ const REVERTS = [
     suite: "test:tabs",
     what: "capture the arriving tab's edit baseline before its unsaved state has been restored",
     file: TABS,
-    from: "    if (window.setUnsavedState) {\n      window.setUnsavedState(tab.hasUnsavedChanges);\n    }\n\n    if (window.isEditMode && window.rebaseEditSession) {\n      window.rebaseEditSession();\n    }",
-    to: "    if (window.isEditMode && window.rebaseEditSession) {\n      window.rebaseEditSession();\n    }\n\n    if (window.setUnsavedState) {\n      window.setUnsavedState(tab.hasUnsavedChanges);\n    }",
+    from: "    if (window.setUnsavedState) {\n      window.setUnsavedState(tab.hasUnsavedChanges);\n    }\n\n    if (inEditMode() && window.rebaseEditSession) {\n      window.rebaseEditSession();\n    }",
+    to: "    if (inEditMode() && window.rebaseEditSession) {\n      window.rebaseEditSession();\n    }\n\n    if (window.setUnsavedState) {\n      window.setUnsavedState(tab.hasUnsavedChanges);\n    }",
     expect: [
       /discarding on a clean tab does not inherit the previous tab's unsaved state/,
     ],
@@ -5856,8 +5867,19 @@ const REVERTS = [
     // only while edit mode was the only way to hold unsaved bytes.
     what: "leave the reload/open guards keyed on edit mode, so a failed view-mode note is discarded silently",
     file: RENDERER,
-    from: "  return hasUnsavedChanges && (isEditMode || saveFailedFor(currentFilePath));",
-    to: "  return hasUnsavedChanges && isEditMode;",
+    from:
+      "function hasUnsavedWork() {\n" +
+      "  return (\n" +
+      "    hasUnsavedChanges &&\n" +
+      "    (isEditMode ||\n" +
+      "      saveFailedFor(currentFilePath) ||\n" +
+      "      reloadConflictFor(currentFilePath))\n" +
+      "  );\n" +
+      "}",
+    to:
+      "function hasUnsavedWork() {\n" +
+      "  return hasUnsavedChanges && isEditMode;\n" +
+      "}",
     expect: [/a failed view-mode auto-save arms the reload\/open guards/],
     mustPass: [/a failed view-mode auto-save records the failure and keeps the document dirty/],
   },
@@ -5887,8 +5909,17 @@ const REVERTS = [
     // moment B saves successfully.
     what: "make the failed-save record a single global flag again instead of a per-path set",
     file: RENDERER,
-    from: "    if (data.success && savedPath) failedSaves.delete(savedPath);",
-    to: "    if (data.success) failedSaves.clear();",
+    from:
+      "    if (data.success && savedPath) {\n" +
+      "      failedSaves.delete(savedPath);\n" +
+      "      const canonicalSavedPath = canonicalReloadPath(savedPath);\n" +
+      "      if (canonicalSavedPath) reloadConflicts.delete(canonicalSavedPath);\n" +
+      "    }",
+    to:
+      "    if (data.success) {\n" +
+      "      failedSaves.clear();\n" +
+      "      reloadConflicts.clear();\n" +
+      "    }",
     expect: [
       /a successful save of one document does not clear another document's recorded failure/,
       /returning to the document whose save failed finds its reload guard still armed/,
@@ -6196,8 +6227,12 @@ const REVERTS = [
     // The call line on its own appears twice, once per commit helper, so the
     // anchor needs the preceding line for uniqueness. \n is correct here: the
     // harness expands it to the file's own EOL (renderer.js is CRLF).
-    from: "  commitViewModeEdit(newContent, scrollPosition);\n  return autoSaveViewModeNote();",
-    to: "  commitViewModeEdit(newContent, scrollPosition);\n  return false;",
+    from:
+      "  if (!commitViewModeEdit(newContent, scrollPosition)) return false;\n" +
+      "  return autoSaveViewModeNote();",
+    to:
+      "  if (!commitViewModeEdit(newContent, scrollPosition)) return false;\n" +
+      "  return false;",
     expect: [/\.\.\.and the note commit helpers auto-save, so that claim is still true/],
     mustPass: [
       /the README promises a view-mode note is written to the file immediately/,
@@ -12574,7 +12609,10 @@ const REVERTS = [
           // verdict is a defect in the test.
           what: "drop the process exit hook, leaving a plain-node suite with nothing to sweep its temp dirs",
           file: VISUAL,
-          from: 'process.on("exit", sweepTempDirs);',
+          from:
+          'process.on("exit", () => {\n' +
+          '  if (sweepTempDirs().length > 0) process.exitCode = 1;\n' +
+          '});',
           to: "void sweepTempDirs;",
           suite: "test:visual",
           expect: [
@@ -13658,6 +13696,2457 @@ const REVERTS = [
             /^a same-source raw-HTML diagram cannot redirect an edit at a real fence$/,
           ],
         },
+  // ============================================
+  // F22 - the shutdown approval protocol
+  //
+  // Every one of these restores a state the app really was in before this
+  // work: leaving discarded unsaved documents in silence, by four different
+  // routes. They are isolated on purpose - one mechanism each - because the
+  // protocol's parts fail independently and a single "remove the guard" record
+  // would prove only that SOMETHING is there.
+  // ============================================
+  {
+    id: "R543",
+    suite: "test:tabs",
+    what:
+      "ask the renderer without first preventing the native close event, so the window X can discard work before approval",
+    file: MAIN,
+    from:
+      "    event.preventDefault();\n" +
+      '    requestShutdown("window-close", () => closeApprovedWindow(win));',
+    to:
+      '    requestShutdown("window-close", () => closeApprovedWindow(win)); /* reverted for proof: native close is not held */',
+    expect: [
+      /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
+      /^an unsaved edit that exists only in the renderer stops the native close$/,
+      /^a renderer that cannot work out the answer says so, and the main process asks$/,
+      /^a renderer that has stopped answering is escalated to the main process, not waited on forever$/,
+      /^two close gestures while one is pending ask once and close once$/,
+      /^an installed updater silent refusal withdraws authorization and the next dirty close asks$/,
+      /^the close after a failed shutdown is asked about again rather than waved through$/,
+      /^a committed navigation invalidates a dispatch and the replacement READY issues a fresh request$/,
+      /^navigation revokes a clean approval so the replacement document cannot close silently$/,
+      /^a synchronous shutdown send failure clears dispatch and falls back without authorizing$/,
+      /^cancelling a send fallback keeps the app alive and a later request remains possible$/,
+      /^a synchronous overlay probe throw clears its token and routes the held close to fallback$/,
+      /^an installed updater error cancels its commit watcher and leaves the next dirty close unauthorized$/,
+      /^an updater commit arriving behind another question remains a required fresh question$/,
+      /^a close raised while the renderer is loading is held, then answered by the renderer that arrives$/,
+      /^a navigation the main process denies leaves the window closable$/,
+      /^a page that loads without the tab overlay falls through to the main-process question$/,
+      /^a pre-release portable child error is handled but cannot clear its retry latch before close$/,
+      /^the isolated portable updater companion completed every live hand-off check$/,
+    ],
+    mustPass: [
+      // The other three exits are untouched by this revert, so they are what
+      // says the close guard specifically - rather than the whole protocol -
+      // is what was removed.
+      /^Ctrl\+Q asks through the shared guard instead of quitting outright$/,
+      /^an application quit is held by the same guard while documents are unsaved$/,
+      /^an update install is deferred behind the same approval, installing nothing first$/,
+      /^the reader's newest edit really is live-only, absent from the tab's own cache$/,
+    ],
+  },
+  {
+    id: "R544",
+    suite: "test:tabs",
+    what: "scan only the ACTIVE tab for unsaved work, so a background tab's edits are discarded in silence",
+    file: TABS,
+    from:
+      "    snapshotActiveTab({ capturePosition: false });\n" +
+      "    return tabs.filter(isDirty).map((tab) => tab.filename);",
+    to:
+      "    const activeOnly = snapshotActiveTab({ capturePosition: false });\n" +
+      "    return activeOnly && isDirty(activeOnly) ? [activeOnly.filename] : [];",
+    expect: [
+      /^an unsaved BACKGROUND tab is found once the active tab has been snapshotted$/,
+      /^two unsaved documents are counted in the message and both named in the detail$/,
+    ],
+    mustPass: [
+      // The ACTIVE document is still found, which is what separates "scans the
+      // wrong set" from "does not scan at all" - the distinction R545 rests on.
+      /^an unsaved edit that exists only in the renderer stops the native close$/,
+      /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
+    ],
+  },
+  {
+    id: "R545",
+    suite: "test:tabs",
+    what: "answer from the tab cache without snapshotting first, so the document being typed into reads as clean",
+    file: TABS,
+    from:
+      "    snapshotActiveTab({ capturePosition: false });\n" +
+      "    return tabs.filter(isDirty).map((tab) => tab.filename);",
+    to: "    return tabs.filter(isDirty).map((tab) => tab.filename);",
+    expect: [
+      /^an unsaved edit that exists only in the renderer stops the native close$/,
+      /^two unsaved documents are counted in the message and both named in the detail$/,
+    ],
+    mustPass: [
+      // A background tab's edits are already IN the cache, so they survive this
+      // revert. That is what makes this record about the snapshot specifically
+      // rather than about the scan.
+      /^an unsaved BACKGROUND tab is found once the active tab has been snapshotted$/,
+      /^the reader's newest edit really is live-only, absent from the tab's own cache$/,
+    ],
+  },
+  {
+    id: "R546",
+    suite: "test:tabs",
+    what: "Ctrl+Q calls app.quit() directly again, bypassing the guard entirely",
+    file: MAIN,
+    from: '        requestShutdown("ctrl-q", quitApprovedApp);',
+    to: "        app.quit();",
+    expect: [
+      /^Ctrl\+Q asks through the shared guard instead of quitting outright$/,
+      /^an approved Ctrl\+Q quits exactly once$/,
+    ],
+    mustPass: [
+      /^an application quit is held by the same guard while documents are unsaved$/,
+      /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
+    ],
+  },
+  {
+    id: "R547",
+    suite: "test:tabs",
+    what: "install the update the moment the button is pressed, before anyone is asked",
+    file: MAIN,
+    from:
+      '  requestShutdown("update-install", () => performUpdateInstall(updater), {\n' +
+      "    forceFresh: true,\n" +
+      "  });",
+    to: "  performUpdateInstall(updater);",
+    expect: [
+      /^an update install is deferred behind the same approval, installing nothing first$/,
+      /^cancelling an update install installs nothing and leaves the app usable$/,
+      /^an install arriving mid-question is queued rather than swapped into the open question$/,
+      /^declining a close re-raises the queued install as its own question rather than dropping it$/,
+    ],
+    mustPass: [
+      // The preflight is a different control and must survive: an install with
+      // nothing downloaded still has to do nothing.
+      /^an install press with nothing downloaded asks nothing and starts nothing$/,
+      /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
+    ],
+  },
+  {
+    id: "R548",
+    suite: "test:tabs",
+    what: "accept any renderer answer, whatever question it claims to be answering",
+    file: MAIN,
+    from:
+      "  const matchesRequest =\n" +
+      "    !!data && Number.isSafeInteger(data.id) && data.id === record.id;",
+    to:
+      "  const matchesRequest =\n" +
+      "    !!data && Number.isSafeInteger(data.id); /* reverted for proof: id mismatch accepted */",
+    expect: [
+      /^an answer carrying the wrong request id is ignored and the question stays open$/,
+    ],
+    mustPass: [
+      // The renderer's own staleness filter is the other half of the id
+      // contract and is untouched here.
+      /^the renderer answers a fresh shutdown request and ignores a stale one$/,
+      /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
+    ],
+  },
+  {
+    id: "R549",
+    suite: "test:tabs",
+    what:
+      "accept a stale lower request id after the same-id response cache has had its first right of refusal",
+    file: TABS,
+    from:
+      "    if (id <= highestShutdownRequestId) {\n" +
+      '      console.log("[CustomTabs] Ignoring stale shutdown request:", id);\n' +
+      "      return;\n" +
+      "    }",
+    to:
+      "    if (false) { /* reverted for proof: stale lower request accepted */\n" +
+      "    }",
+    expect: [
+      /^the renderer answers a fresh shutdown request and ignores a stale one$/,
+    ],
+    mustPass: [
+      /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
+      /^an unsaved BACKGROUND tab is found once the active tab has been snapshotted$/,
+    ],
+  },
+  {
+    id: "R550",
+    suite: "test:tabs",
+    what:
+      "the plausible half-fix: notice that a question is already open and ignore the second close - " +
+      "without holding the window, so the duplicate gesture closes it anyway",
+    file: MAIN,
+    from:
+      '  win.on("close", (event) => {\n' +
+      "    if (hasCurrentShutdownAuthorization()) return;\n" +
+      "    event.preventDefault();",
+    to:
+      '  win.on("close", (event) => {\n' +
+      "    if (hasCurrentShutdownAuthorization()) return;\n" +
+      "    if (pendingShutdown) return; /* reverted for proof */\n" +
+      "    event.preventDefault();",
+    expect: [/^two close gestures while one is pending ask once and close once$/],
+    mustPass: [
+      // A single close is unaffected, which is the whole point: this revert is
+      // about the SECOND gesture, not about the guard.
+      /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
+      /^an unsaved edit that exists only in the renderer stops the native close$/,
+    ],
+  },
+  {
+    id: "R551",
+    suite: "test:tabs",
+    what: "drop a stronger intent that arrives mid-question instead of queueing it",
+    file: MAIN,
+    from:
+      "  if (\n" +
+      "    !forceFresh &&\n" +
+      "    shutdownRank(reason) <= shutdownRank(pendingShutdown.reason)\n" +
+      "  ) {",
+    to:
+      "  if (true) { /* reverted for proof: the intent is lost */\n" +
+      '    declineIntent(intent, "absorbed");\n' +
+      "    return;",
+    expect: [
+      /^an install arriving mid-question is queued rather than swapped into the open question$/,
+      /^a queued update is raised as its own fresh approval rather than coalesced into a close$/,
+      /^declining a close re-raises the queued install as its own question rather than dropping it$/,
+    ],
+    mustPass: [
+      // Coalescing a DUPLICATE still works - the queue is only for a stronger
+      // intent, and this record must not be read as breaking the whole path.
+      /^two close gestures while one is pending ask once and close once$/,
+      /^an update install is deferred behind the same approval, installing nothing first$/,
+    ],
+  },
+  {
+    id: "R552",
+    suite: "test:tabs",
+    what: "approve silently when the renderer cannot answer, instead of asking in the main process",
+    file: MAIN,
+    from:
+      "function askFallbackApproval(record, cause) {\n" +
+      "  if (!record.asked) markShutdownFallbackTiming(record.id, cause);\n" +
+      "  askShutdownQuestion(record, {",
+    to:
+      "function askFallbackApproval(record, cause) {\n" +
+      "  if (!record.asked) markShutdownFallbackTiming(record.id, cause);\n" +
+      '  if (cause) return settleShutdown(record, true, "reverted-silent-approval");\n' +
+      "  askShutdownQuestion(record, {",
+    expect: [
+      /^a lost renderer is asked about in the main process rather than approved silently$/,
+      /^approving the main-process fallback quits exactly once$/,
+      /^a page that loads without the tab overlay falls through to the main-process question$/,
+      /^an unreadable answer raises the main-process question instead of closing$/,
+    ],
+    mustPass: [
+      // The ordinary path never reaches the fallback, so it must be untouched.
+      /^Ctrl\+Q asks through the shared guard instead of quitting outright$/,
+      /^an unsaved edit that exists only in the renderer stops the native close$/,
+      /^a close raised while the renderer is loading is held, then answered by the renderer that arrives$/,
+    ],
+  },
+  {
+    id: "R553",
+    suite: "test:tabs",
+    what: "let any window answer for the document window, dropping the sender and main-frame check",
+    file: MAIN,
+    from:
+      "function isApprovalSender(event) {\n" +
+      "  const win = shutdownOwnerWindow();\n" +
+      "  if (!win) return false;",
+    to:
+      "function isApprovalSender(event) {\n" +
+      "  const win = shutdownOwnerWindow();\n" +
+      "  if (win) return true; /* reverted for proof: any sender answers */",
+    expect: [/^an answer from a window that owns no documents is refused$/],
+    mustPass: [
+      // The id check is a separate control and still holds, so this record is
+      // about WHO answered rather than about WHAT they answered.
+      /^an answer carrying the wrong request id is ignored and the question stays open$/,
+      /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
+    ],
+  },
+  {
+    id: "R554",
+    suite: "test:tabs",
+    what: "never hand a held question to the renderer that arrives, so a close raised during a load waits forever",
+    file: MAIN,
+    from:
+      "  if (\n" +
+      "    pendingShutdown &&\n" +
+      "    !pendingShutdown.asked &&\n" +
+      "    pendingShutdown.dispatchedTo !== approvalRendererGeneration\n" +
+      "  ) {\n" +
+      "    dispatchShutdownRequest(pendingShutdown);\n" +
+      "  }",
+    to: "  /* reverted for proof: a held request is never dispatched */",
+    expect: [
+      /^a close raised while the renderer is loading is held, then answered by the renderer that arrives$/,
+    ],
+    mustPass: [
+      /^a page that loads without the tab overlay falls through to the main-process question$/,
+      /^a replaced renderer announces itself again and becomes answerable$/,
+      /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
+    ],
+  },
+  {
+    id: "R555",
+    suite: "test:tabs",
+    what:
+      "key the renderer's readiness off the START of a navigation again - which this repo has MEASURED " +
+      "still fires for a navigation the main process denies, so document content can make the app unclosable",
+    file: MAIN,
+    from:
+      '  wc.on("did-navigate", () => {\n' +
+      "    const pendingAtNavigation = pendingShutdown;\n" +
+      "    revokeShutdownAuthorization();\n" +
+      '    approvalRendererState = "loading";\n' +
+      "    approvalRendererGeneration += 1;\n" +
+      "    overlayProbeOwner = null;",
+    to:
+      '  wc.on("did-start-navigation", (details) => {\n' +
+      "    if (!details || !details.isMainFrame || details.isSameDocument) return;\n" +
+      '    approvalRendererState = "loading";\n' +
+      "    approvalRendererGeneration += 1;\n" +
+      "    overlayProbeOwner = null;",
+    expect: [/^a navigation the main process denies leaves the window closable$/],
+    mustPass: [
+      // Everything before the denied navigation is unaffected: the state only
+      // goes wrong once a navigation is CANCELLED.
+      /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
+      /^an unsaved edit that exists only in the renderer stops the native close$/,
+      /^a close raised while the renderer is loading is held, then answered by the renderer that arrives$/,
+    ],
+  },
+  {
+    id: "R556",
+    suite: "test:tabs",
+    what: "ask the reader to discard their work for an install that has nothing to install",
+    file: MAIN,
+    from:
+      "  if (!downloadedUpdatePath) {\n" +
+      '    log("Install update requested with nothing downloaded");\n' +
+      "    return;\n" +
+      "  }",
+    to: "  /* reverted for proof: no preflight */",
+    expect: [
+      /^an install press with nothing downloaded asks nothing and starts nothing$/,
+    ],
+    mustPass: [
+      /^an update install is deferred behind the same approval, installing nothing first$/,
+      /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
+    ],
+  },
+  {
+    id: "R557",
+    suite: "test:tabs",
+    what:
+      "let electron-updater's public commit quit directly instead of requiring its own approval",
+    file: MAIN,
+    from:
+      "  revokeShutdownAuthorization();\n" +
+      '  log("Installed update: hand-off requires fresh shutdown approval");\n' +
+      '  requestShutdown("update-install", quitApprovedUpdateApp, {\n' +
+      "    forceFresh: true,\n" +
+      "  });",
+    to:
+      "  revokeShutdownAuthorization();\n" +
+      '  log("Installed update: hand-off requires fresh shutdown approval");\n' +
+      "  quitApprovedUpdateApp(); /* reverted for proof: public commit bypasses fresh approval */",
+    expect: [
+      /^an installed updater commit always raises one distinct fresh approval before quitting$/,
+      /^a clean immediate installed commit gets a silent fresh renderer approval and quits once$/,
+      /^an installed commit detects the exact post-approval edit and Cancel preserves it without authorization$/,
+      /^a dead renderer at installed commit uses the explicit fallback and Cancel leaves authorization false$/,
+    ],
+    mustPass: [
+      // The install itself still runs exactly once; what changes is only what
+      // the app believes afterwards.
+      /^an approved update installs exactly once, however often it is asked for$/,
+      /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
+    ],
+  },
+  {
+    id: "R558",
+    suite: "test:tabs",
+    what:
+      "let a repeated install request reach shutdown approval while a previous hand-off is " +
+      "already active, instead of refusing it before it can create another user question",
+    file: MAIN,
+    from:
+      "  if (updateInstallStarted) {\n" +
+      '    log("Install update requested while an install attempt is already active");\n' +
+      "    return;\n" +
+      "  }\n" +
+      '  requestShutdown("update-install", () => performUpdateInstall(updater), {\n' +
+      "    forceFresh: true,\n" +
+      "  });",
+    to:
+      '  requestShutdown("update-install", () => performUpdateInstall(updater), { forceFresh: true }); /* reverted for proof */',
+    expect: [
+      /^a repeated install press is refused before it opens a second approval question$/,
+      /^a portable pre-spawn duplicate is latched before one temp batch hand-off$/,
+      /^a second install press while an acknowledged portable installer is running is refused outright$/,
+      /^an acknowledged portable hand-off keeps its retry boundary after the child process exits$/,
+      /^the isolated portable updater companion completed every live hand-off check$/,
+    ],
+    mustPass: [
+      // The installer is still launched exactly once - this record is about
+      // what the SECOND press reports, not about double-installing. The
+      // in-function guard in performUpdateInstall is what keeps that true once
+      // this preflight is gone, which is precisely why removing the preflight
+      // must not be readable as breaking the install itself.
+      /^an approved update installs exactly once, however often it is asked for$/,
+      /^an update install is deferred behind the same approval, installing nothing first$/,
+    ],
+  },
+  {
+    id: "R559",
+    suite: "test:tabs",
+    what:
+      "consume the shutdown permission at the first guard that sees it, so the quit that " +
+      "window-all-closed raises after an approved close asks the reader a second time",
+    file: MAIN,
+    from:
+      '  win.on("close", (event) => {\n' +
+      "    if (hasCurrentShutdownAuthorization()) return;\n" +
+      "    event.preventDefault();\n" +
+      '    requestShutdown("window-close", () => closeApprovedWindow(win));',
+    to:
+      '  win.on("close", (event) => {\n' +
+      "    if (hasCurrentShutdownAuthorization()) {\n" +
+      "      revokeShutdownAuthorization(); /* reverted for proof: one-shot */\n" +
+      "      return;\n" +
+      "    }\n" +
+      "    event.preventDefault();\n" +
+      '    requestShutdown("window-close", () => closeApprovedWindow(win));',
+    expect: [
+      /^an approved native close crosses the real window-all-closed cascade without a second question$/,
+      // The same consumption, one step earlier: the guard that lets the
+      // approved close through takes the permission with it, so the state this
+      // record is about is already gone before the cascade begins.
+      /^a clean close ahead of the cascade completes silently and leaves its permission standing$/,
+    ],
+    mustPass: [
+      // The close itself still behaves; what breaks is only the transition
+      // that follows it.
+      /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
+      /^the close an approval authorised is not intercepted a second time$/,
+    ],
+  },
+  {
+    id: "R560",
+    suite: "test:tabs",
+    what:
+      "leave the installed hand-off authorized across the gap between quitAndInstall() and its " +
+      "deferred public commit, so a close raised inside that gap discards unsaved work in silence",
+    file: MAIN,
+    from:
+      "  const attempt = watchUpdaterInstallCommit(updater);\n" +
+      "  updateInstallStarted = true;\n" +
+      "  // The approval covered entering the updater, not an unobservable void call.\n" +
+      "  // The public commit event below must re-authorize the actual lifecycle.\n" +
+      "  revokeShutdownAuthorization();",
+    to:
+      "  const attempt = watchUpdaterInstallCommit();\n" +
+      "  updateInstallStarted = true;\n" +
+      "  /* reverted for proof: the deferred-commit gap stays authorized */",
+    // BOTH HALVES, BECAUSE EITHER ALONE IS INERT. runApprovedContinuations
+    // withdraws the grant for any continuation that returns false, and
+    // performUpdateInstall returns attempt.committed - false on the deferred
+    // path - so removing the explicit revoke above changes nothing while the
+    // return value still reports "nothing started". Reverting only the return
+    // value changes nothing either, because the explicit revoke has already
+    // run. The gap is only left authorized when both go, which is what makes
+    // this record's mutation observable at all: the previous version of R560
+    // flipped the return value alone and could not fail anything.
+    also: {
+      from: "  return attempt.committed;",
+      to: "  return true; /* reverted for proof: an entered updater reports a committed hand-off */",
+    },
+    expect: [
+      /^a native close inside the installed deferred-commit gap is asked rather than silently authorized$/,
+    ],
+    mustPass: [
+      // The installer is still launched, and still only once - the revert is
+      // about what the app believes while the updater's quit is pending.
+      /^a clean immediate installed commit gets a silent fresh renderer approval and quits once$/,
+      /^an approved update installs exactly once, however often it is asked for$/,
+    ],
+  },
+  {
+    id: "R561",
+    suite: "test:tabs",
+    what:
+      "load electron-updater at startup again (PERF-01), which the shutdown work must not " +
+      "quietly undo by reaching for the updater outside the paths that need it",
+    file: MAIN,
+    from: "let autoUpdater = null;\nlet autoUpdaterInitialized = false;",
+    to:
+      'let autoUpdater = require("electron-updater").autoUpdater; /* reverted for proof */\n' +
+      "let autoUpdaterInitialized = false;",
+    expect: [
+      /^the shutdown protocol has not pulled the updater module in behind the lazy load$/,
+    ],
+    mustPass: [
+      // Everything the updater path does still works; only WHEN the module is
+      // loaded changes.
+      /^an update install is deferred behind the same approval, installing nothing first$/,
+      /^an approved update installs exactly once, however often it is asked for$/,
+    ],
+  },
+  {
+    id: "R562",
+    suite: "test:tabs",
+    what:
+      "let the renderer fall silent when it cannot work out the answer, stranding a request " +
+      "that has no timeout behind it",
+    file: TABS,
+    from:
+      '      console.error("[CustomTabs] Could not check for unsaved changes:", error);\n' +
+      "      dirtyFiles = null;",
+    to:
+      '      console.error("[CustomTabs] Could not check for unsaved changes:", error);\n' +
+      "      return; /* reverted for proof: no answer at all */",
+    expect: [
+      /^a renderer that cannot work out the answer says so, and the main process asks$/,
+    ],
+    mustPass: [
+      // A renderer that CAN answer still does, before and after.
+      /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
+      /^an unsaved BACKGROUND tab is found once the active tab has been snapshotted$/,
+    ],
+  },
+  {
+    id: "R563",
+    suite: "test:tabs",
+    what:
+      "remove the only escape for a renderer that is alive but wedged, so a close raised during " +
+      "a long synchronous render waits forever with no dialog and no way out",
+    file: MAIN,
+    from:
+      "    if (!pendingShutdown || pendingShutdown.asked) return;\n" +
+      '    log("Renderer unresponsive with a shutdown question outstanding");\n' +
+      '    askFallbackApproval(pendingShutdown, "unresponsive");',
+    to: "    /* reverted for proof: a wedged renderer is waited on forever */",
+    expect: [
+      /^a renderer that has stopped answering is escalated to the main process, not waited on forever$/,
+    ],
+    mustPass: [
+      // The renderer that comes back still answers, which is what separates
+      // "the net is missing" from "the protocol is broken".
+      /^a renderer that recovers answers the next question itself$/,
+      /^a renderer that cannot work out the answer says so, and the main process asks$/,
+    ],
+  },
+  {
+    id: "R564",
+    suite: "test:tabs",
+    what:
+      "ignore electron-updater's already-set quitAndInstallCalled latch and invoke its " +
+      "silent no-op path instead of refusing the uncommitted install attempt",
+    file: MAIN,
+    from:
+      "  // BaseUpdater.install() silently returns false when this protected latch is\n" +
+      "  // already set; quitAndInstall() erases that result by returning void.\n" +
+      "  if (updater.quitAndInstallCalled === true) {",
+    to:
+      "  // BaseUpdater.install() silently returns false when this protected latch is\n" +
+      "  // already set; quitAndInstall() erases that result by returning void.\n" +
+      "  if (false) { /* reverted for proof: ignore updater's silent-no-op latch */",
+    expect: [
+      /^an installed updater silent refusal withdraws authorization and the next dirty close asks$/,
+    ],
+    mustPass: [
+      /^an installed updater commit always raises one distinct fresh approval before quitting$/,
+      /^an approved update installs exactly once, however often it is asked for$/,
+    ],
+  },
+  {
+    id: "R565",
+    suite: "test:tabs",
+    what:
+      "set the portable install latch only after calling spawn, allowing a re-entrant " +
+      "second install request at the hand-off boundary to create another batch",
+    file: MAIN,
+    from:
+      "      updateInstallStarted = true;\n" +
+      "      revokeShutdownAuthorization();\n" +
+      '      const child = spawn("cmd.exe", ["/c", batchPath], {',
+    to:
+      '      const child = spawn("cmd.exe", ["/c", batchPath], { /* reverted for proof: latch is late */',
+    expect: [
+      /^a portable pre-spawn duplicate is latched before one temp batch hand-off$/,
+      /^a parked portable child admits only one temp batch and spawn hand-off$/,
+      /^the isolated portable updater companion completed every live hand-off check$/,
+    ],
+    mustPass: [
+      /^the portable companion loaded the production portable updater branch$/,
+    ],
+  },
+  {
+    id: "R566",
+    suite: "test:tabs",
+    what:
+      "remove the sameDocument identity fast path, forcing equal clean tab values " +
+      "through newline inspection instead of the zero-scan path",
+    file: TABS,
+    from: "    if (a === b) return true;",
+    to: "    if (false) return true; /* reverted for proof: no identity fast path */",
+    expect: [
+      /^sameDocument treats independently constructed equal LF content as clean, then finds a one-character edit$/,
+    ],
+    mustPass: [
+      /^sameDocument normalizes CRLF and LF in both directions but preserves a real edit$/,
+    ],
+  },
+  {
+    id: "R567",
+    suite: "test:tabs",
+    what:
+      "remove the CR-free direct-comparison fast path, forcing ordinary same-length " +
+      "and final-byte edits through allocation-heavy newline normalization",
+    file: TABS,
+    from:
+      '      a.indexOf("\\r") < 0 &&\n' +
+      '      b.indexOf("\\r") < 0',
+    to:
+      '      false /* reverted for proof: direct CR-free comparison removed */',
+    expect: [
+      /^sameDocument detects same-length and final-byte edits through the direct path$/,
+    ],
+    mustPass: [
+      /^sameDocument normalizes CRLF and LF in both directions but preserves a real edit$/,
+    ],
+  },
+  {
+    id: "R568",
+    suite: "test:tabs",
+    what:
+      "stop updating the maintained dirty answer when a tab's content is assigned, so the flag " +
+      "shutdown reads goes stale and an edited document reports itself clean",
+    file: TABS,
+    from:
+      "      set(value) {\n" +
+      '        if (!mayMutateDocument("tab:content-setter")) return;\n' +
+      "        state.content = value;\n" +
+      "        state.dirty = !sameDocument(value, state.originalContent);\n" +
+      "        bumpDocumentRevision();\n" +
+      "      },",
+    to:
+      "      set(value) {\n" +
+      '        if (!mayMutateDocument("tab:content-setter")) return;\n' +
+      "        state.content = value; /* reverted for proof: the answer goes stale */\n" +
+      "        bumpDocumentRevision();\n" +
+      "      },",
+    expect: [
+      /^the maintained dirty state follows direct assignments and returns clean after the original value is restored$/,
+      /^the maintained state follows clean-dirty-clean-dirty alternation and isolates equal-valued tabs$/,
+    ],
+    mustPass: [
+      // A document that was never edited is still clean, and the protocol
+      // itself is untouched: this record is about a stale ANSWER, not about
+      // the machinery that asks for it. Assertions that depend on any tab
+      // being dirty cannot appear here - the revert makes every tab read
+      // clean, which is precisely the defect.
+      /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
+      /^the renderer answers a fresh shutdown request and ignores a stale one$/,
+    ],
+  },
+  {
+    id: "R569",
+    suite: "test:tabs",
+    what: "make shutdown scanning capture and overwrite the current reading anchor",
+    file: TABS,
+    from: "    snapshotActiveTab({ capturePosition: false });",
+    to: "    snapshotActiveTab(); /* reverted for proof: shutdown captures position */",
+    expect: [
+      /^a shutdown snapshot folds content without replacing its saved reading anchor$/,
+    ],
+    mustPass: [
+      /^the active view state is snapshotted before the all-tab scan$/,
+    ],
+  },
+  {
+    id: "R570",
+    suite: "test:tabs",
+    what: "accept a forged READY from a stale renderer generation",
+    file: MAIN,
+    from:
+      "  if (\n" +
+      "    !Number.isSafeInteger(generation) ||\n" +
+      "    generation !== approvalRendererGeneration\n" +
+      "  ) {",
+    to: "  if (false) { /* reverted for proof: stale READY accepted */",
+    expect: [
+      /^a forged wrong-generation READY is ignored without changing the open request$/,
+    ],
+    mustPass: [
+      /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
+    ],
+  },
+  {
+    id: "R571",
+    suite: "test:tabs",
+    what: "accept a shutdown response whose renderer generation differs from its dispatch",
+    file: MAIN,
+    from:
+      "  const matchesGeneration =\n" +
+      "    !!data &&\n" +
+      "    Number.isSafeInteger(data.gen) &&\n" +
+      "    data.gen === approvalRendererGeneration &&\n" +
+      "    record.dispatchedTo === approvalRendererGeneration;",
+    to: "  const matchesGeneration = true; /* reverted for proof: generation unchecked */",
+    expect: [
+      /^a wrong-generation response is ignored while its request remains open$/,
+    ],
+    mustPass: [
+      /^a forged wrong-generation READY is ignored without changing the open request$/,
+    ],
+  },
+  {
+    id: "R572",
+    suite: "test:tabs",
+    what: "recompute a duplicate shutdown request instead of replaying its first answer",
+    file: TABS,
+    from:
+      "    const cached = shutdownResponses.get(id);\n" +
+      "    if (cached) {\n" +
+      '      tabIpc.send("quit-approval-response", cached);\n' +
+      "      return;\n" +
+      "    }",
+    to: "    const cached = null; /* reverted for proof: duplicate answer is recomputed */",
+    expect: [
+      /^the renderer replays its cached response for a duplicate same-id request$/,
+    ],
+    mustPass: [
+      /^the renderer answers a fresh shutdown request and ignores a stale one$/,
+    ],
+  },
+  {
+    id: "R573",
+    suite: "test:tabs",
+    what:
+      "accept a same-webContents subframe as an approval sender instead of requiring the owner main frame",
+    file: MAIN,
+    from: "  return frame.parent === null;",
+    to: "  return true; /* reverted for proof: subframes can answer */",
+    expect: [
+      /^the approval generation is available only to the document main frame$/,
+    ],
+    mustPass: [
+      /^the renderer's answers arrive on the document window's own main frame$/,
+      /^an answer from a window that owns no documents is refused$/,
+    ],
+  },
+  {
+    id: "R574",
+    suite: "test:tabs",
+    what:
+      "leave a replacement renderer on its predecessor generation, so its READY cannot invalidate and redeliver an open dispatch",
+    file: MAIN,
+    from:
+      '    approvalRendererState = "loading";\n' +
+      "    approvalRendererGeneration += 1;",
+    to:
+      '    approvalRendererState = "loading";\n' +
+      "    approvalRendererGeneration += 0; /* reverted for proof: old generation survives */",
+    expect: [
+      /^a committed navigation invalidates a dispatch and the replacement READY issues a fresh request$/,
+      /^navigation revokes a clean approval so the replacement document cannot close silently$/,
+    ],
+    mustPass: [
+      /^a forged wrong-generation READY is ignored without changing the open request$/,
+      /^a replaced renderer announces itself again and becomes answerable$/,
+    ],
+  },
+  {
+    id: "R577",
+    suite: "test:tabs",
+    what:
+      "let a synchronous overlay executeJavaScript exception escape without releasing the probe owner",
+    file: MAIN,
+    from:
+      "  } catch (error) {\n" +
+      "    finishOverlayProbe(owner, false, error);\n" +
+      "    return;\n" +
+      "  }\n" +
+      "  Promise.resolve(probe).then(",
+    to:
+      "  } catch (error) {\n" +
+      "    return; /* reverted for proof: synchronous probe failure strands token */\n" +
+      "  }\n" +
+      "  Promise.resolve(probe).then(",
+    expect: [
+      /^a synchronous overlay probe throw clears its token and routes the held close to fallback$/,
+    ],
+    mustPass: [
+      /^a later overlay probe can run after a synchronous probe failure$/,
+      /^a page that loads without the tab overlay falls through to the main-process question$/,
+    ],
+  },
+  {
+    id: "R578",
+    suite: "test:tabs",
+    what:
+      "discard a stale overlay probe completion without recording that a superseded token finished",
+    file: MAIN,
+    from:
+      "  if (overlayProbeOwner !== owner) {\n" +
+      "    staleOverlayProbeCompletionCount += 1;\n" +
+      "    return;\n" +
+      "  }",
+    to:
+      "  if (overlayProbeOwner !== owner) {\n" +
+      "    return; /* reverted for proof: stale completion is not safely accounted */\n" +
+      "  }",
+    expect: [
+      /^a stale asynchronous probe completion cannot clear or mark a newer generation$/,
+    ],
+    mustPass: [
+      /^a later overlay probe can run after a synchronous probe failure$/,
+      /^a replaced renderer announces itself again and becomes answerable$/,
+    ],
+  },
+  {
+    id: "R579",
+    suite: "test:tabs",
+    what:
+      "treat an installed updater's synchronous post-call refusal as an active hand-off",
+    file: MAIN,
+    from:
+      "  if (updater.quitAndInstallCalled === false) {\n" +
+      "    finishFailedUpdaterInstallAttempt(attempt);\n" +
+      "    replayAbsorbedUserShutdownAfterUpdaterCancel(\n" +
+      '      "quit-and-install-refused",\n' +
+      "    );\n" +
+      "    return false;\n" +
+      "  }",
+    to:
+      "  if (false) { /* reverted for proof: synchronous refusal stays latched */\n" +
+      "    finishFailedUpdaterInstallAttempt(attempt);\n" +
+      "    replayAbsorbedUserShutdownAfterUpdaterCancel(\n" +
+      '      "quit-and-install-refused",\n' +
+      "    );\n" +
+      "    return false;\n" +
+      "  }",
+    expect: [
+      /^an installed synchronous refusal clears its attempt and leaves a later install request possible$/,
+    ],
+    mustPass: [
+      /^an installed updater commit always raises one distinct fresh approval before quitting$/,
+      /^an installed updater silent refusal withdraws authorization and the next dirty close asks$/,
+    ],
+  },
+  {
+    id: "R580",
+    suite: "test:tabs",
+    what:
+      "let a stale failed attempt clear a newer retry's active ownership slot when it retires",
+    file: MAIN,
+    from:
+      "  if (activeUpdaterInstallAttempt === attempt) {\n" +
+      "    activeUpdaterInstallAttempt = null;\n" +
+      "  }",
+    to:
+      "  activeUpdaterInstallAttempt = null; /* reverted for proof: stale attempt can clear retry */",
+    expect: [
+      /^a retired failed attempt cannot claim a retry's first BaseUpdater boundary or its paired quit$/,
+    ],
+    mustPass: [
+      /^a failed BaseUpdater attempt is quarantined for one check phase and then retires completely$/,
+      /^an error racing a queued BaseUpdater boundary blocks its paired quit, retires safely, and permits retry$/,
+    ],
+  },
+  {
+    id: "R582",
+    suite: "test:tabs",
+    what:
+      "quit a portable hand-off without unreferencing the child it has just committed to",
+    file: MAIN,
+    from:
+      "        committed = true;\n" +
+      "        stopAwaitingHandoff();\n" +
+      "        stopLeaseHeartbeat();\n" +
+      "        child.unref();",
+    to:
+      "        committed = true;\n" +
+      "        stopAwaitingHandoff();\n" +
+      "        stopLeaseHeartbeat(); /* reverted for proof: no unref */",
+    expect: [
+      /^a successful portable spawn commits once, unreferences once, and then quits$/,
+    ],
+    mustPass: [
+      /^a parked portable child admits only one temp batch and spawn hand-off$/,
+      /^the portable companion loaded the production portable updater branch$/,
+    ],
+  },
+  {
+    id: "R583",
+    suite: "test:tabs",
+    what:
+      "clear the portable retry latch before a cancelled child has actually terminated",
+    file: MAIN,
+    from: "        if (childHasTerminalStatus()) releaseRetryLatch();",
+    to:
+      "        releaseRetryLatch(); /* reverted for proof: latch clears before terminal status */",
+    expect: [
+      /^a replaced document cancels a parked portable child before latch reset and permits one later retry$/,
+    ],
+    mustPass: [
+      /^a portable pre-spawn duplicate is latched before one temp batch hand-off$/,
+      /^a successful portable spawn commits once, unreferences once, and then quits$/,
+    ],
+  },
+  {
+    id: "R584",
+    suite: "test:tabs",
+    what:
+      "continue after the portable release-gate write fails instead of cancelling the child fail-closed",
+    file: MAIN,
+    from:
+      "        } catch (err) {\n" +
+      "          cancelPortableHandoff(\n" +
+      '            "Portable update gate could not be released: " + err.message,\n' +
+      "          );\n" +
+      "          return false;\n" +
+      "        }\n" +
+      "        released = true;",
+    to:
+      "        } catch (err) {\n" +
+      "          released = true; /* reverted for proof: failed gate is treated as released */\n" +
+      "        }\n" +
+      "        released = true;",
+    expect: [
+      /^a portable release-gate write failure stays fail-closed until the child closes$/,
+    ],
+    mustPass: [
+      /^a replaced document cancels a parked portable child before latch reset and permits one later retry$/,
+      /^a successful portable spawn commits once, unreferences once, and then quits$/,
+    ],
+  },
+  {
+    id: "R585",
+    suite: "test:tabs",
+    what:
+      "ignore a pre-release portable child error instead of entering close-aware cancellation",
+    file: MAIN,
+    from:
+      "        cancelPortableHandoff(\n" +
+      '          "Portable update installer process error: " + err.message,\n' +
+      "        );",
+    to:
+      "        return; /* reverted for proof: child error is not cancelled */",
+    expect: [
+      /^a pre-release portable child error is handled but cannot clear its retry latch before close$/,
+    ],
+    mustPass: [
+      /^a post-release portable child error waits for close but retains the duplicate-install latch$/,
+      /^a successful portable spawn commits once, unreferences once, and then quits$/,
+    ],
+  },
+  {
+    id: "R586",
+    suite: "test:tabs",
+    what:
+      "begin the portable batch hand-off before the reader has answered the install approval",
+    file: MAIN,
+    from:
+      '  requestShutdown("update-install", () => performUpdateInstall(updater), {\n' +
+      "    forceFresh: true,\n" +
+      "  });",
+    to:
+      "  performUpdateInstall(updater); /* reverted for proof: portable approval bypassed */",
+    expect: [
+      /^a portable install held for approval creates no release gate and Cancel starts no child$/,
+    ],
+    mustPass: [
+      /^an install press with nothing downloaded asks nothing and starts nothing$/,
+      /^a portable pre-spawn duplicate is latched before one temp batch hand-off$/,
+    ],
+  },
+  {
+    id: "R588",
+    suite: "test:tabs",
+    what:
+      "let a controlled probe fault intercept every executeJavaScript call instead of only the production probe shape",
+    file: "test/test-tab-refresh.js",
+    from:
+      '      wc,\n' +
+      '      "executeJavaScript",\n' +
+      "      function (code) {\n" +
+      "        if (code === OVERLAY_PROBE_SOURCE && arguments.length === 1) {",
+    to:
+      '      wc,\n' +
+      '      "executeJavaScript",\n' +
+      "      function (code) {\n" +
+      "        if (code === OVERLAY_PROBE_SOURCE) { /* reverted for proof: injection is broad */",
+    expect: [
+      /^controlled overlay probe injection is limited to the exact production probe shape$/,
+    ],
+    mustPass: [
+      /^a synchronous overlay probe throw clears its token and routes the held close to fallback$/,
+      /^a stale asynchronous probe completion cannot clear or mark a newer generation$/,
+    ],
+  },
+  {
+    id: "R589",
+    suite: "test:tabs",
+    what:
+      "return from the uncaught-exception handler rather than making the unattended harness fail terminally",
+    file: "test/test-tab-refresh.js",
+    from:
+      "  app.exit(1);\n" +
+      "});\n\n" +
+      "// Captured for the shutdown block below.",
+    to:
+      "  return; /* reverted for proof: uncaught exception may open Electron's modal */\n" +
+      "});\n\n" +
+      "// Captured for the shutdown block below.",
+    expect: [
+      /^uncaught harness exceptions terminate headlessly rather than recovering into a native modal$/,
+    ],
+    mustPass: [
+      /^controlled overlay probe injection is limited to the exact production probe shape$/,
+      /^the error sentinel was demonstrably watching both channels$/,
+    ],
+  },
+  {
+    id: "R590",
+    suite: "test:tabs",
+    what:
+      "treat a spawned cmd.exe as a started installer and quit on the release of the gate, " +
+      "before anything has reported that the installer actually ran",
+    file: MAIN,
+    from:
+      "        released = true;\n" +
+      "        awaitPortableHandoff(Date.now() + PORTABLE_HANDOFF_TIMEOUT_MS);",
+    to:
+      "        released = true;\n" +
+      "        commitPortableHandoff(); /* reverted for proof: a spawned cmd is a started installer */",
+    expect: [
+      /^a released portable gate does not quit until the installer hand-off is acknowledged$/,
+      /^a forged portable acknowledgement never quits and the hand-off times out fail-closed$/,
+      /^a portable batch that reports it could not start the installer leaves the app running$/,
+    ],
+    mustPass: [
+      // The hand-off still happens exactly once, and the reader is still asked
+      // before it starts: what the revert removes is the evidence it worked.
+      /^a portable pre-spawn duplicate is latched before one temp batch hand-off$/,
+      /^a portable install held for approval creates no release gate and Cancel starts no child$/,
+      /^the portable companion loaded the production portable updater branch$/,
+    ],
+  },
+  {
+    id: "R591",
+    suite: "test:tabs",
+    what:
+      "accept any file that appears in the private hand-off directory as the installer's " +
+      "acknowledgement, rather than the one carrying this hand-off's own secret",
+    file: MAIN,
+    from: '          return fs.readFileSync(file, "utf8").trim() === handoffToken;',
+    to: "          return fs.existsSync(file); /* reverted for proof: any marker is believed */",
+    expect: [
+      /^a forged portable acknowledgement never quits and the hand-off times out fail-closed$/,
+    ],
+    mustPass: [
+      // A genuine acknowledgement, and a genuine failure report, both still
+      // work - this record is about what else is believed.
+      /^a successful portable spawn commits once, unreferences once, and then quits$/,
+      /^a portable batch that reports it could not start the installer leaves the app running$/,
+    ],
+  },
+  {
+    id: "R592",
+    suite: "test:tabs",
+    what:
+      "wait for the portable installer's acknowledgement forever, so a batch that dies without " +
+      "writing one leaves the in-flight latch standing for the rest of the session",
+    file: MAIN,
+    from:
+      "          if (Date.now() >= deadline) {\n" +
+      "            cancelPortableHandoff(\n" +
+      '              "Portable update: the installer hand-off was never acknowledged",\n' +
+      "            );\n" +
+      "            return;\n" +
+      "          }",
+    to: "          /* reverted for proof: the hand-off wait never expires */",
+    expect: [
+      /^a forged portable acknowledgement never quits and the hand-off times out fail-closed$/,
+    ],
+    mustPass: [
+      /^a successful portable spawn commits once, unreferences once, and then quits$/,
+      /^a portable batch that reports it could not start the installer leaves the app running$/,
+    ],
+  },
+  {
+    id: "R593",
+    suite: "test:tabs",
+    what:
+      "commit the portable hand-off on the approval given before the child existed, so an edit " +
+      "made while the process was starting is discarded without ever being asked about",
+    file: MAIN,
+    from:
+      '        requestShutdown("update-install", releasePortableGate, {\n' +
+      "          forceFresh: true,\n" +
+      "          onDeclined: (why) =>\n" +
+      "            cancelPortableHandoff(\n" +
+      "              `Portable update: the commit approval was not given (${why})`,\n" +
+      "            ),\n" +
+      "        });",
+    to:
+      "        releasePortableGate(); /* reverted for proof: the commit takes the first approval on trust */",
+    expect: [
+      /^a portable commit re-asks about an edit made after the install approval and Cancel keeps it$/,
+    ],
+    mustPass: [
+      // A clean document still hands off, and a release-gate failure still
+      // fails closed: the revert removes the second question, not the path.
+      /^a successful portable spawn commits once, unreferences once, and then quits$/,
+      /^a portable release-gate write failure stays fail-closed until the child closes$/,
+    ],
+  },
+  {
+    id: "R594",
+    suite: "test:tabs",
+    what:
+      "let a declined or absorbed shutdown intent evaporate silently, so the parked installer " +
+      "child that was waiting on its answer is never stood down",
+    file: MAIN,
+    from:
+      "function declineIntent(intent, why) {\n" +
+      "  const onDeclined = intent && intent.onDeclined;",
+    to:
+      "function declineIntent(intent, why) {\n" +
+      "  const onDeclined = null; /* reverted for proof: a declined intent is never told */",
+    expect: [
+      /^a portable commit re-asks about an edit made after the install approval and Cancel keeps it$/,
+    ],
+    mustPass: [
+      // Approval still works end to end; only a "no" loses its listener.
+      /^a successful portable spawn commits once, unreferences once, and then quits$/,
+      /^the portable companion loaded the production portable updater branch$/,
+    ],
+  },
+  {
+    id: "R595",
+    suite: "test:tabs",
+    what:
+      "release a cancelled portable child's retry latch at close but leave its private directory behind",
+    file: MAIN,
+    from:
+      "        const releaseAfterClose = () => {\n" +
+      "          releaseRetryLatch();\n" +
+      "          removeBatchDir();\n" +
+      "        };",
+    to:
+      "        const releaseAfterClose = () => {\n" +
+      "          releaseRetryLatch();\n" +
+      "          /* reverted for proof: child-close cleanup leaves private directory */\n" +
+      "        };",
+    expect: [
+      /^a pre-release portable child error clears its retry latch only after close and permits one new attempt$/,
+      /^the portable updater leaves no private batch directory behind on any failed hand-off$/,
+    ],
+    mustPass: [
+      // State recovery is R585's separate concern; this record isolates residue.
+      /^a pre-release portable child error is handled but cannot clear its retry latch before close$/,
+      /^a parked portable child admits only one temp batch and spawn hand-off$/,
+    ],
+  },
+  {
+    id: "R596",
+    suite: "test:tabs",
+    what:
+      "retain every cancelled shutdown's answer for the life of the document instead of only the " +
+      "one that can still be asked for again",
+    file: TABS,
+    from: "    shutdownResponses.clear();",
+    to: "    /* reverted for proof: answers accumulate for the life of the document */",
+    expect: [
+      /^fifty cancelled shutdowns retain one replayable answer, and only the newest id replays$/,
+    ],
+    mustPass: [
+      // Replaying a duplicate is the reason the cache exists and is untouched.
+      /^the renderer replays its cached response for a duplicate same-id request$/,
+      /^the renderer answers a fresh shutdown request and ignores a stale one$/,
+    ],
+  },
+  {
+    id: "R597",
+    suite: "test:tabs",
+    what:
+      "fold a view-mode edit into the tab only when the live document differs from the ON-DISK " +
+      "copy, so undoing an edit skips the fold and leaves the abandoned text in the cache",
+    file: TABS,
+    from:
+      "        const liveMoved = !state || live !== state.foldedLive;\n" +
+      "        if (liveMoved && !sameDocument(live, currentTab.content)) {",
+    to:
+      "        const liveMoved = !state || live !== state.foldedLive;\n" +
+      "        if (liveMoved && !sameDocument(live, currentTab.originalContent)) { /* reverted for proof */",
+    expect: [
+      /^an undone view-mode edit leaves the cached document clean rather than resurrecting the edit$/,
+      /^an undone CRLF view-mode edit restores the file's own line endings and reports clean$/,
+    ],
+    mustPass: [
+      // A live edit is still detected, and a save/reload still settles: the
+      // revert only changes what an UNDO leaves behind.
+      /^the active view state is snapshotted before the all-tab scan$/,
+      /^dirty save and reload become clean while a reload-time edit remains dirty$/,
+    ],
+  },
+  {
+    id: "R598",
+    suite: "test:packaging",
+    what:
+      "run only the anchor half of the revert audit in CI, which is structurally blind to a " +
+      "renamed assertion and lets an orphaned mustPass report PROVEN forever",
+    file: CI_YML,
+    from:
+      "      - name: Verify every expect/mustPass regex names a live assertion\n" +
+      "        run: node scripts/prove-table-fixes.js --expects",
+    to:
+      "      - name: Verify every revert anchor still resolves\n" +
+      "        run: node scripts/prove-table-fixes.js --anchors",
+    expect: [/^CI audits every expect\/mustPass regex, not just the anchors$/],
+    mustPass: [
+      // The audit is still read-only and still parseable, so this record is
+      // about WHICH audit runs rather than about breaking the check itself.
+      /^no workflow runs the revert harness in its tree-rewriting mode$/,
+      /^the workflows invoke the revert harness in a form this assertion can read$/,
+    ],
+  },
+  {
+    id: "R599",
+    suite: "test:tabs",
+    what:
+      "wait for a 'close' event from a portable child that has already exited, stranding the " +
+      "in-flight install latch and the private directory for the rest of the session",
+    file: MAIN,
+    from:
+      "        if (childHasTerminalStatus()) releaseRetryLatch();\n" +
+      "        if (childClosed) releaseAfterClose();\n" +
+      '        else child.once("close", releaseAfterClose);',
+    to:
+      '        child.once("close", releaseAfterClose); /* reverted for proof: exited child waits for close */',
+    expect: [
+      /^a portable child that has already exited releases its latch without waiting for a close it cannot send$/,
+    ],
+    mustPass: [
+      // A child that is still running is still waited for, which is the
+      // ordering R583 exists to protect and must not be read as broken here.
+      /^a replaced document cancels a parked portable child before latch reset and permits one later retry$/,
+      /^a portable release-gate write failure stays fail-closed until the child closes$/,
+    ],
+  },
+  {
+    id: "R600",
+    suite: "test:tabs",
+    what:
+      "clear the portable retry latch after a hand-off whose gate was already open timed out, " +
+      "so a second Install press can launch a second installer over the first",
+    file: MAIN,
+    from:
+      "        const startedNothing =\n" +
+      "          !released || options.installerDidNotStart === true;",
+    to:
+      "        const startedNothing = true; /* reverted for proof: a timed-out hand-off is treated as having started nothing */",
+    expect: [
+      /^a forged portable acknowledgement never quits and the hand-off times out fail-closed$/,
+    ],
+    mustPass: [
+      // The batch's own failure report is a sound retry boundary and still
+      // clears the latch, so this record is about the AMBIGUOUS case only. The
+      // acknowledged path never reaches cancelPortableHandoff at all, so its
+      // retry boundary must be entirely unmoved by this revert.
+      /^a portable batch that reports it could not start the installer leaves the app running$/,
+      /^a replaced document cancels a parked portable child before latch reset and permits one later retry$/,
+      /^an acknowledged portable hand-off keeps its retry boundary after the child process exits$/,
+    ],
+  },
+  {
+    id: "R601",
+    suite: "test:tabs",
+    what:
+      "quit on an acknowledged portable hand-off using the approval that opened the gate, so an " +
+      "edit typed while the installer was starting is discarded without ever being asked about",
+    file: MAIN,
+    from:
+      "        revokeShutdownAuthorization();\n" +
+      '        log("Portable update: installer hand-off acknowledged, confirming shutdown");\n' +
+      '        requestShutdown("update-install", quitApprovedUpdateApp, {',
+    to:
+      "        grantShutdownAuthorization();\n" +
+      "        quitApprovedUpdateApp();\n" +
+      "        return;\n" +
+      "        /* reverted for proof: the acknowledged hand-off quits on stale consent */\n" +
+      '        requestShutdown("update-install", quitApprovedUpdateApp, {',
+    expect: [
+      /^an edit made after the portable gate opened is asked about before the acknowledged hand-off quits$/,
+      /^approving the confirmation after an acknowledged portable hand-off quits once and starts nothing further$/,
+      /^an acknowledgement landing behind an open question re-asks instead of quitting on stale consent$/,
+    ],
+    mustPass: [
+      // The hand-off itself is untouched: a clean document still quits exactly
+      // once, and the quit still waits for the acknowledgement. The retry
+      // boundary is untouched too - a quit taken on stale consent still leaves
+      // the attempt latched, so a record about WHEN the app quits cannot be
+      // read as one about whether a second installer can start.
+      /^a successful portable spawn commits once, unreferences once, and then quits$/,
+      /^a released portable gate does not quit until the installer hand-off is acknowledged$/,
+      /^a second install press while an acknowledged portable installer is running is refused outright$/,
+      /^an acknowledged portable hand-off keeps its retry boundary after the child process exits$/,
+    ],
+  },
+  {
+    id: "R602",
+    suite: "test:tabs",
+    what:
+      "believe a hand-off marker that was already in the private directory before the gate " +
+      "was released, which the batch cannot have written and something else therefore did",
+    file: MAIN,
+    from:
+      "        if (fs.existsSync(ackPath) || fs.existsSync(failedPath)) {\n" +
+      "          cancelPortableHandoff(\n" +
+      '            "Portable update: a hand-off marker existed before the gate was released",\n' +
+      "          );\n" +
+      "          return false;\n" +
+      "        }",
+    to: "        /* reverted for proof: a pre-existing marker is not questioned */",
+    expect: [
+      /^a portable acknowledgement planted before the gate was released is refused$/,
+    ],
+    mustPass: [
+      /^a successful portable spawn commits once, unreferences once, and then quits$/,
+      /^a portable release-gate write failure stays fail-closed until the child closes$/,
+    ],
+  },
+  {
+    id: "R603",
+    suite: "test:tabs",
+    what:
+      "fold the live document into the active tab whenever the two differ, without asking which " +
+      "side moved - so a value written straight into the cache is reverted by the next snapshot " +
+      "and the tab then reads clean and is clobbered by the next disk refresh",
+    file: TABS,
+    from: "        const liveMoved = !state || live !== state.foldedLive;",
+    to: "        const liveMoved = true; /* reverted for proof: the fold cannot tell which side moved */",
+    expect: [
+      /^unsaved edits survive an on-disk change$/,
+      /^edit base matches the rendered \(unsaved\) content on a dirty tab$/,
+      /^sequential view-mode edits both survive a tab round-trip$/,
+    ],
+    mustPass: [
+      // A real view-mode edit, and an undone one, both still fold: the witness
+      // decides only whether the LIVE copy moved, never what is adopted.
+      /^the active view state is snapshotted before the all-tab scan$/,
+      /^an undone view-mode edit leaves the cached document clean rather than resurrecting the edit$/,
+    ],
+  },
+  {
+    id: "R604",
+    suite: "test:tabs",
+    what:
+      "recompute every tab's dirtiness on every shutdown scan instead of reading the answer the " +
+      "edit already settled, which is the 22.5ms/98.2ms all-dirty close this architecture removed",
+    file: TABS,
+    from:
+      "    if (!state) return !sameDocument(tab.content, tab.originalContent);\n" +
+      "    return state.dirty || state.reloadConflict;",
+    to:
+      "    return !sameDocument(tab.content, tab.originalContent); /* reverted for proof: recomputed on every scan */",
+    expect: [
+      /^the shutdown scan reads no document bytes for tabs whose text has not moved since it was set$/,
+      /^a 2MB dirty background tab is found while its active tab is clean despite a false dirty flag$/,
+    ],
+    mustPass: [
+      // The ANSWERS are identical either way - that is what makes this a
+      // performance record and not a correctness one - so the assignment-time
+      // assertions and the protocol itself must be entirely unmoved.
+      /^sameDocument detects same-length and final-byte edits through the direct path$/,
+      /^an unsaved edit that exists only in the renderer stops the native close$/,
+    ],
+  },
+  {
+    id: "R605",
+    suite: "test:tabs",
+    what:
+      "act on a shutdown answer without asking the renderer to commit against the document " +
+      "revision it described, so an edit made in the gap between the answer and the " +
+      "continuation is discarded by a consent that was never about it",
+    file: MAIN,
+    from:
+      "  const attempt = {\n" +
+      "    id: record.id,\n" +
+      "    reason: record.reason,",
+    to:
+      "  runApprovedContinuations(continuations, record.id, approvedSession);\n" +
+      "  return;\n" +
+      "  /* reverted for proof: the answer is acted on without a commit */\n" +
+      "  const attempt = {\n" +
+      "    id: record.id,\n" +
+      "    reason: record.reason,",
+    expect: [
+      /^an edit made between the answer and the commit is caught, and the close asks again$/,
+      /^an unmoved document commits once and freezes while the close goes through$/,
+    ],
+    mustPass: [
+      // The protocol itself is untouched: a clean close still completes and a
+      // dirty one still asks. What the revert removes is the second look.
+      /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
+      /^an unsaved edit that exists only in the renderer stops the native close$/,
+    ],
+  },
+  {
+    id: "R606",
+    suite: "test:tabs",
+    what:
+      "let the renderer confirm a commit without re-reading the document, so a revision that " +
+      "has moved since the answer is committed against anyway",
+    file: TABS,
+    from:
+      "    if (documentRevision !== revision) {\n" +
+      '      reply(false, "revision-moved");\n' +
+      "      return;\n" +
+      "    }",
+    to: "    /* reverted for proof: a moved revision still commits */",
+    expect: [
+      /^an edit made between the answer and the commit is caught, and the close asks again$/,
+    ],
+    mustPass: [
+      // An unmoved document still commits, and still freezes: this record is
+      // about what the commit REFUSES, not about whether it works.
+      /^an unmoved document commits once and freezes while the close goes through$/,
+      /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
+    ],
+  },
+  {
+    id: "R607",
+    suite: "test:tabs",
+    what:
+      "leave the document frozen after a shutdown that did not happen, so the editor stays " +
+      "read-only for the rest of the session",
+    file: TABS,
+    from:
+      '    if (!data.retainFreeze) thawDocument("newer-request");',
+    to:
+      '    if (true) thawDocument("newer-request"); /* reverted for proof: a retained launch freeze thaws */',
+    expect: [
+      /^a retained launch request leaves the committed document frozen$/,
+    ],
+    mustPass: [
+      /^an unmoved document commits once and freezes while the close goes through$/,
+      /^a refused commit leaves the document editable rather than frozen$/,
+    ],
+  },
+  {
+    id: "R608",
+    suite: "test:tabs",
+    what:
+      "run a continuation whose authorising question has already been superseded by a newer " +
+      "intent, so an answer about one document state acts while the reader is looking at another",
+    file: MAIN,
+    from:
+      "      if (shutdownRequestSeq > authorisedSeq) {\n" +
+      "        supersededContinuationCount += 1;",
+    to:
+      "      if (false) { /* reverted for proof: an old continuation still runs */\n" +
+      "        supersededContinuationCount += 1;",
+    expect: [
+      /^an edit made between the answer and the commit is caught, and the close asks again$/,
+    ],
+    mustPass: [
+      /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
+      /^an update install is deferred behind the same approval, installing nothing first$/,
+    ],
+  },
+  {
+    id: "R609",
+    suite: "test:tabs",
+    what:
+      "read edit mode from a remembered flag instead of the live DOM, so a delayed exit leaves " +
+      "the fold reading a hidden textarea and losing every view-mode edit made afterwards",
+    file: TABS,
+    from:
+      "    if (wrapper) return wrapper.classList.contains(\"split-view\");\n" +
+      "    return !!window.isEditMode;",
+    to: "    return !!window.isEditMode; /* reverted for proof: the shadow flag decides */",
+    expect: [
+      /^edit mode is read from the live DOM, so a view-mode edit after a delayed exit is not missed$/,
+    ],
+    mustPass: [
+      // A document with nothing unsaved is unaffected either way, and the
+      // unreadable-editor guard still fails closed.
+      /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
+      /^an unreadable active editor preserves dirtyFiles:null rather than approving$/,
+    ],
+  },
+  {
+    id: "R610",
+    suite: "test:tabs",
+    what:
+      "re-dispatch a stronger intent that was still being asked about when the window disappeared, so " +
+      "an update install is decided by an automatic rule instead of by the reader",
+    file: MAIN,
+    from:
+      "    settleShutdown(\n" +
+      "      record,\n" +
+      "      false,\n" +
+      "      isUpdaterShutdownReason(record.reason)\n" +
+      '        ? "window-gone-updater"\n' +
+      '        : "window-gone-unowned",\n' +
+      "    );",
+    to: "    dispatchShutdownRequest(record);",
+    expect: [
+      /^a window that disappears refuses the update install it was still being asked about$/,
+    ],
+    mustPass: [
+      /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
+      /^an approved native close crosses the real window-all-closed cascade without a second question$/,
+    ],
+  },
+  {
+    id: "R611",
+    suite: "test:tabs",
+    what:
+      "keep the portable retry latch after a batch process that died before its gate was ever " +
+      "released, blocking every later install attempt over an installer that provably never started",
+    file: MAIN,
+    from:
+      "        if (childHasTerminalStatus()) {\n" +
+      "          cancelPortableHandoff(\n" +
+      '            "Portable update: the batch process ended before the gate could be released",\n' +
+      "            { installerDidNotStart: true },\n" +
+      "          );\n" +
+      "          return false;\n" +
+      "        }",
+    to:
+      "        if (false) { /* reverted for proof: a gate is opened at a child that is already gone */\n" +
+      "          cancelPortableHandoff(\n" +
+      '            "Portable update: the batch process ended before the gate could be released",\n' +
+      "            { installerDidNotStart: true },\n" +
+      "          );\n" +
+      "          return false;\n" +
+      "        }",
+    expect: [
+      /^a portable batch that dies before its gate is released clears the retry latch$/,
+    ],
+    mustPass: [
+      /^a successful portable spawn commits once, unreferences once, and then quits$/,
+      /^a portable release-gate write failure stays fail-closed until the child closes$/,
+    ],
+  },
+  {
+    id: "R612",
+    suite: "test:packaging",
+    what:
+      "treat an assertion the suite announced as SKIPPED as a dead regex, which makes the " +
+      "read-only audit demand a release build before it will agree a name exists",
+    file: "scripts/prove-table-fixes.js",
+    from:
+      "        const skippedMatch = skippedHere.find((n) => re.test(n));\n" +
+      "        if (skippedMatch) {",
+    to:
+      "        const skippedMatch = null; /* reverted for proof: a skipped name reads as dead */\n" +
+      "        if (skippedMatch) {",
+    expect: [
+      /^the revert audit distinguishes a skipped assertion from a dead regex$/,
+    ],
+    mustPass: [
+      /^no workflow runs the revert harness in its tree-rewriting mode$/,
+      /^CI audits every expect\/mustPass regex, not just the anchors$/,
+    ],
+  },
+  {
+    id: "R613",
+    suite: "test:tabs",
+    what:
+      "mint the portable hand-off's acknowledgement secret once instead of per attempt, so a " +
+      "marker captured from any earlier update commits every later one",
+    file: MAIN,
+    from: '      const handoffToken = crypto.randomBytes(32).toString("hex");',
+    to:
+      '      const handoffToken = "f22f22f22f22f22f22f22f22f22f22f22f22f22f22f22f22f22f22f22f22f22f2"; /* reverted for proof: one fixed secret */',
+    expect: [
+      /^a fresh token is minted per attempt and only the current one can commit the hand-off$/,
+      /^a portable acknowledgement replayed from an earlier attempt is refused for its whole deadline$/,
+    ],
+    mustPass: [
+      // A single hand-off still works end to end - the revert is about whether
+      // the secret is a secret, not about whether the protocol runs.
+      /^a successful portable spawn commits once, unreferences once, and then quits$/,
+      /^a released portable gate does not quit until the installer hand-off is acknowledged$/,
+    ],
+  },
+  {
+    id: "R614",
+    suite: "test:tabs",
+    what:
+      "accept an install-update press from any window, so a popup or an injected document can " +
+      "quit the app and replace it on disk without ever owning a document",
+    file: MAIN,
+    from:
+      'ipcMain.on("install-update", (event) => {\n' +
+      "  if (!isApprovalSender(event)) return;",
+    to:
+      'ipcMain.on("install-update", (event) => {\n' +
+      "  /* reverted for proof: any sender may install */",
+    expect: [
+      /^an install press from a window that owns no documents starts nothing at all$/,
+    ],
+    mustPass: [
+      // The document window's own press still works, so this record is about
+      // WHO may press it rather than about the button.
+      /^an install press with nothing downloaded asks nothing and starts nothing$/,
+      /^a successful portable spawn commits once, unreferences once, and then quits$/,
+    ],
+  },
+  {
+    id: "R615",
+    suite: "test:tabs",
+    what:
+      "let the parked batch wait for a release file forever, so an app that dies first leaves a " +
+      "script spinning in the user's temp directory until the machine is rebooted",
+    file: MAIN,
+    from:
+      "          `tasklist /FI \"PID eq ${parentPid}\" /NH 2>nul | find \"${parentPid}\" >nul`,\n" +
+      '          "if errorlevel 1 goto orphaned",',
+    to: '          "rem reverted for proof: no parent-liveness check",',
+    expect: [
+      /^a parked portable batch exits by itself once its parent process is gone$/,
+    ],
+    mustPass: [
+      // The ordinary hand-off is untouched: the check only fires when the
+      // parent is already gone, which never happens in the other scenarios.
+      /^a successful portable spawn commits once, unreferences once, and then quits$/,
+      /^a portable batch that reports it could not start the installer leaves the app running$/,
+    ],
+  },
+  {
+    id: "R616",
+    suite: "test:tabs",
+    what:
+      "freeze only the editor at a committed shutdown, leaving every view-mode interaction - " +
+      "checkboxes, table cells, notes - live on a document that is already going away",
+    file: TABS,
+    from: "    if (inertOwner) inertOwner.inert = true;",
+    to: "    /* reverted for proof: the document surface stays interactive */",
+    expect: [
+      /^a committed freeze makes the whole document surface inert, not just the editor$/,
+    ],
+    mustPass: [
+      // The editor half of the freeze, and its release, are separate controls.
+      /^an unmoved document commits once and freezes while the close goes through$/,
+      /^a retry-safe thaw releases a committed freeze before a later dirty question$/,
+    ],
+  },
+  {
+    id: "R617",
+    suite: "test:tabs",
+    what:
+      "restore nothing when a freeze is released, leaving the document surface inert for the " +
+      "rest of the session after a shutdown that did not happen",
+    file: TABS,
+    from:
+      "    if (frozen.inertOwner) {\n" +
+      "      frozen.inertOwner.inert = frozen.previousInert;\n" +
+      "    }",
+    to: "    /* reverted for proof: the surface is never made interactive again */",
+    expect: [
+      /^a retry-safe thaw restores the document surface as well as the editor$/,
+    ],
+    mustPass: [
+      /^a committed freeze makes the whole document surface inert, not just the editor$/,
+      /^a refused commit leaves the document editable rather than frozen$/,
+    ],
+  },
+  {
+    id: "R618",
+    suite: "test:tabs",
+    what:
+      "adopt a live-copy mutation made after the commit was confirmed, putting text into the " +
+      "cache that the reader's consent was never about",
+    file: TABS,
+    from:
+      "      if (shutdownFreeze) {\n" +
+      "        shutdownFreeze.adoptionsRefused += 1;\n" +
+      "      } else {",
+    to:
+      "      if (false) { /* reverted for proof: a committed freeze adopts anyway */\n" +
+      "      } else {",
+    expect: [
+      /^a committed freeze makes the whole document surface inert, not just the editor$/,
+    ],
+    mustPass: [
+      // Folding is untouched everywhere a freeze is not standing.
+      /^the active view state is snapshotted before the all-tab scan$/,
+      /^an undone view-mode edit leaves the cached document clean rather than resurrecting the edit$/,
+    ],
+  },
+  {
+    // A NEW GESTURE WHILE A COMMIT IS IN FLIGHT. The commit round trip is real
+    // time, and a second intent can land inside it: an Install press, a Ctrl+Q,
+    // a second X. Before this the commit knew nothing about that - it would
+    // confirm, and its continuation would run alongside a question the reader
+    // had already replaced.
+    //
+    // ONE RECORD, DELIBERATELY. The epoch captured at commit start is a second
+    // guard on the same invariant, and with this one in place it can never
+    // fire: `shutdownRequestSeq` moves only inside requestShutdown(), which is
+    // the very function that invalidates the commit first. Removing THIS is
+    // what makes the epoch check observable - the reverted run refuses the
+    // commit for the other reason and the assertion's `commitRefusedWhy` term
+    // catches it - so a separate record for the epoch would be a second name
+    // for one control rather than an independent proof.
+    id: "R619",
+    suite: "test:tabs",
+    what:
+      "let a newer shutdown intent arrive alongside an in-flight commit instead of invalidating " +
+      "it, so an answer about the old document state is confirmed under a question that has " +
+      "already been replaced",
+    file: MAIN,
+    from:
+      "  if (pendingShutdownCommit) {\n" +
+      "    finishShutdownCommit(\n" +
+      "      pendingShutdownCommit,\n" +
+      '      false,\n' +
+      '      "superseded-by-new-intent",\n' +
+      "    );\n" +
+      "  }",
+    to: "  /* reverted for proof: a new intent leaves an in-flight commit standing */",
+    expect: [
+      /^an install arriving inside an in-flight close commit invalidates that commit$/,
+      /^the late reply to an invalidated commit is counted and does nothing$/,
+      /^a second close crossing the first one's commit closes the window exactly once$/,
+    ],
+    mustPass: [
+      // The ordinary commit path has no second intent in it and is untouched.
+      /^an unmoved document commits once and freezes while the close goes through$/,
+      /^an edit made between the answer and the commit is caught, and the close asks again$/,
+    ],
+  },
+  {
+    // A REVISION-BEARING APPROVAL COMMITS OR FAILS CLOSED. A renderer that dies
+    // between answering and confirming is the case where its answer is least
+    // trustworthy - the document that produced it is unreachable, so nothing
+    // can confirm it still describes anything - and a commit left outstanding
+    // strands every intent behind it with no event able to release it.
+    id: "R620",
+    suite: "test:tabs",
+    what:
+      "leave a commit outstanding when the renderer holding it dies, stranding the intents behind " +
+      "it with no dialog, no close and nothing left that could ever answer",
+    file: MAIN,
+    from: '  finishShutdownCommit(pendingShutdownCommit, false, "renderer-unusable");',
+    to: "  /* reverted for proof: a lost renderer leaves its commit outstanding */",
+    expect: [
+      /^a renderer that dies mid-commit fails the commit closed instead of running it$/,
+      /^a commit the renderer could not answer is re-asked in the main process rather than stranded$/,
+    ],
+    mustPass: [
+      // The request half of "nobody can answer" is a separate control and is
+      // untouched: a lost renderer with a QUESTION outstanding still reaches
+      // the main-process dialog.
+      /^a lost renderer is asked about in the main process rather than approved silently$/,
+      /^approving the main-process fallback quits exactly once$/,
+    ],
+  },
+  {
+    // A WEDGED RENDERER HAS NO EVENT OF ITS OWN. It is alive, so nothing
+    // reports it gone; it is not answering, so the commit reply never comes.
+    // Chromium's hang notification is the only signal, and without this the
+    // app holds a frozen document and a question nobody can answer.
+    id: "R621",
+    suite: "test:tabs",
+    what:
+      "ignore an unresponsive renderer while a commit is outstanding, so a wedged page leaves the " +
+      "document frozen and the shutdown decided by whatever it eventually replies",
+    file: MAIN,
+    from:
+      "    if (pendingShutdownCommit) {\n" +
+      '      log("Renderer unresponsive with a shutdown commit in flight");\n' +
+      "      finishShutdownCommit(\n" +
+      "        pendingShutdownCommit,\n" +
+      "        false,\n" +
+      '        "unresponsive-during-commit",\n' +
+      "      );\n" +
+      "    }",
+    to: "    /* reverted for proof: a wedged renderer leaves its commit outstanding */",
+    expect: [
+      /^an unresponsive renderer settles the commit it can no longer answer and asks in the main process$/,
+    ],
+    mustPass: [
+      // The QUESTION half of the unresponsive handler is a separate control.
+      /^a lost renderer is asked about in the main process rather than approved silently$/,
+      /^an unmoved document commits once and freezes while the close goes through$/,
+    ],
+  },
+  {
+    // A PID IS NOT AN IDENTITY. Windows reuses process ids, so "a process with
+    // that number exists" can become true again after the app that parked the
+    // batch has died - and the batch would then wait at a gate nobody will ever
+    // open, for as long as the unrelated impostor lives.
+    id: "R622",
+    suite: "test:tabs",
+    what:
+      "trust the parent PID alone for batch liveness, so a reused process id keeps a parked " +
+      "installer script polling in the user's temp directory indefinitely",
+    file: MAIN,
+    from:
+      "          `if %FOLIA_MISS% GEQ ${PORTABLE_LEASE_STALE_POLLS} goto orphaned`,",
+    to: '          "rem reverted for proof: an unchanging lease never expires",',
+    expect: [
+      /^a parked portable batch stands itself down when its parent stops extending the lease$/,
+    ],
+    mustPass: [
+      // The PID check is the OTHER liveness test and still works on its own.
+      /^a parked portable batch exits by itself once its parent process is gone$/,
+      // And the batch still waits while the lease is being extended, so this
+      // revert is not merely making everything exit.
+      /^a parked portable batch keeps waiting while its parent keeps extending the lease$/,
+    ],
+  },
+  {
+    id: "R623",
+    suite: "test:tabs",
+    what:
+      "park a batch with no lease to read, so the size it measures never moves and the app has no " +
+      "way to tell a live parent from a dead one",
+    file: MAIN,
+    from: '      fs.writeFileSync(leasePath, ".", { flag: "wx", mode: 0o600 });',
+    to: "      /* reverted for proof: the parked batch is given no lease to read */",
+    expect: [
+      /^the portable batch measures its parent's lease by size and gives up only after a bounded stall$/,
+    ],
+    mustPass: [
+      /^the portable batch refuses a missing download and acknowledges only after starting it$/,
+      /^a successful portable spawn commits once, unreferences once, and then quits$/,
+    ],
+  },
+  {
+    // EXCLUSIVITY IS A CLAIM ABOUT PROCESSES. Removing the lock while a worker
+    // of this run is still alive makes the next run's numbers a measurement of
+    // a busy machine - and it will report them as a gate result.
+    id: "R624",
+    suite: "test:packaging",
+    what:
+      "release the benchmark lock and delete the run directory even when a worker of the run could " +
+      "not be proven closed, advertising an exclusivity the machine does not have",
+    file: BENCH_RUN,
+    from:
+      "  const closureProven = await terminateLiveWorkers();\n" +
+      "  if (!closureProven) {",
+    to:
+      "  const closureProven = await terminateLiveWorkers();\n" +
+      "  if (false) { /* reverted for proof: exclusivity is released over a survivor */",
+    expect: [
+      /^the F22 benchmark retains its lock and run directory when a worker cannot be proven closed$/,
+    ],
+    mustPass: [
+      /^the F22 benchmark awaits real worker closure instead of blocking its event loop$/,
+      /^the F22 benchmark always emits a machine-readable summary carrying the raw p95$/,
+    ],
+  },
+  {
+    id: "R625",
+    suite: "test:packaging",
+    what:
+      "exit the benchmark parent on a signal without waiting for its asynchronous cleanup, " +
+      "abandoning the workers it started and losing the verdict that would have named them",
+    file: BENCH_RUN,
+    from:
+      "        releaseRunResources().then(\n" +
+      "          () => process.exit(130),\n" +
+      "          () => process.exit(130),\n" +
+      "        );",
+    to: "      releaseRunResources();\n      process.exit(130);",
+    expect: [
+      /^the F22 benchmark finishes cleanup before any exit path terminates the parent$/,
+    ],
+    mustPass: [
+      /^the F22 benchmark retains its lock and run directory when a worker cannot be proven closed$/,
+      /^the F22 benchmark awaits real worker closure instead of blocking its event loop$/,
+    ],
+  },
+  {
+    // An unref'd backstop only fires when something ELSE is already keeping the
+    // loop alive, which is exactly not guaranteed for the case it exists to
+    // cover: a lifecycle quit that never completes.
+    id: "R626",
+    suite: "test:packaging",
+    what:
+      "let the lifecycle worker's termination backstop be dropped by an idle event loop, so a " +
+      "worker whose product-path quit never completes sits on the machine holding the gate open",
+    file: BENCH_WORKER,
+    from:
+      "    setTimeout(() => {\n" +
+      '      console.error("F22 lifecycle worker did not terminate through the product path");\n' +
+      "      app.exit(process.exitCode || 1);\n" +
+      "    }, 30000);",
+    to:
+      "    const watchdog = setTimeout(() => {\n" +
+      '      console.error("F22 lifecycle worker did not terminate through the product path");\n' +
+      "      app.exit(process.exitCode || 1);\n" +
+      "    }, 30000);\n" +
+      '    if (typeof watchdog.unref === "function") watchdog.unref();',
+    expect: [
+      /^the F22 lifecycle worker cannot survive a failed product-path termination$/,
+    ],
+    mustPass: [
+      /^the F22 benchmark awaits real worker closure instead of blocking its event loop$/,
+      /^the F22 benchmark can publish its raw samples durably and atomically$/,
+    ],
+  },
+  {
+    // TEARDOWN IS NOT CONSENT, part one. A refused commit normally RE-RAISES
+    // its intents, which is right while the app is running and wrong when the
+    // window has gone: the fresh question can only be answered by a rule, and
+    // the rule it reaches is "no window, nothing to lose" - which is how a
+    // window closing used to authorise an installer.
+    id: "R627",
+    suite: "test:tabs",
+    what:
+      "re-raise the intents behind a commit when the window they belong to is destroyed, turning a " +
+      "teardown into a fresh question that only an automatic rule can answer",
+    file: MAIN,
+    from:
+      '    finishShutdownCommit(pendingShutdownCommit, false, "window-closed", {\n' +
+      "      reraise: false,\n" +
+      "    });",
+    to: '    finishShutdownCommit(pendingShutdownCommit, false, "window-closed");',
+    expect: [
+      /^a commit in flight when the window goes is abandoned rather than re-raised into a new question$/,
+    ],
+    mustPass: [
+      // Re-raising is still correct everywhere the app survives.
+      /^an edit made between the answer and the commit is caught, and the close asks again$/,
+      /^a renderer that dies mid-commit fails the commit closed instead of running it$/,
+    ],
+  },
+  {
+    // Part two. settleShutdown() carries the QUEUED intent with whatever it
+    // decides, so a force-fresh update-install queued behind the close was
+    // re-raised by the very settlement that was supposed to end the session.
+    id: "R628",
+    suite: "test:tabs",
+    what:
+      "leave a queued update-install standing when the window is destroyed, so the settlement of the " +
+      "close re-raises it into an approval nobody was asked for",
+    file: MAIN,
+    from:
+      "    if (queuedShutdown) {\n" +
+      '      declineIntent(queuedShutdown, "window-gone");\n' +
+      "      queuedShutdown = null;\n" +
+      "    }",
+    to: "    /* reverted for proof: a queued intent outlives the window */",
+    expect: [
+      /^a window that disappears declines the update queued behind its close instead of installing it$/,
+      /^a window that disappears settles the close it was asked about without running its continuation$/,
+    ],
+    mustPass: [
+      // Queueing itself is untouched: a stronger intent arriving mid-question
+      // is still held and still raised on its own terms while the app lives.
+      /^an install arriving mid-question is queued rather than swapped into the open question$/,
+      /^a queued update is raised as its own fresh approval rather than coalesced into a close$/,
+    ],
+  },
+  {
+    // Part three. The close HAS happened; there is nothing for its continuation
+    // to do, and running it grants an authorization over a session that is
+    // over - which the next lifecycle event then rides through unasked.
+    id: "R629",
+    suite: "test:tabs",
+    what:
+      "approve and run the continuation of a window-close whose window has already gone, granting a " +
+      "standing permission for a session that no longer exists",
+    file: MAIN,
+    from: '      settleShutdown(record, false, "window-gone-already-closed");',
+    to: '      settleShutdown(record, true, "window-gone-already-closed");',
+    expect: [
+      /^a window that disappears settles the close it was asked about without running its continuation$/,
+      /^a window that disappears declines the update queued behind its close instead of installing it$/,
+    ],
+    mustPass: [
+      // The ordinary approved close - the one where the window is still there
+      // to be closed - is a different path and still runs.
+      /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
+      /^an unmoved document commits once and freezes while the close goes through$/,
+    ],
+  },
+  {
+    // AN EMPTY SCREEN IS AN ARGUMENT ABOUT DATA. It says the documents are
+    // gone, so a close or a quit has nothing left to lose. It says nothing
+    // whatever about replacing the application on disk, and using it for that
+    // is the substitution this whole protocol exists to prevent.
+    id: "R630",
+    suite: "test:tabs",
+    what:
+      "approve any shutdown reason when no document window remains, so an updater hand-off that " +
+      "acknowledges after the window has gone quits the app on an approval nobody gave",
+    file: MAIN,
+    from:
+      "function settleWithoutWindow(record) {\n" +
+      "  if (!isUpdaterShutdownReason(record.reason)) {\n" +
+      '    settleShutdown(record, true, "no-window");\n' +
+      "    return;\n" +
+      "  }",
+    to:
+      "function settleWithoutWindow(record) {\n" +
+      "  if (true) { /* reverted for proof: an empty screen approves anything */\n" +
+      '    settleShutdown(record, true, "no-window");\n' +
+      "    return;\n" +
+      "  }",
+    expect: [
+      /^an acknowledged portable hand-off refuses to quit for a window that is already gone$/,
+    ],
+    mustPass: [
+      // The ordinary hand-off, with its window still there, is untouched.
+      /^a successful portable spawn commits once, unreferences once, and then quits$/,
+      /^a released portable gate does not quit until the installer hand-off is acknowledged$/,
+    ],
+  },
+  {
+    id: "R631",
+    suite: "test:packaging",
+    what:
+      "keep scheduling benchmark jobs after one has overrun its budget, so every later measurement is " +
+      "taken on a machine that is still running the worker before it",
+    file: BENCH_RUN,
+    from:
+      "  if (matrixAborted) {\n" +
+      "    throw new MatrixAborted(`no job may start after: ${matrixAborted}`);\n" +
+      "  }",
+    to: "  /* reverted for proof: a timed-out job does not stop the matrix */",
+    expect: [
+      /^the F22 benchmark stops scheduling the moment a worker overruns its budget$/,
+    ],
+    mustPass: [
+      /^the F22 benchmark terminates a timed-out worker exactly once and awaits its close$/,
+      /^the F22 benchmark retains its lock and run directory when a worker cannot be proven closed$/,
+    ],
+  },
+  {
+    id: "R632",
+    suite: "test:packaging",
+    what:
+      "settle a timed-out benchmark worker on a fixed grace period rather than on its observed close, " +
+      "so the run carries on with a process it never proved had gone",
+    file: BENCH_RUN,
+    from:
+      "      budgetExceeded = true;\n" +
+      "      terminateWorker(child).then((closureProven) => {\n" +
+      "        settle(resultWithWorkerErrors({\n" +
+      "          code: child.exitCode,\n" +
+      "          signal: child.signalCode,\n" +
+      "          closureProven,\n" +
+      "        }));\n" +
+      "      });",
+    to:
+      "      budgetExceeded = true;\n" +
+      "      setTimeout(() => {\n" +
+      '        settle({ code: null, signal: "SIGKILL-TIMEOUT" });\n' +
+      "      }, 15000);",
+    expect: [
+      /^the F22 benchmark terminates a timed-out worker exactly once and awaits its close$/,
+    ],
+    mustPass: [
+      /^the F22 benchmark stops scheduling the moment a worker overruns its budget$/,
+      /^the F22 benchmark awaits real worker closure instead of blocking its event loop$/,
+    ],
+  },
+  {
+    // 'exit' says the main process ended. 'close' says its stdio - and so the
+    // renderer children holding it - are gone. Only the second is the claim the
+    // exclusivity lock makes, and sampling the first is how a run gives the
+    // machine back while an Electron tree of its own is still on it.
+    id: "R633",
+    suite: "test:packaging",
+    what:
+      "prove a benchmark worker gone by sampling its exit code instead of awaiting the close of its " +
+      "process tree, so a main process that has exited counts as a machine that is free",
+    file: BENCH_RUN,
+    from: "    if (await waitBounded(closed, TERMINATION_GRACE_MS)) return true;",
+    to: "    if (child.exitCode !== null) return true;",
+    expect: [
+      /^the F22 benchmark awaits real worker closure instead of blocking its event loop$/,
+    ],
+    mustPass: [
+      /^the F22 benchmark terminates a timed-out worker exactly once and awaits its close$/,
+      /^the F22 benchmark retains its lock and run directory when a worker cannot be proven closed$/,
+    ],
+  },
+  {
+    // A TRUNCATED CATALOGUE IS A FINDING ABOUT THE SUITE, NOT ABOUT THE
+    // RECORDS. `--expects` infers "this regex is dead" from "this run never
+    // printed that name", and that inference is only sound if the run reached
+    // its own end. Measured: a harness exception cut the tabs catalogue from
+    // 205 names to 177, and the audit reported 255 orphans, none of them real.
+    id: "R634",
+    suite: "test:packaging",
+    what:
+      "let the revert cataloguer treat a suite that crashed half-way through as a complete list of " +
+      "live assertion names, so every name after the crash is reported as an independent dead regex",
+    file: HARNESS,
+    from:
+      "    if (!run.healthy) {\n" +
+      "      unusableSuites.set(s, run.reasons);",
+    to:
+      "    if (false) {\n" +
+      "      unusableSuites.set(s, run.reasons);",
+    expect: [
+      /^the revert cataloguer refuses to convict a regex on a suite that did not finish$/,
+    ],
+    mustPass: [
+      // The rest of the audit's own guards are untouched.
+      /^the revert audit distinguishes a skipped assertion from a dead regex$/,
+    ],
+  },
+  {
+    // THE EDIT-MODE OBSERVATION HAS TO PROVE IT TOOK THE EDIT-MODE BRANCH. A
+    // 2 MB textarea that was never read, or a fold that quietly took the
+    // view-mode path, produces a number that looks like an edit-mode result
+    // and is not one.
+    id: "R635",
+    suite: "test:packaging",
+    what:
+      "drop the witness that the benchmark's edit-mode samples really reconciled the 2MB textarea " +
+      "into the cache, letting a view-mode fold be reported as an active-editor measurement",
+    file: BENCH_RUN,
+    from:
+      "            const reconciled = result?.diagnostics?.editReconciled;\n" +
+      "            if (\n" +
+      "              !reconciled ||\n" +
+      "              reconciled.samples !== EXPECTED_SAMPLES[job.mode] ||",
+    to:
+      "            const reconciled = result?.diagnostics?.editReconciled;\n" +
+      "            if (\n" +
+      "              false ||\n" +
+      "              false ||",
+    expect: [
+      /^the F22 benchmark proves its active-editor samples really reconciled the editor$/,
+    ],
+    mustPass: [
+      /^the F22 benchmark stops scheduling the moment a worker overruns its budget$/,
+      /^the F22 benchmark awaits real worker closure instead of blocking its event loop$/,
+    ],
+  },
+  {
+    id: "R636",
+    suite: "test:tabs",
+    what: "clear download ownership when update-downloaded fires, allowing its still-pending promise tail to authorize an install",
+    file: MAIN,
+    from: "  updaterDownloadInFlight = true;",
+    to: "  updaterDownloadInFlight = false; /* reverted for proof: event is treated as complete */",
+    expect: [
+      /^a pending download tail owns update errors and invalidates its advertised installer path on failure$/,
+    ],
+    mustPass: [
+      /^a check error cannot poison a live explicit install attempt$/,
+      /^a direct NSIS spawn proves one exact launcher hand-off under final phase-two approval and blocks duplicate auto-install$/,
+    ],
+  },
+  {
+    id: "R637",
+    suite: "test:tabs",
+    what: "re-enable electron-updater's ordinary Windows quit hook, bypassing Folia's NSIS launch proof",
+    file: MAIN,
+    from: "    !isPortable && process.platform !== \"win32\";",
+    to: "    !isPortable; /* reverted for proof: Windows auto-install is enabled */",
+    expect: [
+      /^a direct NSIS spawn proves one exact launcher hand-off under final phase-two approval and blocks duplicate auto-install$/,
+    ],
+    mustPass: [
+      /^a pending download tail owns update errors and invalidates its advertised installer path on failure$/,
+      /^post-spawn NSIS ambiguity remains latched and cannot launch a duplicate installer$/,
+    ],
+  },
+  {
+    id: "R638",
+    suite: "test:tabs",
+    what: "discard the observed direct/elevated child proof while still continuing the shutdown as if an installer had been positively launched",
+    file: MAIN,
+    from:
+      "function commitWindowsInstalledUpdateLaunch(attempt, child, method) {\n" +
+      "  if (\n" +
+      "    !attempt ||\n" +
+      "    attempt.retired ||\n" +
+      "    activeUpdaterInstallAttempt !== attempt ||\n" +
+      "    attempt.committed\n" +
+      "  ) {\n" +
+      "    return;\n" +
+      "  }\n\n" +
+      "  attempt.committed = true;\n" +
+      "  attempt.positiveLaunchObserved = true;",
+    to:
+      "function commitWindowsInstalledUpdateLaunch(attempt, child, method) {\n" +
+      "  if (\n" +
+      "    !attempt ||\n" +
+      "    attempt.retired ||\n" +
+      "    activeUpdaterInstallAttempt !== attempt ||\n" +
+      "    attempt.committed\n" +
+      "  ) {\n" +
+      "    return;\n" +
+      "  }\n\n" +
+      "  attempt.committed = true;\n" +
+      "  attempt.positiveLaunchObserved = false; /* reverted for proof: launch is not positively witnessed */",
+    expect: [
+      /^a direct NSIS spawn proves one exact launcher hand-off under final phase-two approval and blocks duplicate auto-install$/,
+      /^EACCES retries through bundled elevate\.exe and only exit zero proves the elevated installer hand-off$/,
+    ],
+    mustPass: [
+      /^direct NSIS sync and pre-spawn failures fail closed and permit retry only because no launch was proven$/,
+      /^post-spawn NSIS ambiguity remains latched and cannot launch a duplicate installer$/,
+    ],
+  },
+  {
+    id: "R639",
+    suite: "test:tabs",
+    what: "unref the direct NSIS child before its spawn, error and close listeners are attached, losing the proof boundary on an immediate callback",
+    file: MAIN,
+    from:
+      "  let settled = false;\n" +
+      "  let installerStarted = false;\n" +
+      '  child.once("spawn", () => {',
+    to:
+      "  child.unref(); /* reverted for proof: child can outlive its observers */\n" +
+      "  let settled = false;\n" +
+      "  let installerStarted = false;\n" +
+      '  child.once("spawn", () => {',
+    expect: [
+      /^a direct NSIS spawn proves one exact launcher hand-off under final phase-two approval and blocks duplicate auto-install$/,
+    ],
+    mustPass: [
+      /^EACCES retries through bundled elevate\.exe and only exit zero proves the elevated installer hand-off$/,
+      /^a pending download tail owns update errors and invalidates its advertised installer path on failure$/,
+    ],
+  },
+  {
+    id: "R640",
+    suite: "test:tabs",
+    what: "leave a direct launch that failed before spawn latched as ambiguous instead of failing closed and allowing a safe retry",
+    file: MAIN,
+    from: "      !installerStarted,\n",
+    to: "      false, /* reverted for proof: pre-spawn failure is treated as ambiguous */\n",
+    expect: [
+      /^direct NSIS sync and pre-spawn failures fail closed and permit retry only because no launch was proven$/,
+    ],
+    mustPass: [
+      /^post-spawn NSIS ambiguity remains latched and cannot launch a duplicate installer$/,
+      /^EACCES retries through bundled elevate\.exe and only exit zero proves the elevated installer hand-off$/,
+    ],
+  },
+
+  {
+    id: "R641",
+    suite: "test:tabs",
+    what: "thaw the revision committed for a pending Windows launcher before the child proves launch",
+    file: MAIN,
+    from:
+      "      if (started === SHUTDOWN_CONTINUATION_PENDING) {\n" +
+      "        shutdownPendingContinuationCount += 1;\n" +
+      "        revokeShutdownAuthorization();",
+    to:
+      "      if (started === SHUTDOWN_CONTINUATION_PENDING) {\n" +
+      "        shutdownPendingContinuationCount += 1;\n" +
+      "        revokeShutdownAuthorization();\n" +
+      "        releaseShutdownFreeze(); /* reverted for proof: pending launcher loses final consent */",
+    expect: [
+      /^the final Windows approval is committed and frozen before any direct launcher proof$/,
+    ],
+    mustPass: [
+      /^a direct NSIS spawn proves one exact launcher hand-off under final phase-two approval and blocks duplicate auto-install$/,
+    ],
+  },
+  {
+    id: "R642",
+    suite: "test:tabs",
+    what: "ask for another shutdown approval after the installer has positively started instead of quitting under phase two",
+    file: MAIN,
+    from:
+      "  // Phase two already committed and froze the exact document revision before\n" +
+      "  // any process launch. Re-authorize only this quit and execute it immediately:\n" +
+      "  // asking again after NSIS starts is too late because --updated can kill\n" +
+      "  // Folia before another renderer round-trip completes.\n" +
+      "  grantShutdownAuthorization();\n" +
+      "  quitApprovedUpdateApp();",
+    to:
+      "  // Phase two already committed and froze the exact document revision before\n" +
+      "  // any process launch. Re-authorize only this quit and execute it immediately:\n" +
+      "  // asking again after NSIS starts is too late because --updated can kill\n" +
+      "  // Folia before another renderer round-trip completes.\n" +
+      '  requestShutdown("update-install", quitApprovedUpdateApp, { forceFresh: true }); /* reverted for proof */',
+    expect: [
+      /^a direct NSIS spawn proves one exact launcher hand-off under final phase-two approval and blocks duplicate auto-install$/,
+    ],
+    mustPass: [
+      /^the final Windows approval is committed and frozen before any direct launcher proof$/,
+    ],
+  },
+  {
+    id: "R643",
+    suite: "test:tabs",
+    what: "retain a proven pre-launch failure as an ambiguous installer attempt rather than thawing and permitting retry",
+    file: MAIN,
+    from:
+      "  if (retrySafe) {\n" +
+      "    finishFailedUpdaterInstallAttempt(attempt);",
+    to:
+      "  if (false) { /* reverted for proof: retry-safe failure stays latched */\n" +
+      "    finishFailedUpdaterInstallAttempt(attempt);",
+    expect: [
+      /^direct NSIS sync and pre-spawn failures fail closed and permit retry only because no launch was proven$/,
+    ],
+    mustPass: [
+      /^post-spawn NSIS ambiguity remains latched and cannot launch a duplicate installer$/,
+    ],
+  },
+  {
+    id: "R644",
+    suite: "test:tabs",
+    what: "try to relay an unsupported custom NSIS install directory instead of failing before child creation",
+    file: MAIN,
+    from:
+      '    throw new Error(\n' +
+      '      "custom NSIS install directories are unsupported by the verified launcher",\n' +
+      "    );",
+    to:
+      "    args.push(`/D=${updater.installDirectory}`); /* reverted for proof: unsupported /D is launched */",
+    expect: [
+      /^unsupported Windows NSIS metadata fails closed before a launcher child exists$/,
+    ],
+    mustPass: [
+      /^a direct NSIS spawn proves one exact launcher hand-off under final phase-two approval and blocks duplicate auto-install$/,
+    ],
+  },
+  {
+    id: "R645",
+    suite: "test:tabs",
+    what: "accept a reload result after the request-time document snapshot has changed, overwriting a concurrent edit",
+    file: TABS,
+    from:
+      "      if (\n" +
+      "        typeof currentSnapshot !== \"string\" ||\n" +
+      "        !sameDocument(currentSnapshot, request.snapshot)\n" +
+      "      ) {\n" +
+      '        return "document-moved-after-request";\n' +
+      "      }",
+    to:
+      "      if (false) { /* reverted for proof: changed request snapshot is accepted */\n" +
+      '        return "document-moved-after-request";\n' +
+      "      }",
+    expect: [
+      /^edits made during a reload render are not silently marked saved$/,
+    ],
+    mustPass: [
+      /^a CRLF file is not falsely marked edited by its own reload$/,
+    ],
+  },
+  {
+    id: "R646",
+    suite: "test:tabs",
+    what: "compare post-render editor text against raw reload bytes, falsely dirtying CRLF documents after textarea normalization",
+    file: TABS,
+    from: "      const baseline = liveDocument();",
+    to: "      const baseline = data.content; /* reverted for proof: raw CRLF is compared to normalized DOM text */",
+    expect: [
+      /^a CRLF file is not falsely marked edited by its own reload$/,
+    ],
+    mustPass: [
+      /^edits made during a reload render are not silently marked saved$/,
+    ],
+  },
+  {
+    id: "R647",
+    suite: "test:tabs",
+    what:
+      "continue saved-tab restoration after a frozen create refusal, allowing a null tab " +
+      "to be dereferenced and later persisted entries to mutate a retained document session",
+    file: TABS,
+    from:
+      "                if (!tab) {\n" +
+      "                  restorationRefused = true;\n" +
+      "                  break;\n" +
+      "                }",
+    to:
+      "                /* reverted for proof: restoration continues after a refused create */",
+    expect: [
+      /^a retained launch request leaves the committed document frozen$/,
+    ],
+    mustPass: [
+      /^a committed freeze makes the whole document surface inert, not just the editor$/,
+    ],
+  },
+  {
+    id: "R648",
+    suite: "test:tabs",
+    what:
+      "select a restored active tab after a frozen restore refusal, issuing a second mutation " +
+      "attempt after the batch was required to stop",
+    file: TABS,
+    from: "          if (!restorationRefused && tabs.length > 0) {",
+    to: "          if (tabs.length > 0) { /* reverted for proof: select after refusal */",
+    expect: [
+      /^a retained launch request leaves the committed document frozen$/,
+    ],
+    mustPass: [
+      /^a committed freeze makes the whole document surface inert, not just the editor$/,
+    ],
+  },
+  {
+    id: "R649",
+    suite: "test:tabs",
+    what:
+      "allow a tab content accessor to bypass the centralized retained-freeze " +
+      "mutation boundary",
+    file: TABS,
+    from: '        if (!mayMutateDocument("tab:content-setter")) return;',
+    to: "        /* reverted for proof: frozen content accessor writes through */",
+    expect: [
+      /^the retained freeze refuses public setters, tab operations, keyboard commands, and IPC completion paths without advancing the document$/,
+    ],
+    mustPass: [
+      /^a retained launch request leaves the committed document frozen$/,
+    ],
+  },
+  {
+    id: "R650",
+    suite: "test:tabs",
+    what:
+      "stop the committed shutdown freeze from making the document body inert",
+    file: TABS,
+    from: "    if (inertOwner) inertOwner.inert = true;",
+    to: "    if (inertOwner) inertOwner.inert = false; /* reverted for proof: body stays interactive */",
+    expect: [
+      /^a committed freeze makes the whole document surface inert, not just the editor$/,
+    ],
+    mustPass: [
+      /^a retry-safe thaw releases a committed freeze before a later dirty question$/,
+    ],
+  },
+  {
+    id: "R651",
+    suite: "test:tabs",
+    what: "accept a reload request whose sender is not the approval owner",
+    file: MAIN,
+    from:
+      'ipcMain.on("reload-file", (event, data) => {\n' +
+      "  if (!isApprovalSender(event)) {",
+    to:
+      'ipcMain.on("reload-file", (event, data) => {\n' +
+      "  if (false) { /* reverted for proof: foreign reload sender is accepted */",
+    expect: [
+      /^reload ownership drops foreign sender, sequence, path, and page-session replies without inventing a conflict, while a moved live snapshot conflicts$/,
+    ],
+    mustPass: [
+      /^the retained freeze refuses public setters, tab operations, keyboard commands, and IPC completion paths without advancing the document$/,
+    ],
+  },
+
       ];
 
 const argv = process.argv.slice(2);
@@ -13717,6 +16206,60 @@ function runSuite(suite) {
   } catch (e) {
     return String(e.stdout || "") + String(e.stderr || "");
   }
+}
+
+// THE CATALOGUE RUN IS THE ONE RUN THAT HAS TO BE HEALTHY.
+//
+// `--expects` builds its list of live assertion names from ONE clean-tree run
+// per suite and then declares every regex that matches nothing an orphan. That
+// inference is only sound if the suite actually finished: a run that threw
+// half-way through emits a TRUNCATED catalogue, and every name after the crash
+// then looks dead. Measured, not hypothetical - a harness exception in the tabs
+// suite cut its catalogue from 205 names to 177 and the audit reported 255
+// orphans, none of which were real.
+//
+// So the health of the run is established FIRST, and separately from the audit.
+// A suite that did not complete is UNUSABLE: its records are reported as
+// unaudited rather than as findings, and the exit code still fails - loudly,
+// and about the right thing.
+function runSuiteChecked(suite) {
+  let out = "";
+  let exitCode = 0;
+  try {
+    out = execFileSync("npm", ["run", suite], {
+      cwd: ROOT,
+      encoding: "utf8",
+      shell: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (e) {
+    out = String(e.stdout || "") + String(e.stderr || "");
+    exitCode = typeof e.status === "number" ? e.status : 1;
+  }
+  const reasons = [];
+  if (exitCode !== 0) reasons.push(`exit code ${exitCode}`);
+  // Most suites use N/M; packaging also reports its intentional SKIPs in a
+  // pass/fail/skip footer. Both are definitive end markers, so accepting only
+  // the first falsely calls a completed packaging catalogue truncated.
+  const fractionFooter = /===\s*(\d+)\/(\d+)\s+passed\s*===/.exec(out);
+  const summaryFooter =
+    /===\s*(\d+)\s+passed,\s*(\d+)\s+failed,\s*(\d+)\s+SKIPPED\b/.exec(out);
+  if (fractionFooter) {
+    if (fractionFooter[1] !== fractionFooter[2]) {
+      reasons.push(`${fractionFooter[1]}/${fractionFooter[2]} passed`);
+    }
+  } else if (summaryFooter) {
+    if (summaryFooter[2] !== "0") {
+      reasons.push(
+        `${summaryFooter[1]} passed, ${summaryFooter[2]} failed, ${summaryFooter[3]} skipped`,
+      );
+    }
+  } else {
+    reasons.push("no completed-suite footer, so the run did not finish");
+  }
+  if (/harness threw/.test(out)) reasons.push("the harness threw");
+  if (/TIMED OUT/.test(out)) reasons.push("the harness timed out");
+  return { out, exitCode, healthy: reasons.length === 0, reasons };
 }
 
 // THE MATCHING SUBJECT IS THE ASSERTION NAME, NOT THE WHOLE FAIL LINE, and both
@@ -13965,12 +16508,23 @@ if (expectsOnly) {
   const suites = [...new Set(chosen.map((r) => r.suite || "test:tables"))].sort();
   const catalogue = new Map();
   const skipsBySuite = new Map();
+  const unusableSuites = new Map();
   for (const s of suites) {
-    const out = runSuite(s);
-    const names = assertionNames(out);
-    const skips = skippedNames(out);
+    const run = runSuiteChecked(s);
+    const names = assertionNames(run.out);
+    const skips = skippedNames(run.out);
     catalogue.set(s, names);
     skipsBySuite.set(s, skips);
+    if (!run.healthy) {
+      unusableSuites.set(s, run.reasons);
+      console.error(
+        `${s}  SUITE UNUSABLE (${run.reasons.join("; ")}) - it emitted ${names.length} ` +
+          `assertion name(s), which is a TRUNCATED catalogue, not a complete one. Every ` +
+          `regex under this suite is reported UNAUDITED below rather than as an orphan: ` +
+          `a name that a crashed run never reached has not been shown to be dead.`,
+      );
+      continue;
+    }
     console.log(`${s}  ${names.length} assertion(s)`);
     if (skips.length) {
       console.log(
@@ -13987,14 +16541,57 @@ if (expectsOnly) {
   }
   let orphans = 0;
   let excused = 0;
+  let unobservable = 0;
+  let unaudited = 0;
   for (const r of chosen) {
-    const names = catalogue.get(r.suite || "test:tables");
+    const suiteKey = r.suite || "test:tables";
+    // A TRUNCATED CATALOGUE CANNOT CONVICT ANYTHING. Counted and named, so the
+    // gap is visible, but never classified - "this run could not tell" and
+    // "this regex is dead" are different findings and only one of them is
+    // actionable.
+    if (unusableSuites.has(suiteKey)) {
+      unaudited += (r.expect || []).length + (r.mustPass || []).length;
+      continue;
+    }
+    const names = catalogue.get(suiteKey);
+    const skippedHere = skipsBySuite.get(suiteKey) || [];
     for (const [label, list] of [
       ["expect", r.expect || []],
       ["mustPass", r.mustPass || []],
     ]) {
       for (const re of list) {
         if (names.some((n) => re.test(n))) continue;
+        // A NAME THAT WAS ANNOUNCED AS SKIPPED IS NOT A DEAD NAME. The suites
+        // print `SKIP  <assertion name> - <reason>` for every oracle they
+        // cannot run, so a regex that matches one of those has demonstrably
+        // found a live assertion; what it has not found is a RUN of it.
+        //
+        // This distinction is load-bearing for CI. A fresh runner has no
+        // `dist/app.asar`, so every built-ASAR assertion skips; treating those
+        // names as orphans made the read-only audit demand a release build
+        // before it would agree that a regex names something - which turned the
+        // one check that costs no mutation into the one check nobody could run.
+        //
+        // It is deliberately matched against the SPECIFIC skipped name and not
+        // merely "some block skipped in this run". The original rule existed so
+        // a genuinely dead regex could not hide behind an unrelated skip, and
+        // that rule is intact: a regex matching nothing at all, executed or
+        // skipped, is still an orphan and still fails the exit code.
+        //
+        // AND IT IS NOT COUNTED AS A PROOF. A skipped assertion cannot fail, so
+        // a record that names one has not been shown to bite; it is reported on
+        // its own line, with its own total, so the reader can see exactly how
+        // much of the catalogue this run was unable to observe.
+        const skippedMatch = skippedHere.find((n) => re.test(n));
+        if (skippedMatch) {
+          unobservable += 1;
+          console.log(
+            `${r.id}  SKIPPED  ${label}  ${re} names "${skippedMatch}", which this run ` +
+              `announced as SKIPPED in ${suiteKey} - the name is live, but it did not run, ` +
+              `so it proves nothing here`,
+          );
+          continue;
+        }
         // A FALSE POSITIVE THIS AUDIT REALLY HAS, and excusing it explicitly is
         // the only honest option - a check that cries wolf is a check people
         // learn to skip. TWO distinct mechanisms put an assertion name beyond
@@ -14017,8 +16614,7 @@ if (expectsOnly) {
           continue;
         }
         orphans += 1;
-        const suiteKey = r.suite || "test:tables";
-        const hid = skipsBySuite.get(suiteKey) || [];
+        const hid = skippedHere;
         console.log(
           `${r.id}  ORPHANED ${label}  ${re} names no assertion in ${suiteKey}` +
             (hid.length
@@ -14030,10 +16626,42 @@ if (expectsOnly) {
     }
   }
   console.log(
-    orphans === 0
-      ? `\nEvery expect/mustPass regex names a live assertion (${chosen.length} reverts, ${suites.length} suite(s), ${excused} excused).`
-      : `\n${orphans} ORPHANED regex(es). These reverts cannot prove what they claim.`,
+    orphans === 0 && !unusableSuites.size
+      ? `\nEvery expect/mustPass regex names a live assertion (${chosen.length} reverts, ` +
+        `${suites.length} suite(s), ${excused} excused, ${unobservable} named a SKIPPED ` +
+        `assertion and were therefore not observed in this run).`
+      : `\n${orphans} ORPHANED regex(es). These reverts cannot prove what they claim.` +
+        (unobservable ? ` (${unobservable} further regex(es) named a SKIPPED assertion.)` : ""),
   );
+  if (unusableSuites.size) {
+    // FIRST, AND LOUDEST. A truncated catalogue is not a finding about the
+    // records; it is a finding about the suite, and reporting it as hundreds of
+    // dead names buries the one thing that has to be fixed before any of the
+    // rest can be believed.
+    console.error(
+      `\n${unusableSuites.size} SUITE(S) DID NOT COMPLETE, so ${unaudited} expect/mustPass ` +
+        `regex(es) could not be audited at all:`,
+    );
+    for (const [suite, reasons] of unusableSuites) {
+      console.error(`  ${suite}: ${reasons.join("; ")}`);
+    }
+    console.error(
+      `Fix the suite first. Until it runs to its own end this audit cannot tell a dead ` +
+        `regex from a name the run never reached, and it will not guess.`,
+    );
+  }
+  if (unobservable) {
+    console.log(
+      `NOTE: ${unobservable} regex(es) name assertions this run announced as SKIPPED. ` +
+        `The names are live, so they are not orphans - but a skipped assertion cannot fail, ` +
+        `so nothing about those records was proven here. Run the suites in a state where ` +
+        `those blocks execute (for the built-app.asar oracles, that means after a build) ` +
+        `before treating them as audited.`,
+    );
+  }
+  // A distinct code for "could not audit" so a caller can tell it from
+  // "audited, and found dead regexes".
+  if (unusableSuites.size) process.exit(2);
   process.exit(orphans === 0 ? 0 : 1);
 }
 

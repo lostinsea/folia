@@ -11,6 +11,7 @@
 | PERF-05 | **[FIXED]** Code-heavy updates still re-highlight and re-wrap all code blocks | On a **1.46MB / 200-code-block** doc, a small edit still spent **48.5ms** in Prism highlighting + **9.9ms** adding copy buttons | Medium | High |
 | PERF-06 | **[FIXED]** TOC + collapsible-section rebuild runs on every render | On a **2.0MB / 2001-heading** doc, `buildTableOfContents()` + `makeHeadersCollapsible()` cost **27.1ms** on full render and about **30ms** on changed renders | Medium | Medium |
 | PERF-07 | **[FIXED]** Mermaid theme changes synchronously re-render every diagram | Toggling theme on a **20-diagram** doc spent **423.7ms** in `mermaid.run()` and **431.6ms** total in `updateMermaidTheme()`; visible-first rendering cut the blocking toggle to **~85ms** | Medium | Medium |
+| PERF-10 | **[FIXED]** The shutdown approval scan recomputed every open document's dirtiness | Closing after editing every tab, at **25 tabs x 2MB**: raw p95 **22.4936ms** (LF) and **98.1947ms** (CRLF) against a predeclared **16.7ms** budget; maintaining the answer at the edit instead brought the same observations to **1.002ms** and **1.2792ms** | Medium | High |
 
 ## Measurement methodology
 
@@ -417,8 +418,63 @@ has not been measured and is likely still quadratic. The 5 MB leg remains
 super-linear, so something else becomes quadratic at that scale; the render-cost
 guard covers it rather than a fix.
 
-## Measured and found already fast
+### PERF-10 — The shutdown approval scan recomputed every open document
 
+**Different harness, different runtime — do not read this against the
+methodology block at the top of this file.** PERF-01 to PERF-09 were measured
+with the scratch render harness on Electron v41.7.1 / Node v20.18.3. This finding
+was produced by `npm run bench:f22` (`bench/run-f22-shutdown.js`), a
+process-isolated parent/worker gate on the Electron pinned in this repository at
+the time of the run. Full method, all three runs and the durability limitation of
+the second are recorded in `bench/BASELINE.md`, *The F22 shutdown-approval gate*.
+
+**The defect.** The F22 shutdown protocol asks the renderer whether anything is
+unsaved, and the renderer answered by comparing each tab's `content` against its
+`originalContent`. That answer was memoised — but the memo was keyed on the
+**values**, so its own validity check was itself a full document comparison.
+A close that followed an edit therefore re-read every byte of every open
+document, and for CRLF documents re-normalised both sides of every comparison as
+well.
+
+**Measured, against a budget fixed before the run:** p95 <= **16.7ms**, one frame
+at 60 Hz. At 25 tabs of 2MB with every tab freshly edited:
+
+| Observation | Raw p95 before | Raw p95 after |
+|---|---:|---:|
+| All-dirty, LF endings | **22.4936ms** | **1.002ms** |
+| All-dirty, CRLF endings | **98.1947ms** | **1.2792ms** |
+| Single dirty tab, CRLF | 1.048ms | 0.7076ms |
+| Cold close, worst of nine points | 2.538ms | 2.5902ms |
+| Warm close, worst of nine points | 0.993ms | 1.0375ms |
+
+The two all-dirty rows are the finding; the other three are there to show the
+change did not buy the worst case at the expense of the common one.
+
+**The fix — `src/custom-tabs.js`.** The comparison belongs to the **edit**, not
+to the close. `content` and `originalContent` are now accessor properties whose
+setters settle dirtiness once, at the moment the text changes; the shutdown scan
+reads one boolean per tab. Accessors rather than a convention, deliberately:
+`custom-tabs.js`, `renderer.js`, the suites and the benchmark all assign those
+properties directly, so an update rule that had to be invoked by hand would be
+one refactor away from a stale flag — and a stale flag here reads as "nothing
+unsaved" and discards the document. `setCleanDocument()` states the clean case
+(disk refresh, completed save, reload takeover) atomically instead of comparing
+twice on the way to an answer already known.
+
+**Why this is the ordering that matters.** The work is not removed, it is moved
+to where it is already paid for — one comparison per edit, on the tab being
+edited, instead of a comparison per tab on every close. The close path becomes
+O(number of tabs) plus at most one active-tab reconciliation.
+
+**Non-vacuity.** Each all-dirty observation is verified against an exact filename
+oracle: every open document must be named, in tab order. The observation is
+recorded **before** the oracle is checked, so a mismatch does not erase the
+timing — it marks the run **failed**, which means the number is **not accepted as
+a gate result**, though raw diagnostic timing may remain in the output and in the
+durable artifact. Without the oracle a scan that found nothing would report an
+excellent number and be entirely wrong about it.
+
+## Measured and found already fast
 - **Custom tab sync I/O is not the current bottleneck.**
   - `custom-tabs.js:69-111,640`
   - `statSync()` on a 2MB file: **0.05ms avg**

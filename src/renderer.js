@@ -4,6 +4,7 @@
 const { ipcRenderer, shell, clipboard } = require('electron');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { pathToFileURL } = require('url');
 
 // Helper modules
@@ -1104,6 +1105,7 @@ let redoHistory = [];   // future states (string[])
 let undoRedoRendering = false; // suppress loading screen & scrollTop reset during undo/redo
 
 function historyPush(content) {
+  if (!mayMutateRendererDocument('history-push')) return;
   // NOT gated on isEditMode, and that is a decision rather than an omission.
   // A reviewer proposed `if (!isEditMode) return;` here, arguing that since
   // Ctrl+Z/Ctrl+Y are now edit-mode only, a view-mode push strands an entry
@@ -1149,6 +1151,7 @@ function historyRestore(snapshot) {
 }
 
 function historyUndo() {
+  if (!mayMutateRendererDocument('history-undo')) return;
   if (undoHistory.length === 0) return;
   const currentContent = isEditMode ? markdownEditor.value : originalMarkdown;
   redoHistory.push(currentContent);
@@ -1158,8 +1161,7 @@ function historyUndo() {
   undoRedoRendering = true;
   if (isEditMode) {
     markdownEditor.value = prevContent;
-    hasUnsavedChanges = (prevContent !== originalMarkdown);
-    updateUnsavedIndicator();
+    setDocumentDirtyFromContent(prevContent);
     clearTimeout(previewDebounceTimer);
     renderMarkdown(prevContent).then(() => {
       contentWrapper.scrollTop = scrollPos;
@@ -1175,6 +1177,7 @@ function historyUndo() {
 }
 
 function historyRedo() {
+  if (!mayMutateRendererDocument('history-redo')) return;
   if (redoHistory.length === 0) return;
   const currentContent = isEditMode ? markdownEditor.value : originalMarkdown;
   undoHistory.push(currentContent);
@@ -1184,8 +1187,7 @@ function historyRedo() {
   undoRedoRendering = true;
   if (isEditMode) {
     markdownEditor.value = nextContent;
-    hasUnsavedChanges = (nextContent !== originalMarkdown);
-    updateUnsavedIndicator();
+    setDocumentDirtyFromContent(nextContent);
     clearTimeout(previewDebounceTimer);
     renderMarkdown(nextContent).then(() => {
       contentWrapper.scrollTop = scrollPos;
@@ -1208,6 +1210,8 @@ function historyClear() {
 
 // File watching state
 let isFileTrackingActive = false;
+let fileTrackingPauseOwner = null;
+let fileTrackingResumeHold = 0;
 let fileUpdateNotificationShown = false;
 let fileUpdateDismissTimeout = null;
 
@@ -1228,9 +1232,16 @@ let hasUnsavedChanges = false;
 // Refresh discards the note. The mirror image is just as bad: the global stays
 // set and clean tab B starts claiming unsaved changes it does not have.
 const failedSaves = new Set();
+const reloadConflicts = new Set();
 
 function saveFailedFor(p) {
-  return !!p && failedSaves.has(p);
+  const canonical = canonicalReloadPath(p);
+  return !!canonical && failedSaves.has(canonical);
+}
+
+function reloadConflictFor(p) {
+  const canonical = canonicalReloadPath(p);
+  return !!canonical && reloadConflicts.has(canonical);
 }
 
 // The guards on open/refresh/close asked `isEditMode && hasUnsavedChanges`,
@@ -1240,15 +1251,201 @@ function saveFailedFor(p) {
 // the reload straight through and the note died silently right after the alert
 // said it had not been written.
 function hasUnsavedWork() {
-  return hasUnsavedChanges && (isEditMode || saveFailedFor(currentFilePath));
+  return (
+    hasUnsavedChanges &&
+    (isEditMode ||
+      hasPendingSaveFor(currentFilePath) ||
+      saveFailedFor(currentFilePath) ||
+      reloadConflictFor(currentFilePath))
+  );
 }
 let originalMarkdown = '';
 let previewDebounceTimer = null;
+let reloadRequestSequence = 0;
+const latestReloadRequestByPath = new Map();
+const reloadRequestSession = crypto.randomUUID();
+let latestReloadMainEpoch = 0;
+let foreignReloadResultCount = 0;
+let reloadConflictResultCount = 0;
+let foreignReloadFailureCount = 0;
+let fileOpenSequence = 0;
+let supersededFileOpenCompletionCount = 0;
+let frozenFileOpenCompletionCount = 0;
+
+function mayMutateRendererDocument(source) {
+  const tabs = window.CustomTabs;
+  return !tabs || typeof tabs.mayMutateDocument !== 'function'
+    ? true
+    : tabs.mayMutateDocument(source);
+}
+
+const reloadPathAliases = new Map();
+
+function canonicalReloadPath(filePath) {
+  if (typeof filePath !== 'string' || filePath.length === 0) return null;
+  const resolved = path.normalize(path.resolve(filePath));
+  const spelling =
+    process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  if (reloadPathAliases.has(spelling)) {
+    return reloadPathAliases.get(spelling);
+  }
+  return rebindReloadPath(filePath);
+}
+
+function rebindReloadPath(filePath) {
+  if (typeof filePath !== 'string' || filePath.length === 0) return null;
+  const resolved = path.normalize(path.resolve(filePath));
+  const spelling =
+    process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  let canonical = spelling;
+  try {
+    const real = fs.realpathSync.native(resolved);
+    canonical =
+      process.platform === 'win32' ? real.toLowerCase() : real;
+  } catch (error) {
+    if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') {
+      console.error('Failed to canonicalize document path:', error);
+    }
+  }
+  reloadPathAliases.set(spelling, canonical);
+  return canonical;
+}
+
+function normaliseReloadSnapshot(value) {
+  return typeof value === 'string' ? value.replace(/\r\n?/g, '\n') : value;
+}
+
+function sameReloadDocument(left, right) {
+  return normaliseReloadSnapshot(left) === normaliseReloadSnapshot(right);
+}
+
+function fileTrackingPathKey(filePath) {
+  if (typeof filePath !== 'string' || filePath.length === 0) return null;
+  const resolved = path.normalize(path.resolve(filePath));
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function setDocumentDirtyState(value) {
+  hasUnsavedChanges = !!value;
+  updateUnsavedIndicator();
+  return hasUnsavedChanges;
+}
+
+function withFileTrackingResumeHeld(run) {
+  fileTrackingResumeHold += 1;
+  try {
+    return run();
+  } finally {
+    fileTrackingResumeHold -= 1;
+  }
+}
+
+function setDocumentDirtyFromContent(content) {
+  let baseline = originalMarkdown;
+  if (!isEditMode) {
+    const tabs = window.CustomTabs;
+    const activeTab =
+      tabs && typeof tabs.getActiveTab === 'function'
+        ? tabs.getActiveTab()
+        : null;
+    if (
+      activeTab &&
+      fileTrackingPathKey(activeTab.filePath) ===
+        fileTrackingPathKey(currentFilePath) &&
+      typeof activeTab.originalContent === 'string'
+    ) {
+      baseline = activeTab.originalContent;
+    } else {
+      // Without a tab-owned persisted baseline, a view-mode mutation cannot
+      // prove that it returned to disk content. Fail dirty rather than
+      // laundering an edit clean by comparing the store with itself.
+      setDocumentDirtyState(true);
+      return true;
+    }
+  }
+  return setDocumentDirtyState(!sameReloadDocument(content, baseline));
+}
+
+function currentReloadSnapshot() {
+  return isEditMode && markdownEditor
+    ? markdownEditor.value
+    : originalMarkdown;
+}
+
+function validateReloadResultForCurrentPage(data, checkSnapshot = true) {
+  const request = data && data.reloadRequest;
+  const session = data && data.reloadSession;
+  const customTabs = window.CustomTabs;
+  if (
+    !request ||
+    !Number.isSafeInteger(request.sequence) ||
+    typeof request.path !== 'string' ||
+    typeof request.snapshot !== 'string' ||
+    request.session !== reloadRequestSession ||
+    !session ||
+    !Number.isSafeInteger(session.epoch) ||
+    session.pageSession !== reloadRequestSession
+  ) {
+    return 'foreign';
+  }
+  if (customTabs) {
+    if (
+      typeof customTabs.getActiveTabId !== 'function' ||
+      !Number.isSafeInteger(request.tabId) ||
+      request.tabId !== customTabs.getActiveTabId()
+    ) {
+      return 'foreign';
+    }
+  }
+  const requestPath = canonicalReloadPath(request.path);
+  const resultPath = canonicalReloadPath(data.path);
+  const currentPath = canonicalReloadPath(currentFilePath);
+  if (
+    !requestPath ||
+    requestPath !== resultPath ||
+    requestPath !== currentPath ||
+    latestReloadRequestByPath.get(requestPath) !== request.sequence
+  ) {
+    return 'foreign';
+  }
+  if (
+    checkSnapshot &&
+    normaliseReloadSnapshot(currentReloadSnapshot()) !==
+    normaliseReloadSnapshot(request.snapshot)
+  ) {
+    return 'conflict';
+  }
+  latestReloadMainEpoch = Math.max(latestReloadMainEpoch, session.epoch);
+  return null;
+}
+
+function markReloadConflict(filePath) {
+  if (!mayMutateRendererDocument('reload-conflict-set')) return false;
+  const canonical = canonicalReloadPath(filePath);
+  if (!canonical) return false;
+  reloadConflicts.add(canonical);
+  if (canonical === canonicalReloadPath(currentFilePath)) {
+    setDocumentDirtyState(true);
+  }
+  return true;
+}
+
+function clearReloadConflict(filePath) {
+  if (!mayMutateRendererDocument('reload-conflict-clear')) return false;
+  const canonical = canonicalReloadPath(filePath);
+  if (!canonical) return false;
+  return reloadConflicts.delete(canonical);
+}
 
 // Navigation history (for back/forward)
 let navigationHistory = [];
 let navigationIndex = -1;
-let isNavigating = false; // Flag to prevent adding to history during back/forward
+let navigationRequestSequence = 0;
+let pendingNavigationRequest = null;
+let acceptedNavigationRequestCount = 0;
+let rejectedNavigationRequestCount = 0;
+let failedNavigationRequestCount = 0;
+let lastNavigationRequestResult = null;
 
 // Update the current document path.
 //
@@ -1276,8 +1473,6 @@ function updateNavButtons() {
 }
 
 function addToNavigationHistory(filePath, scrollPosition = 0) {
-  if (isNavigating) return; // Don't add during back/forward navigation
-
   // Update scroll position of current entry before navigating away
   if (navigationIndex >= 0 && navigationHistory[navigationIndex]) {
     navigationHistory[navigationIndex].scrollPosition = contentWrapper.scrollTop;
@@ -1298,6 +1493,135 @@ function addToNavigationHistory(filePath, scrollPosition = 0) {
   updateNavButtons();
 }
 
+function reassertCurrentWatcherIntent() {
+  assertFileTrackingOwnership(currentFilePath, !hasUnsavedChanges, {
+    adoptBaseline: false,
+  });
+}
+
+function cancelPendingNavigation(reason, reassertWatcher = false) {
+  if (!pendingNavigationRequest) return false;
+  rejectedNavigationRequestCount += 1;
+  lastNavigationRequestResult = reason;
+  pendingNavigationRequest = null;
+  updateNavButtons();
+  if (reassertWatcher) reassertCurrentWatcherIntent();
+  return true;
+}
+
+function navigationRequestMatches(openRequest, resultPath = null) {
+  const pending = pendingNavigationRequest;
+  const targetEntry =
+    pending && navigationHistory[pending.targetIndex];
+  return !!(
+    pending &&
+    targetEntry &&
+    openRequest &&
+    Number.isSafeInteger(openRequest.token) &&
+    openRequest.token === pending.token &&
+    Number.isSafeInteger(openRequest.targetIndex) &&
+    openRequest.targetIndex === pending.targetIndex &&
+    canonicalReloadPath(openRequest.path) ===
+      canonicalReloadPath(pending.path) &&
+    canonicalReloadPath(targetEntry.filePath) ===
+      canonicalReloadPath(pending.path) &&
+    (!resultPath ||
+      canonicalReloadPath(resultPath) === canonicalReloadPath(pending.path))
+  );
+}
+
+function preflightFileOpen(data) {
+  const openRequest = data && data.openRequest;
+  if (!openRequest) {
+    cancelPendingNavigation('superseded-by-non-navigation-open');
+    return Object.freeze({
+      accepted: true,
+      navigation: false,
+      lifecycleOptions: Object.freeze({
+        adoptPathIdentity: true,
+      }),
+    });
+  }
+  if (!navigationRequestMatches(openRequest, data && data.path)) {
+    rejectedNavigationRequestCount += 1;
+    lastNavigationRequestResult = 'stale-navigation-success';
+    reassertCurrentWatcherIntent();
+    return Object.freeze({
+      accepted: false,
+      navigation: true,
+      lifecycleOptions: null,
+    });
+  }
+
+  const pending = pendingNavigationRequest;
+  navigationIndex = pending.targetIndex;
+  pendingNavigationRequest = null;
+  acceptedNavigationRequestCount += 1;
+  lastNavigationRequestResult = 'accepted';
+  updateNavButtons();
+  return Object.freeze({
+    accepted: true,
+    navigation: true,
+    lifecycleOptions: Object.freeze({
+      recordNavigation: false,
+      adoptPathIdentity: true,
+      postRenderScroll:
+        pending.scrollTop > 0
+          ? Object.freeze({ type: 'restore', top: pending.scrollTop })
+          : Object.freeze({ type: 'none', top: 0 }),
+    }),
+  });
+}
+
+function handleFileOpenResult(event, data) {
+  const openRequest = data && data.openRequest;
+  if (!openRequest) return;
+  if (!navigationRequestMatches(openRequest, data && data.path)) {
+    rejectedNavigationRequestCount += 1;
+    lastNavigationRequestResult = 'stale-navigation-failure';
+    return;
+  }
+  pendingNavigationRequest = null;
+  failedNavigationRequestCount += 1;
+  lastNavigationRequestResult =
+    (data && data.reason) || 'navigation-open-failed';
+  updateNavButtons();
+  if (data && typeof data.message === 'string' && data.message) {
+    showNotification(data.message, 5000);
+  }
+}
+
+ipcRenderer.on('file-open-result', handleFileOpenResult);
+
+function requestHistoryNavigation(targetIndex) {
+  const entry = navigationHistory[targetIndex];
+  if (!entry) return false;
+  if (hasUnsavedWork() && !confirm(i18n('confirm.unsavedOpen'))) return false;
+  cancelPendingNavigation('superseded-by-navigation-request');
+
+  if (navigationHistory[navigationIndex]) {
+    navigationHistory[navigationIndex].scrollPosition = contentWrapper.scrollTop;
+  }
+  const request = Object.freeze({
+    token: ++navigationRequestSequence,
+    path: entry.filePath,
+    targetIndex,
+    scrollTop: entry.scrollPosition || 0,
+  });
+  pendingNavigationRequest = request;
+  lastNavigationRequestResult = 'pending';
+  updateNavButtons();
+  ipcRenderer.send('open-file-path', {
+    filePath: entry.filePath,
+    openRequest: {
+      token: request.token,
+      path: request.path,
+      targetIndex: request.targetIndex,
+    },
+  });
+  return true;
+}
+
 // Both of these send `open-file-path`, which replaces the document. Every OTHER
 // route to that channel - the toolbar Open button, the welcome button, the
 // drag-drop handler - asks hasUnsavedWork() first; these two did not, so a
@@ -1310,47 +1634,15 @@ function addToNavigationHistory(filePath, scrollPosition = 0) {
 // They now REPORT whether they navigated, so the keydown handler can decide
 // whether the key was actually consumed - see the measurement recorded there.
 function navigateBack() {
+  if (!mayMutateRendererDocument('navigate-back')) return false;
   if (navigationIndex <= 0) return false;
-  if (hasUnsavedWork() && !confirm(i18n('confirm.unsavedOpen'))) return false;
-
-  // Save current scroll position
-  if (navigationHistory[navigationIndex]) {
-    navigationHistory[navigationIndex].scrollPosition = contentWrapper.scrollTop;
-  }
-
-  navigationIndex--;
-  const entry = navigationHistory[navigationIndex];
-  let navigated = false;
-  if (entry) {
-    isNavigating = true;
-    ipcRenderer.send('open-file-path', entry.filePath);
-    navigated = true;
-    // Scroll position will be restored when file loads
-  }
-  updateNavButtons();
-  return navigated;
+  return requestHistoryNavigation(navigationIndex - 1);
 }
 
 function navigateForward() {
+  if (!mayMutateRendererDocument('navigate-forward')) return false;
   if (navigationIndex >= navigationHistory.length - 1) return false;
-  if (hasUnsavedWork() && !confirm(i18n('confirm.unsavedOpen'))) return false;
-
-  // Save current scroll position
-  if (navigationHistory[navigationIndex]) {
-    navigationHistory[navigationIndex].scrollPosition = contentWrapper.scrollTop;
-  }
-
-  navigationIndex++;
-  const entry = navigationHistory[navigationIndex];
-  let navigated = false;
-  if (entry) {
-    isNavigating = true;
-    ipcRenderer.send('open-file-path', entry.filePath);
-    navigated = true;
-    // Scroll position will be restored when file loads
-  }
-  updateNavButtons();
-  return navigated;
+  return requestHistoryNavigation(navigationIndex + 1);
 }
 
 // Navigation button click handlers
@@ -1964,16 +2256,17 @@ function getActiveMarkdown() {
 // buffer; with document translation gone there is only one buffer, so the
 // mirror had nothing to mirror to and every callback was unreachable.
 function commitViewModeEdit(newContent, scrollPosition) {
+  if (!mayMutateRendererDocument('view-edit')) return false;
   historyPush(originalMarkdown);
   originalMarkdown = newContent;
   renderMarkdown(newContent).then(() => {
     contentWrapper.scrollTop = scrollPosition;
   });
-  hasUnsavedChanges = true;
   // replaceSourceSilently() has always repainted the indicator here and this
   // one did not, so a view-mode edit left the dirty flag set with no sign of
   // it on screen. Same state, same display.
-  updateUnsavedIndicator();
+  setDocumentDirtyFromContent(newContent);
+  return true;
 }
 
 // Commit a view-mode NOTE change: the same content update as any other
@@ -1992,7 +2285,7 @@ function commitViewModeEdit(newContent, scrollPosition) {
 // Auto-saving those would extend implicit persistence to exactly the surface
 // the user asked to make explicit-save-only.
 function commitViewModeNote(newContent, scrollPosition) {
-  commitViewModeEdit(newContent, scrollPosition);
+  if (!commitViewModeEdit(newContent, scrollPosition)) return false;
   return autoSaveViewModeNote();
 }
 
@@ -2002,18 +2295,19 @@ function commitViewModeNote(newContent, scrollPosition) {
 // deliberately does not push - unlike replaceSourceSilently(), which is
 // otherwise its twin.
 function commitViewModeNoteSilently(newContent) {
+  if (!mayMutateRendererDocument('view-note-silent')) return false;
   originalMarkdown = newContent;
-  hasUnsavedChanges = true;
-  updateUnsavedIndicator();
+  setDocumentDirtyFromContent(newContent);
   return autoSaveViewModeNote();
 }
 
 // Update markdown source without triggering a full re-render (used when DOM is already patched).
 function replaceSourceSilently(newContent) {
+  if (!mayMutateRendererDocument('replace-source-silent')) return false;
   historyPush(originalMarkdown);
   originalMarkdown = newContent;
-  hasUnsavedChanges = true;
-  updateUnsavedIndicator();
+  setDocumentDirtyFromContent(newContent);
+  return true;
 }
 
 // Clear the block-level hash of the viewer child that contains `node`,
@@ -2892,6 +3186,7 @@ viewer.addEventListener('click', (e) => {
           showNotification(i18n('notif.blockedExecutable', { name: displayName }), 6000);
         } else if (MARKDOWN_EXTS.has(ext)) {
           // Open the markdown file in this app
+          cancelPendingNavigation('superseded-by-document-link');
           ipcRenderer.send('open-file-path', openPath);
         } else if (resolved.isDirectory) {
           // Opening a folder shows it in the file manager; nothing is executed.
@@ -2980,6 +3275,7 @@ const DROPPABLE_EXTENSIONS = ['md', 'markdown', 'mdown', 'mkd', 'mkdn', 'mmd', '
     if (!isFileDrag(e)) return;
     e.preventDefault();
     clearDropState();
+    if (!mayMutateRendererDocument('drop-open')) return;
 
     const files = e.dataTransfer && e.dataTransfer.files;
     if (!files || files.length === 0) return;
@@ -3001,6 +3297,7 @@ const DROPPABLE_EXTENSIONS = ['md', 'markdown', 'mdown', 'mkd', 'mkdn', 'mmd', '
     if (!filePath) return;
 
     if (hasUnsavedWork() && !confirm(i18n('confirm.unsavedOpen'))) return;
+    cancelPendingNavigation('superseded-by-drop-open');
     ipcRenderer.send('open-file-path', filePath);
   });
 
@@ -3013,6 +3310,7 @@ const DROPPABLE_EXTENSIONS = ['md', 'markdown', 'mdown', 'mkd', 'mkdn', 'mmd', '
 
 // Open file button (toolbar)
 openFileBtn.addEventListener('click', () => {
+  if (!mayMutateRendererDocument('open-file-dialog')) return;
   // Check for unsaved changes before opening file dialog
   if (hasUnsavedWork()) {
     if (!confirm(i18n('confirm.unsavedOpen'))) {
@@ -3021,6 +3319,7 @@ openFileBtn.addEventListener('click', () => {
   }
 
   fileMenu.classList.remove('visible');
+  cancelPendingNavigation('superseded-by-open-dialog');
   ipcRenderer.send('open-file-dialog');
 });
 
@@ -3028,6 +3327,8 @@ openFileBtn.addEventListener('click', () => {
 const welcomeOpenBtn = document.getElementById('welcomeOpenBtn');
 if (welcomeOpenBtn) {
   welcomeOpenBtn.addEventListener('click', () => {
+    if (!mayMutateRendererDocument('welcome-open-file')) return;
+    cancelPendingNavigation('superseded-by-welcome-open');
     ipcRenderer.send('open-file-dialog');
   });
 }
@@ -3036,8 +3337,11 @@ if (welcomeOpenBtn) {
 const welcomeReadmeBtn = document.getElementById('welcomeReadmeBtn');
 if (welcomeReadmeBtn) {
   welcomeReadmeBtn.addEventListener('click', async () => {
+    if (!mayMutateRendererDocument('welcome-open-readme')) return;
+    cancelPendingNavigation('superseded-by-welcome-readme');
     try {
       const readmePath = await ipcRenderer.invoke('get-readme-path');
+      if (!mayMutateRendererDocument('welcome-open-readme-after-await')) return;
       ipcRenderer.send('open-file-path', readmePath);
     } catch (e) {
       showNotification('README.md not found', 2000);
@@ -3047,6 +3351,7 @@ if (welcomeReadmeBtn) {
 
 // Refresh button
 refreshBtn.addEventListener('click', () => {
+  if (!mayMutateRendererDocument('refresh-button')) return;
   if (!currentFilePath) {
     return;
   }
@@ -3252,12 +3557,33 @@ function dismissFileUpdateNotification() {
 }
 
 function reloadCurrentFile() {
+  if (!mayMutateRendererDocument('reload-request')) return false;
   if (!currentFilePath) {
-    return;
+    return false;
   }
 
+  const customTabs = window.CustomTabs;
+  let tabId = null;
+  if (customTabs) {
+    if (typeof customTabs.getActiveTabId !== 'function') return false;
+    tabId = customTabs.getActiveTabId();
+    if (!Number.isSafeInteger(tabId)) return false;
+  }
+  const requestPath = canonicalReloadPath(currentFilePath);
+  if (!requestPath) return false;
+  const sequence = ++reloadRequestSequence;
+  const snapshot = currentReloadSnapshot();
+  latestReloadRequestByPath.set(requestPath, sequence);
   dismissFileUpdateNotification();
-  ipcRenderer.send('reload-file', { filePath: currentFilePath });
+  ipcRenderer.send('reload-file', {
+    filePath: currentFilePath,
+    reloadRequestSequence: sequence,
+    reloadRequestPath: requestPath,
+    reloadRequestSnapshot: snapshot,
+    reloadRequestSession,
+    reloadRequestTabId: tabId,
+  });
+  return true;
 }
 
 // Before printToPDF: main signals renderer to drop dark mode for a clean light export
@@ -3344,6 +3670,7 @@ window.rebaseEditSession = () => captureEditSessionBaseline(false);
 let toggleEditPending = false;
 
 toggleEditBtn.addEventListener('click', async () => {
+  if (!mayMutateRendererDocument('toggle-edit-mode')) return;
   if (toggleEditPending) return;
   fileMenu.classList.remove('visible');
   // Leaving edit mode DISCARDS whatever is unsaved in the editor, and the
@@ -3388,6 +3715,7 @@ toggleEditBtn.addEventListener('click', async () => {
       }
     }
   }
+  if (!mayMutateRendererDocument('toggle-edit-mode-after-await')) return;
   if (isEditMode && hasUnsavedChanges) {
     if (!confirm(i18n('confirm.unsavedExit'))) {
       return;
@@ -3423,10 +3751,12 @@ toggleEditBtn.addEventListener('click', async () => {
     // Ctrl+S and the Save button live, so carrying the flag in is exactly what
     // makes recovery possible. It is ANDed with the incoming flag so a clean
     // document is never made to look dirty.
-    hasUnsavedChanges =
+    setDocumentDirtyState(
       hasUnsavedChanges &&
-      (saveFailedFor(currentFilePath) || hasPendingSaveFor(currentFilePath));
-    updateUnsavedIndicator();
+        (saveFailedFor(currentFilePath) ||
+          hasPendingSaveFor(currentFilePath) ||
+          reloadConflictFor(currentFilePath))
+    );
     toggleEditBtn.style.background = 'var(--primary-color)';
     toggleEditBtn.style.color = '#ffffff';
   } else {
@@ -3444,12 +3774,6 @@ toggleEditBtn.addEventListener('click', async () => {
     // undo step. Cancel it next to the preview timer it belongs with.
     clearTimeout(historyDebounceTimer);
 
-    // Resume file tracking when exiting edit mode (if it was paused)
-    if (!isFileTrackingActive && currentFilePath) {
-      ipcRenderer.send('resume-file-watching');
-      isFileTrackingActive = true;
-    }
-
     if (discardOnExit) {
       // Restore the document, the history and the dirty flag to the baseline
       // captured when the session started, then repaint, so the editor buffer,
@@ -3463,12 +3787,11 @@ toggleEditBtn.addEventListener('click', async () => {
       if (baseline) {
         historyRestore(baseline.history);
         originalMarkdown = baseline.document;
-        hasUnsavedChanges = baseline.dirty;
+        setDocumentDirtyState(baseline.dirty);
       } else {
-        hasUnsavedChanges = false;
+        setDocumentDirtyState(false);
       }
       markdownEditor.value = originalMarkdown;
-      updateUnsavedIndicator();
       // The tab record holds its own copy, and switchToTab seeds
       // `originalMarkdown` from it. Leaving the discarded text there would let
       // the next tab switch replay it.
@@ -3483,6 +3806,11 @@ toggleEditBtn.addEventListener('click', async () => {
       }
       await renderMarkdown(originalMarkdown);
       contentWrapper.scrollTop = scrollPos;
+    }
+    if (currentFilePath) {
+      assertFileTrackingOwnership(currentFilePath, !hasUnsavedChanges, {
+        adoptBaseline: false,
+      });
     }
     // The session is over either way; nothing may outlive it and be mistaken
     // for the baseline of a later one.
@@ -3608,6 +3936,7 @@ if (editorSplitter) {
 markdownEditor.addEventListener('keydown', (e) => {
   if (e.key === 'Tab') {
     e.preventDefault();
+    if (!mayMutateRendererDocument('editor-tab-key')) return;
     const start = markdownEditor.selectionStart;
     const end = markdownEditor.selectionEnd;
     const spaces = '  '; // 2 spaces
@@ -3621,6 +3950,7 @@ markdownEditor.addEventListener('keydown', (e) => {
 // Push to undo history on significant changes (debounced)
 let historyDebounceTimer = null;
 markdownEditor.addEventListener('input', () => {
+  if (!mayMutateRendererDocument('editor-input-history')) return;
   clearTimeout(historyDebounceTimer);
   historyDebounceTimer = setTimeout(() => {
     if (isEditMode) historyPush(markdownEditor.value);
@@ -3629,17 +3959,10 @@ markdownEditor.addEventListener('input', () => {
 
 // Live preview with fast debounce
 markdownEditor.addEventListener('input', () => {
+  if (!mayMutateRendererDocument('editor-input-preview')) return;
   if (!isEditMode) return;
 
-  const previousUnsavedState = hasUnsavedChanges;
-  hasUnsavedChanges = (markdownEditor.value !== originalMarkdown);
-  updateUnsavedIndicator();
-
-  // Pause file tracking when unsaved changes appear
-  if (!previousUnsavedState && hasUnsavedChanges) {
-    ipcRenderer.send('pause-file-watching');
-    isFileTrackingActive = false;
-  }
+  setDocumentDirtyFromContent(markdownEditor.value);
 
   // Clear existing timer
   clearTimeout(previewDebounceTimer);
@@ -3652,6 +3975,7 @@ markdownEditor.addEventListener('input', () => {
 
 // Sync editor textarea content with originalMarkdown after external changes (e.g. delete operations)
 function syncEditorWithStore() {
+  if (!mayMutateRendererDocument('sync-editor-store')) return false;
   if (isEditMode && markdownEditor.value !== originalMarkdown) {
     const cursorPos = markdownEditor.selectionStart;
     markdownEditor.value = originalMarkdown;
@@ -3659,6 +3983,7 @@ function syncEditorWithStore() {
     const newPos = Math.min(cursorPos, originalMarkdown.length);
     markdownEditor.selectionStart = markdownEditor.selectionEnd = newPos;
   }
+  return true;
 }
 
 // If cursor is inside a fenced code block, return the position just after the closing ```
@@ -3725,19 +4050,78 @@ function skipPastCodeBlock(content, insertPos) {
 // is the only reliable way to answer "is this document now on disk?".
 const pendingSaves = new Map();
 let nextSaveRequestId = 1;
+const saveRequestSession = crypto.randomUUID();
+let pendingSaveStatusRevision = 0;
+const PENDING_SAVE_STATUS_EVENT = 'folia-pending-save-status-changed';
 // Guards against an out-of-order pair of replies for the SAME document leaving
 // the store describing the older write.
-let lastAdoptedSaveId = 0;
+const lastAdoptedSaveByPath = new Map();
+
+function pendingSaveMatchesPath(entry, filePath) {
+  if (!entry || typeof filePath !== 'string' || filePath.length === 0) {
+    return false;
+  }
+  const spelling = fileTrackingPathKey(filePath);
+  if (spelling && entry.spellingKey === spelling) return true;
+  const canonical = canonicalReloadPath(filePath);
+  return !!canonical && entry.pathKey === canonical;
+}
+
+function pendingSaveEntriesFor(paths, includeAll = false) {
+  if (includeAll) return Array.from(pendingSaves.values());
+  if (paths === null || paths === undefined) return [];
+  const requestedPaths =
+    Array.isArray(paths)
+      ? paths
+      : [paths];
+  return Array.from(pendingSaves.values()).filter(
+    (entry) =>
+      requestedPaths.some((filePath) => pendingSaveMatchesPath(entry, filePath))
+  );
+}
+
+function getPendingSaveStatus(paths) {
+  const entries = pendingSaveEntriesFor(paths, arguments.length === 0);
+  return Object.freeze({
+    revision: pendingSaveStatusRevision,
+    pending: entries.length > 0,
+    count: entries.length,
+    paths: Object.freeze(Array.from(new Set(entries.map((entry) => entry.path)))),
+  });
+}
+
+function publishPendingSaveStatusChange() {
+  pendingSaveStatusRevision += 1;
+  updateUnsavedIndicator();
+  window.dispatchEvent(new Event(PENDING_SAVE_STATUS_EVENT));
+}
+
+function isExpectedSaveResult(data) {
+  return !!(
+    data &&
+    data.saveRequestSession === saveRequestSession &&
+    Number.isSafeInteger(data.requestId) &&
+    pendingSaves.has(data.requestId)
+  );
+}
 
 // A promise that settles once every write currently in flight for `path` has
 // been answered, or null when there are none. Callers that must not act on a
 // stale dirty flag - exiting edit mode above all - wait on this first.
 function pendingSaveFor(path) {
-  const waits = [];
-  pendingSaves.forEach((entry) => {
-    if (entry.path === path) waits.push(entry.promise);
-  });
+  const waits = pendingSaveEntriesFor(path).map((entry) => entry.promise);
   return waits.length ? Promise.all(waits) : null;
+}
+
+async function waitForPendingSaves(path) {
+  // Re-check after every batch. A second Save can be issued while the caller
+  // is awaiting the first one; returning after only the captured batch would
+  // still allow that newer write to outlive a tab close.
+  for (;;) {
+    const pending = pendingSaveFor(path);
+    if (!pending) return;
+    await pending;
+  }
 }
 
 // True while at least one write for `path` is still unanswered. Distinct from
@@ -3745,14 +4129,11 @@ function pendingSaveFor(path) {
 // to decide "is this document's latest content known to be on disk?" must not
 // have to await anything to find out.
 function hasPendingSaveFor(path) {
-  let pending = false;
-  pendingSaves.forEach((entry) => {
-    if (entry.path === path) pending = true;
-  });
-  return pending;
+  return pendingSaveEntriesFor(path).length > 0;
 }
 
 function saveMarkdownFile() {
+  if (!mayMutateRendererDocument('save-request')) return null;
   if (!currentFilePath) {
     alert(i18n('alert.noFileOpen'));
     return;
@@ -3760,15 +4141,23 @@ function saveMarkdownFile() {
 
   const content = isEditMode ? markdownEditor.value : originalMarkdown;
   const requestId = nextSaveRequestId++;
-  const entry = { path: currentFilePath, content: content, resolve: null };
+  const entry = {
+    path: currentFilePath,
+    pathKey: canonicalReloadPath(currentFilePath),
+    spellingKey: fileTrackingPathKey(currentFilePath),
+    content: content,
+    resolve: null,
+  };
   entry.promise = new Promise((resolve) => {
     entry.resolve = resolve;
   });
   pendingSaves.set(requestId, entry);
+  publishPendingSaveStatusChange();
   ipcRenderer.send('save-markdown-file', {
     filePath: currentFilePath,
     content: content,
-    requestId: requestId
+    requestId: requestId,
+    saveRequestSession
   });
 }
 
@@ -3816,9 +4205,11 @@ document.addEventListener('keydown', (e) => {
   if (!isEditMode) return;
   if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'z') {
     e.preventDefault();
+    if (!mayMutateRendererDocument('shortcut-undo')) return;
     historyUndo();
   } else if ((e.ctrlKey || e.metaKey) && e.key === 'y') {
     e.preventDefault();
+    if (!mayMutateRendererDocument('shortcut-redo')) return;
     historyRedo();
   }
 });
@@ -3827,6 +4218,7 @@ document.addEventListener('keydown', (e) => {
 document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === 's' && isEditMode) {
     e.preventDefault();
+    if (!mayMutateRendererDocument('shortcut-save')) return;
     saveMarkdownFile();
   }
 });
@@ -3835,6 +4227,7 @@ document.addEventListener('keydown', (e) => {
 document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === 'r') {
     e.preventDefault();
+    if (!mayMutateRendererDocument('shortcut-reload')) return;
     if (currentFilePath) {
       // Check for unsaved changes
       if (hasUnsavedWork()) {
@@ -3850,17 +4243,57 @@ document.addEventListener('keydown', (e) => {
 
 // Handle save result
 ipcRenderer.on('save-markdown-result', (event, data) => {
+  if (!isExpectedSaveResult(data)) {
+    console.log('Ignoring save result from another renderer session');
+    return;
+  }
   const requestId = data && data.requestId;
   const entry = requestId != null ? pendingSaves.get(requestId) : null;
-  if (entry) pendingSaves.delete(requestId);
+  if (entry) {
+    pendingSaves.delete(requestId);
+    publishPendingSaveStatusChange();
+  }
+  if (!mayMutateRendererDocument('ipc-save-result')) {
+    if (entry) entry.resolve(data && data.success === true);
+    if (!data || !data.success) {
+      showNotification(
+        i18n('alert.saveFailed') + ((data && data.error) || ''),
+        5000
+      );
+    }
+    return;
+  }
   const savedPath = (data && data.path) || (entry && entry.path) || null;
   // A reply for a BACKGROUND document must never touch the stores, which
   // describe the document on screen. The tab layer owns that tab's own cache.
-  const isForCurrent = !savedPath || savedPath === currentFilePath;
+  const savedDocumentKey =
+    (entry && entry.pathKey) || canonicalReloadPath(savedPath);
+  const currentDocumentKey = canonicalReloadPath(currentFilePath);
+  const isForCurrent =
+    !savedDocumentKey ||
+    savedDocumentKey === currentDocumentKey;
 
   if (data.success) {
+    // Clear persistence failures before applying the clean transition below.
+    // The dirty-state choke point deliberately refuses to resume tracking
+    // while either witness remains.
+    if (savedPath) {
+      const savedKeys = new Set([savedDocumentKey]);
+      if (!entry) savedKeys.add(canonicalReloadPath(savedPath));
+      for (const savedKey of savedKeys) {
+        if (savedKey) {
+          failedSaves.delete(savedKey);
+          reloadConflicts.delete(savedKey);
+        }
+      }
+    }
+    const lastAdoptedSaveId = savedDocumentKey
+      ? lastAdoptedSaveByPath.get(savedDocumentKey) || 0
+      : 0;
     if (isForCurrent && requestId > lastAdoptedSaveId) {
-      lastAdoptedSaveId = requestId;
+      if (savedDocumentKey) {
+        lastAdoptedSaveByPath.set(savedDocumentKey, requestId);
+      }
       // The other half of the same defect as in saveMarkdownFile(): copying the
       // textarea back over originalMarkdown after a VIEW-mode save discarded
       // the document that was actually just written, so the undone content
@@ -3889,24 +4322,13 @@ ipcRenderer.on('save-markdown-result', (event, data) => {
       // Typing during the write leaves genuinely unsaved bytes behind;
       // declaring the document clean would lose them at the next exit without
       // a warning.
-      hasUnsavedChanges = isEditMode
-        ? markdownEditor.value !== originalMarkdown
-        : storeMovedDuringWrite;
-      updateUnsavedIndicator();
+      setDocumentDirtyState(
+        isEditMode
+          ? !sameReloadDocument(markdownEditor.value, originalMarkdown)
+          : storeMovedDuringWrite
+      );
     }
-    // A successful write resolves any earlier failure recorded for THAT path -
-    // not for whichever document happens to be on screen now. Deliberately
-    // OUTSIDE the isForCurrent/ordering block above: those conditions decide
-    // whether the on-screen stores may be touched, but "this path is now on
-    // disk" is a fact about the path and is just as true for a background tab.
-    if (data.success && savedPath) failedSaves.delete(savedPath);
     console.log('File saved successfully');
-
-    // Resume file tracking after save
-    if (isForCurrent && !isFileTrackingActive) {
-      ipcRenderer.send('resume-file-watching');
-      isFileTrackingActive = true;
-    }
   } else {
     console.error('Save failed:', data.error);
     // A failed write means that document's latest bytes live only in memory.
@@ -3922,10 +4344,18 @@ ipcRenderer.on('save-markdown-result', (event, data) => {
     // arrives describes bytes that never reached disk. Which mode the user
     // happens to be in when the reply lands says nothing about whether the
     // write succeeded.
-    if (savedPath) failedSaves.add(savedPath);
+    if (savedPath) {
+      const failedKeys = new Set([savedDocumentKey]);
+      if (!entry) failedKeys.add(canonicalReloadPath(savedPath));
+      for (const failedKey of failedKeys) {
+        if (failedKey) failedSaves.add(failedKey);
+      }
+      if (data.conflict && savedDocumentKey) {
+        reloadConflicts.add(savedDocumentKey);
+      }
+    }
     if (isForCurrent) {
-      hasUnsavedChanges = true;
-      updateUnsavedIndicator();
+      setDocumentDirtyState(true);
     }
     alert(i18n('alert.saveFailed') + data.error);
   }
@@ -3937,10 +4367,42 @@ ipcRenderer.on('save-markdown-result', (event, data) => {
 
 // Update unsaved indicator
 function updateUnsavedIndicator() {
-  if (hasUnsavedChanges) {
+  const trackingBlocked =
+    hasUnsavedChanges ||
+    hasPendingSaveFor(currentFilePath) ||
+    saveFailedFor(currentFilePath) ||
+    reloadConflictFor(currentFilePath);
+  if (trackingBlocked) {
     unsavedIndicator.style.display = 'inline';
+    // Dirty ownership is established at the transition itself, not only when
+    // the document is later selected. Otherwise main can observe an external
+    // write, advance the path baseline, and send a notification that this
+    // renderer deliberately drops because the document is dirty.
+    fileTrackingPauseOwner = fileTrackingPathKey(currentFilePath);
+    if (isFileTrackingActive) setFileTrackingIntent(false);
   } else {
     unsavedIndicator.style.display = 'none';
+    const tabs = window.CustomTabs;
+    const frozen =
+      !!tabs &&
+      typeof tabs.isDocumentFrozen === 'function' &&
+      tabs.isDocumentFrozen();
+    const currentOwner = fileTrackingPathKey(currentFilePath);
+    if (
+      !frozen &&
+      fileTrackingResumeHold === 0 &&
+      currentOwner &&
+      !isFileTrackingActive &&
+      fileTrackingPauseOwner === currentOwner
+    ) {
+      // This is the inverse transition of the pause above. Keeping it here
+      // makes typing, undo/redo, save adoption and every other dirty-state
+      // transition obey the same ownership rule instead of relying on each
+      // caller to remember a separate resume.
+      assertFileTrackingOwnership(currentFilePath, true, {
+        adoptBaseline: false,
+      });
+    }
   }
 }
 
@@ -4009,12 +4471,14 @@ function updateFileMenuRecent() {
     item.append(nameSpan, pathSpan);
 
     item.addEventListener('click', () => {
+      if (!mayMutateRendererDocument('recent-file-open')) return;
       // Check for unsaved changes before opening
       if (hasUnsavedWork()) {
         if (!confirm(i18n('confirm.unsavedOpenFile', {name: file.name}))) {
           return;
         }
       }
+      cancelPendingNavigation('superseded-by-recent-open');
       ipcRenderer.send('open-file-path', file.path);
       fileMenu.classList.remove('visible');
     });
@@ -6424,71 +6888,241 @@ function extractTableData(table) {
   return { columns, data };
 }
 
-// Handle file opened
-ipcRenderer.on('file-opened', async (event, data) => {
+function setFileTrackingIntent(active, send = true) {
+  isFileTrackingActive = !!active;
+  fileTrackingPauseOwner = isFileTrackingActive
+    ? null
+    : fileTrackingPathKey(currentFilePath);
+  if (send) {
+    ipcRenderer.send(
+      isFileTrackingActive ? 'resume-file-watching' : 'pause-file-watching'
+    );
+  }
+  return isFileTrackingActive;
+}
+
+function assertFileTrackingOwnership(
+  filePath,
+  active,
+  {
+    adoptBaseline = false,
+    modifiedTime = null,
+    diskVersion = null,
+  } = {},
+) {
+  if (!filePath) {
+    stopFileTrackingIntent();
+    return false;
+  }
+
+  const requestedOwner = fileTrackingPathKey(filePath);
+  const currentOwner = fileTrackingPathKey(currentFilePath);
+  if (!requestedOwner || !currentOwner || requestedOwner !== currentOwner) {
+    return false;
+  }
+
+  const tabs = window.CustomTabs;
+  const retainedFreeze =
+    !!tabs &&
+    typeof tabs.isDocumentFrozen === 'function' &&
+    tabs.isDocumentFrozen();
+  const trackingActive =
+    active !== false &&
+    !hasUnsavedChanges &&
+    !hasPendingSaveFor(filePath) &&
+    !saveFailedFor(filePath) &&
+    !reloadConflictFor(filePath) &&
+    !retainedFreeze;
+  const wasTrackingActive = isFileTrackingActive;
+  const selection = {
+    filePath,
+    adoptBaseline: adoptBaseline === true,
+    modifiedTime: Number.isFinite(modifiedTime) ? modifiedTime : null,
+    diskVersion,
+  };
+
+  isFileTrackingActive = trackingActive;
+  fileTrackingPauseOwner = trackingActive
+    ? null
+    : fileTrackingPathKey(filePath);
+  if (trackingActive) {
+    // A clean document may be selected while the previous dirty document left
+    // main paused. Name the new owner before resuming so no watcher is ever
+    // armed against the old path.
+    ipcRenderer.send('set-active-file', selection);
+    ipcRenderer.send('resume-file-watching');
+  } else {
+    // A dirty document must be paused before selection. Otherwise selecting it
+    // can transiently arm a watcher and adopt current disk state before the
+    // renderer has asserted that its in-memory bytes own the document.
+    if (wasTrackingActive) ipcRenderer.send('pause-file-watching');
+    ipcRenderer.send('set-active-file', selection);
+  }
+  return trackingActive;
+}
+
+function adoptFileTrackingBaseline(filePath, modifiedTime, diskVersion = null) {
+  if (!filePath || !Number.isFinite(modifiedTime)) return false;
+  ipcRenderer.send('adopt-file-baseline', {
+    filePath,
+    modifiedTime,
+    diskVersion,
+  });
+  return true;
+}
+
+function stopFileTrackingIntent() {
+  isFileTrackingActive = false;
+  fileTrackingPauseOwner = null;
+  ipcRenderer.send('stop-file-watching');
+}
+
+function beginFileOpen(data, options = {}) {
+  if (!mayMutateRendererDocument(options.source || 'ipc-file-opened')) {
+    return null;
+  }
+  const openSequence = ++fileOpenSequence;
+  const openedPath = data && data.path;
+  const openedContent = data && data.content;
+  const dirty = options.hasUnsavedChanges === true;
+  const previousOpenedPath = canonicalReloadPath(openedPath);
+  if (options.adoptPathIdentity === true && openedPath) {
+    rebindReloadPath(openedPath);
+  }
   // Clear undo/redo history on new file
   historyClear();
   _lastRenderedContent = null;
 
+  // Core ownership changes as one synchronous boundary before rendering:
+  // current path, source, editor and history all become this document before
+  // any asynchronous work can let phase two observe a mixed old/new state.
+  updateFileInfo(openedPath);
   // Store original markdown for editor
-  originalMarkdown = data.content;
-  // This document has just been re-read from disk, so any earlier failed write
-  // against THIS path describes content that no longer exists. Scoped to the
-  // path: a failure recorded for another tab's document is still true and must
-  // survive, which a single global flag could not express.
-  if (data.filePath) failedSaves.delete(data.filePath);
-  if (!isEditMode) {
-    hasUnsavedChanges = false;
-    updateUnsavedIndicator();
-  }
-  // If in edit mode, update editor content
-  if (isEditMode) {
-    markdownEditor.value = originalMarkdown;
-    hasUnsavedChanges = false;
-    updateUnsavedIndicator();
-    // A different document is now open underneath the edit session, so the
-    // session's baseline describes a file the user is no longer editing.
-    // Without moving it, exiting with a discard would write the PREVIOUS
-    // document's text over this one.
-    captureEditSessionBaseline(true);
-  }
-
-  await renderMarkdown(data.content);
-
-  // Update file info bar
-  updateFileInfo(data.path);
-
-  // Handle navigation history and scroll position
-  if (isNavigating) {
-    // Restore scroll position for back/forward navigation
-    const entry = navigationHistory[navigationIndex];
-    if (entry && entry.scrollPosition) {
-      // Small delay to ensure content is rendered
-      setTimeout(() => {
-        contentWrapper.scrollTop = entry.scrollPosition;
-      }, 100);
+  originalMarkdown = openedContent;
+  withFileTrackingResumeHeld(() => {
+    // This document has just been re-read from disk, so any earlier failed
+    // write against THIS path describes content that no longer exists. Scoped
+    // to the path: a failure for another tab must survive.
+    if (options.clearFailedSave !== false && openedPath) {
+      const canonicalOpenedPath = canonicalReloadPath(openedPath);
+      if (canonicalOpenedPath) failedSaves.delete(canonicalOpenedPath);
+      if (previousOpenedPath) failedSaves.delete(previousOpenedPath);
+      if (options.adoptPathIdentity === true) {
+        if (canonicalOpenedPath) reloadConflicts.delete(canonicalOpenedPath);
+        if (previousOpenedPath) reloadConflicts.delete(previousOpenedPath);
+      }
     }
-    isNavigating = false;
-  } else {
-    // Add to navigation history for normal file opens
-    addToNavigationHistory(data.path, 0);
-    // Scroll to top for new files
-    contentWrapper.scrollTop = 0;
+    if (!isEditMode) {
+      setDocumentDirtyState(dirty);
+    }
+    // If in edit mode, update editor content
+    if (isEditMode) {
+      markdownEditor.value = originalMarkdown;
+      setDocumentDirtyState(dirty);
+      // A different document is now open underneath the edit session, so the
+      // session's baseline describes a file the user is no longer editing.
+      captureEditSessionBaseline(options.preserveEditBaseline ? false : true);
+    }
+
+    assertFileTrackingOwnership(
+      openedPath,
+      !dirty && options.trackingActive !== false,
+      {
+        adoptBaseline: !dirty && options.adoptDiskBaseline !== false,
+        modifiedTime: data && data.modifiedTime,
+        diskVersion: data && data.diskVersion,
+      },
+    );
+  });
+
+  // Own every non-visual part of the open synchronously. A render may take
+  // seconds; phase-two freeze or a newer open can arrive during that await, so
+  // no navigation flag, watcher initialization, history entry or recent-file
+  // update may depend on its completion.
+  const postRenderScroll =
+    options.postRenderScroll ||
+    (options.normalScroll === 'caller'
+      ? { type: 'caller', top: 0 }
+      : { type: 'top', top: 0 });
+  if (options.recordNavigation !== false) {
+    addToNavigationHistory(openedPath, 0);
   }
-
-  // Enable file tracking
-  isFileTrackingActive = true;
-
-  // If multiple files were selected, add all to recent files
-  if (data.allPaths && data.allPaths.length > 0) {
+  if (
+    options.recordRecents !== false &&
+    data &&
+    data.allPaths &&
+    data.allPaths.length > 0
+  ) {
     data.allPaths.forEach(filePath => {
       saveRecentFile(filePath);
     });
-  } else {
-    // Fallback for single file (backwards compatibility)
-    saveRecentFile(data.path);
+  } else if (options.recordRecents !== false) {
+    saveRecentFile(openedPath);
   }
-});
+
+  return Object.freeze({
+    sequence: openSequence,
+    path: openedPath,
+    postRenderScroll,
+  });
+}
+
+function completeFileOpen(context, visualCompletion = null) {
+  if (!context || !Number.isSafeInteger(context.sequence)) return false;
+  // A newer file-open owns the renderer now. Its synchronous ownership
+  // boundary has already replaced these stores, so the older completion must
+  // not apply its visual position to the newer document.
+  if (context.sequence !== fileOpenSequence) {
+    supersededFileOpenCompletionCount += 1;
+    return false;
+  }
+  // Phase-two freeze can begin while a large/Mermaid render is awaiting. The
+  // core document and all state-machine ownership above are coherent and
+  // frozen; visual position must not move after that final approval.
+  if (!mayMutateRendererDocument('ipc-file-opened-after-render')) {
+    frozenFileOpenCompletionCount += 1;
+    return false;
+  }
+
+  if (context.postRenderScroll.type === 'restore') {
+    // Small delay preserves the existing navigation behavior while retaining
+    // both ownership checks at the actual visual mutation.
+    setTimeout(() => {
+      if (
+        context.sequence !== fileOpenSequence ||
+        !mayMutateRendererDocument('file-opened-scroll-restore')
+      ) {
+        return;
+      }
+      contentWrapper.scrollTop = context.postRenderScroll.top;
+    }, 100);
+  } else if (context.postRenderScroll.type === 'top') {
+    contentWrapper.scrollTop = 0;
+  } else if (
+    context.postRenderScroll.type === 'caller' &&
+    typeof visualCompletion === 'function'
+  ) {
+    visualCompletion();
+  }
+  return true;
+}
+
+// Upstream fallback: when no tab overlay claims this channel, renderer owns
+// both lifecycle and the single visual render.
+async function handleFileOpened(event, data) {
+  const preflight = preflightFileOpen(data);
+  if (!preflight.accepted) return;
+  const context = beginFileOpen(
+    data,
+    preflight.lifecycleOptions || {},
+  );
+  if (!context) return;
+  await renderMarkdown(data.content);
+  completeFileOpen(context);
+}
+
+// Handle file opened
+ipcRenderer.on('file-opened', handleFileOpened);
 
 // Handle file changed externally
 ipcRenderer.on('file-changed-externally', (event, data) => {
@@ -6496,6 +7130,7 @@ ipcRenderer.on('file-changed-externally', (event, data) => {
 
   // Don't show notification if we have unsaved changes (tracking should be paused anyway)
   if (hasUnsavedChanges) {
+    markReloadConflict(data && data.path ? data.path : currentFilePath);
     return;
   }
 
@@ -6505,9 +7140,14 @@ ipcRenderer.on('file-changed-externally', (event, data) => {
 
 // Handle file deleted
 ipcRenderer.on('file-deleted', (event, data) => {
+  const deletedPath = canonicalReloadPath(data && data.path);
+  const activePath = canonicalReloadPath(currentFilePath);
+  if (!deletedPath || !activePath || deletedPath !== activePath) {
+    console.log('Ignoring stale file deletion:', data && data.path);
+    return;
+  }
   console.log('File deleted:', data.path);
   showNotification(i18n('notif.fileDeleted'), 5000);
-  isFileTrackingActive = false;
 });
 
 // Handle file not found (from recent files or links)
@@ -6526,39 +7166,86 @@ ipcRenderer.on('file-not-found', (event, data) => {
 
 // Handle file reload result
 ipcRenderer.on('file-reload-result', async (event, data) => {
-  if (data.success) {
+  if (data && data.success) {
+    if (!mayMutateRendererDocument('ipc-reload-result')) return;
+    const reloadValidation = validateReloadResultForCurrentPage(data);
+    if (reloadValidation === 'foreign') {
+      foreignReloadResultCount += 1;
+      console.log('Ignoring reload result from another renderer session');
+      return;
+    }
+    if (reloadValidation === 'conflict') {
+      reloadConflictResultCount += 1;
+      const conflictPath =
+        canonicalReloadPath(
+          data.reloadRequest && data.reloadRequest.path
+        ) || canonicalReloadPath(currentFilePath);
+      markReloadConflict(conflictPath);
+      showNotification(
+        i18n('notif.reloadFailed') +
+          'The document changed while the reload was in progress.',
+        4000
+      );
+      return;
+    }
+    const previousReloadPath = canonicalReloadPath(data.path);
+    const acceptedReloadPath = rebindReloadPath(data.path);
+    if (previousReloadPath) reloadConflicts.delete(previousReloadPath);
+    if (acceptedReloadPath) reloadConflicts.delete(acceptedReloadPath);
     originalMarkdown = data.content;
-    // The document was just re-read from disk, so whatever the last write did
-    // or failed to do is no longer what is on screen - for THIS path only.
-    if (currentFilePath) failedSaves.delete(currentFilePath);
-    if (!isEditMode) {
-      hasUnsavedChanges = false;
-      updateUnsavedIndicator();
-    }
-    // If in edit mode, update editor content
-    if (isEditMode) {
-      markdownEditor.value = originalMarkdown;
-      hasUnsavedChanges = false;
-      updateUnsavedIndicator();
-      // The reload replaced the document underneath an open edit session, so
-      // the session's baseline now describes content that is no longer on
-      // disk. Without moving it, exiting with a discard would restore the
-      // PRE-reload text and silently undo the reload as well.
-      captureEditSessionBaseline(true);
-    }
+    withFileTrackingResumeHeld(() => {
+      // The document was just re-read from disk, so whatever the last write
+      // did or failed to do is no longer what is on screen - for this path.
+      if (currentFilePath) {
+        const canonicalCurrentPath = canonicalReloadPath(currentFilePath);
+        if (canonicalCurrentPath) failedSaves.delete(canonicalCurrentPath);
+      }
+      if (!isEditMode) {
+        setDocumentDirtyState(false);
+      }
+      // If in edit mode, update editor content
+      if (isEditMode) {
+        markdownEditor.value = originalMarkdown;
+        setDocumentDirtyState(false);
+        // The reload replaced the document underneath an open edit session, so
+        // the session's baseline must move with it.
+        captureEditSessionBaseline(true);
+      }
+      assertFileTrackingOwnership(data.path, true, {
+        adoptBaseline: true,
+        modifiedTime: data.modifiedTime,
+        diskVersion: data.diskVersion,
+      });
+    });
 
     // Re-render the markdown
     await renderMarkdown(data.content);
 
-    showNotification(i18n('notif.fileReloaded'), 2000);
+    // CustomTabs owns acceptance once the shared file-open lifecycle is
+    // available. It shows success only after the same tab and render
+    // generation still own this completion; notifying here would announce a
+    // superseded reload over whichever tab is visible now.
+    if (!window.customTabsOwnsReloadResults) {
+      showNotification(i18n('notif.fileReloaded'), 2000);
+    }
   } else {
-    showNotification(i18n('notif.reloadFailed') + data.error, 4000);
+    if (validateReloadResultForCurrentPage(data, false) === 'foreign') {
+      foreignReloadFailureCount += 1;
+      console.log('Ignoring reload failure from another request or document');
+      return;
+    }
+    showNotification(
+      i18n('notif.reloadFailed') + ((data && data.error) || ''),
+      4000
+    );
   }
 });
 
 // Handle external file open request (from double-clicking a file when app is already open)
 ipcRenderer.on('external-file-open-request', (event, data) => {
+  if (!mayMutateRendererDocument('ipc-external-file-open')) return;
   const { filePath } = data;
+  cancelPendingNavigation('superseded-by-external-open');
 
   // Check for unsaved changes
   if (hasUnsavedWork()) {
@@ -7095,6 +7782,7 @@ function _isAlreadyWrapped(markdownContent, textIndex, selLen, wrapper) {
 
 // Formatting functions - work in both view and edit mode
 function applyMarkdownFormat(wrapper, multiline = false) {
+  if (!mayMutateRendererDocument('format')) return;
   if (!savedSelection || !currentFilePath) return;
 
   if (isEditMode) {
@@ -7128,8 +7816,7 @@ function applyMarkdownFormat(wrapper, multiline = false) {
     markdownEditor.selectionStart = start;
     markdownEditor.selectionEnd = start + formattedText.length;
 
-    hasUnsavedChanges = true;
-    updateUnsavedIndicator();
+    setDocumentDirtyFromContent(markdownEditor.value);
 
     clearTimeout(previewDebounceTimer);
     previewDebounceTimer = setTimeout(() => {
@@ -7205,6 +7892,7 @@ ctxItalic.addEventListener('click', () => {
 
 // Code block
 ctxCode.addEventListener('click', () => {
+  if (!mayMutateRendererDocument('format-code')) return;
   if (!savedSelection || !currentFilePath) return;
   hideContextMenu();
 
@@ -7237,8 +7925,7 @@ ctxCode.addEventListener('click', () => {
     markdownEditor.selectionEnd = start + formattedText.length;
 
     // Mark as unsaved
-    hasUnsavedChanges = true;
-    updateUnsavedIndicator();
+    setDocumentDirtyFromContent(markdownEditor.value);
 
     // Trigger preview update
     clearTimeout(previewDebounceTimer);
@@ -7284,6 +7971,7 @@ ctxList.addEventListener('click', () => {
 
 // Remove formatting
 ctxRemoveFormat.addEventListener('click', () => {
+  if (!mayMutateRendererDocument('format-remove')) return;
   if (!savedSelection || !currentFilePath) return;
   hideContextMenu();
 
@@ -7315,8 +8003,7 @@ ctxRemoveFormat.addEventListener('click', () => {
     markdownEditor.selectionEnd = start + cleanText.length;
 
     // Mark as unsaved
-    hasUnsavedChanges = true;
-    updateUnsavedIndicator();
+    setDocumentDirtyFromContent(markdownEditor.value);
 
     // Trigger preview update
     clearTimeout(previewDebounceTimer);
@@ -7657,6 +8344,7 @@ ctxEditNote.addEventListener('click', () => {
 
 // Delete Note context menu click
 ctxDeleteNote.addEventListener('click', () => {
+  if (!mayMutateRendererDocument('context-note-delete')) return;
   hideContextMenu();
   const noteEl = rightClickTarget && rightClickTarget.closest('.noted-text, .noted-image, .note-label');
   if (!noteEl || !currentFilePath) return;
@@ -7676,8 +8364,7 @@ ctxDeleteNote.addEventListener('click', () => {
         replacement +
         editorVal.substring(match.index + match[0].length);
 
-      hasUnsavedChanges = true;
-      updateUnsavedIndicator();
+      setDocumentDirtyFromContent(markdownEditor.value);
 
       clearTimeout(previewDebounceTimer);
       previewDebounceTimer = setTimeout(() => {
@@ -7724,6 +8411,7 @@ ctxDeleteNote.addEventListener('click', () => {
 
 // Save note
 noteSaveBtn.addEventListener('click', () => {
+  if (!mayMutateRendererDocument('note-dialog-commit')) return;
   const labelName = noteLabelInput.value.trim();
   const title = noteTitleInput.value.trim();
   const content = noteContentInput.value.trim();
@@ -7791,8 +8479,7 @@ noteSaveBtn.addEventListener('click', () => {
           newNoteHtml +
           editorVal.substring(match.index + match[0].length);
 
-        hasUnsavedChanges = true;
-        updateUnsavedIndicator();
+        setDocumentDirtyFromContent(markdownEditor.value);
 
         clearTimeout(previewDebounceTimer);
         previewDebounceTimer = setTimeout(() => {
@@ -7924,8 +8611,7 @@ noteSaveBtn.addEventListener('click', () => {
       markdownEditor.selectionStart = start;
       markdownEditor.selectionEnd = start + replacement.length;
 
-      hasUnsavedChanges = true;
-      updateUnsavedIndicator();
+      setDocumentDirtyFromContent(markdownEditor.value);
 
       clearTimeout(previewDebounceTimer);
       previewDebounceTimer = setTimeout(() => {
@@ -8000,8 +8686,7 @@ noteSaveBtn.addEventListener('click', () => {
       markdownEditor.selectionStart = newPos;
       markdownEditor.selectionEnd = newPos;
 
-      hasUnsavedChanges = true;
-      updateUnsavedIndicator();
+      setDocumentDirtyFromContent(markdownEditor.value);
 
       clearTimeout(previewDebounceTimer);
       previewDebounceTimer = setTimeout(() => {
@@ -8192,6 +8877,7 @@ function partialDOMReplace(container, oldText, newText, occurrence) {
 
 // Update markdown source silently (no re-render)
 function updateSourceSilently(oldText, newText, occurrence) {
+  if (!mayMutateRendererDocument('update-source-silent')) return false;
   historyPush(originalMarkdown);
   const ti = findNthOccurrence(originalMarkdown, oldText, occurrence);
   if (ti !== -1) {
@@ -8200,11 +8886,12 @@ function updateSourceSilently(oldText, newText, occurrence) {
       newText +
       originalMarkdown.substring(ti + oldText.length);
   }
-  hasUnsavedChanges = true;
-  updateUnsavedIndicator();
+  setDocumentDirtyFromContent(originalMarkdown);
+  return true;
 }
 
 editTextSaveBtn.addEventListener('click', () => {
+  if (!mayMutateRendererDocument('edit-text-dialog-commit')) return;
   const newText = editTextArea.value;
   if (newText === editTextOriginal) {
     closeEditTextDialog();
@@ -8220,8 +8907,7 @@ editTextSaveBtn.addEventListener('click', () => {
         newText +
         editorVal.substring(textIndex + editTextOriginal.length);
 
-      hasUnsavedChanges = true;
-      updateUnsavedIndicator();
+      setDocumentDirtyFromContent(markdownEditor.value);
 
       clearTimeout(previewDebounceTimer);
       previewDebounceTimer = setTimeout(() => {
@@ -8609,6 +9295,7 @@ function formatFileSize(bytes) {
 
 // Insert image markdown into document at the right position
 function insertImageMarkdown(imageMarkdown, originalSize, compressedSize) {
+  if (!mayMutateRendererDocument('image-insert')) return;
   if (isEditMode) {
     // Edit mode: insert at saved cursor position
     const cursorPos = savedCursorPosition !== null ? savedCursorPosition : markdownEditor.selectionStart;
@@ -8625,8 +9312,7 @@ function insertImageMarkdown(imageMarkdown, originalSize, compressedSize) {
     markdownEditor.selectionStart = newPos;
     markdownEditor.selectionEnd = newPos;
 
-    hasUnsavedChanges = true;
-    updateUnsavedIndicator();
+    setDocumentDirtyFromContent(markdownEditor.value);
 
     clearTimeout(previewDebounceTimer);
     previewDebounceTimer = setTimeout(() => {
@@ -8657,6 +9343,7 @@ ipcRenderer.on('image-selected', (event, data) => {
     showNotification(i18n('notif.imageFailed') + data.error, 3000);
     return;
   }
+  if (!mayMutateRendererDocument('ipc-image-selected')) return;
 
   const { base64, mimeType, fileName } = data;
 
@@ -8706,6 +9393,7 @@ ipcRenderer.on('image-selected', (event, data) => {
 
 // Delete Image
 ctxDeleteImage.addEventListener('click', () => {
+  if (!mayMutateRendererDocument('context-image-delete')) return;
   hideContextMenu();
   if (!rightClickTarget || !currentFilePath) return;
 
@@ -8738,8 +9426,7 @@ ctxDeleteImage.addEventListener('click', () => {
 
     markdownEditor.value = content.substring(0, removeStart) + content.substring(removeEnd);
 
-    hasUnsavedChanges = true;
-    updateUnsavedIndicator();
+    setDocumentDirtyFromContent(markdownEditor.value);
     clearTimeout(previewDebounceTimer);
     previewDebounceTimer = setTimeout(() => {
       renderMarkdown(markdownEditor.value);
@@ -8903,6 +9590,7 @@ function normalizeMermaidCode(s) {
 }
 
 function deleteMermaidFromSource(svgTexts, mermaidEl) {
+  if (!mayMutateRendererDocument('mermaid-delete')) return;
   const content = isEditMode ? markdownEditor.value : originalMarkdown;
   const blocks = [];
   // Allow optional spaces/tabs before the newline after ```mermaid, and one or more newlines
@@ -8974,8 +9662,7 @@ function deleteMermaidFromSource(svgTexts, mermaidEl) {
   originalMarkdown = isEditMode ? originalMarkdown : newContent;
   if (isEditMode) {
     markdownEditor.value = newContent;
-    hasUnsavedChanges = true;
-    updateUnsavedIndicator();
+    setDocumentDirtyFromContent(markdownEditor.value);
   }
   syncEditorWithStore();
   showNotification('Mermaid diagram deleted', 1500);
@@ -9008,6 +9695,7 @@ ctxDeleteTable && ctxDeleteTable.addEventListener('click', () => {
 });
 
 function deleteTableFromSource(tableEl, headers, cellTexts = []) {
+  if (!mayMutateRendererDocument('table-delete')) return;
   const content = isEditMode ? markdownEditor.value : originalMarkdown;
   // Match markdown table rows: lines starting with | (last \n optional for end-of-file)
   const tableRegex = /(\|[^\n]+\|[ \t]*\n)+\|[^\n]+\|[ \t]*(?:\n|$)/g;
@@ -9059,8 +9747,7 @@ function deleteTableFromSource(tableEl, headers, cellTexts = []) {
   originalMarkdown = isEditMode ? originalMarkdown : newTableContent;
   if (isEditMode) {
     markdownEditor.value = newTableContent;
-    hasUnsavedChanges = true;
-    updateUnsavedIndicator();
+    setDocumentDirtyFromContent(markdownEditor.value);
   }
   syncEditorWithStore();
   showNotification('Table deleted', 1500);
@@ -9452,6 +10139,7 @@ function closeMermaidTemplateDialog() {
 }
 
 async function insertMermaidFromDialog() {
+  if (!mayMutateRendererDocument('mermaid-dialog-commit')) return;
   // Strip ``` code fences if user accidentally pasted the whole code block
   let code = mermaidTemplateCode.value.trim();
   code = code.replace(/^```mermaid\s*\r?\n?/i, '').replace(/\r?\n?```\s*$/, '').trim();
@@ -9503,6 +10191,7 @@ async function insertMermaidFromDialog() {
   // up to the commit, so it cannot interleave with another submission.
   mermaidDialogSubmitting = false;
   if (!validated) return;
+  if (!mayMutateRendererDocument('mermaid-dialog-commit-after-await')) return;
 
   // The dialog this submission belongs to was closed, cancelled or reopened
   // while it was validating. Commit nothing.
@@ -9611,11 +10300,10 @@ async function insertMermaidFromDialog() {
 
     if (isEditMode) {
       markdownEditor.value = newContent;
-      hasUnsavedChanges = true;
-      updateUnsavedIndicator();
+      setDocumentDirtyFromContent(markdownEditor.value);
     } else {
       originalMarkdown = newContent;
-      hasUnsavedChanges = true;
+      setDocumentDirtyFromContent(originalMarkdown);
     }
     syncEditorWithStore();
 
@@ -9636,8 +10324,7 @@ async function insertMermaidFromDialog() {
       const newCursor = safePos + mermaidBlock.length;
       markdownEditor.selectionStart = markdownEditor.selectionEnd = newCursor;
       markdownEditor.focus();
-      hasUnsavedChanges = true;
-      updateUnsavedIndicator();
+      setDocumentDirtyFromContent(markdownEditor.value);
       clearTimeout(previewDebounceTimer);
       previewDebounceTimer = setTimeout(() => renderMarkdown(markdownEditor.value), TIMING.previewDebounceDelay);
       showNotification('Mermaid inserted', 1000);
@@ -9648,9 +10335,9 @@ async function insertMermaidFromDialog() {
       const before = activeContent.substring(0, insertPos);
       const after = activeContent.substring(insertPos);
       const newContent = before + mermaidBlock + after;
-
       originalMarkdown = newContent;
-      hasUnsavedChanges = true;
+      originalMarkdown = newContent;
+      setDocumentDirtyFromContent(originalMarkdown);
       syncEditorWithStore();
 
       await renderMermaidInDOM(code, 'insert');
@@ -9815,6 +10502,7 @@ function getCleanTableMarkdown() {
 }
 
 function insertTableFromDialog() {
+  if (!mayMutateRendererDocument('table-dialog-commit')) return;
   const md = getCleanTableMarkdown();
   if (!md) return;
 
@@ -9881,11 +10569,10 @@ function insertTableFromDialog() {
 
     if (isEditMode) {
       markdownEditor.value = newContent;
-      hasUnsavedChanges = true;
-      updateUnsavedIndicator();
+      setDocumentDirtyFromContent(markdownEditor.value);
     } else {
       originalMarkdown = newContent;
-      hasUnsavedChanges = true;
+      setDocumentDirtyFromContent(originalMarkdown);
     }
     syncEditorWithStore();
 
@@ -9905,8 +10592,7 @@ function insertTableFromDialog() {
       const newCursor = safePos + md.length + 2;
       markdownEditor.selectionStart = markdownEditor.selectionEnd = newCursor;
       markdownEditor.focus();
-      hasUnsavedChanges = true;
-      updateUnsavedIndicator();
+      setDocumentDirtyFromContent(markdownEditor.value);
       clearTimeout(previewDebounceTimer);
       previewDebounceTimer = setTimeout(() => renderMarkdown(markdownEditor.value), TIMING.previewDebounceDelay);
       showNotification('Table inserted', 1000);
@@ -9917,9 +10603,9 @@ function insertTableFromDialog() {
       const before = activeContent.substring(0, insertPos);
       const after = activeContent.substring(insertPos);
       const newContent = before + '\n' + md + '\n' + after;
-
       originalMarkdown = newContent;
-      hasUnsavedChanges = true;
+      originalMarkdown = newContent;
+      setDocumentDirtyFromContent(originalMarkdown);
       syncEditorWithStore();
 
       renderTableInDOM(md, 'insert');
@@ -9955,6 +10641,7 @@ tableInsertOverlay && tableInsertOverlay.addEventListener('click', (e) => {
 
 // Insert content at cursor position (works in both edit mode and view mode)
 function insertContentAtCursor(content) {
+  if (!mayMutateRendererDocument('insert-at-cursor')) return;
   historyPush(isEditMode ? markdownEditor.value : originalMarkdown);
 
   if (isEditMode) {
@@ -9967,8 +10654,7 @@ function insertContentAtCursor(content) {
     const newCursor = safePos + content.length;
     markdownEditor.selectionStart = markdownEditor.selectionEnd = newCursor;
     markdownEditor.focus();
-    hasUnsavedChanges = true;
-    updateUnsavedIndicator();
+    setDocumentDirtyFromContent(markdownEditor.value);
     clearTimeout(previewDebounceTimer);
     previewDebounceTimer = setTimeout(() => renderMarkdown(markdownEditor.value), TIMING.previewDebounceDelay);
   } else {
@@ -10166,6 +10852,7 @@ ctxNotesPanelEdit.addEventListener('click', () => {
 
 // Delete note from notes panel
 ctxNotesPanelDelete.addEventListener('click', () => {
+  if (!mayMutateRendererDocument('notes-panel-delete')) return;
   const nid = notesPanelContextNoteId;
   hideNotesPanelContextMenu();
   if (!nid || !currentFilePath) return;
@@ -10184,8 +10871,7 @@ ctxNotesPanelDelete.addEventListener('click', () => {
         replacement +
         editorVal.substring(match.index + match[0].length);
 
-      hasUnsavedChanges = true;
-      updateUnsavedIndicator();
+      setDocumentDirtyFromContent(markdownEditor.value);
 
       clearTimeout(previewDebounceTimer);
       previewDebounceTimer = setTimeout(() => {
@@ -10300,8 +10986,8 @@ window.i18n = i18n;
 // Without it this flag is global across tabs, and the refresh/exit guards that
 // depend on it would silently discard another tab's unsaved edits.
 window.setUnsavedState = function (value) {
-  hasUnsavedChanges = !!value;
-  updateUnsavedIndicator();
+  if (!mayMutateRendererDocument('unsaved-state-setter')) return;
+  setDocumentDirtyState(value);
 };
 // Exposed so the tab overlay can take down a stale "File Updated" prompt.
 // It is already an implicit global today (classic script), but the overlay
@@ -10309,18 +10995,108 @@ window.setUnsavedState = function (value) {
 // so a DOM-only dismissal would leave it stuck true and silently swallow the
 // next change notification for up to 10s.
 window.dismissFileUpdateNotification = dismissFileUpdateNotification;
+window.requestCurrentFileReload = reloadCurrentFile;
+window.beginFileOpen = beginFileOpen;
+window.completeFileOpen = completeFileOpen;
+window.preflightFileOpen = preflightFileOpen;
+window.cancelPendingNavigation = cancelPendingNavigation;
+// Read-only product API used by shutdown approval and tab ownership. Callers
+// may filter by one path or an array of open-tab paths; returned data is frozen.
+window.getPendingSaveStatus = getPendingSaveStatus;
+window.waitForPendingSaves = waitForPendingSaves;
+window.isExpectedSaveResult = isExpectedSaveResult;
+window.setFileTrackingIntent = setFileTrackingIntent;
+window.assertFileTrackingOwnership = assertFileTrackingOwnership;
+window.adoptFileTrackingBaseline = adoptFileTrackingBaseline;
+window.stopFileTrackingIntent = stopFileTrackingIntent;
+window.rendererFileOpenHandler = handleFileOpened;
+window.getFileOpenDiagnostics = function () {
+  return Object.freeze({
+    sequence: fileOpenSequence,
+    supersededCompletionCount: supersededFileOpenCompletionCount,
+    frozenCompletionCount: frozenFileOpenCompletionCount,
+    navigationRequestSequence,
+    pendingNavigationToken: pendingNavigationRequest
+      ? pendingNavigationRequest.token
+      : 0,
+    pendingNavigationPath: pendingNavigationRequest
+      ? pendingNavigationRequest.path
+      : null,
+    pendingNavigationTargetIndex: pendingNavigationRequest
+      ? pendingNavigationRequest.targetIndex
+      : -1,
+    acceptedNavigationRequestCount,
+    rejectedNavigationRequestCount,
+    failedNavigationRequestCount,
+    lastNavigationRequestResult,
+    navigationIndex,
+    navigationLength: navigationHistory.length,
+    isFileTrackingActive,
+    undoSize: undoHistory.length,
+    redoSize: redoHistory.length,
+  });
+};
+window.getLatestReloadRequestSequence = function (filePath) {
+  const canonical = canonicalReloadPath(filePath);
+  return canonical ? latestReloadRequestByPath.get(canonical) || 0 : 0;
+};
+window.getReloadRequestSession = function () {
+  return reloadRequestSession;
+};
+window.markReloadConflict = markReloadConflict;
+window.clearReloadConflict = clearReloadConflict;
+window.getReloadRequestDiagnostics = function () {
+  return Object.freeze({
+    sequence: reloadRequestSequence,
+    session: reloadRequestSession,
+    latestMainEpoch: latestReloadMainEpoch,
+    foreignResultCount: foreignReloadResultCount,
+    conflictResultCount: reloadConflictResultCount,
+    foreignFailureCount: foreignReloadFailureCount,
+    fileOpenSequence,
+    supersededFileOpenCompletionCount,
+    frozenFileOpenCompletionCount,
+    navigationRequestSequence,
+    pendingNavigationToken: pendingNavigationRequest
+      ? pendingNavigationRequest.token
+      : 0,
+    pendingNavigationPath: pendingNavigationRequest
+      ? pendingNavigationRequest.path
+      : null,
+    pendingNavigationTargetIndex: pendingNavigationRequest
+      ? pendingNavigationRequest.targetIndex
+      : -1,
+    acceptedNavigationRequestCount,
+    rejectedNavigationRequestCount,
+    failedNavigationRequestCount,
+    lastNavigationRequestResult,
+    navigationIndex,
+    navigationLength: navigationHistory.length,
+    isFileTrackingActive,
+    undoSize: undoHistory.length,
+    redoSize: redoHistory.length,
+    latestByPath: Array.from(latestReloadRequestByPath.entries()),
+    conflicts: Array.from(reloadConflicts),
+  });
+};
 
 // Expose currentFilePath with getter/setter so custom-tabs.js
 // setting window.currentFilePath also updates the local variable.
 Object.defineProperty(window, 'currentFilePath', {
   get() { return currentFilePath; },
-  set(v) { currentFilePath = v; },
+  set(v) {
+    if (!mayMutateRendererDocument('current-file-path-setter')) return;
+    currentFilePath = v;
+  },
   enumerable: true, configurable: true
 });
 
 // Expose originalMarkdown the same way (used by edit mode).
 Object.defineProperty(window, 'originalMarkdown', {
   get() { return originalMarkdown; },
-  set(v) { originalMarkdown = v; },
+  set(v) {
+    if (!mayMutateRendererDocument('original-markdown-setter')) return;
+    originalMarkdown = v;
+  },
   enumerable: true, configurable: true
 });

@@ -18,6 +18,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const { execFileSync } = require("child_process");
+const { EventEmitter } = require("events");
 const { stripJsComments } = require("./test-source-utils.js");
 
 // The repository root, which is this suite's subject - it reads package.json,
@@ -134,11 +135,377 @@ function isPackaged(files, rel) {
   return included;
 }
 
-function main() {
+async function main() {
   console.log("\n=== Packaging allowlist ===\n");
 
   const pkg = JSON.parse(read("package.json"));
   const files = pkg.build && pkg.build.files;
+  check(
+    "the machine-exclusive F22 benchmark script invokes its process-isolated parent",
+    pkg.scripts && pkg.scripts["bench:f22"] === "node bench/run-f22-shutdown.js",
+    pkg.scripts && pkg.scripts["bench:f22"],
+  );
+  check(
+    "the ordinary npm test aggregate does not run the machine-exclusive F22 benchmark",
+    typeof pkg.scripts?.test === "string" && !pkg.scripts.test.includes("bench:f22"),
+    pkg.scripts && pkg.scripts.test,
+  );
+  const buildDoc = read("docs/BUILD.md");
+  check(
+    "BUILD documents the separate machine-exclusive F22 benchmark command",
+    /npm run bench:f22/.test(buildDoc) &&
+      /not[^a-z]+part[^a-z]+of[^a-z]+`npm test`/i.test(buildDoc),
+  );
+  // A GATE THAT PRINTS ONLY ROUNDED NUMBERS AND THEN DELETES ITS WORKING
+  // DIRECTORY LEAVES NOTHING TO FILE. That really happened: a run produced a
+  // reportable result and the raw samples were gone by the time anyone went
+  // looking, because the transcript carried three-decimal figures and the
+  // result files had been swept. Both halves are asserted - the greppable
+  // machine-readable line that always appears, and the opt-in file written
+  // atomically to a caller-chosen path - because either alone can rot.
+  {
+    const runnerPath = path.join(ROOT, "bench", "run-f22-shutdown.js");
+    const runner = fs.existsSync(runnerPath)
+      ? fs.readFileSync(runnerPath, "utf8")
+      : "";
+    check(
+      "the F22 benchmark runner is present for the evidence assertions below",
+      runner.length > 0,
+      `${runnerPath} is ${runner.length} bytes - zero would make the two checks below vacuous`,
+    );
+    check(
+      "the F22 benchmark always emits a machine-readable summary carrying the raw p95",
+      /F22-RESULT-JSON/.test(runner) && /rawP95/.test(runner),
+      "bench/run-f22-shutdown.js must print an F22-RESULT-JSON line whose summary " +
+        "includes rawP95; a rounded figure is not the number the gate judged",
+    );
+    check(
+      "the F22 benchmark can publish its raw samples durably and atomically",
+      /F22_RESULT_FILE/.test(runner) &&
+        /\.tmp-/.test(runner) &&
+        /renameSync/.test(runner) &&
+        /F22_RESULT_FILE/.test(buildDoc),
+      "bench/run-f22-shutdown.js must honour F22_RESULT_FILE, write through a " +
+        "temporary and rename it into place, and docs/BUILD.md must say so",
+    );
+    // EXCLUSIVITY IS A CLAIM ABOUT PROCESSES, NOT ABOUT INTENTIONS. The lock
+    // says "no other benchmark is running on this machine"; removing it while a
+    // worker of this run is still alive makes that false for the NEXT run,
+    // which then measures a busy machine and reports the number as a gate
+    // result. So closure has to be awaited for real - not sampled from an exit
+    // code, and above all not waited for by blocking the very event loop the
+    // 'close' events arrive on, which is what Atomics.wait() did here.
+    check(
+      "the F22 benchmark awaits real worker closure instead of blocking its event loop",
+      !/Atomics\.wait/.test(runner) &&
+        /liveWorkers\s*=\s*new Map\(/.test(runner) &&
+        /markClosed\(\)/.test(runner) &&
+        // The wait is on the CHILD'S OWN close promise, and it is bounded at
+        // both stages of the escalation - not a poll of an exit code, which
+        // says the main process ended while its renderers may still hold the
+        // stdio this parent's exclusivity claim is about.
+        /await waitBounded\(closed, TERMINATION_GRACE_MS\)/.test(runner) &&
+        /return waitBounded\(closed, TERMINATION_KILL_MS\)/.test(runner) &&
+        /const outcomes = await Promise\.all\(/.test(runner) &&
+        /async function terminateLiveWorkers/.test(runner),
+      "bench/run-f22-shutdown.js must track a close promise per worker and await " +
+        "it with a bounded wait; Atomics.wait blocks the loop the close arrives on",
+    );
+    check(
+      "the F22 benchmark retains its lock and run directory when a worker cannot be proven closed",
+      /const closureProven = await terminateLiveWorkers\(\)/.test(runner) &&
+        /if \(!closureProven\)/.test(runner) &&
+        /quarantined/.test(runner) &&
+        // The quarantine branch returns BEFORE either release, so neither the
+        // run directory nor the lock can be removed over a survivor.
+        /if \(!closureProven\)[\s\S]*?return;[\s\S]*?rmSync\(runRoot/.test(runner) &&
+        /if \(!closureProven\)[\s\S]*?return;[\s\S]*?unlinkSync\(lockPath\)/.test(runner),
+      "bench/run-f22-shutdown.js must quarantine the lock and run directory rather " +
+        "than advertise exclusivity while a worker of the run is still alive",
+    );
+    check(
+      "the F22 benchmark finishes cleanup before any exit path terminates the parent",
+      !/releaseRunResources\(\);\s*\n\s*process\.exit/.test(runner) &&
+        /releaseRunResources\(\)\.then\(/.test(runner) &&
+        /await releaseRunResources\(\)/.test(runner),
+      "signal, uncaught-exception and unhandled-rejection paths must await the " +
+        "asynchronous release before process.exit, or they abandon live workers",
+    );
+    check(
+      "the F22 benchmark quarantines lock and run evidence when publication or cleanup fails",
+      (() => {
+        const publication = runner.indexOf("const publicationProven = publishResults();");
+        const publicationFailure = runner.indexOf("retained because required result publication failed");
+        const cleanup = runner.indexOf("let cleanupProven = false;");
+        const cleanupFailure = runner.indexOf("retained because required cleanup failed");
+        const unlock = runner.indexOf("fs.unlinkSync(lockPath)");
+        return (
+          publication >= 0 &&
+          publicationFailure > publication &&
+          cleanup > publicationFailure &&
+          cleanupFailure > cleanup &&
+          unlock > cleanupFailure &&
+          /if \(!publicationProven\) \{[\s\S]*?emitResultSummary\(\);[\s\S]*?return;/.test(runner) &&
+          /if \(!cleanupProven\) \{[\s\S]*?emitResultSummary\(\);[\s\S]*?return;/.test(runner)
+        );
+      })(),
+      "required result publication and run-directory cleanup must each return through " +
+        "quarantine before the exclusive lock can be unlinked",
+    );
+    const workerPath = path.join(ROOT, "bench", "bench-f22-shutdown.js");
+    const worker = fs.existsSync(workerPath)
+      ? fs.readFileSync(workerPath, "utf8")
+      : "";
+    check(
+      "the F22 lifecycle worker cannot survive a failed product-path termination",
+      worker.length > 0 &&
+        /did not terminate through the product path/.test(worker) &&
+        // Referenced, not unref'd: an unref'd backstop only fires when
+        // something else is already holding the loop open, which is exactly not
+        // guaranteed for the case it exists to cover.
+        !/watchdog\.unref/.test(worker) &&
+        /\}\)\.catch\(\(error\) => \{/.test(worker) &&
+        /app\.exit\(process\.exitCode \|\| 1\)/.test(worker),
+      "bench/bench-f22-shutdown.js must exit explicitly when the lifecycle quit " +
+        "does not complete and when its own teardown throws",
+    );
+    // A TIMED-OUT WORKER IS NOT A SLOW ROW, IT IS A CONTAMINATED MACHINE. The
+    // job that overran is still running somewhere; every measurement taken
+    // after it would be taken on a machine with two Electron trees on it, and
+    // reported as a gate result. Scheduling has to stop at the timeout, not
+    // continue with one bad row recorded.
+    check(
+      "the F22 benchmark stops scheduling the moment a worker overruns its budget",
+      /let matrixAborted = null/.test(runner) &&
+        /class MatrixAborted extends Error/.test(runner) &&
+        /async function runJob\(job\)/.test(runner) &&
+        /if \(matrixAborted\) \{[\s\S]*?throw new MatrixAborted\(/.test(runner) &&
+        /child\.timedOut \|\| child\.closureProven === false/.test(runner) &&
+        // Every launch goes through the gate: a loop that still called
+        // runWorker directly would start the next Electron tree anyway.
+        /validateResult\(job, await runJob\(job\)\)/.test(runner) &&
+        !/validateResult\(job, await runWorker\(job\)\)/.test(runner),
+      "bench/run-f22-shutdown.js must route every job through runJob() and refuse " +
+        "to launch another worker once one has timed out or could not be closed",
+    );
+    check(
+      "the F22 benchmark terminates a timed-out worker exactly once and awaits its close",
+      /const terminations = new Map\(\)/.test(runner) &&
+        /function terminateWorker\(child\)/.test(runner) &&
+        /const existing = terminations\.get\(child\);/.test(runner) &&
+        /if \(existing\) return existing;/.test(runner) &&
+        // The end-of-run sweep delegates rather than running a second ladder.
+        /map\(\(child\) => terminateWorker\(child\)\)/.test(runner) &&
+        // The overrun is latched at the instant it happens, so a worker that
+        // closes during its own termination cannot erase it.
+        /budgetExceeded = true;/.test(runner) &&
+        /timedOut: budgetExceeded/.test(runner) &&
+        // The old behaviour: settle after a fixed grace period whether or not
+        // the tree closed, and carry on with the next job.
+        !/SIGKILL-TIMEOUT/.test(runner),
+      "bench/run-f22-shutdown.js must terminate the exact timed-out child through " +
+        "one shared escalation and settle on its observed close",
+    );
+    // Source checks establish that the fail-closed branches are present, but
+    // cannot prove that an EventEmitter error really leaves the run blocked
+    // until close. Load an isolated copy with a deterministic child-process
+    // double so this exercises the actual error listeners, termination ladder,
+    // live-worker registration, and runJob scheduling gate without launching
+    // Electron or a benchmark matrix.
+    const loadLifecycleProbe = () => {
+      const childProcess = require("child_process");
+      const realSpawn = childProcess.spawn;
+      const runnerModule = require.resolve(runnerPath);
+      const cachedRunner = require.cache[runnerModule];
+      const children = [];
+      childProcess.spawn = () => {
+        const child = new EventEmitter();
+        child.pid = 4242 + children.length;
+        child.exitCode = null;
+        child.signalCode = null;
+        child.stdout = new EventEmitter();
+        child.stderr = new EventEmitter();
+        child.killCalls = 0;
+        child.kill = () => {
+          child.killCalls++;
+          return true;
+        };
+        children.push(child);
+        return child;
+      };
+      delete require.cache[runnerModule];
+      let runner;
+      try {
+        runner = require(runnerPath);
+      } finally {
+        childProcess.spawn = realSpawn;
+        if (cachedRunner) require.cache[runnerModule] = cachedRunner;
+        else delete require.cache[runnerModule];
+      }
+      return { runner, children };
+    };
+    const proveLifecycleErrorFailsClosed = async (source) => {
+      const { runner, children } = loadLifecycleProbe();
+      const first = runner.runJob({
+        id: `controlled-${source}`,
+        mode: "controlled",
+        jobFile: "controlled-job.json",
+      });
+      let firstSettled = false;
+      first.then(
+        () => { firstSettled = true; },
+        () => { firstSettled = true; },
+      );
+      const child = children[0];
+      const emitter = source === "child process" ? child : child[source];
+      const error = new Error(`controlled ${source} error`);
+      error.code = "EIO";
+      emitter.emit("error", error);
+      let secondErrorCaught = null;
+      try {
+        emitter.emit("error", new Error(`second controlled ${source} error before close`));
+      } catch (caught) {
+        secondErrorCaught = caught;
+      }
+      await new Promise((resolve) => setImmediate(resolve));
+      const blockedUntilClose =
+        !firstSettled && child.killCalls === 1 && runner.liveWorkers.has(child);
+      child.exitCode = 1;
+      child.emit("close", 1, null);
+      const outcome = await first;
+      let lateErrorCaught = null;
+      try {
+        emitter.emit("error", new Error(`late controlled ${source} error after close`));
+      } catch (caught) {
+        lateErrorCaught = caught;
+      }
+      let refused = null;
+      try {
+        await runner.runJob({
+          id: `after-${source}`,
+          mode: "controlled",
+          jobFile: "controlled-job.json",
+        });
+      } catch (caught) {
+        refused = caught;
+      }
+      return {
+        blockedUntilClose,
+        outcome,
+        firstError: error,
+        secondErrorCaught,
+        lateErrorCaught,
+        workerClosed: !runner.liveWorkers.has(child),
+        refused,
+        spawned: children.length,
+      };
+    };
+    for (const source of ["child process", "stdout", "stderr"]) {
+      const probe = await proveLifecycleErrorFailsClosed(source);
+      check(
+        `the F22 benchmark fail-closes a ${source} error until the actual child close`,
+        probe.blockedUntilClose &&
+          probe.outcome.closureProven === true &&
+          probe.outcome.firstWorkerError === probe.firstError &&
+          probe.outcome.workerErrors?.[0]?.startsWith(`${source} error:`) &&
+          probe.secondErrorCaught === null &&
+          probe.lateErrorCaught === null &&
+          probe.workerClosed &&
+          /no job may start after:/.test(probe.refused?.message || "") &&
+          probe.spawned === 1,
+        `blockedUntilClose=${probe.blockedUntilClose} closureProven=${probe.outcome.closureProven} ` +
+          `firstErrorPreserved=${probe.outcome.firstWorkerError === probe.firstError} ` +
+          `workerErrors=${JSON.stringify(probe.outcome.workerErrors)} secondErrorCaught=${probe.secondErrorCaught} ` +
+          `lateErrorCaught=${probe.lateErrorCaught} workerClosed=${probe.workerClosed} ` +
+          `refused=${probe.refused && probe.refused.message} spawned=${probe.spawned}`,
+      );
+    }
+    check(
+      "the F22 error paths publish failure detail and preserve the lock quarantine on unproven closure",
+      /workerErrors=\$\{child\.workerErrors\.join/.test(runner) &&
+        /child\.timedOut \|\| child\.closureProven === false \|\| child\.workerErrors\?\.length/.test(runner) &&
+        /if \(!closureProven\)[\s\S]*?run resources quarantined[\s\S]*?publishResults\(\)[\s\S]*?return;/.test(runner) &&
+        /if \(require\.main === module\)/.test(runner),
+      "worker and stream errors must be published, abort the matrix, and retain lock/run evidence " +
+        "when termination cannot prove closure; lifecycle probes must not launch the real matrix",
+    );
+    // AN ACTIVE-EDITOR NUMBER HAS TO HAVE COME FROM THE ACTIVE-EDITOR BRANCH.
+    // The edit-* observations put a 2 MB buffer in the textarea and let the
+    // shutdown fold reconcile it; a fold that quietly took the view-mode path
+    // instead produces a plausible number that measures the wrong thing. The
+    // buffer ends in a character no sample ever writes to the cache, so a cache
+    // that ends in it can only have been adopted from the editor - and the
+    // parent requires that witness on EVERY sample.
+    check(
+      "the F22 benchmark proves its active-editor samples really reconciled the editor",
+      /editReconciled/.test(runner) &&
+        /reconciled\.samples !== EXPECTED_SAMPLES\[job\.mode\]/.test(runner) &&
+        /setup\.editorRendered !== false/.test(runner) &&
+        /editReconciled/.test(worker) &&
+        /did not reconcile the editor into the cache/.test(worker) &&
+        // Written once, in setup - not per sample. Re-assigning two million
+        // characters into a laid-out textarea twenty times is what made the
+        // renderer miss its liveness pings and fail the run's health check.
+        /THE 2 MB BUFFER GOES IN ONCE/.test(worker),
+      "bench must witness the editor-to-cache reconciliation on every edit-* sample " +
+        "and must not rewrite the 2MB textarea inside the sample loop",
+    );
+  }
+  // THE READ-ONLY AUDIT MUST WORK ON A CLEAN CHECKOUT. A fresh runner has no
+  // `dist/app.asar`, so every built-ASAR oracle announces itself SKIPPED. Until
+  // this distinction existed, `--expects` read those names as dead regexes and
+  // failed - which meant the one audit that costs no mutation could not be run
+  // without first producing a release build. A skipped name is live but
+  // unobserved, and the audit has to say exactly that: not an orphan, and not a
+  // proof either.
+  {
+    const harness = read("scripts/prove-table-fixes.js");
+    check(
+      "the revert audit distinguishes a skipped assertion from a dead regex",
+      /skippedMatch/.test(harness) &&
+        /SKIPPED\s+\$\{label\}|SKIPPED  /.test(harness) &&
+        /proves nothing here/.test(harness) &&
+        // Still an orphan when it matches nothing at all: the escape hatch is
+        // the specific skipped NAME, never "some block skipped in this run".
+        /ORPHANED \$\{label\}/.test(harness),
+      "scripts/prove-table-fixes.js must report a regex that names a SKIPPED " +
+        "assertion separately from one that names nothing, without counting " +
+        "either as proven",
+    );
+    // THE OTHER WAY THAT AUDIT CAN LIE, and the one that actually happened: a
+    // suite that crashed part-way prints a TRUNCATED list of assertion names,
+    // and every name it never reached then looks like a dead regex. Measured -
+    // one harness exception turned a 205-name catalogue into 177 and produced
+    // 255 confident, wrong orphan findings. "The suite did not finish" and
+    // "this regex is dead" are different results and only one of them is about
+    // the records.
+    check(
+      "the revert cataloguer refuses to convict a regex on a suite that did not finish",
+      /function runSuiteChecked/.test(harness) &&
+        /SUITE UNUSABLE/.test(harness) &&
+        // The health signals themselves: a non-zero exit, and a missing
+        // `=== N/M passed ===` footer, which is what a crashed run leaves out.
+        /if \(exitCode !== 0\) reasons\.push/.test(harness) &&
+        /the run did not finish/.test(harness) &&
+        // AND THE GATE IS ACTUALLY APPLIED. A health check that is computed and
+        // then ignored is the same as no health check at all. Anchored to a
+        // whole source line: this file also CONTAINS the revert record that
+        // perturbs that line, and a substring match would happily find the
+        // record's own quoted copy of it and report the control present after
+        // it had been removed.
+        /^ {4}if \(!run\.healthy\) \{\r?$/m.test(harness) &&
+        /unusableSuites/.test(harness) &&
+        // The records under an unusable suite are counted as unaudited rather
+        // than classified, and the exit code is distinct from "found orphans".
+        /unaudited \+=/.test(harness) &&
+        /process\.exit\(2\)/.test(harness) &&
+        // And true orphans are still reported: the escape hatch is the suite's
+        // health, never the regex's convenience.
+        /ORPHANED \$\{label\}/.test(harness),
+      "scripts/prove-table-fixes.js must detect a suite that did not run to " +
+        "completion and report its regexes as unaudited rather than as orphans",
+    );
+  }
   check("package.json declares build.files", Array.isArray(files) && files.length > 0);
   if (!Array.isArray(files)) {
     console.log("\nCannot continue without build.files.\n");
@@ -173,6 +540,35 @@ function main() {
 
   // 1. Preload scripts referenced from the main process.
   const mainJs = read("src/main.js");
+  // MacUpdater has no BaseUpdater-style, attributable synchronous
+  // before-quit-for-update/app.quit pair. This platform path cannot be driven
+  // live from the Windows/Linux packaging harness, so pin its fail-closed
+  // contract structurally without inventing that lifecycle.
+  const macExplicitInstallStart = mainJs.indexOf(
+    'if (process.platform === "darwin") {',
+  );
+  const macExplicitInstallEnd = mainJs.indexOf(
+    "\n  // BaseUpdater.install()",
+    macExplicitInstallStart,
+  );
+  const macExplicitInstallBlock =
+    macExplicitInstallStart >= 0 && macExplicitInstallEnd > macExplicitInstallStart
+      ? mainJs.slice(macExplicitInstallStart, macExplicitInstallEnd)
+      : "";
+  check(
+    "macOS explicit update installation fails closed instead of assuming a BaseUpdater quit pair",
+    /Explicit update installation is unavailable on macOS/.test(
+      macExplicitInstallBlock,
+    ) &&
+      /status:\s*"error"/.test(macExplicitInstallBlock) &&
+      /replayAbsorbedUserShutdownAfterUpdaterCancel\(\s*"unsupported-macos-explicit-install"/.test(
+        macExplicitInstallBlock,
+      ) &&
+      /return false;/.test(macExplicitInstallBlock) &&
+      !/watchUpdaterInstallCommit|quitAndInstall/.test(macExplicitInstallBlock),
+    "the macOS explicit-install branch must report an error, replay any absorbed user " +
+      "intent, return false, and never claim BaseUpdater's paired quit lifecycle",
+  );
   const preloadRe = /preload:\s*path\.join\(\s*__dirname\s*,\s*["'`]([^"'`]+)["'`]\s*\)/g;
   let m;
   while ((m = preloadRe.exec(mainJs))) addRef(SRC, m[1]);
@@ -1424,6 +1820,66 @@ function main() {
         : `${uncovered.length} of ${declared.size} never run in CI: ${uncovered.join(", ")} - ` +
           "these are the suites that drive real windows, so a regression in " +
           "them would reach a release unopposed",
+    );
+  }
+
+  // The revert harness has TWO read-only audits and one destructive mode, and
+  // CI ran only the first audit. `--anchors` proves the text a record perturbs
+  // still exists; `--expects` proves the assertion NAMES it pairs with still
+  // exist. Only the second can catch a renamed assertion, and an orphaned
+  // `mustPass` is unfalsifiable by construction - it can never match, so the
+  // COLLATERAL guard can never fire and the record reports PROVEN with its
+  // guard gone. Both audits belong in CI; the destructive mode - which rewrites
+  // the working tree and is machine-exclusive - must never be run there, and a
+  // workflow that started doing so would corrupt whatever else that runner was
+  // building. Asserted in both directions for that reason.
+  //
+  // NOTE FOR EDITORS: these locals are deliberately not named wfDir/wfFiles or
+  // ciWorkflowDir/ciWorkflowFiles - two identical declarations in this file
+  // make an existing revert record's anchor ambiguous. See R488 above.
+  {
+    const auditWorkflowDir = path.join(ROOT, ".github", "workflows");
+    const auditWorkflowFiles = fs.existsSync(auditWorkflowDir)
+      ? fs.readdirSync(auditWorkflowDir).filter((f) => /\.ya?ml$/i.test(f))
+      : [];
+    const harnessRuns = [];
+    for (const f of auditWorkflowFiles) {
+      const text = fs.readFileSync(path.join(auditWorkflowDir, f), "utf8");
+      for (const m of text.matchAll(
+        /run:\s*(?:npx\s+)?node\s+scripts\/prove-table-fixes\.js([^\r\n]*)/g,
+      )) {
+        harnessRuns.push({ file: f, flags: m[1].trim() });
+      }
+    }
+    // Positive control for both assertions below: they are counts derived by
+    // regex, and an empty set agrees with an empty set. If this parse ever
+    // stopped matching, "no mutating run" would pass having read nothing.
+    check(
+      "the workflows invoke the revert harness in a form this assertion can read",
+      auditWorkflowFiles.length > 0 && harnessRuns.length > 0,
+      `${auditWorkflowFiles.length} workflow file(s), ${harnessRuns.length} ` +
+        `prove-table-fixes.js invocation(s) parsed: ` +
+        JSON.stringify(harnessRuns),
+    );
+    check(
+      "CI audits every expect/mustPass regex, not just the anchors",
+      harnessRuns.some((run) => /(^|\s)--expects(\s|$)/.test(run.flags)) &&
+        harnessRuns.some((run) => /(^|\s)--anchors(\s|$)/.test(run.flags)),
+      `revert-harness invocations: ${JSON.stringify(harnessRuns)} - both ` +
+        "--anchors and --expects are required; anchors alone cannot see a " +
+        "renamed assertion, and an orphaned mustPass reports PROVEN forever",
+    );
+    const mutating = harnessRuns.filter(
+      (run) => !/(^|\s)--(anchors|expects)(\s|$)/.test(run.flags),
+    );
+    check(
+      "no workflow runs the revert harness in its tree-rewriting mode",
+      mutating.length === 0,
+      mutating.length === 0
+        ? `${harnessRuns.length} invocation(s), all read-only`
+        : `${mutating.length} mutating invocation(s): ${JSON.stringify(mutating)} - ` +
+          "the harness rewrites the working tree of the checkout it runs in, so " +
+          "everything built afterwards in that job would be built from reverted source",
     );
   }
 
@@ -4456,4 +4912,7 @@ function main() {
   process.exit(fail === 0 ? 0 : 1);
 }
 
-main();
+main().catch((error) => {
+  console.error(`FAIL  packaging suite exception  -> ${error && error.stack ? error.stack : error}`);
+  process.exit(1);
+});
