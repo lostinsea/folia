@@ -8119,31 +8119,32 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       await createActiveTab(danglingLink, "F22_OLD_TARGET_BYTES");
       fs.unlinkSync(originalTarget);
       const symlinkResult = await exec(`
-        new Promise((resolve) => {
+        (async () => {
           const ipc = require("electron").ipcRenderer;
           const expectedPath = ${JSON.stringify(danglingLink)};
-          // This is a deliberately controlled save failure. Keep the browser
-          // alert stubbed so it cannot turn the assertion into a native modal.
           const originalAlert = window.alert;
-          const finish = (result) => {
+          let timer = null;
+          let onResult = null;
+          try {
+            window.alert = () => {};
+            window.originalMarkdown = "F22_ATTEMPTED_DANGLING_SAVE";
+            return await new Promise((resolve) => {
+              timer = setTimeout(() => resolve({ timedOut: true }), 5000);
+              onResult = (_event, data) => {
+                if (!data || data.path !== expectedPath) return;
+                resolve({ timedOut: false, data });
+              };
+              ipc.on("save-markdown-result", onResult);
+              document.getElementById("saveButton").click();
+            });
+          } catch (error) {
+            return { error: String(error && error.stack ? error.stack : error) };
+          } finally {
+            if (timer) clearTimeout(timer);
+            if (onResult) ipc.removeListener("save-markdown-result", onResult);
             window.alert = originalAlert;
-            resolve(result);
-          };
-          const timer = setTimeout(() => {
-            ipc.removeListener("save-markdown-result", onResult);
-            finish({ timedOut: true });
-          }, 5000);
-          const onResult = (_event, data) => {
-            if (!data || data.path !== expectedPath) return;
-            clearTimeout(timer);
-            ipc.removeListener("save-markdown-result", onResult);
-            finish({ timedOut: false, data });
-          };
-          window.alert = () => {};
-          ipc.on("save-markdown-result", onResult);
-          window.originalMarkdown = "F22_ATTEMPTED_DANGLING_SAVE";
-          document.getElementById("saveButton").click();
-        })
+          }
+        })()
       `);
       let linkStats = null;
       let linkTarget = null;
@@ -8240,14 +8241,19 @@ async function runF22SaveAndReloadScenarios(win, exec) {
           identity.tabId === ${tab.id} &&
           identity.documentGeneration === owner.owner.documentGeneration &&
           identity.pathKey === owner.owner.pathKey &&
+          Number.isSafeInteger(identity.selectionGeneration) &&
+          identity.selectionGeneration > 0 &&
+          identity.selectionGeneration === owner.owner.selectionGeneration &&
           prepared.content === ${JSON.stringify(content)}
         );
         return {
           matchesActiveDocument,
+          selectionGeneration: matchesActiveDocument
+            ? identity.selectionGeneration
+            : null,
           saveRequest: matchesActiveDocument
             ? {
                 ...identity,
-                selectionGeneration: owner.owner.selectionGeneration,
               }
             : null,
         };
@@ -8265,6 +8271,8 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     typeof save.saveRequest.pathKey === "string" &&
     Number.isSafeInteger(save.saveRequest.selectionGeneration) &&
     save.saveRequest.selectionGeneration > 0 &&
+    save.saveRequest.selectionGeneration ===
+      save.activeDocument.selectionGeneration &&
     save.saveRequest.requestId === save.requestId
   );
   const requestSave = async (filePath, content, baselineContent = content) => {
@@ -8685,9 +8693,19 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   let secondHeld;
   let stillOpenWithBothPending;
   let stillOpenAfterFirst;
+  let pendingCloseAlerts = null;
   const pendingSaveRig = shutdownRig(win);
   let pendingSaveDeferral;
   try {
+    await exec(`
+      (() => {
+        const originalAlert = window.alert;
+        const alerts = [];
+        window.__f22PendingCloseAlert = { originalAlert, alerts };
+        window.alert = message => alerts.push(String(message));
+        return null;
+      })()
+    `);
     // First prove the shutdown protocol parks its question while the renderer
     // reports a real pending save. The result is deliberately held above, so
     // this covers the save-queue deferral without replacing any fs method.
@@ -8752,6 +8770,19 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     pendingSaveRig.restore();
     __shutdown.reset();
     restoreSaveSend();
+    try {
+      pendingCloseAlerts = await exec(`
+        (() => {
+          const probe = window.__f22PendingCloseAlert;
+          if (!probe) return null;
+          window.alert = probe.originalAlert;
+          delete window.__f22PendingCloseAlert;
+          return probe.alerts;
+        })()
+      `);
+    } catch {
+      pendingCloseAlerts = null;
+    }
   }
   check(
     "F22 shutdown defers its approval until a pending save settles instead of prompting concurrently",
@@ -8760,8 +8791,10 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       pendingSaveDeferral.deferred === true &&
       pendingSaveDeferral.resumed === true &&
       pendingSaveDeferral.prevented === true &&
-      pendingSaveDeferral.dialogs === 0,
-    JSON.stringify(pendingSaveDeferral),
+      pendingSaveDeferral.dialogs === 0 &&
+      Array.isArray(pendingCloseAlerts) &&
+      pendingCloseAlerts.length === 0,
+    JSON.stringify({ pendingSaveDeferral, pendingCloseAlerts }),
   );
   const diskAfterClose = fs.readFileSync(closeFile, "utf8");
   const closedAfterBoth = await exec(
@@ -8810,18 +8843,25 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   const crlfUndoRecorded = await exec(`
     (() => {
       const editor = window.markdownEditor;
-      // Programmatic textarea assignment does not create the browser's native
-      // undo record. Seed the application's real undo stack with the pre-edit
-      // bytes, exactly as renderer-side edit commands do before replacing text.
-      historyPush(editor.value);
-      const undoSizeAfterBaseline = window.getFileOpenDiagnostics().undoSize;
-      editor.value = "# F22 CRLF\\n\\nTEMPORARY_EDIT\\n";
-      editor.dispatchEvent(new Event("input", { bubbles: true }));
+      const original = editor.value;
+      const replacementStart = original.indexOf("ORIGINAL");
+      editor.setRangeText(
+        "TEMPORARY_EDIT",
+        replacementStart,
+        replacementStart + "ORIGINAL".length,
+        "end",
+      );
+      editor.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        inputType: "insertText",
+        data: "TEMPORARY_EDIT",
+      }));
+      const undoSizeAfterEdit = window.getFileOpenDiagnostics().undoSize;
       document.dispatchEvent(new KeyboardEvent("keydown", {
         key: "z", ctrlKey: true, bubbles: true, cancelable: true,
       }));
       return {
-        undoSizeAfterBaseline,
+        undoSizeAfterEdit,
         editor: editor.value,
       };
     })()
@@ -8852,36 +8892,63 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     })()
   `);
   const crlfSave = await exec(`
-    new Promise((resolve) => {
+    (async () => {
       const ipc = require("electron").ipcRenderer;
       const filePath = ${JSON.stringify(crlfEditFile)};
       const oldAlert = window.alert;
       const originalSend = ipc.send;
       let savePayload = null;
-      ipc.send = function (channel, ...args) {
-        if (channel === "save-markdown-file") savePayload = args[0];
-        return originalSend.call(this, channel, ...args);
-      };
-      const timer = setTimeout(() => {
-        ipc.removeListener("save-markdown-result", onResult);
-        window.alert = oldAlert;
+      let selectedOwner = null;
+      let ownerAtSave = null;
+      let timer = null;
+      let onResult = null;
+      try {
+        ipc.send = function (channel, ...args) {
+          const payload = args[0];
+          if (
+            (channel === "set-active-file" || channel === "start-file-watching") &&
+            payload &&
+            payload.filePath === filePath &&
+            payload.owner
+          ) {
+            selectedOwner = payload.owner;
+          }
+          if (channel === "save-markdown-file") {
+            savePayload = payload;
+            ownerAtSave = selectedOwner;
+          }
+          return originalSend.call(this, channel, ...args);
+        };
+        window.alert = () => {};
+        window.CustomTabs.switchToTab(${crlfOtherTab.id});
+        window.CustomTabs.switchToTab(${crlfTab.id});
+        window.markdownEditor.value = "# F22 CRLF\\n\\nPERSISTED_EDIT\\n";
+        window.markdownEditor.dispatchEvent(new Event("input", { bubbles: true }));
+        return await new Promise((resolve) => {
+          timer = setTimeout(
+            () => resolve({ timedOut: true, savePayload, ownerAtSave }),
+            5000,
+          );
+          onResult = (_event, result) => {
+            if (!result || result.path !== filePath) return;
+            resolve({ timedOut: false, result, savePayload, ownerAtSave });
+          };
+          ipc.on("save-markdown-result", onResult);
+          document.getElementById("saveButton").click();
+        });
+      } catch (error) {
+        return {
+          error: String(error && error.stack ? error.stack : error),
+          savePayload,
+          ownerAtSave,
+        };
+      } finally {
+        if (timer) clearTimeout(timer);
+        if (onResult) ipc.removeListener("save-markdown-result", onResult);
         ipc.send = originalSend;
-        resolve({ timedOut: true, savePayload });
-      }, 5000);
-      const onResult = (_event, result) => {
-        if (!result || result.path !== filePath) return;
-        clearTimeout(timer);
-        ipc.removeListener("save-markdown-result", onResult);
         window.alert = oldAlert;
-        ipc.send = originalSend;
-        resolve({ timedOut: false, result, savePayload });
-      };
-      window.alert = () => {};
-      window.markdownEditor.value = "# F22 CRLF\\n\\nPERSISTED_EDIT\\n";
-      window.markdownEditor.dispatchEvent(new Event("input", { bubbles: true }));
-      ipc.on("save-markdown-result", onResult);
-      document.getElementById("saveButton").click();
-    })
+      }
+    })()
   `);
   const crlfDiskBytes = fs.readFileSync(crlfEditFile, "utf8");
   const crlfAfterEditSave = await exec(`
@@ -8909,7 +8976,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   check(
     "F22 edit-mode CRLF undo survives tab cache folding without becoming dirty",
     crlfEnteredEditMode === true &&
-      crlfUndoRecorded.undoSizeAfterBaseline === crlfUndoBaseline + 1 &&
+      crlfUndoRecorded.undoSizeAfterEdit === crlfUndoBaseline + 1 &&
       crlfUndoRecorded.editor === crlfOriginal.replace(/\r\n/g, "\n") &&
       crlfUndoState.semanticOriginal === true &&
       crlfAfterRoundTrip.content === crlfOriginal &&
@@ -8927,11 +8994,48 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       crlfSave.savePayload &&
       crlfSave.savePayload.filePath === crlfEditFile &&
       crlfSave.savePayload.content === crlfSaved &&
+      crlfSave.savePayload.saveRequest &&
+      crlfSave.ownerAtSave &&
+      crlfSave.savePayload.saveRequest.pageSession ===
+        crlfSave.ownerAtSave.pageSession &&
+      crlfSave.savePayload.saveRequest.tabId === crlfTab.id &&
+      crlfSave.savePayload.saveRequest.documentGeneration ===
+        crlfSave.ownerAtSave.documentGeneration &&
+      crlfSave.savePayload.saveRequest.pathKey ===
+        crlfSave.ownerAtSave.pathKey &&
+      Number.isSafeInteger(crlfSave.savePayload.saveRequest.selectionGeneration) &&
+      crlfSave.savePayload.saveRequest.selectionGeneration > 0 &&
+      crlfSave.savePayload.saveRequest.selectionGeneration ===
+        crlfSave.ownerAtSave.selectionGeneration &&
       crlfDiskBytes === crlfSaved &&
       !/(^|[^\r])\n/.test(crlfDiskBytes) &&
       crlfAfterEditSave.content === crlfSaved &&
       crlfAfterEditSave.original === crlfSaved &&
       crlfAfterEditSave.dirty === false,
+    crlfEditDetail,
+  );
+  check(
+    "F22 real Save carries complete active selection identity",
+    crlfSave &&
+      crlfSave.timedOut === false &&
+      crlfSave.savePayload &&
+      crlfSave.savePayload.saveRequest &&
+      crlfSave.ownerAtSave &&
+      typeof crlfSave.savePayload.saveRequest.pageSession === "string" &&
+      Number.isSafeInteger(crlfSave.savePayload.saveRequest.tabId) &&
+      Number.isSafeInteger(crlfSave.savePayload.saveRequest.documentGeneration) &&
+      typeof crlfSave.savePayload.saveRequest.pathKey === "string" &&
+      Number.isSafeInteger(crlfSave.savePayload.saveRequest.selectionGeneration) &&
+      crlfSave.savePayload.saveRequest.selectionGeneration > 0 &&
+      crlfSave.savePayload.saveRequest.pageSession ===
+        crlfSave.ownerAtSave.pageSession &&
+      crlfSave.savePayload.saveRequest.tabId === crlfSave.ownerAtSave.tabId &&
+      crlfSave.savePayload.saveRequest.documentGeneration ===
+        crlfSave.ownerAtSave.documentGeneration &&
+      crlfSave.savePayload.saveRequest.pathKey ===
+        crlfSave.ownerAtSave.pathKey &&
+      crlfSave.savePayload.saveRequest.selectionGeneration ===
+        crlfSave.ownerAtSave.selectionGeneration,
     crlfEditDetail,
   );
 
@@ -8942,27 +9046,20 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   // document rather than the stale textarea.
   const crlfViewSaved = "# F22 CRLF\r\n\r\nVIEW_MODE_EDIT\r\n";
   const crlfViewSave = await exec(`
-    new Promise((resolve) => {
+    (async () => {
       const ipc = require("electron").ipcRenderer;
       const filePath = ${JSON.stringify(crlfEditFile)};
       const originalSend = ipc.send;
+      const originalAlert = window.alert;
       let savePayload = null;
-      ipc.send = function (channel, ...args) {
-        if (channel === "save-markdown-file") savePayload = args[0];
-        return originalSend.call(this, channel, ...args);
-      };
-      const finish = (value) => {
-        ipc.removeListener("save-markdown-result", onResult);
-        ipc.send = originalSend;
-        resolve(value);
-      };
-      const timer = setTimeout(() => finish({ timedOut: true, savePayload }), 5000);
-      const onResult = (_event, result) => {
-        if (!result || result.path !== filePath) return;
-        clearTimeout(timer);
-        finish({ timedOut: false, result, savePayload });
-      };
+      let timer = null;
+      let onResult = null;
       try {
+        ipc.send = function (channel, ...args) {
+          if (channel === "save-markdown-file") savePayload = args[0];
+          return originalSend.call(this, channel, ...args);
+        };
+        window.alert = () => {};
         if (window.CustomTabs.__inEditMode()) {
           toggleEditBtn.click();
         }
@@ -8970,13 +9067,24 @@ async function runF22SaveAndReloadScenarios(win, exec) {
         window.markdownEditor.value = ${JSON.stringify(crlfViewSaved.replace(/\r\n/g, "\n"))};
         window.CustomTabs.switchToTab(${crlfOtherTab.id});
         window.CustomTabs.switchToTab(${crlfTab.id});
-        ipc.on("save-markdown-result", onResult);
-        saveMarkdownFile();
+        return await new Promise((resolve) => {
+          timer = setTimeout(() => resolve({ timedOut: true, savePayload }), 5000);
+          onResult = (_event, result) => {
+            if (!result || result.path !== filePath) return;
+            resolve({ timedOut: false, result, savePayload });
+          };
+          ipc.on("save-markdown-result", onResult);
+          saveMarkdownFile();
+        });
       } catch (error) {
-        clearTimeout(timer);
-        finish({ error: String(error && error.stack ? error.stack : error), savePayload });
+        return { error: String(error && error.stack ? error.stack : error), savePayload };
+      } finally {
+        if (timer) clearTimeout(timer);
+        if (onResult) ipc.removeListener("save-markdown-result", onResult);
+        ipc.send = originalSend;
+        window.alert = originalAlert;
       }
-    })
+    })()
   `);
   const crlfViewDiskBytes = fs.readFileSync(crlfEditFile, "utf8");
   const crlfAfterViewSave = await exec(`
@@ -9035,36 +9143,24 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     mixedNewlineFile,
     mixedNewlineOriginal,
   );
-  await exec(
-    `window.CustomTabs.createTab(${JSON.stringify(mixedNewlineOtherFile)}, "F22_MIXED_NEWLINE_OTHER\\n", { activate: false }); null;`,
+  const mixedNewlineOtherTab = await exec(
+    `window.CustomTabs.createTab(${JSON.stringify(mixedNewlineOtherFile)}, "F22_MIXED_NEWLINE_OTHER\\n", { activate: false })`,
   );
   const mixedNewlineSave = await exec(`
-    new Promise((resolve) => {
+    (async () => {
       const ipc = require("electron").ipcRenderer;
       const filePath = ${JSON.stringify(mixedNewlineFile)};
       const originalSend = ipc.send;
       const originalAlert = window.alert;
       let savePayload = null;
-      ipc.send = function (channel, ...args) {
-        if (channel === "save-markdown-file") savePayload = args[0];
-        return originalSend.call(this, channel, ...args);
-      };
-      const finish = (value) => {
-        ipc.removeListener("save-markdown-result", onResult);
-        ipc.send = originalSend;
-        window.alert = originalAlert;
-        resolve(value);
-      };
-      const timer = setTimeout(
-        () => finish({ timedOut: true, savePayload }),
-        5000,
-      );
-      const onResult = (_event, result) => {
-        if (!result || result.path !== filePath) return;
-        clearTimeout(timer);
-        finish({ timedOut: false, result, savePayload });
-      };
+      let timer = null;
+      let onResult = null;
       try {
+        ipc.send = function (channel, ...args) {
+          if (channel === "save-markdown-file") savePayload = args[0];
+          return originalSend.call(this, channel, ...args);
+        };
+        window.alert = () => {};
         if (!window.CustomTabs.__inEditMode()) toggleEditBtn.click();
         const editor = window.markdownEditor;
         editor.setRangeText("A", 0, 1, "end");
@@ -9072,16 +9168,32 @@ async function runF22SaveAndReloadScenarios(win, exec) {
         const d = editor.value.indexOf("\\nd") + 1;
         editor.setRangeText("D", d, d + 1, "end");
         editor.dispatchEvent(new Event("input", { bubbles: true }));
-        ipc.on("save-markdown-result", onResult);
-        document.getElementById("saveButton").click();
+        window.CustomTabs.switchToTab(${mixedNewlineOtherTab.id});
+        window.CustomTabs.switchToTab(${mixedNewlineTab.id});
+        return await new Promise((resolve) => {
+          timer = setTimeout(
+            () => resolve({ timedOut: true, savePayload }),
+            5000,
+          );
+          onResult = (_event, result) => {
+            if (!result || result.path !== filePath) return;
+            resolve({ timedOut: false, result, savePayload });
+          };
+          ipc.on("save-markdown-result", onResult);
+          document.getElementById("saveButton").click();
+        });
       } catch (error) {
-        clearTimeout(timer);
-        finish({
+        return {
           error: String(error && error.stack ? error.stack : error),
           savePayload,
-        });
+        };
+      } finally {
+        if (timer) clearTimeout(timer);
+        if (onResult) ipc.removeListener("save-markdown-result", onResult);
+        ipc.send = originalSend;
+        window.alert = originalAlert;
       }
-    })
+    })()
   `);
   const mixedNewlineDiskBytes = fs.readFileSync(mixedNewlineFile, "utf8");
   const mixedNewlineAfterSave = await exec(`
@@ -9168,10 +9280,9 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       return null;
     })()
   `);
-  let deletionDocumentGeneration = 0;
   let deletionWatcherGeneration = 0;
   let deletionEventSequence = 0;
-  const deletionOwner = async (tab, filePath) => exec(`
+  const syntheticDeletionOwner = async (tab, filePath) => exec(`
     (() => {
       const probe = window.__f22DeletionProtocolProbe;
       const observed = probe && probe.selections
@@ -9186,17 +9297,23 @@ async function runF22SaveAndReloadScenarios(win, exec) {
             window.getReloadRequestSession(),
           )
         : null;
+      if (!(
+        identity &&
+        observed &&
+        observed.owner &&
+        typeof identity.pageSession === "string" &&
+        Number.isSafeInteger(identity.tabId) &&
+        Number.isSafeInteger(identity.documentGeneration) &&
+        typeof identity.pathKey === "string" &&
+        Number.isSafeInteger(observed.owner.selectionGeneration) &&
+        observed.owner.selectionGeneration > 0
+      )) return null;
       return {
-        pageSession: (identity && identity.pageSession) ||
-          (window.getReloadRequestSession && window.getReloadRequestSession()) ||
-          "f22-synthetic-page",
-        tabId: ${tab.id},
-        documentGeneration: (identity && identity.documentGeneration) ||
-          ${++deletionDocumentGeneration},
-        pathKey: (identity && identity.pathKey) ||
-          require("path").resolve(${JSON.stringify(filePath)}).toLowerCase(),
-        selectionGeneration: (observed && observed.owner.selectionGeneration) ||
-          ${deletionDocumentGeneration},
+        pageSession: identity.pageSession,
+        tabId: identity.tabId,
+        documentGeneration: identity.documentGeneration,
+        pathKey: identity.pathKey,
+        selectionGeneration: observed.owner.selectionGeneration,
       };
     })()
   `);
@@ -9239,7 +9356,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   fs.writeFileSync(deletedBFile, "F22_DELETED_B_BASE\r\n", "utf8");
   await clearTabs();
   const deletedA = await createActiveTab(deletedAFile, "F22_DELETED_A_BASE\r\n");
-  const deletedAOwner = await deletionOwner(deletedA, deletedAFile);
+  const deletedAOwner = await syntheticDeletionOwner(deletedA, deletedAFile);
   const deletedB = await exec(
     `window.CustomTabs.createTab(${JSON.stringify(deletedBFile)}, "F22_DELETED_B_BASE\\r\\n", { activate: false })`,
   );
@@ -9276,6 +9393,37 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       } : null;
     })()
   `.replace("${tabId}", String(tabId)));
+  const saveWithAlertGuard = (filePath) => exec(`
+    (async () => {
+      const ipc = require("electron").ipcRenderer;
+      const expectedPath = ${JSON.stringify(filePath)};
+      const oldAlert = window.alert;
+      const alerts = [];
+      let timer = null;
+      let onResult = null;
+      try {
+        window.alert = message => alerts.push(String(message));
+        return await new Promise((resolve) => {
+          timer = setTimeout(() => resolve({ timedOut: true, alerts }), 5000);
+          onResult = (_event, result) => {
+            if (!result || result.path !== expectedPath) return;
+            resolve({ timedOut: false, result, alerts });
+          };
+          ipc.on("save-markdown-result", onResult);
+          document.getElementById("saveButton").click();
+        });
+      } catch (error) {
+        return {
+          error: String(error && error.stack ? error.stack : error),
+          alerts,
+        };
+      } finally {
+        if (timer) clearTimeout(timer);
+        if (onResult) ipc.removeListener("save-markdown-result", onResult);
+        window.alert = oldAlert;
+      }
+    })()
+  `);
   await exec(`window.CustomTabs.switchToTab(${deletedB.id}); null;`);
   const deletionBBefore = await deletionTabSnapshot(deletedB.id);
   fs.unlinkSync(deletedAFile);
@@ -9288,7 +9436,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   // becomes selectable; do not manufacture a second path-only deletion.
   const deletedAReplayEvent = replayDeletionEvent(
     deletedAEvent,
-    await deletionOwner(deletedA, deletedAFile),
+    await syntheticDeletionOwner(deletedA, deletedAFile),
   );
   await emitDeletion(deletedAReplayEvent);
   const deletionAAfterReplay = await exec(`
@@ -9323,29 +9471,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       };
     })()
   `);
-  const deletionSave = await exec(`
-    new Promise((resolve) => {
-      const ipc = require("electron").ipcRenderer;
-      const filePath = ${JSON.stringify(deletedAFile)};
-      const oldAlert = window.alert;
-      const alerts = [];
-      const timer = setTimeout(() => {
-        ipc.removeListener("save-markdown-result", onResult);
-        window.alert = oldAlert;
-        resolve({ timedOut: true, alerts });
-      }, 5000);
-      const onResult = (_event, result) => {
-        if (!result || result.path !== filePath) return;
-        clearTimeout(timer);
-        ipc.removeListener("save-markdown-result", onResult);
-        window.alert = oldAlert;
-        resolve({ timedOut: false, result, alerts });
-      };
-      window.alert = message => alerts.push(String(message));
-      ipc.on("save-markdown-result", onResult);
-      document.getElementById("saveButton").click();
-    })
-  `);
+  const deletionSave = await saveWithAlertGuard(deletedAFile);
   const deletionAAfterSave = await exec(`
     (() => {
       const tab = window.CustomTabs.getTabs().find(t => t.id === ${deletedA.id});
@@ -9371,29 +9497,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     if (toast) toast.classList.remove("show");
     null;
   `);
-  const replacementSave = await exec(`
-    new Promise((resolve) => {
-      const ipc = require("electron").ipcRenderer;
-      const filePath = ${JSON.stringify(deletedAFile)};
-      const oldAlert = window.alert;
-      const alerts = [];
-      const timer = setTimeout(() => {
-        ipc.removeListener("save-markdown-result", onResult);
-        window.alert = oldAlert;
-        resolve({ timedOut: true, alerts });
-      }, 5000);
-      const onResult = (_event, result) => {
-        if (!result || result.path !== filePath) return;
-        clearTimeout(timer);
-        ipc.removeListener("save-markdown-result", onResult);
-        window.alert = oldAlert;
-        resolve({ timedOut: false, result, alerts });
-      };
-      window.alert = message => alerts.push(String(message));
-      ipc.on("save-markdown-result", onResult);
-      document.getElementById("saveButton").click();
-    })
-  `);
+  const replacementSave = await saveWithAlertGuard(deletedAFile);
   const replacementBytesAfterSave = fs.readFileSync(deletedAFile, "utf8");
   const replacementConflictAfterSave = await exec(`
     (() => {
@@ -9425,7 +9529,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     closedDeletedFile,
     "F22_DELETED_CLOSED\r\n",
   );
-  const closedDeletedAOwner = await deletionOwner(
+  const closedDeletedAOwner = await syntheticDeletionOwner(
     closedDeletedA,
     closedDeletedFile,
   );
@@ -9451,7 +9555,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     replacementDeletedFile,
     "F22_DELETED_REPLACEMENT_OLD\r\n",
   );
-  const replacementDeletedAOwner = await deletionOwner(
+  const replacementDeletedAOwner = await syntheticDeletionOwner(
     replacementDeletedA,
     replacementDeletedFile,
   );
@@ -9471,7 +9575,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     replacementDeletedFile,
     "F22_DELETED_REPLACEMENT_NEW\r\n",
   );
-  const replacementDeletedA2Owner = await deletionOwner(
+  const replacementDeletedA2Owner = await syntheticDeletionOwner(
     replacementDeletedA2,
     replacementDeletedFile,
   );
@@ -9490,57 +9594,66 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   const replacementAfter = await deletionTabSnapshot(replacementDeletedA2.id);
   const replacementAfterMessages = await deletedMessages();
 
-  // A delivery remains recoverable when the renderer process loses its first
-  // ACK.  This exercises main's real watcher-to-renderer envelope (rather than
-  // our injected delivery): after the owner is selected again, it must retry
-  // the same event ID, then accept exactly one ACK without warning twice.
-  const noAckDeletedFile = path.join(dir, "f22-deleted-no-ack-a.md");
-  fs.writeFileSync(noAckDeletedFile, "F22_DELETED_NO_ACK\r\n", "utf8");
+  // This leg uses only main's real fs.watch delivery. Its first envelope
+  // reaches an inactive owner, which refuses it without consuming main's
+  // evidence; selecting that exact owner then causes main to replay its ID.
+  const inactiveDeletedFile = path.join(dir, "f22-deleted-inactive-a.md");
+  fs.writeFileSync(inactiveDeletedFile, "F22_DELETED_INACTIVE_A\r\n", "utf8");
   await clearTabs();
-  const noAckDeletedA = await createActiveTab(
-    noAckDeletedFile,
-    "F22_DELETED_NO_ACK\r\n",
+  const inactiveDeletedA = await createActiveTab(
+    inactiveDeletedFile,
+    "F22_DELETED_INACTIVE_A\r\n",
   );
-  const noAckDeletedB = await exec(
+  const inactiveSelectedOwner = await exec(`
+    window.__f22DeletionProtocolProbe.selections
+      .filter(entry => entry.filePath === ${JSON.stringify(inactiveDeletedFile)} &&
+        entry.owner && entry.owner.tabId === ${inactiveDeletedA.id})
+      .at(-1)?.owner || null
+  `);
+  const inactiveDeletedB = await exec(
     `window.CustomTabs.createTab(${JSON.stringify(deletedBFile)}, "F22_DELETED_B_BASE\\r\\n", { activate: false })`,
   );
-  const noAckBBefore = await deletionTabSnapshot(noAckDeletedB.id);
-  const noAckMessageStart = await deletedMessages();
-  const noAckDeliveryStart = await exec(
+  await exec(`window.CustomTabs.switchToTab(${inactiveDeletedB.id}); null;`);
+  const inactiveBBefore = await deletionTabSnapshot(inactiveDeletedB.id);
+  const inactiveMessageStart = await deletedMessages();
+  const inactiveDeliveryStart = await exec(
     `window.__f22DeletionProtocolProbe.deliveries.length`,
   );
-  await exec(`
-    window.__f22DeletionProtocolProbe.dropAcknowledgements = true;
-    null;
-  `);
-  fs.unlinkSync(noAckDeletedFile);
-  const noAckFirstDelivered = await waitForCondition(
+  fs.unlinkSync(inactiveDeletedFile);
+  const inactiveFirstDelivered = await waitForCondition(
     exec,
     `window.__f22DeletionProtocolProbe.deliveries
-      .slice(${noAckDeliveryStart})
-      .some(entry => entry && entry.path === ${JSON.stringify(noAckDeletedFile)} &&
-        entry.delivery && Number.isSafeInteger(entry.delivery.eventId))`,
+      .slice(${inactiveDeliveryStart})
+      .some(entry => entry && entry.path === ${JSON.stringify(inactiveDeletedFile)} &&
+        entry.delivery &&
+        Number.isSafeInteger(entry.delivery.eventId) &&
+        entry.delivery.owner &&
+        typeof entry.delivery.owner.pageSession === "string" &&
+        entry.delivery.owner.tabId === ${inactiveDeletedA.id} &&
+        Number.isSafeInteger(entry.delivery.owner.documentGeneration) &&
+        typeof entry.delivery.owner.pathKey === "string")`,
     5000,
   );
-  const noAckFirstDelivery = await exec(`
+  const inactiveFirstDelivery = await exec(`
     window.__f22DeletionProtocolProbe.deliveries
-      .slice(${noAckDeliveryStart})
-      .find(entry => entry && entry.path === ${JSON.stringify(noAckDeletedFile)}) || null
+      .slice(${inactiveDeliveryStart})
+      .find(entry => entry && entry.path === ${JSON.stringify(inactiveDeletedFile)}) || null
   `);
-  const noAckMessagesAfterFirst = await deletedMessages();
-  await exec(`
-    window.__f22DeletionProtocolProbe.dropAcknowledgements = false;
-    null;
+  const inactiveBAfterRefusal = await deletionTabSnapshot(inactiveDeletedB.id);
+  const inactiveMessagesAfterRefusal = await deletedMessages();
+  await exec(`window.CustomTabs.switchToTab(${inactiveDeletedA.id}); null;`);
+  const inactiveReplaySelectedOwner = await exec(`
+    window.__f22DeletionProtocolProbe.selections
+      .filter(entry => entry.filePath === ${JSON.stringify(inactiveDeletedFile)} &&
+        entry.owner && entry.owner.tabId === ${inactiveDeletedA.id})
+      .at(-1)?.owner || null
   `);
-  await exec(`window.CustomTabs.switchToTab(${noAckDeletedB.id}); null;`);
-  const noAckBAfterInactive = await deletionTabSnapshot(noAckDeletedB.id);
-  await exec(`window.CustomTabs.switchToTab(${noAckDeletedA.id}); null;`);
-  const noAckReplayDelivered = await waitForCondition(
+  const inactiveReplayDelivered = await waitForCondition(
     exec,
     `(() => {
       const deliveries = window.__f22DeletionProtocolProbe.deliveries
-        .slice(${noAckDeliveryStart})
-        .filter(entry => entry && entry.path === ${JSON.stringify(noAckDeletedFile)});
+        .slice(${inactiveDeliveryStart})
+        .filter(entry => entry && entry.path === ${JSON.stringify(inactiveDeletedFile)});
       const first = deliveries[0];
       return !!(
         first &&
@@ -9552,12 +9665,12 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     })()`,
     5000,
   );
-  const noAckRecovery = await exec(`
+  const inactiveRecovery = await exec(`
     (() => {
       const probe = window.__f22DeletionProtocolProbe;
       const deliveries = probe.deliveries
-        .slice(${noAckDeliveryStart})
-        .filter(entry => entry && entry.path === ${JSON.stringify(noAckDeletedFile)});
+        .slice(${inactiveDeliveryStart})
+        .filter(entry => entry && entry.path === ${JSON.stringify(inactiveDeletedFile)});
       const first = deliveries[0] || null;
       const eventId = first && first.delivery && first.delivery.eventId;
       return {
@@ -9567,14 +9680,15 @@ async function runF22SaveAndReloadScenarios(win, exec) {
         ),
         messages: window.__f22DeletionMessages
           .filter(message => /deleted from disk/i.test(message)).length,
+        active: (window.CustomTabs.getActiveTab() || {}).id,
       };
     })()
   `);
+  const inactiveAAfterConsumption = await deletionTabSnapshot(inactiveDeletedA.id);
 
-  // A deletion can arrive while mutation is frozen for shutdown, which is the
-  // renderer-side analogue of a paused watcher. Its tab identity must survive
-  // that boundary and replay only after the thaw, not attach to B merely
-  // because B was the active tab when the watcher event was observed.
+  // This is the same production watcher path while mutation is frozen. The
+  // frozen renderer refusal must retain the real main-process envelope until
+  // thaw and exact-owner selection make consumption authorized.
   const frozenDeletedFile = path.join(dir, "f22-deleted-frozen-a.md");
   fs.writeFileSync(frozenDeletedFile, "F22_DELETED_FROZEN_A\r\n", "utf8");
   await clearTabs();
@@ -9582,10 +9696,12 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     frozenDeletedFile,
     "F22_DELETED_FROZEN_A\r\n",
   );
-  const frozenDeletedAOwner = await deletionOwner(
-    frozenDeletedA,
-    frozenDeletedFile,
-  );
+  const frozenSelectedOwner = await exec(`
+    window.__f22DeletionProtocolProbe.selections
+      .filter(entry => entry.filePath === ${JSON.stringify(frozenDeletedFile)} &&
+        entry.owner && entry.owner.tabId === ${frozenDeletedA.id})
+      .at(-1)?.owner || null
+  `);
   const frozenDeletedB = await exec(
     `window.CustomTabs.createTab(${JSON.stringify(deletedBFile)}, "F22_DELETED_B_BASE\\r\\n", { activate: false })`,
   );
@@ -9607,13 +9723,24 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     5000,
   );
   const frozenMessageCount = await deletedMessages();
-  fs.unlinkSync(frozenDeletedFile);
-  const frozenDeletedEvent = deletionEvent(
-    frozenDeletedFile,
-    frozenDeletedAOwner,
-    97002,
+  const frozenDeliveryStart = await exec(
+    `window.__f22DeletionProtocolProbe.deliveries.length`,
   );
-  await emitDeletion(frozenDeletedEvent);
+  fs.unlinkSync(frozenDeletedFile);
+  const frozenFirstDelivered = await waitForCondition(
+    exec,
+    `window.__f22DeletionProtocolProbe.deliveries
+      .slice(${frozenDeliveryStart})
+      .some(entry => entry && entry.path === ${JSON.stringify(frozenDeletedFile)} &&
+        entry.delivery &&
+        Number.isSafeInteger(entry.delivery.eventId) &&
+        entry.delivery.owner &&
+        typeof entry.delivery.owner.pageSession === "string" &&
+        entry.delivery.owner.tabId === ${frozenDeletedA.id} &&
+        Number.isSafeInteger(entry.delivery.owner.documentGeneration) &&
+        typeof entry.delivery.owner.pathKey === "string")`,
+    5000,
+  );
   const frozenBAfterDelete = await deletionTabSnapshot(frozenDeletedB.id);
   const frozenMessagesBeforeThaw = await deletedMessages();
   await exec(`require("electron").ipcRenderer.emit("quit-approval-thaw", {}); null;`);
@@ -9623,15 +9750,47 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     5000,
   );
   await exec(`window.CustomTabs.switchToTab(${frozenDeletedA.id}); null;`);
-  // A thaw lets the owning selection receive the same pending delivery, not a
-  // new deletion with a fresh identity.
-  const frozenDeletedReplayEvent = replayDeletionEvent(
-    frozenDeletedEvent,
-    await deletionOwner(frozenDeletedA, frozenDeletedFile),
+  const frozenReplaySelectedOwner = await exec(`
+    window.__f22DeletionProtocolProbe.selections
+      .filter(entry => entry.filePath === ${JSON.stringify(frozenDeletedFile)} &&
+        entry.owner && entry.owner.tabId === ${frozenDeletedA.id})
+      .at(-1)?.owner || null
+  `);
+  const frozenReplayDelivered = await waitForCondition(
+    exec,
+    `(() => {
+      const deliveries = window.__f22DeletionProtocolProbe.deliveries
+        .slice(${frozenDeliveryStart})
+        .filter(entry => entry && entry.path === ${JSON.stringify(frozenDeletedFile)});
+      const first = deliveries[0];
+      return !!(
+        first &&
+        first.delivery &&
+        deliveries.filter(entry =>
+          entry.delivery && entry.delivery.eventId === first.delivery.eventId,
+        ).length >= 2
+      );
+    })()`,
+    5000,
   );
-  await emitDeletion(frozenDeletedReplayEvent);
   const frozenAAfterThaw = await deletionTabSnapshot(frozenDeletedA.id);
   const frozenMessagesAfterThaw = await deletedMessages();
+  const frozenRecovery = await exec(`
+    (() => {
+      const probe = window.__f22DeletionProtocolProbe;
+      const deliveries = probe.deliveries
+        .slice(${frozenDeliveryStart})
+        .filter(entry => entry && entry.path === ${JSON.stringify(frozenDeletedFile)});
+      const first = deliveries[0] || null;
+      const eventId = first && first.delivery && first.delivery.eventId;
+      return {
+        deliveries,
+        acknowledgements: probe.acknowledgements.filter(
+          ack => ack && ack.eventId === eventId,
+        ),
+      };
+    })()
+  `);
 
   const deletionDetail = JSON.stringify({
     deletionProbe,
@@ -9666,30 +9825,36 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     replacementBeforeMessages,
     replacementAfterStaleMessages,
     replacementAfterMessages,
-    noAckDeletedA: noAckDeletedA.id,
-    noAckDeletedB: noAckDeletedB.id,
-    noAckBBefore,
-    noAckBAfterInactive,
-    noAckMessageStart,
-    noAckFirstDelivered,
-    noAckFirstDelivery,
-    noAckMessagesAfterFirst,
-    noAckReplayDelivered,
-    noAckRecovery,
+    inactiveDeletedA: inactiveDeletedA.id,
+    inactiveDeletedB: inactiveDeletedB.id,
+    inactiveSelectedOwner,
+    inactiveBBefore,
+    inactiveBAfterRefusal,
+    inactiveMessageStart,
+    inactiveFirstDelivered,
+    inactiveFirstDelivery,
+    inactiveMessagesAfterRefusal,
+    inactiveReplaySelectedOwner,
+    inactiveReplayDelivered,
+    inactiveRecovery,
+    inactiveAAfterConsumption,
     frozenDeletedA: frozenDeletedA.id,
-    frozenDeletedAOwner,
-    frozenDeletedEvent,
-    frozenDeletedReplayEvent,
     frozenDeletedB: frozenDeletedB.id,
+    frozenSelectedOwner,
     frozenDeletion,
     frozenBeforeDelete,
+    frozenDeliveryStart,
+    frozenFirstDelivered,
     frozenBInitial,
     frozenBAfterDelete,
     frozenMessageCount,
     frozenMessagesBeforeThaw,
     frozenThawed,
+    frozenReplaySelectedOwner,
+    frozenReplayDelivered,
     frozenAAfterThaw,
     frozenMessagesAfterThaw,
+    frozenRecovery,
     replacementSave,
     replacementBytesAfterSave,
     replacementConflictAfterSave,
@@ -9697,7 +9862,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     replacementAfterExplicitAdoption,
   });
   check(
-    "F22 deletion delivery stays with the inactive owning tab and dedupes its event ID",
+    "F22 synthetic deletion envelope stays with the inactive owning tab and dedupes its event ID",
     deletionProbe === true &&
       JSON.stringify(deletionBAfterForeignDelivery) === JSON.stringify(deletionBBefore) &&
       deletionMessagesBeforeA === 0 &&
@@ -9758,42 +9923,134 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     deletionDetail,
   );
   check(
-    "F22 missing deletion ACK retries the owning delivery without mutating B",
-    noAckFirstDelivered === true &&
-      noAckFirstDelivery &&
-      noAckFirstDelivery.delivery &&
-      Number.isSafeInteger(noAckFirstDelivery.delivery.eventId) &&
-      noAckBAfterInactive.content === noAckBBefore.content &&
-      noAckBAfterInactive.originalContent === noAckBBefore.originalContent &&
-      noAckBAfterInactive.dirty === noAckBBefore.dirty &&
-      noAckBAfterInactive.reloadConflict === noAckBBefore.reloadConflict &&
-      noAckMessagesAfterFirst === noAckMessageStart + 1 &&
-      noAckReplayDelivered === true &&
-      noAckRecovery.deliveries.length === 2 &&
-      noAckRecovery.deliveries[0].delivery.eventId ===
-        noAckRecovery.deliveries[1].delivery.eventId &&
-      noAckRecovery.acknowledgements.some(ack => ack.consumed === true) &&
-      noAckRecovery.messages === noAckMessageStart + 1,
+    "F22 watcher-driven inactive deletion refusal retains the production owner envelope",
+    inactiveFirstDelivered === true &&
+      inactiveFirstDelivery &&
+      inactiveFirstDelivery.delivery &&
+      inactiveFirstDelivery.delivery.owner &&
+      inactiveSelectedOwner &&
+      inactiveFirstDelivery.delivery.owner.pageSession ===
+        inactiveSelectedOwner.pageSession &&
+      inactiveFirstDelivery.delivery.owner.tabId === inactiveSelectedOwner.tabId &&
+      inactiveFirstDelivery.delivery.owner.documentGeneration ===
+        inactiveSelectedOwner.documentGeneration &&
+      inactiveFirstDelivery.delivery.owner.pathKey === inactiveSelectedOwner.pathKey &&
+      inactiveFirstDelivery.delivery.selectionGeneration ===
+        inactiveSelectedOwner.selectionGeneration &&
+      inactiveBAfterRefusal.content === inactiveBBefore.content &&
+      inactiveBAfterRefusal.originalContent === inactiveBBefore.originalContent &&
+      inactiveBAfterRefusal.dirty === inactiveBBefore.dirty &&
+      inactiveBAfterRefusal.reloadConflict === inactiveBBefore.reloadConflict &&
+      inactiveMessagesAfterRefusal === inactiveMessageStart &&
+      inactiveRecovery.acknowledgements.some(ack =>
+        ack.consumed === false &&
+        ack.pageSession === inactiveFirstDelivery.delivery.owner.pageSession &&
+        ack.tabId === inactiveFirstDelivery.delivery.owner.tabId &&
+        ack.documentGeneration ===
+          inactiveFirstDelivery.delivery.owner.documentGeneration &&
+        ack.pathKey === inactiveFirstDelivery.delivery.owner.pathKey &&
+        ack.selectionGeneration ===
+          inactiveFirstDelivery.delivery.selectionGeneration &&
+        ack.watcherGeneration ===
+          inactiveFirstDelivery.delivery.watcherGeneration,
+      ),
     deletionDetail,
   );
   check(
-    "F22 frozen deletion replays after thaw only to the owner generation",
+    "F22 watcher-driven inactive deletion replays one event ID and consumes only its valid owner generation",
+    inactiveReplayDelivered === true &&
+      inactiveRecovery.active === inactiveDeletedA.id &&
+    inactiveReplaySelectedOwner &&
+      inactiveAAfterConsumption &&
+      inactiveAAfterConsumption.dirty === false &&
+      inactiveAAfterConsumption.reloadConflict === false &&
+      inactiveRecovery.deliveries.length === 2 &&
+      inactiveRecovery.deliveries[0].delivery.eventId ===
+        inactiveRecovery.deliveries[1].delivery.eventId &&
+      inactiveRecovery.deliveries[1].delivery.owner.pageSession ===
+        inactiveReplaySelectedOwner.pageSession &&
+      inactiveRecovery.deliveries[1].delivery.owner.tabId ===
+        inactiveReplaySelectedOwner.tabId &&
+      inactiveRecovery.deliveries[1].delivery.owner.documentGeneration ===
+        inactiveReplaySelectedOwner.documentGeneration &&
+      inactiveRecovery.deliveries[1].delivery.owner.pathKey ===
+        inactiveReplaySelectedOwner.pathKey &&
+      inactiveRecovery.deliveries[1].delivery.selectionGeneration ===
+        inactiveReplaySelectedOwner.selectionGeneration &&
+      inactiveRecovery.acknowledgements.some(ack =>
+        ack.consumed === true &&
+        ack.pageSession === inactiveRecovery.deliveries[1].delivery.owner.pageSession &&
+        ack.tabId === inactiveRecovery.deliveries[1].delivery.owner.tabId &&
+        ack.documentGeneration ===
+          inactiveRecovery.deliveries[1].delivery.owner.documentGeneration &&
+        ack.pathKey === inactiveRecovery.deliveries[1].delivery.owner.pathKey &&
+        ack.selectionGeneration ===
+          inactiveRecovery.deliveries[1].delivery.selectionGeneration &&
+        ack.watcherGeneration ===
+          inactiveRecovery.deliveries[1].delivery.watcherGeneration,
+      ) &&
+      inactiveRecovery.messages === inactiveMessageStart + 1,
+    deletionDetail,
+  );
+  check(
+    "F22 watcher-driven frozen deletion refusal preserves the real envelope until thaw",
     frozenDeletion &&
       frozenDeletion.ownerTabId === frozenDeletedA.id &&
       Number.isSafeInteger(frozenDeletion.gen) &&
       frozenBeforeDelete === true &&
-      frozenDeletedEvent.delivery.owner.tabId === frozenDeletedAOwner.tabId &&
-      frozenDeletedEvent.delivery.owner.documentGeneration ===
-        frozenDeletedAOwner.documentGeneration &&
-      frozenDeletedEvent.delivery.owner.pathKey === frozenDeletedAOwner.pathKey &&
-      Number.isSafeInteger(frozenDeletedEvent.delivery.watcherGeneration) &&
+      frozenFirstDelivered === true &&
+      frozenRecovery.deliveries[0] &&
+      frozenSelectedOwner &&
+      frozenRecovery.deliveries[0].delivery.owner.pageSession ===
+        frozenSelectedOwner.pageSession &&
+      frozenRecovery.deliveries[0].delivery.owner.tabId === frozenSelectedOwner.tabId &&
+      frozenRecovery.deliveries[0].delivery.owner.documentGeneration ===
+        frozenSelectedOwner.documentGeneration &&
+      frozenRecovery.deliveries[0].delivery.owner.pathKey ===
+        frozenSelectedOwner.pathKey &&
+      frozenRecovery.deliveries[0].delivery.selectionGeneration ===
+        frozenSelectedOwner.selectionGeneration &&
       JSON.stringify(frozenBAfterDelete) === JSON.stringify(frozenBInitial) &&
       frozenMessagesBeforeThaw === frozenMessageCount &&
+      frozenRecovery.acknowledgements.some(ack =>
+        ack.consumed === false &&
+        ack.selectionGeneration ===
+          frozenRecovery.deliveries[0].delivery.selectionGeneration &&
+        ack.watcherGeneration ===
+          frozenRecovery.deliveries[0].delivery.watcherGeneration,
+      ) &&
       frozenThawed === true &&
+      frozenReplayDelivered === true &&
+      frozenRecovery.deliveries.length === 2 &&
+      frozenRecovery.deliveries[0].delivery.eventId ===
+        frozenRecovery.deliveries[1].delivery.eventId &&
+      frozenReplaySelectedOwner &&
+      frozenRecovery.deliveries[1].delivery.owner.pageSession ===
+        frozenReplaySelectedOwner.pageSession &&
+      frozenRecovery.deliveries[1].delivery.owner.tabId ===
+        frozenReplaySelectedOwner.tabId &&
+      frozenRecovery.deliveries[1].delivery.owner.documentGeneration ===
+        frozenReplaySelectedOwner.documentGeneration &&
+      frozenRecovery.deliveries[1].delivery.owner.pathKey ===
+        frozenReplaySelectedOwner.pathKey &&
+      frozenRecovery.deliveries[1].delivery.selectionGeneration ===
+        frozenReplaySelectedOwner.selectionGeneration &&
       frozenAAfterThaw &&
       frozenAAfterThaw.dirty === false &&
       frozenAAfterThaw.reloadConflict === false &&
-      frozenMessagesAfterThaw === frozenMessageCount + 1,
+      frozenMessagesAfterThaw === frozenMessageCount + 1 &&
+      frozenRecovery.acknowledgements.some(ack =>
+        ack.consumed === true &&
+        ack.pageSession === frozenRecovery.deliveries[1].delivery.owner.pageSession &&
+        ack.tabId === frozenRecovery.deliveries[1].delivery.owner.tabId &&
+        ack.documentGeneration ===
+          frozenRecovery.deliveries[1].delivery.owner.documentGeneration &&
+        ack.pathKey === frozenRecovery.deliveries[1].delivery.owner.pathKey &&
+        ack.selectionGeneration ===
+          frozenRecovery.deliveries[1].delivery.selectionGeneration &&
+        ack.watcherGeneration ===
+          frozenRecovery.deliveries[1].delivery.watcherGeneration,
+      ),
     deletionDetail,
   );
   check(
@@ -9836,7 +10093,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     "F22_SAVE_ORDER_BASE\r\n",
   );
   const orderedSave = await exec(`
-    (() => {
+    (async () => {
       const ipc = require("electron").ipcRenderer;
       const tab = window.CustomTabs.getTabs().find(t => t.id === ${orderedSaveTab.id});
       const originalSend = ipc.send;
@@ -9902,7 +10159,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
           saveRequestSession: requests[0].saveRequestSession,
           saveRequest: requests[0].saveRequest,
         });
-        return Promise.resolve().then(() => {
+        return await Promise.resolve().then(() => {
           const afterStaleFailure = {
             content: tab.content,
             original: tab.originalContent,
@@ -10014,8 +10271,6 @@ async function runF22SaveAndReloadScenarios(win, exec) {
             alerts: alerts.slice(),
             controls: controls.slice(),
           };
-          ipc.send = originalSend;
-          window.alert = originalAlert;
           return {
             requests,
             pendingBefore,
@@ -10031,9 +10286,10 @@ async function runF22SaveAndReloadScenarios(win, exec) {
           };
         });
       } catch (error) {
+        return { error: String(error && error.stack ? error.stack : error), requests, controls, alerts };
+      } finally {
         ipc.send = originalSend;
         window.alert = originalAlert;
-        return { error: String(error && error.stack ? error.stack : error), requests, controls, alerts };
       }
     })()
   `);
@@ -10050,7 +10306,9 @@ async function runF22SaveAndReloadScenarios(win, exec) {
         request.saveRequest.pageSession === request.saveRequestSession &&
         Number.isSafeInteger(request.saveRequest.tabId) &&
         Number.isSafeInteger(request.saveRequest.documentGeneration) &&
-        typeof request.saveRequest.pathKey === "string",
+        typeof request.saveRequest.pathKey === "string" &&
+        Number.isSafeInteger(request.saveRequest.selectionGeneration) &&
+        request.saveRequest.selectionGeneration > 0,
       ) &&
       orderedSave.pendingBefore.count === 2 &&
       orderedSave.afterNewerSuccess.content === "F22_SAVE_B_NEWER" &&
@@ -10099,7 +10357,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       orderedSaveDetail,
   );
   check(
-      "F22 old D success after newer E failure cannot clear E's conflict state",
+      "F22 stale older save success cannot resume watching or replace newer failure isolation",
       orderedSave.afterNewerFailure.content === "F22_SAVE_E_NEWER_FAILURE" &&
         orderedSave.afterNewerFailure.original === "F22_SAVE_B_NEWER" &&
       orderedSave.afterNewerFailure.dirty === true &&
@@ -10113,7 +10371,8 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       orderedSave.afterOldSuccess.pending.count === 0 &&
       orderedSave.afterOldSuccess.shutdownDirty.length > 0 &&
       orderedSave.afterOldSuccess.disk === "F22_SAVE_D_OLD_SUCCESS_AFTER_E" &&
-      orderedSave.afterOldSuccess.alerts.length === 2,
+      orderedSave.afterOldSuccess.alerts.length === 2 &&
+      orderedSave.afterOldSuccess.controls.length === 0,
     orderedSaveDetail,
   );
 
