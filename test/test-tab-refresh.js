@@ -4816,12 +4816,9 @@ function awaitCompanionProcess(child, budgets) {
       settleCount += 1;
       if (settled) return;
       settled = true;
-      // A drain timeout is terminal for the parent: keeping the original
-      // watchdog alive after returning would kill a child that this function
-      // has already reported as unconfirmed, potentially racing subsequent
-      // diagnostics. The event listeners deliberately remain installed so
-      // the late-event assertions can prove this guard, but no timer may take
-      // another action after settlement.
+      // No timer may take an action after settlement. The event listeners
+      // deliberately remain installed so the late-event assertions can prove
+      // this guard.
       if (timeout) clearTimeout(timeout);
       if (killGrace) clearTimeout(killGrace);
       if (drainGrace) clearTimeout(drainGrace);
@@ -4858,6 +4855,10 @@ function awaitCompanionProcess(child, budgets) {
         killThrew = true;
         postSpawnError = error;
       }
+      // kill() can synchronously emit exit/close on child-like emitters. Those
+      // handlers have already selected the drain path or settled, so do not
+      // arm a kill grace after their timer cleanup.
+      if (settled || exited) return;
       killGrace = setTimeout(
         () =>
           settle({
@@ -4914,7 +4915,10 @@ function awaitCompanionProcess(child, budgets) {
         return;
       }
       postSpawnError = error;
-      startDrainGrace();
+      // An error after a successful spawn is not evidence the child is gone.
+      // Keep the normal watchdog armed: if close never follows, it must still
+      // request one kill and wait through its kill grace before reporting an
+      // unconfirmed termination.
     });
     child.once("close", (code) => {
       clearTimeout(timeout);
@@ -5708,8 +5712,47 @@ async function runCompanionSettlementScenarios() {
     errorThenClose.processNeverStarted === false &&
       errorThenClose.closeObserved === true &&
       errorThenClose.code === 1 &&
+      errorThenClose.timedOut === false &&
+      errorThenCloseChild.killCalls === 0 &&
+      errorThenClose.settleCount() === 1 &&
       String(errorThenClose.error).includes("post-spawn fault"),
-    JSON.stringify({ ...errorThenClose, error: String(errorThenClose.error) }),
+    JSON.stringify({
+      ...errorThenClose,
+      error: String(errorThenClose.error),
+      killCalls: errorThenCloseChild.killCalls,
+      settleCount: errorThenClose.settleCount(),
+    }),
+  );
+
+  // -- an error AFTER a successful spawn, then close before the budget -------
+  const errorCloseBeforeBudgetChild = fakeChild();
+  const errorCloseBeforeBudgetPromise = awaitCompanionProcess(
+    errorCloseBeforeBudgetChild,
+    budgets,
+  );
+  errorCloseBeforeBudgetChild.emit("error", new Error("post-spawn fault, then close"));
+  await sleep(Math.floor(budgets.budgetMs / 2));
+  errorCloseBeforeBudgetChild.emit("close", 0);
+  const errorCloseBeforeBudget = await errorCloseBeforeBudgetPromise;
+  // A close cancels the original watchdog even when it follows a post-spawn
+  // error. Waiting beyond all timer budgets makes that cancellation observable.
+  await sleep(
+    budgets.budgetMs + budgets.killGraceMs + budgets.drainGraceMs + 100,
+  );
+  check(
+    "a post-spawn error followed by close before budget does not request a kill",
+    errorCloseBeforeBudget.processNeverStarted === false &&
+      errorCloseBeforeBudget.closeObserved === true &&
+      errorCloseBeforeBudget.timedOut === false &&
+      errorCloseBeforeBudgetChild.killCalls === 0 &&
+      errorCloseBeforeBudget.settleCount() === 1 &&
+      String(errorCloseBeforeBudget.error).includes("then close"),
+    JSON.stringify({
+      ...errorCloseBeforeBudget,
+      error: String(errorCloseBeforeBudget.error),
+      killCalls: errorCloseBeforeBudgetChild.killCalls,
+      settleCount: errorCloseBeforeBudget.settleCount(),
+    }),
   );
 
   // -- an error AFTER a successful spawn, and no close ever ------------------
@@ -5717,21 +5760,25 @@ async function runCompanionSettlementScenarios() {
   const errorNoClosePromise = awaitCompanionProcess(errorNoCloseChild, budgets);
   errorNoCloseChild.emit("error", new Error("post-spawn fault, still running"));
   const errorNoClose = await errorNoClosePromise;
-  // The drain result is terminal even though the child was never confirmed
-  // gone. Wait past the original watchdog and its kill grace: either acting
-  // after this result would race the preserved tree it just told the caller
-  // not to touch.
-  await sleep(budgets.budgetMs + budgets.killGraceMs + 100);
+  const errorNoCloseKillCallsAtSettlement = errorNoCloseChild.killCalls;
+  // This has exhausted the normal watchdog plus kill grace. Wait past every
+  // budget again: no cleared timer may request another kill after settlement.
+  await sleep(
+    budgets.budgetMs + budgets.killGraceMs + budgets.drainGraceMs + 100,
+  );
   check(
-    "a post-spawn error with no close is never mistaken for a spawn that started nothing",
+    "a post-spawn error with no close kills once then fails closed without later timer action",
     errorNoClose.processNeverStarted === false &&
       errorNoClose.closeObserved === false &&
+      errorNoClose.timedOut === true &&
       String(errorNoClose.error).includes("still running") &&
-      errorNoCloseChild.killCalls === 0 &&
+      errorNoCloseKillCallsAtSettlement === 1 &&
+      errorNoCloseChild.killCalls === 1 &&
       errorNoClose.settleCount() === 1,
     JSON.stringify({
       ...errorNoClose,
       error: String(errorNoClose.error),
+      killCallsAtSettlement: errorNoCloseKillCallsAtSettlement,
       killCalls: errorNoCloseChild.killCalls,
       settleCount: errorNoClose.settleCount(),
     }),
