@@ -14,6 +14,7 @@ const path = require("path");
 const portableHarness = process.env.F22_PORTABLE_HARNESS === "1";
 const focusedF22Harness = process.env.F22_FOCUSED_HARNESS === "1";
 const focusedCommitHarness = process.env.F22_COMMIT_FOCUSED_HARNESS === "1";
+const companionSelfcheck = process.env.F22_COMPANION_SELFCHECK === "1";
 // One window-destroying teardown case per child process. See
 // runTeardownScenario(): main.js nulls its own `mainWindow` on `closed`, so a
 // scenario that destroys the window poisons every later scenario in the same
@@ -53,6 +54,8 @@ if (portableHarness) {
   process.argv.splice(1, 0, "test-f22-focused.js");
 } else if (finalizerSelfcheck) {
   process.argv.splice(1, 0, "test-f22-finalizer.js");
+} else if (companionSelfcheck) {
+  process.argv.splice(1, 0, "test-f22-companion-selfcheck.js");
 }
 
 const {
@@ -72,6 +75,7 @@ const {
 require("./test-userdata-isolation");
 
 const results = [];
+let unavailableEvidence = 0;
 // A SCOPED CAPTURE, FOR TESTING THE HARNESS'S OWN ASSERTIONS. Some controls in
 // this file are only observable by making a helper FAIL and then reading the
 // assertion it produced - runCompanion's naming and accounting under a spawn
@@ -86,8 +90,1094 @@ function check(name, ok, detail) {
     checkCapture.push({ name, ok, detail });
     return;
   }
+
   results.push({ name, ok, detail });
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${ok ? "" : "  -> " + detail}`);
+}
+
+function unavailable(name, detail) {
+  unavailableEvidence += 1;
+  console.log(`UNAVAILABLE  ${name}  -> ${detail}`);
+}
+
+// This is deliberately data-only: capability scheduling must be testable
+// without Electron state, and each group remains independently reportable.
+function createDeletionEvidencePlan(capabilities, acknowledgementContract) {
+  const producerGeneration = capabilities.producer === true;
+  const acknowledgementLifecycle =
+    capabilities.ackIdentity === true && acknowledgementContract === "valid";
+  return Object.freeze({
+    producerGeneration: Object.freeze({
+      scheduled: producerGeneration,
+      unavailable: "F22 deletion producer identity evidence is unavailable",
+    }),
+    watcherOwnership: Object.freeze({
+      scheduled: capabilities.watcher === true,
+      unavailable: "F22 deletion watcher ownership evidence is unavailable",
+    }),
+    rendererTombstoneCache: Object.freeze({
+      scheduled: capabilities.tombstone === true,
+      unavailable: "F22 deletion tombstone cache evidence is unavailable",
+    }),
+    deletionSaveRefusal: Object.freeze({
+      scheduled: capabilities.saveRefusal === true,
+      unavailable: "F22 deletion Save-refusal evidence is unavailable",
+    }),
+    acknowledgementLifecycle: Object.freeze({
+      scheduled: acknowledgementLifecycle,
+      unavailable: "F22 deletion ACK identity/retirement evidence is unavailable",
+      invalid: acknowledgementContract === "invalid",
+    }),
+    synchronousSendRecovery: Object.freeze({
+      scheduled:
+        capabilities.synchronousSend === true && acknowledgementLifecycle,
+      unavailable: "F22 synchronous deletion-send recovery evidence is unavailable",
+    }),
+  });
+}
+
+async function runDeletionEvidenceGroup(plan, group, body) {
+  if (!plan[group].scheduled) return undefined;
+  return body();
+}
+
+function scheduleDeletionAssertion(plan, groups, sink, name, evaluate, detail) {
+  if (
+    !Array.isArray(groups) ||
+    !groups.every((group) => plan[group] && plan[group].scheduled === true)
+  ) {
+    return false;
+  }
+  sink(
+    name,
+    evaluate(),
+    typeof detail === "function" ? detail() : detail,
+  );
+  return true;
+}
+
+function classifyDeletionCapability(advertised, supported) {
+  if (!advertised) return "absent";
+  return supported ? "supported" : "invalid";
+}
+
+function sourceForNamedDeletionFunction(source, name) {
+  if (typeof source !== "string" || typeof name !== "string") return "";
+  const isIdentifier = (character) =>
+    typeof character === "string" && /[A-Za-z0-9_$]/.test(character);
+  const skipQuoted = (index, quote) => {
+    for (let cursor = index + 1; cursor < source.length; cursor += 1) {
+      if (source[cursor] === "\\") {
+        cursor += 1;
+      } else if (source[cursor] === quote) {
+        return cursor + 1;
+      }
+    }
+    return source.length;
+  };
+  const skipLineComment = (index) => {
+    const newline = source.indexOf("\n", index + 2);
+    return newline < 0 ? source.length : newline + 1;
+  };
+  const skipBlockComment = (index) => {
+    const end = source.indexOf("*/", index + 2);
+    return end < 0 ? source.length : end + 2;
+  };
+  const skipSyntax = (index) => {
+    const character = source[index];
+    if (character === "'" || character === '"') {
+      return skipQuoted(index, character);
+    }
+    if (character === "/" && source[index + 1] === "/") {
+      return skipLineComment(index);
+    }
+    if (character === "/" && source[index + 1] === "*") {
+      return skipBlockComment(index);
+    }
+    if (character !== "`") return index;
+    let cursor = index + 1;
+    while (cursor < source.length) {
+      if (source[cursor] === "\\") {
+        cursor += 2;
+      } else if (source[cursor] === "`") {
+        return cursor + 1;
+      } else if (source[cursor] === "$" && source[cursor + 1] === "{") {
+        cursor = skipInterpolation(cursor + 2);
+      } else {
+        cursor += 1;
+      }
+    }
+    return source.length;
+  };
+  const skipInterpolation = (index) => {
+    let depth = 1;
+    for (let cursor = index; cursor < source.length; cursor += 1) {
+      const skipped = skipSyntax(cursor);
+      if (skipped !== cursor) {
+        cursor = skipped - 1;
+        continue;
+      }
+      if (source[cursor] === "{") {
+        depth += 1;
+      } else if (source[cursor] === "}" && --depth === 0) {
+        return cursor + 1;
+      }
+    }
+    return source.length;
+  };
+  const findCodeCharacter = (start, target) => {
+    for (let cursor = start; cursor < source.length; cursor += 1) {
+      const skipped = skipSyntax(cursor);
+      if (skipped !== cursor) {
+        cursor = skipped - 1;
+      } else if (source[cursor] === target) {
+        return cursor;
+      }
+    }
+    return -1;
+  };
+  const matchingDelimiter = (start, open, close) => {
+    let depth = 0;
+    for (let cursor = start; cursor < source.length; cursor += 1) {
+      const skipped = skipSyntax(cursor);
+      if (skipped !== cursor) {
+        cursor = skipped - 1;
+        continue;
+      }
+      if (source[cursor] === open) {
+        depth += 1;
+      } else if (source[cursor] === close && --depth === 0) {
+        return cursor;
+      }
+    }
+    return -1;
+  };
+  for (let start = 0; start < source.length; start += 1) {
+    const skipped = skipSyntax(start);
+    if (skipped !== start) {
+      start = skipped - 1;
+      continue;
+    }
+    if (
+      !source.startsWith("function", start) ||
+      isIdentifier(source[start - 1]) ||
+      isIdentifier(source[start + "function".length])
+    ) {
+      continue;
+    }
+    let cursor = start + "function".length;
+    while (/\s/.test(source[cursor] || "")) cursor += 1;
+    if (source[cursor] === "*") cursor += 1;
+    while (/\s/.test(source[cursor] || "")) cursor += 1;
+    if (
+      !source.startsWith(name, cursor) ||
+      isIdentifier(source[cursor - 1]) ||
+      isIdentifier(source[cursor + name.length])
+    ) {
+      continue;
+    }
+    const argumentsStart = findCodeCharacter(cursor + name.length, "(");
+    if (argumentsStart < 0) return "";
+    const argumentsEnd = matchingDelimiter(argumentsStart, "(", ")");
+    if (argumentsEnd < 0) return "";
+    const bodyStart = findCodeCharacter(argumentsEnd + 1, "{");
+    if (bodyStart < 0) return "";
+    const bodyEnd = matchingDelimiter(bodyStart, "{", "}");
+    return bodyEnd < 0 ? "" : source.slice(start, bodyEnd + 1);
+  }
+  return "";
+}
+
+function deletionIdentityFieldsPresent(source) {
+  return [
+    "eventId",
+    "selectionGeneration",
+    "watcherGeneration",
+    "attempt",
+    "pageSession",
+    "rendererGeneration",
+    "tabId",
+    "documentGeneration",
+    "pathKey",
+  ].every((field) => new RegExp(`\\b${field}\\b`).test(source));
+}
+
+function deletionOwnerFieldsPresent(source) {
+  return [
+    "pageSession",
+    "rendererGeneration",
+    "tabId",
+    "documentGeneration",
+    "pathKey",
+  ].every((field) => new RegExp(`\\b${field}\\b`).test(source));
+}
+
+function directReturnCallName(functionSource) {
+  if (typeof functionSource !== "string") return "";
+  const isIdentifier = (character) =>
+    typeof character === "string" && /[A-Za-z0-9_$]/.test(character);
+  const skipQuoted = (index, quote) => {
+    for (let cursor = index + 1; cursor < functionSource.length; cursor += 1) {
+      if (functionSource[cursor] === "\\") {
+        cursor += 1;
+      } else if (functionSource[cursor] === quote) {
+        return cursor + 1;
+      }
+    }
+    return functionSource.length;
+  };
+  const skipSyntax = (index) => {
+    const character = functionSource[index];
+    if (character === "'" || character === '"' || character === "`") {
+      return skipQuoted(index, character);
+    }
+    if (character === "/" && functionSource[index + 1] === "/") {
+      const newline = functionSource.indexOf("\n", index + 2);
+      return newline < 0 ? functionSource.length : newline + 1;
+    }
+    if (character === "/" && functionSource[index + 1] === "*") {
+      const end = functionSource.indexOf("*/", index + 2);
+      return end < 0 ? functionSource.length : end + 2;
+    }
+    return index;
+  };
+  let bodyStart = -1;
+  for (let cursor = 0; cursor < functionSource.length; cursor += 1) {
+    const skipped = skipSyntax(cursor);
+    if (skipped !== cursor) {
+      cursor = skipped - 1;
+    } else if (functionSource[cursor] === "{") {
+      bodyStart = cursor;
+      break;
+    }
+  }
+  if (bodyStart < 0) return "";
+  let depth = 1;
+  for (let cursor = bodyStart + 1; cursor < functionSource.length; cursor += 1) {
+    const skipped = skipSyntax(cursor);
+    if (skipped !== cursor) {
+      cursor = skipped - 1;
+      continue;
+    }
+    const character = functionSource[cursor];
+    if (character === "{") {
+      depth += 1;
+      continue;
+    }
+    if (character === "}") {
+      depth -= 1;
+      if (depth === 0) break;
+      continue;
+    }
+    if (
+      depth !== 1 ||
+      !functionSource.startsWith("return", cursor) ||
+      isIdentifier(functionSource[cursor - 1]) ||
+      isIdentifier(functionSource[cursor + "return".length])
+    ) {
+      continue;
+    }
+    let nameStart = cursor + "return".length;
+    while (/\s/.test(functionSource[nameStart] || "")) nameStart += 1;
+    if (!/[A-Za-z_$]/.test(functionSource[nameStart] || "")) continue;
+    let nameEnd = nameStart + 1;
+    while (isIdentifier(functionSource[nameEnd])) nameEnd += 1;
+    let argumentsStart = nameEnd;
+    while (/\s/.test(functionSource[argumentsStart] || "")) argumentsStart += 1;
+    if (functionSource[argumentsStart] === "(") {
+      return functionSource.slice(nameStart, nameEnd);
+    }
+  }
+  return "";
+}
+
+function reachableDeletionOwnerIdentity(source) {
+  const visited = new Set();
+  let functionName = "getActiveDocumentIdentity";
+  // Direct identity-helper delegation is deliberately bounded; a cycle is
+  // invalid rather than an unbounded source-analysis walk.
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (visited.has(functionName)) return false;
+    visited.add(functionName);
+    const functionSource = sourceForNamedDeletionFunction(source, functionName);
+    if (!functionSource) return false;
+    if (deletionOwnerFieldsPresent(functionSource)) return true;
+    functionName = directReturnCallName(functionSource);
+    if (!functionName) return false;
+  }
+  return false;
+}
+
+function hasSaveResultCorrelationContract(saveHandlerSource) {
+  const resultStart = saveHandlerSource.indexOf("const sendSaveResult =");
+  const resultEnd = saveHandlerSource.indexOf(
+    "const sendSaveScopeFailure",
+    resultStart + 1,
+  );
+  const resultSource = resultStart < 0
+    ? ""
+    : saveHandlerSource.slice(
+      resultStart,
+      resultEnd < 0 ? undefined : resultEnd,
+    );
+  const payload = /replyTarget\.send\(\s*["']save-markdown-result["']\s*,\s*\{([\s\S]*?)\}\s*\)/.exec(
+    resultSource,
+  );
+  return /\bconst\s+saveRequestSession\s*=\s*data\s*&&\s*data\.saveRequestSession\b/.test(
+    saveHandlerSource,
+  ) &&
+    /\bconst\s+saveRequest\s*=\s*data\s*&&\s*data\.saveRequest\b/.test(
+      saveHandlerSource,
+    ) &&
+    !!payload &&
+    /(?:^|,)\s*saveRequestSession\s*,/.test(payload[1]) &&
+    /(?:^|,)\s*saveRequest\s*,/.test(payload[1]);
+}
+
+function saveResultCorrelationSelfcheck() {
+  const valid = `
+    const saveRequestSession = data && data.saveRequestSession;
+    const saveRequest = data && data.saveRequest;
+    const sendSaveResult = () => {
+      replyTarget.send("save-markdown-result", {
+        ...outgoing,
+        saveRequestSession,
+        saveRequest,
+      });
+    };
+    const sendSaveScopeFailure = () => {};
+  `;
+  const deadShorthand = valid.replace(
+    "saveRequestSession,\n        saveRequest,",
+    "requestSession: saveRequestSession,\n        request: saveRequest,",
+  ) + "\nconst decoy = { saveRequestSession, saveRequest, };";
+  return hasSaveResultCorrelationContract(valid) &&
+    !hasSaveResultCorrelationContract(deadShorthand);
+}
+
+// This is the one deletion-contract classifier used by both the live
+// preflight and the pure fixtures below. Keep advertisements separate from
+// implementations: a half-landed protocol is a hard failure, never an
+// "unavailable" excuse.
+function deriveDeletionContracts({
+  mainSource = "",
+  rendererSource = "",
+  tabsSource = "",
+  runtimeAckListeners = [],
+} = {}) {
+  const normaliseRuntimeListener = (listener) => {
+    const actual = listener && listener.listener ? listener.listener : listener;
+    const source = listener && typeof listener.source === "string"
+      ? listener.source
+      : typeof actual === "function"
+        ? Function.prototype.toString.call(actual)
+        : "";
+    return {
+      raw: listener,
+      source,
+      once: !!(listener && (listener.once === true || listener.listener)),
+      async:
+        !!(listener && listener.async === true) ||
+        !!(actual && actual.constructor &&
+          actual.constructor.name === "AsyncFunction") ||
+        /\bawait\b/.test(source),
+    };
+  };
+  const ackListeners = runtimeAckListeners.map(normaliseRuntimeListener);
+  const deliverySource = sourceForNamedDeletionFunction(
+    mainSource,
+    "deliverDeletionReport",
+  );
+  const saveHandlerStart = mainSource.indexOf('ipcMain.on("save-markdown-file"');
+  const saveHandlerEnd = mainSource.indexOf(
+    "\nipcMain.",
+    saveHandlerStart + 1,
+  );
+  const saveHandlerSource = saveHandlerStart < 0
+    ? ""
+    : mainSource.slice(
+      saveHandlerStart,
+      saveHandlerEnd < 0 ? undefined : saveHandlerEnd,
+    );
+  const producerAdvertised = /\bdeliverDeletionReport\b/.test(mainSource);
+  const producerDelivery = producerAdvertised &&
+    /\.send\(\s*["']file-deleted["']/.test(deliverySource);
+  const deliveryIdentity = producerDelivery &&
+    deletionIdentityFieldsPresent(deliverySource);
+  const documentTombstone = /\bdeletionTombstone\b/.test(tabsSource);
+  const saveResultAdvertised = /\bsaveRequest(?:Session)?\b/.test(
+    saveHandlerSource,
+  );
+  const saveResultCorrelation = hasSaveResultCorrelationContract(
+    saveHandlerSource,
+  );
+  // Seeing the public helper merely advertises a reload-owner protocol. The
+  // helper must reach a body that constructs the full owner identity before it
+  // can support it.
+  const reloadOwnerAdvertised = /\bgetActiveDocumentIdentity\b/.test(
+    tabsSource,
+  );
+  const reloadOwnerIdentity = reloadOwnerAdvertised &&
+    reachableDeletionOwnerIdentity(tabsSource);
+  const acknowledgedDelivery = /\bfile-deleted-ack\b/.test(mainSource);
+  const rendererAcknowledgementSender =
+    /ipcRenderer\.send\(\s*["']file-deleted-ack["']/.test(rendererSource);
+  const rendererDeletionClassifier =
+    sourceForNamedDeletionFunction(
+      rendererSource,
+      "classifyDeletionDelivery",
+    ).length > 0 &&
+    sourceForNamedDeletionFunction(
+      rendererSource,
+      "acknowledgeDeletionDelivery",
+    ).length > 0;
+  const productionAckListeners = ackListeners.filter((listener) =>
+    /\bfindDeletionDeliveryById\b/.test(listener.source) &&
+    /\bclearDeletionDeliveryAttempt\b/.test(listener.source) &&
+    /\brendererGeneration\b/.test(listener.source));
+  const productionAckHandler = productionAckListeners[0] || null;
+  const productionAckSource = productionAckHandler
+    ? productionAckHandler.source
+    : "";
+  const acknowledgementAttempt = !!productionAckHandler &&
+    /\bfindDeletionDeliveryById\b/.test(productionAckSource) &&
+    /\bclearDeletionDeliveryAttempt\b/.test(productionAckSource) &&
+    deletionIdentityFieldsPresent(productionAckSource);
+  const persistentProductionAckRegistration =
+    ackListeners.length === 1 &&
+    productionAckListeners.length === 1 &&
+    ackListeners[0] === productionAckHandler &&
+    productionAckHandler.once === false &&
+    /ipcMain\.on\(\s*["']file-deleted-ack["']/.test(mainSource);
+  const synchronousProductionAckHandler = !!productionAckHandler &&
+    productionAckHandler.async === false;
+  const caughtSynchronousSend =
+    /try\s*\{[\s\S]*?\.send\(\s*["']file-deleted["'][\s\S]*?\}\s*catch/.test(
+      deliverySource,
+    );
+  const prerequisite = {
+    documentTombstone,
+    producerDelivery,
+    deliveryIdentity,
+    acknowledgedDelivery,
+    rendererAcknowledgementSender,
+    rendererDeletionClassifier,
+    acknowledgementAttempt,
+    mainAcknowledgementListener: productionAckListeners.length > 0,
+    uniqueProductionAckRegistration: productionAckListeners.length === 1,
+    persistentProductionAckRegistration,
+    synchronousProductionAckHandler,
+    caughtSynchronousSend,
+    saveResultCorrelation,
+    saveResultAdvertised,
+    reloadOwnerAdvertised,
+    reloadOwnerIdentity,
+  };
+  const capabilities = {
+    producer: producerDelivery && deliveryIdentity,
+    tombstone: producerDelivery && deliveryIdentity && documentTombstone,
+    watcher: producerDelivery && deliveryIdentity,
+    saveRefusal:
+      producerDelivery &&
+      deliveryIdentity &&
+      documentTombstone &&
+      saveResultCorrelation,
+    ackIdentity:
+      producerDelivery &&
+      deliveryIdentity &&
+      acknowledgedDelivery &&
+      rendererAcknowledgementSender &&
+      rendererDeletionClassifier &&
+      acknowledgementAttempt &&
+      prerequisite.mainAcknowledgementListener &&
+      prerequisite.uniqueProductionAckRegistration &&
+      persistentProductionAckRegistration &&
+      synchronousProductionAckHandler,
+    synchronousSend:
+      producerDelivery &&
+      deliveryIdentity &&
+      caughtSynchronousSend &&
+      acknowledgedDelivery,
+    reloadOwner: reloadOwnerIdentity,
+  };
+  const acknowledgementAdvertised =
+    acknowledgedDelivery ||
+    rendererAcknowledgementSender ||
+    ackListeners.length > 0;
+  const acknowledgementContractViolations = acknowledgementAdvertised
+    ? [
+      acknowledgementAttempt ||
+        "the ACK attempt contract is malformed",
+      acknowledgedDelivery ||
+        "main does not advertise the ACK channel",
+      rendererAcknowledgementSender ||
+        "renderer does not advertise the ACK sender",
+      rendererDeletionClassifier ||
+        "renderer does not provide the deletion classifier",
+      ackListeners.length === 1 ||
+        `runtime listener count is ${ackListeners.length}, not 1`,
+      productionAckListeners.length === 1 ||
+        `matching production handlers is ${productionAckListeners.length}, not 1`,
+      persistentProductionAckRegistration ||
+        "the production ACK registration is not one persistent handler",
+      !productionAckHandler || !productionAckHandler.once ||
+        "the production ACK handler is registered with once",
+      !productionAckHandler || synchronousProductionAckHandler ||
+        "the production ACK handler is asynchronous",
+    ].filter((result) => typeof result === "string")
+    : [];
+  const acknowledgementContract = !acknowledgementAdvertised
+    ? "absent"
+    : acknowledgementContractViolations.length === 0 ? "valid" : "invalid";
+  const capabilityContracts = {
+    producerGeneration: classifyDeletionCapability(
+      producerAdvertised,
+      capabilities.producer,
+    ),
+    watcherOwnership: classifyDeletionCapability(
+      producerAdvertised,
+      capabilities.watcher,
+    ),
+    rendererTombstoneCache: classifyDeletionCapability(
+      producerAdvertised || documentTombstone,
+      capabilities.tombstone,
+    ),
+    deletionSaveRefusal: classifyDeletionCapability(
+      producerAdvertised || documentTombstone,
+      capabilities.saveRefusal,
+    ),
+    synchronousSendRecovery: classifyDeletionCapability(
+      producerAdvertised,
+      capabilities.synchronousSend,
+    ),
+    reloadOwner: classifyDeletionCapability(
+      reloadOwnerAdvertised,
+      reloadOwnerIdentity,
+    ),
+  };
+  const statuses = [
+    ...Object.values(capabilityContracts),
+    acknowledgementContract === "valid" ? "supported" : acknowledgementContract,
+  ];
+  return {
+    prerequisite,
+    capabilities,
+    capabilityContracts,
+    acknowledgementContract,
+    acknowledgementContractViolations,
+    acknowledgementAdvertised,
+    productionAckListeners,
+    productionAckHandler,
+    productionAckSource,
+    synchronousProductionAckHandler,
+    saveHandlerSource,
+    status: statuses.includes("invalid")
+      ? "invalid"
+      : statuses.every((status) => status === "absent")
+        ? "absent"
+        : "supported",
+  };
+}
+
+function deletionEvidenceDisposition(derived, plan, group) {
+  const contract = group === "acknowledgementLifecycle"
+    ? derived.acknowledgementContract === "valid"
+      ? "supported"
+      : derived.acknowledgementContract
+    : derived.capabilityContracts[group];
+  if (plan[group] && plan[group].scheduled === true) return "scheduled";
+  return (plan[group] && plan[group].invalid === true) || contract === "invalid"
+    ? "invalid"
+    : "unavailable";
+}
+
+function deletionCapabilityClassificationSelfcheck() {
+  const delivery = `
+function deliverDeletionReport(target) {
+  const deliveryIdentity = {
+    eventId: 1,
+    selectionGeneration: 1,
+    watcherGeneration: 1,
+    attempt: 1,
+    pageSession: "fixture",
+    rendererGeneration: 1,
+    tabId: 1,
+    documentGeneration: 1,
+    pathKey: "fixture",
+  };
+  try {
+    target.send("file-deleted", deliveryIdentity);
+  } catch (error) {}
+}
+`;
+  const acknowledgement = `
+ipcMain.on("file-deleted-ack", function acknowledgement(event, payload) {
+  const record = findDeletionDeliveryById(payload.eventId);
+  if (!record ||
+      payload.selectionGeneration !== record.selectionGeneration ||
+      payload.watcherGeneration !== record.watcherGeneration ||
+      payload.attempt !== record.attempt ||
+      payload.pageSession !== record.owner.pageSession ||
+      payload.rendererGeneration !== record.owner.rendererGeneration ||
+      payload.owner.tabId !== record.owner.tabId ||
+      payload.owner.documentGeneration !== record.owner.documentGeneration ||
+      payload.owner.pathKey !== record.owner.pathKey) return;
+  clearDeletionDeliveryAttempt(record);
+});
+`;
+  const save = `
+ipcMain.on("save-markdown-file", (event, data) => {
+  const saveRequestSession = data && data.saveRequestSession;
+  const saveRequest = data && data.saveRequest;
+  const sendSaveResult = () => {
+    replyTarget.send("save-markdown-result", {
+      ...outgoing,
+      saveRequestSession,
+      saveRequest,
+    });
+  };
+  const sendSaveScopeFailure = () => {};
+});
+`;
+  const tabs = `
+const deletionTombstone = true;
+function getActiveDocumentIdentity(tab, pageSession) {
+  return documentIdentity(tab, pageSession);
+}
+function documentIdentity(tab, pageSession) {
+  return {
+    pageSession: "fixture",
+    rendererGeneration: 1,
+    tabId: 1,
+    documentGeneration: 1,
+    pathKey: "fixture",
+  };
+}
+`;
+  const renderer = `
+function classifyDeletionDelivery() {}
+function acknowledgeDeletionDelivery() {}
+ipcRenderer.on("file-deleted", () => {
+  classifyDeletionDelivery();
+  acknowledgeDeletionDelivery();
+});
+ipcRenderer.send("file-deleted-ack", acknowledgement);
+`;
+  const acknowledgementListener = acknowledgement.slice(
+    acknowledgement.indexOf("function acknowledgement"),
+    acknowledgement.lastIndexOf("});"),
+  );
+  const full = () => deriveDeletionContracts({
+    mainSource: delivery + acknowledgement + save,
+    rendererSource: renderer,
+    tabsSource: tabs,
+    runtimeAckListeners: [{
+      source: acknowledgementListener,
+      once: false,
+      async: false,
+    }],
+  });
+  const assertPartial = (derived, group) => {
+    const plan = createDeletionEvidencePlan(
+      derived.capabilities,
+      derived.acknowledgementContract,
+    );
+    return derived.status === "invalid" &&
+      deletionEvidenceDisposition(derived, plan, group) === "invalid";
+  };
+  const supported = full();
+  const whollyAbsent = deriveDeletionContracts();
+  const directCompleteReloadOwner = deriveDeletionContracts({
+    tabsSource: `
+function getActiveDocumentIdentity() {
+  return {
+    pageSession: "fixture",
+    rendererGeneration: 1,
+    tabId: 1,
+    documentGeneration: 1,
+    pathKey: "fixture",
+  };
+}
+`,
+  });
+  const delegatedCompleteReloadOwner = deriveDeletionContracts({
+    tabsSource: tabs,
+  });
+  const delegatedMissingReloadOwner = deriveDeletionContracts({
+    tabsSource: tabs.replace('pathKey: "fixture",', ""),
+  });
+  const unknownReloadOwnerHelper = deriveDeletionContracts({
+    tabsSource: tabs.replace(
+      "return documentIdentity(tab, pageSession);",
+      "return unknownDocumentIdentity(tab, pageSession);",
+    ),
+  });
+  const cyclicReloadOwnerHelpers = deriveDeletionContracts({
+    tabsSource: `
+function getActiveDocumentIdentity(tab, pageSession) {
+  return documentIdentity(tab, pageSession);
+}
+function documentIdentity(tab, pageSession) {
+  return getActiveDocumentIdentity(tab, pageSession);
+}
+`,
+  });
+  const unreachableOwnerFieldTokens = deriveDeletionContracts({
+    tabsSource: `
+function getActiveDocumentIdentity(tab, pageSession) {
+  return incompleteDocumentIdentity(tab, pageSession);
+}
+function incompleteDocumentIdentity(tab, pageSession) {
+  return {
+    pageSession: "fixture",
+    rendererGeneration: 1,
+    tabId: 1,
+    documentGeneration: 1,
+  };
+}
+function unrelatedIdentityTokenDecoy() {
+  return {
+    pageSession: "fixture",
+    rendererGeneration: 1,
+    tabId: 1,
+    documentGeneration: 1,
+    pathKey: "fixture",
+  };
+}
+`,
+  });
+  const partialProducerIdentity = deriveDeletionContracts({
+    mainSource: (delivery + acknowledgement + save).replace(
+      "rendererGeneration: 1,",
+      "",
+    ),
+    rendererSource: renderer,
+    tabsSource: tabs,
+    runtimeAckListeners: [{
+      source: acknowledgementListener,
+      once: false,
+      async: false,
+    }],
+  });
+  const tombstoneOnly = deriveDeletionContracts({
+    tabsSource: tabs,
+  });
+  const producerOnly = deriveDeletionContracts({
+    mainSource: delivery + acknowledgement + save,
+  });
+  const partialSaveDeclaration = deriveDeletionContracts({
+    mainSource: (delivery + acknowledgement + save).replace(
+      "const saveRequest = data && data.saveRequest;",
+      "",
+    ),
+    rendererSource: renderer,
+    tabsSource: tabs,
+    runtimeAckListeners: [{
+      source: acknowledgementListener,
+      once: false,
+      async: false,
+    }],
+  });
+  const partialSavePayload = deriveDeletionContracts({
+    mainSource: (delivery + acknowledgement + save).replace(
+      "saveRequest,",
+      "request: saveRequest,",
+    ),
+    rendererSource: renderer,
+    tabsSource: tabs,
+    runtimeAckListeners: [{
+      source: acknowledgementListener,
+      once: false,
+      async: false,
+    }],
+  });
+  const partialReloadSupport = deriveDeletionContracts({
+    mainSource: delivery + acknowledgement + save,
+    rendererSource: renderer,
+    tabsSource: tabs.replace('pathKey: "fixture",', ""),
+    runtimeAckListeners: [{
+      source: acknowledgementListener,
+      once: false,
+      async: false,
+    }],
+  });
+  const partialSyncCatch = deriveDeletionContracts({
+    mainSource: (delivery + acknowledgement + save).replace(
+      "} catch (error) {}",
+      "}",
+    ),
+    rendererSource: renderer,
+    tabsSource: tabs,
+    runtimeAckListeners: [{
+      source: acknowledgementListener,
+      once: false,
+      async: false,
+    }],
+  });
+  const missingDeliveryFunctionWithUnrelatedCatch = deriveDeletionContracts({
+    mainSource: `
+const deliverDeletionReport = (target) => target.send("file-deleted", {});
+function unrelatedCaughtSend(target) {
+  try {
+    target.send("file-deleted", {});
+  } catch (error) {}
+}
+`,
+  });
+  const partialSyncChannel = deriveDeletionContracts({
+    mainSource: (delivery + acknowledgement + save).replaceAll(
+      "file-deleted-ack",
+      "removed-deletion-ack",
+    ),
+    rendererSource: renderer,
+    tabsSource: tabs,
+    runtimeAckListeners: [{
+      source: acknowledgementListener,
+      once: false,
+      async: false,
+    }],
+  });
+  const rendererAckOnly = deriveDeletionContracts({
+    mainSource: delivery + save,
+    rendererSource: renderer,
+  });
+  const mainAckOnly = deriveDeletionContracts({
+    mainSource: delivery + acknowledgement + save,
+    tabsSource: tabs,
+    runtimeAckListeners: [{
+      source: acknowledgementListener,
+      once: false,
+      async: false,
+    }],
+  });
+  const missingRendererClassifier = deriveDeletionContracts({
+    mainSource: delivery + acknowledgement + save,
+    rendererSource: renderer.replace(
+      "function classifyDeletionDelivery() {}",
+      "function unrelatedDeletionClassifier() {}",
+    ),
+    tabsSource: tabs,
+    runtimeAckListeners: [{
+      source: acknowledgementListener,
+      once: false,
+      async: false,
+    }],
+  });
+  const nestedFunctionTokensAfterBody = `
+function getActiveDocumentIdentity() {
+  const nested = () => \`nested \${\`${"${"}still nested${"}"}\`}\`;
+  return { value: nested };
+}
+  function indentedLater() {
+    return {
+      pageSession: "fixture",
+      rendererGeneration: 1,
+      tabId: 1,
+      documentGeneration: 1,
+      pathKey: "fixture",
+    };
+  }
+`;
+  const tokensAfterFunction = deriveDeletionContracts({
+    tabsSource: nestedFunctionTokensAfterBody,
+  });
+  const acknowledgementMutation = (listener) => deriveDeletionContracts({
+    mainSource: delivery + acknowledgement + save,
+    rendererSource: renderer,
+    tabsSource: tabs,
+    runtimeAckListeners: [listener],
+  });
+  const onceAcknowledgement = acknowledgementMutation({
+    source: acknowledgementListener,
+    once: true,
+    async: false,
+  });
+  const duplicateAcknowledgement = deriveDeletionContracts({
+    mainSource: delivery + acknowledgement + save,
+    rendererSource: renderer,
+    tabsSource: tabs,
+    runtimeAckListeners: [
+      { source: acknowledgementListener, once: false, async: false },
+      { source: acknowledgementListener, once: false, async: false },
+    ],
+  });
+  const asyncAcknowledgement = acknowledgementMutation({
+    source: acknowledgementListener,
+    once: false,
+    async: true,
+  });
+  const missingAttemptClear = acknowledgementMutation({
+    source: acknowledgementListener.replace(
+      "clearDeletionDeliveryAttempt",
+      "ignoredDeletionDeliveryAttempt",
+    ),
+    once: false,
+    async: false,
+  });
+  const absentPlan = createDeletionEvidencePlan(
+    whollyAbsent.capabilities,
+    whollyAbsent.acknowledgementContract,
+  );
+  return supported.status === "supported" &&
+    supported.acknowledgementContract === "valid" &&
+    supported.capabilityContracts.reloadOwner === "supported" &&
+    supported.prerequisite.reloadOwnerIdentity === true &&
+    directCompleteReloadOwner.capabilityContracts.reloadOwner === "supported" &&
+    delegatedCompleteReloadOwner.capabilityContracts.reloadOwner === "supported" &&
+    [
+      delegatedMissingReloadOwner,
+      unknownReloadOwnerHelper,
+      cyclicReloadOwnerHelpers,
+      unreachableOwnerFieldTokens,
+    ].every((derived) =>
+      derived.status === "invalid" &&
+      derived.capabilityContracts.reloadOwner === "invalid") &&
+    whollyAbsent.status === "absent" &&
+    Object.keys(absentPlan).every((group) =>
+      deletionEvidenceDisposition(whollyAbsent, absentPlan, group) === "unavailable",
+    ) &&
+    assertPartial(partialProducerIdentity, "producerGeneration") &&
+    assertPartial(tombstoneOnly, "rendererTombstoneCache") &&
+    assertPartial(producerOnly, "rendererTombstoneCache") &&
+    assertPartial(partialSaveDeclaration, "deletionSaveRefusal") &&
+    assertPartial(partialSavePayload, "deletionSaveRefusal") &&
+    assertPartial(partialReloadSupport, "reloadOwner") &&
+    assertPartial(partialSyncCatch, "synchronousSendRecovery") &&
+    missingDeliveryFunctionWithUnrelatedCatch.prerequisite.caughtSynchronousSend ===
+      false &&
+    missingDeliveryFunctionWithUnrelatedCatch.capabilityContracts
+      .synchronousSendRecovery === "invalid" &&
+    assertPartial(partialSyncChannel, "synchronousSendRecovery") &&
+    assertPartial(rendererAckOnly, "acknowledgementLifecycle") &&
+    assertPartial(mainAckOnly, "acknowledgementLifecycle") &&
+    assertPartial(missingRendererClassifier, "acknowledgementLifecycle") &&
+    missingRendererClassifier.acknowledgementContractViolations.includes(
+      "renderer does not provide the deletion classifier",
+    ) &&
+    assertPartial(tokensAfterFunction, "reloadOwner") &&
+    assertPartial(onceAcknowledgement, "acknowledgementLifecycle") &&
+    assertPartial(duplicateAcknowledgement, "acknowledgementLifecycle") &&
+    assertPartial(asyncAcknowledgement, "acknowledgementLifecycle") &&
+    assertPartial(missingAttemptClear, "acknowledgementLifecycle");
+}
+
+async function deletionEvidencePlanSelfcheck() {
+  const partial = createDeletionEvidencePlan({
+    producer: true,
+    tombstone: true,
+    watcher: true,
+    saveRefusal: false,
+    ackIdentity: false,
+    synchronousSend: false,
+  }, "absent");
+  const invalidAcknowledgement = createDeletionEvidencePlan({
+    producer: true,
+    tombstone: true,
+    watcher: true,
+    saveRefusal: true,
+    ackIdentity: true,
+    synchronousSend: true,
+  }, "invalid");
+  const partialRuns = [];
+  for (const group of Object.keys(partial)) {
+    await runDeletionEvidenceGroup(partial, group, async () => {
+      partialRuns.push(group);
+    });
+  }
+  const assertionRuns = [];
+  const assertionSink = (...args) => assertionRuns.push(args);
+  const assertionThunkRuns = {
+    producer: 0,
+    tombstone: 0,
+    watcher: 0,
+    acknowledgement: 0,
+    acknowledgementDetail: 0,
+  };
+  const producerAssertion = scheduleDeletionAssertion(
+    partial,
+    ["producerGeneration"],
+    assertionSink,
+    "producer",
+    () => {
+      assertionThunkRuns.producer += 1;
+      return true;
+    },
+    () => "producer-detail",
+  );
+  const tombstoneAssertion = scheduleDeletionAssertion(
+    partial,
+    ["rendererTombstoneCache"],
+    assertionSink,
+    "tombstone",
+    () => {
+      assertionThunkRuns.tombstone += 1;
+      return true;
+    },
+    () => "tombstone-detail",
+  );
+  const watcherAssertion = scheduleDeletionAssertion(
+    partial,
+    ["watcherOwnership"],
+    assertionSink,
+    "watcher",
+    () => {
+      assertionThunkRuns.watcher += 1;
+      return true;
+    },
+    () => "watcher-detail",
+  );
+  const acknowledgementAssertion = scheduleDeletionAssertion(
+    partial,
+    ["acknowledgementLifecycle"],
+    assertionSink,
+    "acknowledgement",
+    () => {
+      assertionThunkRuns.acknowledgement += 1;
+      throw new Error("unscheduled acknowledgement evidence was evaluated");
+    },
+    () => {
+      assertionThunkRuns.acknowledgementDetail += 1;
+      throw new Error("unscheduled acknowledgement detail was evaluated");
+    },
+  );
+  const unknownAssertion = scheduleDeletionAssertion(
+    partial,
+    ["does-not-exist"],
+    assertionSink,
+    "unknown",
+    () => true,
+    () => "unknown-detail",
+  );
+  return partial.producerGeneration.scheduled === true &&
+    partial.rendererTombstoneCache.scheduled === true &&
+    partial.watcherOwnership.scheduled === true &&
+    partial.deletionSaveRefusal.scheduled === false &&
+    partial.acknowledgementLifecycle.scheduled === false &&
+    partial.synchronousSendRecovery.scheduled === false &&
+    invalidAcknowledgement.producerGeneration.scheduled === true &&
+    invalidAcknowledgement.acknowledgementLifecycle.scheduled === false &&
+    invalidAcknowledgement.acknowledgementLifecycle.invalid === true &&
+    invalidAcknowledgement.synchronousSendRecovery.scheduled === false &&
+    JSON.stringify(partialRuns) === JSON.stringify([
+      "producerGeneration",
+      "watcherOwnership",
+      "rendererTombstoneCache",
+    ]) &&
+    producerAssertion === true &&
+    tombstoneAssertion === true &&
+    watcherAssertion === true &&
+    acknowledgementAssertion === false &&
+    unknownAssertion === false &&
+    assertionThunkRuns.producer === 1 &&
+    assertionThunkRuns.tombstone === 1 &&
+    assertionThunkRuns.watcher === 1 &&
+    assertionThunkRuns.acknowledgement === 0 &&
+    assertionThunkRuns.acknowledgementDetail === 0 &&
+    JSON.stringify(assertionRuns) === JSON.stringify([
+      ["producer", true, "producer-detail"],
+      ["tombstone", true, "tombstone-detail"],
+      ["watcher", true, "watcher-detail"],
+    ]);
 }
 
 // Always restores, including on a throw: a capture left installed would silence
@@ -3546,7 +4636,24 @@ const COMPANION_ASSERTION_TOTALS = {
 // them with its own single assertion, rather than asserting `code === 0` and
 // leaving the child's own accounting unreferenced beside it.
 function summariseCompanionTranscript(text) {
-  const lines = text.split(/\r?\n/).map((line) => line.trim());
+  // Footers are an exact transport contract. Trimming would turn a malformed
+  // child transcript into a terminal accounting that this parent never saw.
+  const lines = text.split(/\r?\n/);
+  const passedFooterRecord =
+    /^=== ([1-9]\d*)\/([1-9]\d*) passed(?:; ([1-9]\d*) unavailable)? ===$/;
+  const timedOutFooterRecord =
+    /^=== TIMED OUT after (?:0|[1-9]\d*)\/(?:0|[1-9]\d*) checks ===$/;
+  const recognizedNonFooterBanners = new Set(["=== Application started ==="]);
+  const protocolText = "\\S(?:.*\\S)?";
+  const passRecord = new RegExp(`^PASS  (${protocolText})$`);
+  const failureRecord = new RegExp(`^FAIL  (${protocolText})  -> (${protocolText})$`);
+  const unavailableRecord = new RegExp(
+    `^UNAVAILABLE  (${protocolText})  -> (${protocolText})$`,
+  );
+  const protocolPrefix = (line) =>
+    line.trimStart().startsWith("PASS") ||
+    line.trimStart().startsWith("FAIL") ||
+    line.trimStart().startsWith("UNAVAILABLE");
   // COUNTED, NOT PICKED. Taking the last footer accepts a transcript with two
   // of them, and two terminal accountings in one companion is not a companion
   // that finished twice - it is a transcript this parent cannot attribute, and
@@ -3555,22 +4662,80 @@ function summariseCompanionTranscript(text) {
   // numbers read as N === M whenever the run wedged after its last assertion,
   // which is the precise confusion this reconciliation exists to remove.
   const passedFooters = lines
-    .map((line) => /^=== (\d+)\/(\d+) passed ===$/.exec(line))
+    .map((line) => passedFooterRecord.exec(line))
     .filter(Boolean);
-  const timedOutFooters = lines.filter((line) => /^=== TIMED OUT /.test(line));
+  const timedOutFooters = lines.filter((line) => timedOutFooterRecord.test(line));
   const only = passedFooters.length === 1 ? passedFooters[0] : null;
+  const footerIndex = only ? lines.indexOf(only[0]) : -1;
+  // `main.js` emits this exact startup banner into every Electron child
+  // transcript. It is preamble only; every fenced line after the definitive
+  // passed footer is malformed, even if it is this otherwise known banner.
+  const footerLikeSummary = (line) =>
+    /^(?:\s*===\s*(?:\d+\s*\/\s*\d+|TIMED\s*OUT\b)|\s*(?:\d+\s*\/\s*\d+\s+(?:passed|unavailable)\b|TIMED\s*OUT\b).*===\s*$)/i.test(line);
+  const malformedFooterLines = lines.filter((line, index) =>
+    (/^\s*===/.test(line) || footerLikeSummary(line)) &&
+    (!recognizedNonFooterBanners.has(line) ||
+      (footerIndex >= 0 && index > footerIndex)) &&
+    !passedFooterRecord.test(line) &&
+    !timedOutFooterRecord.test(line));
+  const assertionLines = footerIndex < 0 ? [] : lines.slice(0, footerIndex);
+  const postFooterAssertions =
+    footerIndex < 0 ? [] : lines.slice(footerIndex + 1).filter(protocolPrefix);
+  const malformedProtocolLines = lines.filter((line) =>
+    protocolPrefix(line) &&
+    !passRecord.test(line) &&
+    !failureRecord.test(line) &&
+    !unavailableRecord.test(line));
   return {
     passedFooters: passedFooters.map((match) => match[0]),
     timedOutFooters,
+    malformedFooterLines,
     passed: only ? Number(only[1]) : null,
     total: only ? Number(only[2]) : null,
+    unavailable: only ? Number(only[3] || 0) : null,
     // The child's OWN failure names, not a byte tail. A tail can cut a failure
     // in half; these are what the parent's detail has to carry so a companion
     // failure is readable without re-running it.
-    failures: lines
-      .filter((line) => line.startsWith("FAIL  "))
-      .map((line) => line.slice(6).split("  -> ")[0]),
+    failures: assertionLines
+      .map((line) => failureRecord.exec(line))
+      .filter(Boolean)
+      .map((match) => match[1]),
+    passedAssertions: assertionLines.filter((line) => passRecord.test(line)),
+    unavailableAssertions: assertionLines
+      .filter((line) => unavailableRecord.test(line))
+      .map((line) => unavailableRecord.exec(line)[1]),
+    malformedUnavailableAssertions: assertionLines.filter((line) =>
+      line.startsWith("UNAVAILABLE") && !unavailableRecord.test(line)),
+    malformedProtocolLines,
+    postFooterAssertions,
   };
+}
+
+function reconcileCompanionCompletion({ code, timedOut, error, closeObserved, transcript, expectedTotal }) {
+  const footerComplete =
+    closeObserved === true &&
+    !timedOut &&
+    !error &&
+    transcript.passedFooters.length === 1 &&
+    transcript.timedOutFooters.length === 0 &&
+    transcript.malformedFooterLines.length === 0 &&
+    transcript.total === expectedTotal &&
+    transcript.passed === transcript.total &&
+    transcript.failures.length === 0;
+  const assertionAccounting =
+    transcript.postFooterAssertions.length === 0 &&
+    transcript.malformedProtocolLines.length === 0 &&
+    transcript.malformedUnavailableAssertions.length === 0 &&
+    transcript.passedAssertions.length + transcript.failures.length ===
+      transcript.total &&
+    transcript.unavailableAssertions.length === transcript.unavailable;
+  if (footerComplete && assertionAccounting && code === 0 && transcript.unavailable === 0) {
+    return { kind: "passed", valid: true };
+  }
+  if (footerComplete && assertionAccounting && code === 2 && transcript.unavailable > 0) {
+    return { kind: "unavailable", valid: true };
+  }
+  return { kind: "invalid", valid: false };
 }
 
 function relayCompanionOutput(child, output) {
@@ -3971,12 +5136,35 @@ async function runCompanion(options) {
   const scratchPreserved = scratch.preserved;
   const scratchError = scratch.error;
   const transcript = summariseCompanionTranscript(output.join(""));
+  const completion = reconcileCompanionCompletion({
+    code: result.code,
+    timedOut: result.timedOut,
+    error: result.error,
+    closeObserved: result.closeObserved,
+    transcript,
+    expectedTotal: options.expectedTotal,
+  });
+  const completedUnavailable =
+    completion.kind === "unavailable" &&
+    streamErrors.length === 0 &&
+    scratchExistedBefore === true &&
+    scratchRemoved === true;
+  if (completedUnavailable) {
+    unavailable(
+      options.name,
+      JSON.stringify({
+        code: result.code,
+        companionPassedFooters: transcript.passedFooters,
+        companionPassed: transcript.passed,
+        companionTotal: transcript.total,
+        companionUnavailable: transcript.unavailable,
+      }),
+    );
+    return terminationConfirmed;
+  }
   check(
     options.name,
-    result.code === 0 &&
-      !result.timedOut &&
-      !result.error &&
-      result.closeObserved === true &&
+    completion.kind === "passed" &&
       // The child's own accounting has to agree, exactly once. Without this the
       // parent is asserting "the process ended well", which is not the same
       // claim as "every check in it ran and passed".
@@ -3984,6 +5172,7 @@ async function runCompanion(options) {
       transcript.timedOutFooters.length === 0 &&
       transcript.total === options.expectedTotal &&
       transcript.passed === transcript.total &&
+      transcript.unavailable === 0 &&
       transcript.failures.length === 0 &&
       streamErrors.length === 0 &&
       scratchExistedBefore === true &&
@@ -4000,6 +5189,7 @@ async function runCompanion(options) {
       companionTimedOutFooters: transcript.timedOutFooters,
       companionPassed: transcript.passed,
       companionTotal: transcript.total,
+      companionUnavailable: transcript.unavailable,
       companionFailures: transcript.failures,
       streamErrors,
       expectedTotal: options.expectedTotal,
@@ -4102,6 +5292,191 @@ function skipPortableAndTeardownCompanions(blockedBy) {
 // block costs a couple of seconds and can assert the branches a real companion
 // reaches only when something has already gone wrong.
 async function runCompanionSettlementScenarios() {
+  const startupBanner = "=== Application started ===\n";
+  const unavailableFooter = summariseCompanionTranscript(
+    startupBanner +
+      "PASS  retained check\nUNAVAILABLE  first  -> detail\nUNAVAILABLE  second  -> detail\n=== 1/1 passed; 2 unavailable ===\n",
+  );
+  const malformedUnavailableFooters = [
+    " === 1/1 passed; 1 unavailable ===",
+    "=== 1/1 passed; 0 unavailable ===",
+    "=== 1/1 passed; 1 unavailable === ",
+  ].every((footer) =>
+    summariseCompanionTranscript(footer).passedFooters.length === 0,
+  );
+  const completeFooter = summariseCompanionTranscript(
+    startupBanner + "PASS  retained check\n=== 1/1 passed ===\n",
+  );
+  const timedOutFooter = summariseCompanionTranscript(
+    startupBanner + "PASS  retained check\n=== TIMED OUT after 1/2 checks ===\n",
+  );
+  const malformedTimedOutFooterTranscripts = [
+    "=== TIMED OUT after 1/2 checks === ",
+    "=== TIMED OUT after 1/2 check ===",
+  ].map((footer) =>
+    summariseCompanionTranscript(
+      startupBanner + "PASS  retained check\n" + footer + "\n",
+    ));
+  const malformedPostFooterSummaries = [
+    " 1/1 passed ===",
+    " 0/1 passed; 3 unavailable ===",
+    " TIMED OUT after 0/1 checks ===",
+    "=== TIMEDOUT after 0/1 checks ===",
+  ].map((summary) =>
+    summariseCompanionTranscript(
+      "PASS  retained check\n=== 1/1 passed ===\n" + summary + "\n",
+    ));
+  const postFooterPass = summariseCompanionTranscript(
+    "PASS  retained check\n=== 1/1 passed ===\nPASS  unaccounted\n",
+  );
+  const postFooterUnavailable = summariseCompanionTranscript(
+    "PASS  retained check\n=== 1/1 passed ===\nUNAVAILABLE  unaccounted\n",
+  );
+  const countMismatch = summariseCompanionTranscript(
+    "PASS  retained check\n=== 2/2 passed ===\n",
+  );
+  const malformedProtocolTranscripts = [
+    "PASS retained check\n=== 1/1 passed ===\n",
+    "FAIL  retained check -> detail\n=== 1/1 passed ===\n",
+    "UNAVAILABLE first -> detail\n=== 1/1 passed; 1 unavailable ===\n",
+    "UNAVAILABLE  first -> detail\n=== 1/1 passed; 1 unavailable ===\n",
+    "UNAVAILABLE  first  -> \n=== 1/1 passed; 1 unavailable ===\n",
+    "UNAVAILABLE   first  -> detail\n=== 1/1 passed; 1 unavailable ===\n",
+    "UNAVAILABLE  first  ->   \n=== 1/1 passed; 1 unavailable ===\n",
+    " PASS  retained check\n=== 1/1 passed ===\n",
+    "PASS  retained check\n=== 1/1 passed ===\nFAIL retained check\n",
+  ].map((text) => summariseCompanionTranscript(text));
+  const malformedFooterTranscripts = [
+    "PASS  retained check\n=== 1/1 passed; 0 unavailable ===\n",
+    "PASS  retained check\n=== 1/1 passed === \n",
+    "PASS  retained check\n=== 1/1 passed ===\n=== 1/1 passed ===\n",
+    "PASS  retained check\n=== 1/1 passed ===\n=== 1/1 passed === \n",
+    "PASS  retained check\n=== 1/1 passed ===\n === 1/1 passed ===\n",
+  ].map((text) => summariseCompanionTranscript(text));
+  const leadingZeroFooterTranscripts = [
+    "PASS  retained check\n=== 01/01 passed ===\n",
+    "PASS  retained check\n=== 1/01 passed ===\n",
+    "PASS  retained check\n=== 01/1 passed ===\n",
+  ].map((text) => summariseCompanionTranscript(text));
+  const leadingZeroFootersRejected = leadingZeroFooterTranscripts.every(
+    (transcript) =>
+      transcript.passedFooters.length === 0 &&
+      transcript.malformedFooterLines.length === 1 &&
+      reconcileCompanionCompletion({
+        code: 0, timedOut: false, error: null, closeObserved: true,
+        transcript, expectedTotal: 1,
+      }).kind === "invalid",
+  );
+  const reviewerReproFooterTranscripts = [
+    "PASS  retained check\n=== 1/1 passed ===\n=== passed 1/1 ===\n",
+    "PASS  retained check\n=== 1/1 passed ===\n=== unavailable 1/1 ===\n",
+  ].map((text) => summariseCompanionTranscript(text));
+  const arbitraryFencedSummaryTranscripts = [
+    "=== bogus ===\nPASS  retained check\n=== 1/1 passed ===\n",
+    "PASS  retained check\n=== 1/1 passed ===\n=== bogus ===\n",
+  ].map((text) => summariseCompanionTranscript(text));
+  const postFooterStartupBanner = summariseCompanionTranscript(
+    "PASS  retained check\n=== 1/1 passed ===\n=== Application started ===\n",
+  );
+  const fencedSummariesRejected = [
+    ...reviewerReproFooterTranscripts,
+    ...arbitraryFencedSummaryTranscripts,
+    postFooterStartupBanner,
+  ].every((transcript) =>
+    transcript.malformedFooterLines.length === 1 &&
+    reconcileCompanionCompletion({
+      code: 0, timedOut: false, error: null, closeObserved: true,
+      transcript, expectedTotal: 1,
+    }).kind === "invalid",
+  );
+  const strictTranscriptGrammar =
+    malformedProtocolTranscripts.every((transcript) =>
+      transcript.malformedProtocolLines.length > 0 &&
+      reconcileCompanionCompletion({
+        code: 0, timedOut: false, error: null, closeObserved: true,
+        transcript, expectedTotal: 1,
+      }).kind === "invalid") &&
+    malformedFooterTranscripts.every((transcript) =>
+      (transcript.malformedFooterLines.length > 0 ||
+        transcript.passedFooters.length !== 1) &&
+      reconcileCompanionCompletion({
+        code: 0, timedOut: false, error: null, closeObserved: true,
+        transcript, expectedTotal: 1,
+      }).kind === "invalid");
+  const completionCases = {
+    passed: reconcileCompanionCompletion({
+      code: 0, timedOut: false, error: null, closeObserved: true,
+      transcript: completeFooter, expectedTotal: 1,
+    }),
+    unavailable: reconcileCompanionCompletion({
+      code: 2, timedOut: false, error: null, closeObserved: true,
+      transcript: unavailableFooter, expectedTotal: 1,
+    }),
+    codeZeroUnavailable: reconcileCompanionCompletion({
+      code: 0, timedOut: false, error: null, closeObserved: true,
+      transcript: unavailableFooter, expectedTotal: 1,
+    }),
+    codeTwoWithoutUnavailable: reconcileCompanionCompletion({
+      code: 2, timedOut: false, error: null, closeObserved: true,
+      transcript: completeFooter, expectedTotal: 1,
+    }),
+  };
+  check(
+    "companion transcript parser preserves an explicit unavailable completion",
+    unavailableFooter.passedFooters.length === 1 &&
+      unavailableFooter.passed === 1 &&
+      unavailableFooter.total === 1 &&
+      unavailableFooter.unavailable === 2 &&
+      unavailableFooter.failures.length === 0 &&
+      unavailableFooter.malformedFooterLines.length === 0 &&
+      completeFooter.malformedFooterLines.length === 0 &&
+      timedOutFooter.timedOutFooters.length === 1 &&
+      timedOutFooter.malformedFooterLines.length === 0 &&
+      reconcileCompanionCompletion({
+        code: 1, timedOut: true, error: null, closeObserved: true,
+        transcript: timedOutFooter, expectedTotal: 2,
+      }).kind === "invalid" &&
+      malformedTimedOutFooterTranscripts.every((transcript) =>
+        transcript.malformedFooterLines.length === 1 &&
+        reconcileCompanionCompletion({
+          code: 1, timedOut: true, error: null, closeObserved: true,
+          transcript, expectedTotal: 2,
+        }).kind === "invalid") &&
+      malformedPostFooterSummaries.every((transcript) =>
+        transcript.malformedFooterLines.length === 1 &&
+        reconcileCompanionCompletion({
+          code: 0, timedOut: false, error: null, closeObserved: true,
+          transcript, expectedTotal: 1,
+        }).kind === "invalid") &&
+      malformedUnavailableFooters === true &&
+      leadingZeroFootersRejected === true &&
+      fencedSummariesRejected === true &&
+      strictTranscriptGrammar === true &&
+      completionCases.passed.kind === "passed" &&
+      completionCases.unavailable.kind === "unavailable" &&
+      completionCases.codeZeroUnavailable.kind === "invalid" &&
+      completionCases.codeTwoWithoutUnavailable.kind === "invalid" &&
+      reconcileCompanionCompletion({
+        code: 0, timedOut: false, error: null, closeObserved: true,
+        transcript: postFooterPass, expectedTotal: 1,
+      }).kind === "invalid" &&
+      reconcileCompanionCompletion({
+        code: 0, timedOut: false, error: null, closeObserved: true,
+        transcript: postFooterUnavailable, expectedTotal: 1,
+      }).kind === "invalid" &&
+      reconcileCompanionCompletion({
+        code: 0, timedOut: false, error: null, closeObserved: true,
+        transcript: countMismatch, expectedTotal: 2,
+      }).kind === "invalid",
+    JSON.stringify({
+      unavailableFooter, malformedUnavailableFooters, completionCases,
+      strictTranscriptGrammar, malformedProtocolTranscripts,
+      malformedFooterTranscripts, leadingZeroFooterTranscripts,
+      leadingZeroFootersRejected, postFooterPass, postFooterUnavailable,
+      countMismatch, timedOutFooter, malformedTimedOutFooterTranscripts,
+      malformedPostFooterSummaries, postFooterStartupBanner,
+    }),
+  );
   const { EventEmitter } = require("events");
   const budgets = { budgetMs: 300, killGraceMs: 200, drainGraceMs: 150 };
   const fakeChild = (overrides) => {
@@ -4454,7 +5829,8 @@ async function runCompanionSettlementScenarios() {
     } finally {
       restoreThrowingSpawn();
     }
-  });
+      },
+    );
   const only = captured.length === 1 ? captured[0] : null;
   let detail = null;
   try {
@@ -4655,7 +6031,7 @@ async function runCompanionSettlementScenarios() {
       child.stdout = new EventEmitter();
       child.stderr = new EventEmitter();
       queueMicrotask(() => {
-        child.stdout.emit("data", "=== 1/1 passed ===\n");
+        child.stdout.emit("data", "PASS  retained check\n=== 1/1 passed ===\n");
         child.emit("exit", 0);
         child.emit("close", 0);
       });
@@ -4895,6 +6271,14 @@ async function runFinalizerPreservationSubprocess() {
   const evidence = preserved ? path.join(preserved, "evidence.txt") : null;
   // THE SAME RECONCILIATION THE COMPANIONS GET, not a weaker parallel one.
   const transcript = summariseCompanionTranscript(text);
+  const completion = reconcileCompanionCompletion({
+    code: result && result.code,
+    timedOut: result && result.timedOut,
+    error: spawnError || (result && result.error),
+    closeObserved: result && result.closeObserved,
+    transcript,
+    expectedTotal: FINALIZER_SELFCHECK_ASSERTIONS,
+  });
   const terminationConfirmed =
     !!spawnError ||
     (result !== null &&
@@ -4902,17 +6286,8 @@ async function runFinalizerPreservationSubprocess() {
   check(
     "the finalizer selfcheck subprocess completed its whole run and accounted for every assertion",
     !spawnError &&
-      result !== null &&
-      result.code === 0 &&
-      result.timedOut === false &&
-      !result.error &&
-      result.closeObserved === true &&
-      transcript.passedFooters.length === 1 &&
-      transcript.timedOutFooters.length === 0 &&
-      transcript.failures.length === 0 &&
+      completion.kind === "passed" &&
       streamErrors.length === 0 &&
-      transcript.total === FINALIZER_SELFCHECK_ASSERTIONS &&
-      transcript.passed === transcript.total &&
       // Exactly one of each announcement: a second would mean two finalizers
       // ran, and the evidence below could not be attributed to either.
       rootLine.count === 1 &&
@@ -4925,6 +6300,7 @@ async function runFinalizerPreservationSubprocess() {
       closeObserved: result && result.closeObserved,
       error: result && result.error && String(result.error),
       passedFooters: transcript.passedFooters,
+      unavailable: transcript.unavailable,
       timedOutFooters: transcript.timedOutFooters,
       failures: transcript.failures,
       streamErrors,
@@ -8054,6 +9430,126 @@ async function run(win) {
 
 async function runF22SaveAndReloadScenarios(win, exec) {
   const wc = win.webContents;
+  // R2 is a regression suite for the companion production correction.  Do not
+  // execute a mixture of old contracts and new proof obligations: that yields
+  // incidental failures which look like evidence rather than the explicit
+  // prerequisite disposition that maintainers need when running this test file
+  // alone on the immutable base revision.
+  const deletionProducerSource = fs.readFileSync(
+    path.join(__dirname, "..", "src", "main.js"), "utf8",
+  );
+  const deletionTabsSource = fs.readFileSync(
+    path.join(__dirname, "..", "src", "custom-tabs.js"), "utf8",
+  );
+  const deletionRendererSource = fs.readFileSync(
+    path.join(__dirname, "..", "src", "renderer.js"), "utf8",
+  );
+  const deletionAckChannel = "file-deleted-ack";
+  const initialDeletionAckListeners = ipcMain.rawListeners(deletionAckChannel);
+  const deletionContracts = deriveDeletionContracts({
+    mainSource: deletionProducerSource,
+    rendererSource: deletionRendererSource,
+    tabsSource: deletionTabsSource,
+    runtimeAckListeners: initialDeletionAckListeners,
+  });
+  const deletionProductionPrerequisite = deletionContracts.prerequisite;
+  const deletionCapabilities = deletionContracts.capabilities;
+  const deletionCapabilityContracts = deletionContracts.capabilityContracts;
+  const productionDeletionAckListeners = deletionContracts.productionAckListeners
+    .map((listener) => listener.raw);
+  const productionDeletionAckHandler = deletionContracts.productionAckHandler
+    ? deletionContracts.productionAckHandler.raw
+    : null;
+  const productionDeletionAckSource = deletionContracts.productionAckSource;
+  const persistentProductionAckRegistration =
+    deletionProductionPrerequisite.persistentProductionAckRegistration;
+  const synchronousProductionDeletionAckHandler =
+    deletionContracts.synchronousProductionAckHandler;
+  const saveHandlerSource = deletionContracts.saveHandlerSource;
+  const reportDeletionCapability = (name, contract, detail) => {
+    if (contract === "invalid") {
+      check(`${name} production contract is complete when advertised`, false, detail);
+    } else {
+      unavailable(name, detail);
+    }
+  };
+  const deletionAckContractViolations =
+    deletionContracts.acknowledgementContractViolations;
+  const deletionAcknowledgementContract =
+    deletionContracts.acknowledgementContract;
+  const deletionAcknowledgementContractDetail = JSON.stringify({
+    contract: deletionAcknowledgementContract,
+    violations: deletionAckContractViolations,
+    listeners: initialDeletionAckListeners.length,
+    matchingHandlers: productionDeletionAckListeners.length,
+    persistentProductionAckRegistration,
+    synchronousProductionDeletionAckHandler,
+    acknowledgementAttempt: deletionProductionPrerequisite.acknowledgementAttempt,
+  });
+  const deletionEvidencePlan = createDeletionEvidencePlan(
+    deletionCapabilities,
+    deletionAcknowledgementContract,
+  );
+  const deletionPlanSelfcheckPassed = await deletionEvidencePlanSelfcheck();
+  const saveResultCorrelationSelfcheckPassed = saveResultCorrelationSelfcheck();
+  const deletionCapabilityClassificationSelfcheckPassed =
+    deletionCapabilityClassificationSelfcheck();
+  check(
+    "F22 deletion capability plan keeps producer, tombstone and watcher scheduled when ACK support is absent",
+    deletionPlanSelfcheckPassed,
+    JSON.stringify(createDeletionEvidencePlan({
+      producer: true,
+      tombstone: true,
+      watcher: true,
+      saveRefusal: false,
+      ackIdentity: false,
+      synchronousSend: false,
+    }, "absent")),
+  );
+  check(
+    "F22 deletion capability classification follows direct reload-owner delegation and rejects malformed advertised contracts",
+    deletionCapabilityClassificationSelfcheckPassed,
+    JSON.stringify({ deletionCapabilityClassificationSelfcheckPassed }),
+  );
+  check(
+    "F22 save-result correlation capability rejects a dead shorthand decoy",
+    saveResultCorrelationSelfcheckPassed,
+    JSON.stringify({ saveResultCorrelationSelfcheckPassed }),
+  );
+  for (const [group, entry] of Object.entries(deletionEvidencePlan)) {
+    const disposition = deletionEvidenceDisposition(
+      deletionContracts,
+      deletionEvidencePlan,
+      group,
+    );
+    if (disposition === "scheduled") continue;
+    if (disposition === "invalid") {
+      if (group === "acknowledgementLifecycle") {
+        check(
+          "F22 production deletion ACK registration is one persistent uniquely identified handler",
+          false,
+          deletionAcknowledgementContractDetail,
+        );
+      } else {
+        check(
+          `F22 ${group} production contract is complete when advertised`,
+          false,
+          JSON.stringify({
+            group,
+            contract: deletionCapabilityContracts[group],
+            deletionProductionPrerequisite,
+          }),
+        );
+      }
+    } else {
+      unavailable(
+        entry.unavailable,
+        group === "acknowledgementLifecycle"
+          ? deletionAcknowledgementContractDetail
+          : JSON.stringify(deletionProductionPrerequisite),
+      );
+    }
+  }
   const clearTabs = () =>
     exec(`
       (async () => {
@@ -8128,9 +9624,8 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       // EEXIST, invalid paths and all unrelated I/O failures are setup failures.
       if (["EPERM", "EACCES", "ENOSYS", "ENOTSUP", "EOPNOTSUPP"].includes(code)) {
         symlinkAvailable = false;
-        check(
-          "F22 symlink retarget save is skipped only for unsupported or denied symlink creation",
-          true,
+        unavailable(
+          "F22 symlink retarget evidence is unavailable on this platform",
           symlinkReason,
         );
       } else {
@@ -8240,16 +9735,16 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       return null;
     })()
   `);
-  let saveRaceRequest = 0;
-  let saveRaceSequence = 0;
+  let saveRaceScenario = 0;
+  let lastObservedSaveRaceSequence = 0;
+  const observedSaveRaceSequences = [];
   const prepareSaveRaceDocument = async (filePath, baselineContent, content) => {
     const ownerStart = await exec(`
       window.__f22SavePathRaceProbe.owners.length
     `);
     await clearTabs();
     const tab = await createActiveTab(filePath, baselineContent);
-    const sequence = ++saveRaceSequence;
-    return exec(`
+    const activeDocument = await exec(`
       (() => {
         const hasSaveSeam = !!(
           window.CustomTabs &&
@@ -8275,7 +9770,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
         const identity = prepared && prepared.identity;
         const selectionGeneration =
           owner && owner.owner && owner.owner.selectionGeneration;
-        const sequence = ${sequence};
+        const sequence = identity && identity.sequence;
         const matchesActiveDocument = !!(
           identity &&
           owner &&
@@ -8286,6 +9781,8 @@ async function runF22SaveAndReloadScenarios(win, exec) {
           identity.pathKey === owner.owner.pathKey &&
           Number.isSafeInteger(selectionGeneration) &&
           selectionGeneration > 0 &&
+          Number.isSafeInteger(sequence) &&
+          sequence > 0 &&
           prepared.content === ${JSON.stringify(content)}
         );
         return {
@@ -8299,18 +9796,41 @@ async function runF22SaveAndReloadScenarios(win, exec) {
             ? {
                 ...identity,
                 selectionGeneration,
-                sequence,
               }
             : null,
         };
       })()
     `);
+    const sequence = activeDocument && activeDocument.sequence;
+    const sequencePositive =
+      Number.isSafeInteger(sequence) && sequence > 0;
+    const sequenceMonotonic =
+      sequencePositive && sequence > lastObservedSaveRaceSequence;
+    if (sequencePositive) {
+      lastObservedSaveRaceSequence = Math.max(
+        lastObservedSaveRaceSequence,
+        sequence,
+      );
+    }
+    const observed = {
+      ...activeDocument,
+      sequencePositive,
+      sequenceMonotonic,
+    };
+    observedSaveRaceSequences.push({
+      sequence,
+      sequencePositive,
+      sequenceMonotonic,
+    });
+    return observed;
   };
   const hasMatchedSaveRequest = (save) => !!(
     save &&
     save.activeDocument &&
     save.activeDocument.seamReady === true &&
     save.activeDocument.matchesActiveDocument === true &&
+    save.activeDocument.sequencePositive === true &&
+    save.activeDocument.sequenceMonotonic === true &&
     save.saveRequest &&
     typeof save.saveRequest.pageSession === "string" &&
     Number.isSafeInteger(save.saveRequest.tabId) &&
@@ -8323,10 +9843,43 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     Number.isSafeInteger(save.saveRequest.sequence) &&
     save.saveRequest.sequence > 0 &&
     save.saveRequest.sequence === save.activeDocument.sequence &&
-    save.saveRequest.requestId === save.requestId
+    save.saveRequest.requestId === save.requestId &&
+    save.result &&
+    save.result.saveRequestSession === save.saveRequest.pageSession &&
+    save.result.saveRequest &&
+    save.result.saveRequest.requestId === save.saveRequest.requestId &&
+    save.result.saveRequest.sequence === save.saveRequest.sequence &&
+    save.result.saveRequest.pageSession === save.saveRequest.pageSession &&
+    save.result.saveRequest.tabId === save.saveRequest.tabId &&
+    save.result.saveRequest.documentGeneration ===
+      save.saveRequest.documentGeneration &&
+    save.result.saveRequest.pathKey === save.saveRequest.pathKey &&
+    save.result.saveRequest.selectionGeneration ===
+      save.saveRequest.selectionGeneration
   );
+  const closeFile = path.join(dir, "f22-close-pending.md");
+  if (!deletionProductionPrerequisite.saveResultCorrelation) {
+    reportDeletionCapability(
+      "F22 correlated save-path and pending-save evidence requires saveRequest production support",
+      classifyDeletionCapability(
+        /\bsaveRequest\b/.test(saveHandlerSource),
+        deletionProductionPrerequisite.saveResultCorrelation,
+      ),
+      JSON.stringify({
+        saveResultCorrelation: deletionProductionPrerequisite.saveResultCorrelation,
+      }),
+    );
+    await exec(`
+      window.__f22SavePathRaceProbe && window.__f22SavePathRaceProbe.restore();
+      null;
+    `);
+    fs.writeFileSync(closeFile, "F22_CLOSE_BASE", "utf8");
+    await clearTabs();
+    await createActiveTab(closeFile, "F22_CLOSE_BASE");
+  } else {
+  try {
   const requestSave = async (filePath, content, baselineContent = content) => {
-    const requestId = ++saveRaceRequest;
+    const requestId = ++saveRaceScenario;
     const activeDocument = await prepareSaveRaceDocument(
       filePath,
       baselineContent,
@@ -8825,16 +10378,27 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       fs.unlinkSync(validLink);
     } catch {}
   }
-  await exec(`
-    window.__f22SavePathRaceProbe.restore();
-    null;
-  `);
+  check(
+    "F22 prepareSaveRequest keeps production-issued save sequences positive and strictly monotonic",
+    observedSaveRaceSequences.length > 0 &&
+      observedSaveRaceSequences.every((entry) => entry.sequencePositive === true) &&
+      observedSaveRaceSequences.every((entry) => entry.sequenceMonotonic === true) &&
+      observedSaveRaceSequences.every((entry, index, entries) =>
+        index === 0 || entry.sequence > entries[index - 1].sequence),
+    JSON.stringify(observedSaveRaceSequences),
+  );
+  } finally {
+    await exec(`
+      window.__f22SavePathRaceProbe &&
+        window.__f22SavePathRaceProbe.restore();
+      null;
+    `);
+  }
 
   // Hold only IPC delivery, not the filesystem implementation: both saves use
   // the real FileHandle.writeFile path. This makes the close path observe two
   // genuinely pending renderer saves, including one started after it began to
   // wait, without reviving the obsolete fs.writeFile monkeypatch.
-  const closeFile = path.join(dir, "f22-close-pending.md");
   fs.writeFileSync(closeFile, "F22_CLOSE_BASE", "utf8");
   await clearTabs();
   const closingTab = await createActiveTab(closeFile, "F22_CLOSE_BASE");
@@ -8976,7 +10540,21 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     JSON.stringify({ firstHeld, secondHeld, stillOpenWithBothPending, stillOpenAfterFirst, closeFlow, diskAfterClose }),
   );
 
+  }
+
   // ---- F22 regression: an edit-mode CRLF undo keeps raw cache bytes -------
+  if (!deletionProductionPrerequisite.saveResultCorrelation) {
+    reportDeletionCapability(
+      "F22 raw-newline save identity and cache evidence requires saveRequest production support",
+      classifyDeletionCapability(
+        /\bsaveRequest\b/.test(saveHandlerSource),
+        deletionProductionPrerequisite.saveResultCorrelation,
+      ),
+      JSON.stringify({
+        saveResultCorrelation: deletionProductionPrerequisite.saveResultCorrelation,
+      }),
+    );
+  } else {
   // The editor necessarily exposes LF text.  Exercise its real input and undo
   // path, then cross a tab snapshot before making a later, unrelated save.
   // A semantic-only test would miss the regression: the current text still
@@ -9353,21 +10931,57 @@ async function runF22SaveAndReloadScenarios(win, exec) {
         window.alert = () => {};
         if (!window.CustomTabs.__inEditMode()) toggleEditBtn.click();
         const editor = window.markdownEditor;
+        const original = editor.value;
+        const undoSizeBeforeInput = window.getFileOpenDiagnostics().undoSize;
+        editor.setRangeText("X", 0, 1, "end");
+        editor.dispatchEvent(new InputEvent("input", {
+          bubbles: true, inputType: "insertText", data: "X",
+        }));
+        await new Promise(resolve => setTimeout(resolve, 900));
+        const undoSizeAfterFirstEdit = window.getFileOpenDiagnostics().undoSize;
+        const firstStableValue = editor.value;
+        editor.setRangeText("Y", 0, 1, "end");
+        editor.dispatchEvent(new InputEvent("input", {
+          bubbles: true, inputType: "insertText", data: "Y",
+        }));
+        const secondTransientValue = editor.value;
+        document.dispatchEvent(new KeyboardEvent("keydown", {
+          key: "z", ctrlKey: true, bubbles: true, cancelable: true,
+        }));
+        await new Promise(resolve => setTimeout(resolve, 900));
+        const undoApplied = editor.value === firstStableValue &&
+          editor.value !== secondTransientValue;
+        const undoSizeAfterUndo = window.getFileOpenDiagnostics().undoSize;
         editor.setRangeText("A", 0, 1, "end");
-        editor.dispatchEvent(new Event("input", { bubbles: true }));
+        editor.dispatchEvent(new InputEvent("input", {
+          bubbles: true, inputType: "insertText", data: "A",
+        }));
+        await new Promise(resolve => setTimeout(resolve, 900));
         const d = editor.value.indexOf("\\nd") + 1;
         editor.setRangeText("D", d, d + 1, "end");
-        editor.dispatchEvent(new Event("input", { bubbles: true }));
+        editor.dispatchEvent(new InputEvent("input", {
+          bubbles: true, inputType: "insertText", data: "D",
+        }));
+        await new Promise(resolve => setTimeout(resolve, 900));
         window.CustomTabs.switchToTab(${mixedNewlineOtherTab.id});
         window.CustomTabs.switchToTab(${mixedNewlineTab.id});
+        const restoredAfterRoundTrip = editor.value;
         return await new Promise((resolve) => {
           timer = setTimeout(
-            () => resolve({ timedOut: true, savePayload }),
+            () => resolve({
+              timedOut: true, savePayload, undoApplied, restoredAfterRoundTrip,
+              undoSizeBeforeInput, undoSizeAfterFirstEdit, undoSizeAfterUndo,
+              firstStableValue, secondTransientValue,
+            }),
             5000,
           );
           onResult = (_event, result) => {
             if (!result || result.path !== filePath) return;
-            resolve({ timedOut: false, result, savePayload });
+            resolve({
+              timedOut: false, result, savePayload, undoApplied, restoredAfterRoundTrip,
+              undoSizeBeforeInput, undoSizeAfterFirstEdit, undoSizeAfterUndo,
+              firstStableValue, secondTransientValue,
+            });
           };
           ipc.on("save-markdown-result", onResult);
           document.getElementById("saveButton").click();
@@ -9414,6 +11028,12 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       mixedNewlineSave.result &&
       mixedNewlineSave.result.success === true &&
       mixedNewlineSave.savePayload &&
+      mixedNewlineSave.undoSizeAfterFirstEdit > mixedNewlineSave.undoSizeBeforeInput &&
+      mixedNewlineSave.undoApplied === true &&
+      mixedNewlineSave.firstStableValue === "X\nb\nc\nd\ne" &&
+      mixedNewlineSave.secondTransientValue === "Y\nb\nc\nd\ne" &&
+      mixedNewlineSave.undoSizeAfterUndo >= mixedNewlineSave.undoSizeBeforeInput &&
+      mixedNewlineSave.restoredAfterRoundTrip === "A\nb\nc\nD\ne" &&
       mixedNewlineSave.savePayload.content === mixedNewlineSaved &&
       mixedNewlineDiskBytes === mixedNewlineSaved &&
       mixedNewlineAfterSave.editor === "A\nb\nc\nD\ne",
@@ -9428,7 +11048,678 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     mixedNewlineDetail,
   );
 
+  }
+
   // ---- F22 regression: deleted-tab evidence belongs to its generation ----
+  let f22WatcherProbe = null;
+  const checkDeletionEvidence = (groups, name, evaluate, detail) => {
+    scheduleDeletionAssertion(
+      deletionEvidencePlan,
+      groups,
+      check,
+      name,
+      evaluate,
+      detail,
+    );
+  };
+  await runDeletionEvidenceGroup(
+    deletionEvidencePlan,
+    "producerGeneration",
+    async () => {
+  let watcherProbe = null;
+  let mainDeletionAckProbe = null;
+  let mainDeletionAckProbeRestored = false;
+  let restoreWatcherConstruction = null;
+  let restoreMainDeletionAckConstruction = null;
+  try {
+  // Instrument real main-process producer resources at the fs boundary, not
+  // renderer IPC controls.  This records the OS watcher and the polling
+  // producer used while a deleted path is retained for rearm.
+  watcherProbe = (() => {
+    const live = new Map();
+    const starts = [];
+    const stops = [];
+    let nextId = 1;
+    let lastWatchedPath = null;
+    const snapshot = () => ({
+      starts: starts.map(({ id, kind, filePath }) => ({ id, kind, filePath })),
+      stops: stops.map(({ id, kind, filePath }) => ({ id, kind, filePath })),
+      live: [...live.values()].map(({ id, kind, filePath }) => ({
+        id, kind, filePath,
+      })),
+    });
+    const retire = (record) => {
+      if (!record || !live.delete(record.id)) return;
+      stops.push(record);
+    };
+    const realWatch = fs.watch;
+    const realSetInterval = global.setInterval;
+    const realClearInterval = global.clearInterval;
+    const restoreWatch = replaceMethod(fs, "watch", function(filePath, ...args) {
+      const watcher = realWatch.call(this, filePath, ...args);
+      const record = {
+        id: nextId++, kind: "fs.watch", filePath: String(filePath),
+      };
+      lastWatchedPath = record.filePath;
+      starts.push(record);
+      live.set(record.id, record);
+      const originalClose = watcher.close.bind(watcher);
+      replaceMethod(watcher, "close", function(...closeArgs) {
+        try {
+          return originalClose(...closeArgs);
+        } finally {
+          retire(record);
+        }
+      });
+      watcher.once?.("close", () => retire(record));
+      return watcher;
+    });
+    restoreWatcherConstruction = () => restoreWatch();
+    const intervalRecords = new Map();
+    const restoreSetInterval = replaceMethod(
+      global,
+      "setInterval",
+      function(handler, delay, ...args) {
+        const handle = realSetInterval.call(this, handler, delay, ...args);
+        if (
+          Number(delay) === 2000 &&
+          typeof handler === "function" &&
+          /\bcheckFileChanges\b/.test(Function.prototype.toString.call(handler))
+        ) {
+          const record = {
+            id: nextId++, kind: "poll", filePath: lastWatchedPath,
+          };
+          starts.push(record);
+          live.set(record.id, record);
+          intervalRecords.set(handle, record);
+          if (handle && typeof handle.close === "function") {
+            const originalClose = handle.close.bind(handle);
+            replaceMethod(handle, "close", function(...closeArgs) {
+              try {
+                return originalClose(...closeArgs);
+              } finally {
+                retire(record);
+                intervalRecords.delete(handle);
+              }
+            });
+          }
+        }
+        return handle;
+      },
+    );
+    restoreWatcherConstruction = () => {
+      restoreSetInterval();
+      restoreWatch();
+    };
+    const restoreClearInterval = replaceMethod(
+      global,
+      "clearInterval",
+      function(handle) {
+        retire(intervalRecords.get(handle));
+        intervalRecords.delete(handle);
+        return realClearInterval.call(this, handle);
+      },
+    );
+    restoreWatcherConstruction = () => {
+      restoreClearInterval();
+      restoreSetInterval();
+      restoreWatch();
+    };
+    return {
+      snapshot,
+      restore() {
+        restoreWatcherConstruction();
+      },
+    };
+  })();
+  f22WatcherProbe = watcherProbe;
+  // Observe the actual ipcMain acknowledgement listener.  Renderer-side
+  // forwarding only proves that ipcRenderer.send was attempted; the wrapped
+  // listener below records a matching deletion-record Map retirement while
+  // preserving its arguments, receiver, return value, and listener order.
+  mainDeletionAckProbe = await runDeletionEvidenceGroup(
+    deletionEvidencePlan,
+    "acknowledgementLifecycle",
+    async () => (() => {
+    const channel = deletionAckChannel;
+    const listeners = initialDeletionAckListeners;
+    const sameListenerSequence = (left, right) =>
+      left.length === right.length &&
+      left.every((listener, index) => listener === right[index]);
+    const productionListener = productionDeletionAckHandler;
+    if (!productionListener || !synchronousProductionDeletionAckHandler) {
+      throw new Error(
+        `Expected one synchronous production ${channel} listener identified by ` +
+          "findDeletionDeliveryById and clearDeletionDeliveryAttempt",
+      );
+    }
+    const productionListenerIndex = listeners.indexOf(productionListener);
+    const productionListenerIsOnce = !!productionListener.listener;
+    const records = [];
+    const recordWrites = [];
+    let watchedOwner = null;
+    const normaliseDelivery = (payload) => {
+      const attempt = payload && (
+        payload.attempt ?? payload.deliveryAttempt ?? payload.attemptId
+      );
+      const eventId = payload && (payload.eventId ?? payload.id);
+      const owner = payload && (payload.owner || payload);
+      return payload && {
+        eventId,
+        selectionGeneration: payload.selectionGeneration,
+        watcherGeneration: payload.watcherGeneration,
+        attempt,
+        pageSession: payload.pageSession ?? (owner && owner.pageSession),
+        rendererGeneration:
+          payload.rendererGeneration ?? (owner && owner.rendererGeneration),
+        tabId: owner && owner.tabId,
+        documentGeneration: owner && owner.documentGeneration,
+        pathKey: owner && owner.pathKey,
+        complete: Number.isSafeInteger(eventId) &&
+          eventId > 0 &&
+          Number.isSafeInteger(payload.selectionGeneration) &&
+          payload.selectionGeneration > 0 &&
+          Number.isSafeInteger(payload.watcherGeneration) &&
+          payload.watcherGeneration > 0 &&
+          Number.isSafeInteger(attempt) &&
+          attempt > 0 &&
+          typeof (payload.pageSession ?? (owner && owner.pageSession)) === "string" &&
+          (payload.pageSession ?? (owner && owner.pageSession)).length > 0 &&
+          Number.isSafeInteger(
+            payload.rendererGeneration ?? (owner && owner.rendererGeneration),
+          ) &&
+          (payload.rendererGeneration ?? (owner && owner.rendererGeneration)) > 0 &&
+          Number.isSafeInteger(owner && owner.tabId) &&
+          owner.tabId > 0 &&
+          Number.isSafeInteger(owner && owner.documentGeneration) &&
+          owner.documentGeneration > 0 &&
+          typeof (owner && owner.pathKey) === "string" &&
+          owner.pathKey.length > 0,
+      };
+    };
+    const normaliseAcknowledgement = (payload) => {
+      const delivery = normaliseDelivery(payload);
+      return delivery && {
+        ...delivery,
+        consumed: payload.consumed,
+        why: payload.why,
+        complete:
+          delivery.complete === true &&
+          typeof payload.consumed === "boolean" &&
+          typeof payload.why === "string",
+      };
+    };
+    const sameIdentity = (left, right) => !!(
+      left && right && left.complete && right.complete &&
+      left.eventId === right.eventId &&
+      left.selectionGeneration === right.selectionGeneration &&
+      left.watcherGeneration === right.watcherGeneration &&
+      left.attempt === right.attempt &&
+      left.pageSession === right.pageSession &&
+      left.rendererGeneration === right.rendererGeneration &&
+      left.tabId === right.tabId &&
+      left.documentGeneration === right.documentGeneration &&
+      left.pathKey === right.pathKey
+    );
+    const sameAcknowledgement = (left, right) =>
+      sameIdentity(left, right) && left.consumed === right.consumed &&
+      left.why === right.why;
+    const terminalDeletionRefusal = (identity) =>
+      !!identity && [
+        "owner-closed",
+        "replacement-owner",
+        "foreign-session",
+        "owner-path-moved",
+      ].includes(identity.why);
+    const retryableDeletionRefusal = (identity) =>
+      !!identity && identity.consumed === false &&
+        [
+          "owner-inactive",
+          "frozen",
+          "stale-selection",
+          "not-active",
+        ].includes(identity.why);
+    const terminalAcknowledgement = (identity) =>
+      !!identity && (
+        (identity.consumed === true &&
+          ["consumed", "already-consumed"].includes(identity.why)) ||
+        (identity.consumed === false && terminalDeletionRefusal(identity))
+      );
+    const producerRecord = (value) =>
+      value && (value.record || value.deliveryRecord || value);
+    const recordIdentity = (value) => normaliseDelivery(
+      producerRecord(value) &&
+        (producerRecord(value).delivery || producerRecord(value).envelope ||
+          producerRecord(value).report || producerRecord(value)),
+    );
+    const ownerIsComplete = (owner) => !!(
+      owner &&
+      typeof owner.pageSession === "string" &&
+      owner.pageSession.length > 0 &&
+      Number.isSafeInteger(owner.rendererGeneration) &&
+      owner.rendererGeneration > 0 &&
+      Number.isSafeInteger(owner.tabId) &&
+      owner.tabId > 0 &&
+      Number.isSafeInteger(owner.documentGeneration) &&
+      owner.documentGeneration > 0 &&
+      typeof owner.pathKey === "string" &&
+      owner.pathKey.length > 0 &&
+      typeof owner.spelling === "string"
+    );
+    const expectedOwnerKey = (owner) => ownerIsComplete(owner)
+      ? [
+        owner.pageSession,
+        owner.rendererGeneration,
+        owner.tabId,
+        owner.documentGeneration,
+        owner.pathKey,
+        owner.spelling,
+      ].join("\0")
+      : null;
+    const sameObservedDocumentOwner = (left, right) => !!(
+      ownerIsComplete(left) &&
+      ownerIsComplete(right) &&
+      left.pageSession === right.pageSession &&
+      left.rendererGeneration === right.rendererGeneration &&
+      left.tabId === right.tabId &&
+      left.documentGeneration === right.documentGeneration &&
+      left.pathKey === right.pathKey &&
+      left.spelling === right.spelling
+    );
+    const snapshotOwner = (owner) => ownerIsComplete(owner)
+      ? {
+        pageSession: owner.pageSession,
+        rendererGeneration: owner.rendererGeneration,
+        tabId: owner.tabId,
+        documentGeneration: owner.documentGeneration,
+        pathKey: owner.pathKey,
+        spelling: owner.spelling,
+      }
+      : null;
+    const observedObjectIds = new WeakMap();
+    let nextObservedObjectId = 1;
+    const observedObjectId = (value) => {
+      if (value === null || value === undefined) return String(value);
+      if ((typeof value !== "object" && typeof value !== "function")) {
+        return `${typeof value}:${String(value)}`;
+      }
+      let id = observedObjectIds.get(value);
+      if (!id) {
+        id = nextObservedObjectId++;
+        observedObjectIds.set(value, id);
+      }
+      return id;
+    };
+    const deliveryFingerprint = (identity) => identity && [
+      identity.eventId,
+      identity.pageSession,
+      identity.rendererGeneration,
+      identity.tabId,
+      identity.documentGeneration,
+      identity.pathKey,
+      identity.selectionGeneration,
+      identity.watcherGeneration,
+      identity.attempt,
+    ].join("\0");
+    const attemptState = (record) => record && {
+      recordKey: record.key,
+      recordObjectId: observedObjectId(record),
+      deliveryIdentity: deliveryFingerprint(recordIdentity(record)),
+      attempt: record.attempt,
+      inFlight: record.inFlight,
+      hasBooleanInFlight: typeof record.inFlight === "boolean",
+      hasAckTimeout: Object.hasOwn(record, "ackTimeout"),
+      ackTimeoutActive: record.ackTimeout !== null &&
+        record.ackTimeout !== undefined,
+      ackTimeout: observedObjectId(record.ackTimeout),
+      hasRetryTimeout: Object.hasOwn(record, "retryTimeout"),
+      retryTimeoutActive: record.retryTimeout !== null &&
+        record.retryTimeout !== undefined,
+      retryTimeout: observedObjectId(record.retryTimeout),
+    };
+    const originalSet = Map.prototype.set;
+    const originalValues = Map.prototype.values;
+    Map.prototype.set = function observedDeletionRecordStore(key, value) {
+      const record = producerRecord(value);
+      const identity = recordIdentity(value);
+      const owner = record && (record.owner ||
+        (record.delivery && record.delivery.owner));
+      const ownerKey = expectedOwnerKey(owner);
+      if (identity && Number.isSafeInteger(identity.eventId) && ownerKey) {
+        // deletionDeliveries uses an owner/document key, never eventId. Keep
+        // the actual map and key produced with this complete delivery identity.
+        recordWrites.push({
+          map: this,
+          key,
+          value,
+          identity,
+          ownerKeyed:
+            key === ownerKey &&
+            record.key === ownerKey &&
+            ownerIsComplete(owner),
+          },
+        );
+      }
+      return originalSet.call(this, key, value);
+    };
+    const currentRecordsForEvent = (identity) => {
+      if (!identity || !Number.isSafeInteger(identity.eventId)) return [];
+      return recordWrites.filter((candidate) =>
+        candidate.map.get(candidate.key) === candidate.value &&
+        candidate.ownerKeyed === true &&
+        candidate.map.has(candidate.key) &&
+        recordIdentity(candidate.value).eventId === identity.eventId,
+      );
+    };
+    const sameAttemptState = (left, right) => !!(
+      left && right &&
+      left.recordKey === right.recordKey &&
+      left.recordObjectId === right.recordObjectId &&
+      left.deliveryIdentity === right.deliveryIdentity &&
+      left.attempt === right.attempt &&
+      left.inFlight === right.inFlight &&
+      left.hasBooleanInFlight === right.hasBooleanInFlight &&
+      left.hasAckTimeout === right.hasAckTimeout &&
+      left.ackTimeoutActive === right.ackTimeoutActive &&
+      left.ackTimeout === right.ackTimeout &&
+      left.hasRetryTimeout === right.hasRetryTimeout &&
+      left.retryTimeoutActive === right.retryTimeoutActive &&
+      left.retryTimeout === right.retryTimeout
+    );
+    restoreMainDeletionAckConstruction = () => {
+      Map.prototype.set = originalSet;
+      Map.prototype.values = originalValues;
+    };
+    const originalEmit = ipcMain.emit;
+    const restoreEmit = replaceMethod(
+      ipcMain,
+      "emit",
+      function observedDeletionAcknowledgement(channelName, ...args) {
+        if (
+          (channelName === "start-file-watching" ||
+            channelName === "set-active-file") &&
+          args[1] &&
+          args[1].owner
+        ) {
+          watchedOwner = snapshotOwner(args[1].owner);
+        }
+        if (channelName !== channel) {
+          return originalEmit.call(this, channelName, ...args);
+        }
+        const payload = args[1];
+        const identity = normaliseAcknowledgement(payload);
+        const listenersBefore = ipcMain.rawListeners(channel);
+        const deletionRecords = recordWrites.filter((candidate) =>
+          candidate.map.get(candidate.key) === candidate.value &&
+          sameIdentity(recordIdentity(candidate.value), identity) &&
+          candidate.ownerKeyed === true &&
+          candidate.map.has(candidate.key),
+        );
+        const candidateRecords = currentRecordsForEvent(identity);
+        const deletionRecord =
+          deletionRecords.length > 0 &&
+          deletionRecords.every(
+            (candidate) => candidate.value === deletionRecords[0].value,
+          )
+            ? deletionRecords[0]
+            : null;
+        const candidateRecord =
+          candidateRecords.length > 0 &&
+          candidateRecords.every(
+            (candidate) => candidate.value === candidateRecords[0].value,
+          )
+            ? candidateRecords[0]
+            : null;
+        // A forged acknowledgement intentionally cannot identify the record
+        // by its full identity. Still observe the one real event-id record so
+        // rejection proves its live attempt and retry state stayed unchanged.
+        const observedRecord = deletionRecord || candidateRecord;
+        const observedIdentity = observedRecord
+          ? recordIdentity(observedRecord.value)
+          : null;
+        const observedOwner = observedRecord &&
+          (producerRecord(observedRecord.value).owner ||
+            (producerRecord(observedRecord.value).delivery &&
+              producerRecord(observedRecord.value).delivery.owner));
+        const watchedOwnerBefore = snapshotOwner(watchedOwner);
+        const attemptBefore = observedRecord
+          ? attemptState(producerRecord(observedRecord.value))
+          : null;
+        let attemptAfter = null;
+        const record = {
+          identity,
+          reachedMain: true,
+          productionListenerRegistered: listenersBefore[productionListenerIndex] ===
+            productionListener,
+          listenerSequenceBefore: sameListenerSequence(listenersBefore, listeners),
+          productionListenerIsOnce,
+          deletionRecordFound: !!deletionRecord,
+          ownerKeyedRecord: !!(deletionRecord && deletionRecord.ownerKeyed),
+          candidateRecordFound: !!candidateRecord,
+          identityMatchesCurrentRecord: !!deletionRecord,
+          owner: snapshotOwner(observedOwner),
+          watchedOwner: watchedOwnerBefore,
+          watchedOwnerMatchesRecord: sameObservedDocumentOwner(
+            observedOwner,
+            watchedOwnerBefore,
+          ),
+          watchedOwnerIsDistinctTab: !!(
+            observedOwner &&
+            watchedOwnerBefore &&
+            observedOwner.tabId !== watchedOwnerBefore.tabId
+          ),
+          attemptBefore,
+          attemptAfter: null,
+          attemptStateUnchanged: false,
+          recordFingerprintUnchanged: false,
+          attemptRetired: false,
+          recordRetired: false,
+          recordParked: false,
+          retryScheduled: false,
+          matchingDeliveryRecordRemains: false,
+          retiredMaps: [],
+          deliveryMap: null,
+          deliveryMaps: [],
+          tombstoneRetained: false,
+        };
+        const originalDelete = Map.prototype.delete;
+        Map.prototype.delete = function observedDeletionRecordRetirement(key) {
+          const deleted = originalDelete.call(this, key);
+          if (deleted && observedRecord) {
+            if (this === record.deliveryMap && key === observedRecord.key) {
+              record.recordRetired = true;
+              record.retiredMaps.push(this);
+            }
+          }
+          return deleted;
+        };
+        Map.prototype.values = function observedDeletionDeliveryLookup(...args) {
+          if (
+            observedRecord &&
+            /\bfindDeletionDeliveryById\b/.test(new Error().stack || "") &&
+            !record.deliveryMaps.includes(this) &&
+            candidateRecords.some((candidate) =>
+              candidate.map === this &&
+              Array.from(originalValues.call(this)).includes(candidate.value))
+          ) {
+            // findDeletionDeliveryById() is the production lookup boundary.
+            // Only the Map it traverses is the delivery registry; the
+            // tombstone map holds the same record but is not this contract.
+            record.deliveryMaps.push(this);
+            record.deliveryMap = this;
+          }
+          return originalValues.apply(this, args);
+        };
+        try {
+          return originalEmit.call(this, channelName, ...args);
+        } finally {
+          Map.prototype.delete = originalDelete;
+          Map.prototype.values = originalValues;
+          if (observedRecord) {
+            attemptAfter = attemptState(producerRecord(observedRecord.value));
+            record.attemptAfter = attemptAfter;
+            record.attemptStateUnchanged = sameAttemptState(
+              attemptBefore,
+              attemptAfter,
+            );
+            record.recordFingerprintUnchanged = record.attemptStateUnchanged;
+            record.attemptRetired = !!(
+              deletionRecord &&
+              attemptBefore &&
+              attemptBefore.attempt === identity.attempt &&
+              attemptBefore.hasBooleanInFlight === true &&
+              attemptBefore.inFlight === true &&
+              attemptBefore.ackTimeoutActive === true &&
+              attemptAfter.attempt === identity.attempt &&
+              attemptAfter.hasBooleanInFlight === true &&
+              attemptAfter.inFlight === false &&
+              attemptAfter.ackTimeoutActive === false
+            );
+            const deliveryMaps = record.deliveryMap ? [record.deliveryMap] : [];
+            record.recordParked = producerRecord(observedRecord.value).parked === true;
+            record.retryScheduled =
+              attemptAfter.retryTimeoutActive === true;
+            record.matchingDeliveryRecordRemains = deliveryMaps.some((map) =>
+              Array.from(map.values()).some((value) =>
+                sameIdentity(recordIdentity(value), observedIdentity)));
+            // A tombstone retaining the same consumed delivery is a distinct
+            // map from deletionDeliveries and must not mask its retirement.
+            record.tombstoneRetained = candidateRecords.some(
+              (candidate) =>
+                candidate.map !== record.deliveryMap &&
+                candidate.map.get(candidate.key) === candidate.value &&
+                sameIdentity(recordIdentity(candidate.value), observedIdentity),
+            );
+          }
+          const listenersAfter = ipcMain.rawListeners(channel);
+          record.listenerSequenceAfter = productionListenerIsOnce
+            ? sameListenerSequence(
+                listenersAfter,
+                listeners.filter((listener) => listener !== productionListener),
+              )
+            : sameListenerSequence(listenersAfter, listeners);
+          record.accepted = record.productionListenerRegistered &&
+            record.listenerSequenceBefore &&
+            record.listenerSequenceAfter &&
+            record.deletionRecordFound &&
+            record.ownerKeyedRecord &&
+            (terminalAcknowledgement(identity)
+              ? record.attemptRetired === true &&
+                record.deliveryMaps.length === 1 &&
+                record.recordRetired === true &&
+                record.recordParked === false &&
+                attemptAfter.hasRetryTimeout === true &&
+                record.retryScheduled === false &&
+                record.matchingDeliveryRecordRemains === false
+              : retryableDeletionRefusal(identity) &&
+                record.attemptRetired === true &&
+                record.deliveryMaps.length === 1 &&
+                record.recordRetired === false &&
+                (identity.why === "frozen"
+                  ? record.recordParked === true &&
+                    record.retryScheduled === false
+                  : record.recordParked === false &&
+                    (record.watchedOwnerMatchesRecord === true
+                      ? record.retryScheduled === true
+                      : identity.why === "owner-inactive" &&
+                        record.watchedOwnerIsDistinctTab === true &&
+                        record.retryScheduled === false)) &&
+                record.matchingDeliveryRecordRemains === true);
+          records.push(record);
+        }
+      },
+    );
+    restoreMainDeletionAckConstruction = () => {
+      restoreEmit();
+      Map.prototype.set = originalSet;
+      Map.prototype.values = originalValues;
+    };
+    return {
+      acceptedAndRetired(identity) {
+        return records.some((record) =>
+          sameAcknowledgement(record.identity, identity) &&
+          record.reachedMain === true &&
+          record.accepted === true &&
+          (terminalAcknowledgement(identity)
+            ? record.attemptRetired === true &&
+              record.deliveryMaps.length === 1 &&
+              record.recordRetired === true &&
+              record.recordParked === false &&
+              record.retryScheduled === false &&
+              record.matchingDeliveryRecordRemains === false
+            : retryableDeletionRefusal(identity) &&
+              record.attemptRetired === true &&
+              record.deliveryMaps.length === 1 &&
+              record.recordRetired === false &&
+              (identity.why === "frozen"
+                ? record.recordParked === true &&
+                  record.retryScheduled === false
+                : record.recordParked === false &&
+                  (record.watchedOwnerMatchesRecord === true
+                    ? record.retryScheduled === true
+                    : identity.why === "owner-inactive" &&
+                      record.watchedOwnerIsDistinctTab === true &&
+                      record.retryScheduled === false)) &&
+              record.matchingDeliveryRecordRemains === true),
+        );
+      },
+      count(identity) {
+        return records.filter((record) => sameAcknowledgement(record.identity, identity))
+          .length;
+      },
+      rejectedAndUnchanged(identity) {
+        return records.some((record) =>
+          sameAcknowledgement(record.identity, identity) &&
+          record.reachedMain === true &&
+          record.productionListenerRegistered === true &&
+          record.listenerSequenceBefore === true &&
+          record.listenerSequenceAfter === true &&
+          record.candidateRecordFound === true &&
+          record.identityMatchesCurrentRecord === false &&
+          record.attemptBefore &&
+          record.attemptBefore.inFlight === true &&
+          record.attemptBefore.ackTimeoutActive === true &&
+          record.attemptBefore.retryTimeoutActive === false &&
+          record.attemptStateUnchanged === true &&
+          record.recordFingerprintUnchanged === true &&
+          record.recordRetired === false &&
+          record.recordParked === false &&
+          record.retryScheduled === false &&
+          record.matchingDeliveryRecordRemains === true,
+        );
+      },
+      recordSnapshot(identity) {
+        const candidates = currentRecordsForEvent(identity);
+        return {
+          count: candidates.length,
+          records: candidates.map((candidate) => ({
+            identity: recordIdentity(candidate.value),
+            ownerKeyed: candidate.ownerKeyed === true,
+            attempt: attemptState(producerRecord(candidate.value)),
+          })),
+        };
+      },
+      observation(identity) {
+        return records.findLast((record) =>
+          sameAcknowledgement(record.identity, identity),
+        ) || null;
+      },
+      listenerSequenceIntact() {
+        const current = ipcMain.rawListeners(channel);
+        return productionListenerIsOnce
+          ? sameListenerSequence(
+              current,
+              listeners.filter((listener) => listener !== productionListener),
+            )
+          : sameListenerSequence(current, listeners);
+      },
+      restore() {
+        restoreMainDeletionAckConstruction();
+      },
+    };
+    })(),
+  );
+
   // Capture real main-process deliveries and ACKs. The test never manufactures
   // delivery IDs, owners or watcher generations: each comes from wc.send after
   // the actual watcher detected a filesystem deletion.
@@ -9439,11 +11730,13 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       const originalSend = ipc.send;
       const send = originalSend.bind(ipc);
       const probe = window.__f22DeletionProtocolProbe = {
-        selections: [], deliveries: [], acknowledgements: [],
+        selections: [], deliveries: [], deletionEvents: [], acknowledgements: [],
         attemptedAcknowledgements: [], droppedAcknowledgements: [],
         forwardedAcknowledgements: [], dropAcknowledgements: false,
+        originalSend,
+        restored: false,
       };
-      ipc.send = (channel, ...args) => {
+      const deletionProtocolSend = (channel, ...args) => {
         const payload = args[0];
         if ((channel === "start-file-watching" || channel === "set-active-file") &&
             payload && payload.owner) {
@@ -9457,15 +11750,25 @@ async function runF22SaveAndReloadScenarios(win, exec) {
           }
           // This call is the real ipcRenderer transport; entries here, unlike
           // attempts, have crossed the renderer-to-main boundary.
+          const result = send(channel, ...args);
           probe.forwardedAcknowledgements.push(payload);
           probe.acknowledgements.push(payload);
+          return result;
         }
         return send(channel, ...args);
       };
-      const onDeletion = (_event, payload) => probe.deliveries.push(payload);
+      probe.wrapper = deletionProtocolSend;
+      ipc.send = deletionProtocolSend;
+      const onDeletion = (event, payload) => {
+        probe.deletionEvents.push(event);
+        probe.deliveries.push(payload);
+      };
       probe.restore = () => {
-        if (ipc.send !== originalSend) ipc.send = originalSend;
+        if (probe.restored) return false;
+        probe.restored = true;
+        if (ipc.send === deletionProtocolSend) ipc.send = originalSend;
         ipc.removeListener("file-deleted", onDeletion);
+        return true;
       };
       ipc.on("file-deleted", onDeletion);
       return null;
@@ -9476,6 +11779,246 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   const deletedMessages = () => exec(
     `window.__f22DeletionMessages.filter(message => /deleted from disk/i.test(message)).length`,
   );
+  const deletionDeliveryIdentity = (delivery) => {
+    const attempt = delivery && (
+      delivery.attempt ?? delivery.deliveryAttempt ?? delivery.attemptId
+    );
+    const owner = delivery && (delivery.owner || delivery);
+    return delivery && {
+      eventId: delivery.eventId,
+      selectionGeneration: delivery.selectionGeneration,
+      watcherGeneration: delivery.watcherGeneration,
+      attempt,
+      pageSession: delivery.pageSession ?? (owner && owner.pageSession),
+      rendererGeneration:
+        delivery.rendererGeneration ?? (owner && owner.rendererGeneration),
+      tabId: owner && owner.tabId,
+      documentGeneration: owner && owner.documentGeneration,
+      pathKey: owner && owner.pathKey,
+      complete: Number.isSafeInteger(delivery.eventId) &&
+        delivery.eventId > 0 &&
+        Number.isSafeInteger(delivery.selectionGeneration) &&
+        delivery.selectionGeneration > 0 &&
+        Number.isSafeInteger(delivery.watcherGeneration) &&
+        delivery.watcherGeneration > 0 &&
+        Number.isSafeInteger(attempt) &&
+        attempt > 0 &&
+        typeof (delivery.pageSession ?? (owner && owner.pageSession)) === "string" &&
+        (delivery.pageSession ?? (owner && owner.pageSession)).length > 0 &&
+        Number.isSafeInteger(
+          delivery.rendererGeneration ?? (owner && owner.rendererGeneration),
+        ) &&
+        (delivery.rendererGeneration ?? (owner && owner.rendererGeneration)) > 0 &&
+        Number.isSafeInteger(owner && owner.tabId) &&
+        owner.tabId > 0 &&
+        Number.isSafeInteger(owner && owner.documentGeneration) &&
+        owner.documentGeneration > 0 &&
+        typeof (owner && owner.pathKey) === "string" &&
+        owner.pathKey.length > 0,
+    };
+  };
+  const deletionAckIdentity = (acknowledgement) => {
+    const delivery = deletionDeliveryIdentity(acknowledgement);
+    return delivery && {
+      ...delivery,
+      consumed: acknowledgement.consumed,
+      why: acknowledgement.why,
+      complete:
+        delivery.complete === true &&
+        typeof acknowledgement.consumed === "boolean" &&
+        typeof acknowledgement.why === "string",
+    };
+  };
+  const deletionIdentityDifferences = (left, right) => {
+    const fields = [
+      "pageSession",
+      "rendererGeneration",
+      "tabId",
+      "documentGeneration",
+      "pathKey",
+      "selectionGeneration",
+      "watcherGeneration",
+      "attempt",
+    ];
+    return fields.filter((field) => left && right && left[field] !== right[field]);
+  };
+  const acknowledgementMatchesDelivery = (acknowledgement, delivery) => {
+    const ack = deletionAckIdentity(acknowledgement);
+    const produced = deletionDeliveryIdentity(delivery);
+    return !!(
+      ack && produced && ack.complete && produced.complete &&
+      ack.eventId === produced.eventId &&
+      ack.selectionGeneration === produced.selectionGeneration &&
+      ack.watcherGeneration === produced.watcherGeneration &&
+      ack.attempt === produced.attempt &&
+      ack.pageSession === produced.pageSession &&
+      ack.rendererGeneration === produced.rendererGeneration &&
+      ack.tabId === produced.tabId &&
+      ack.documentGeneration === produced.documentGeneration &&
+      ack.pathKey === produced.pathKey
+    );
+  };
+  const deletionIdentityKey = (identity) => identity && identity.complete &&
+    JSON.stringify({
+      eventId: identity.eventId,
+      selectionGeneration: identity.selectionGeneration,
+      watcherGeneration: identity.watcherGeneration,
+      attempt: identity.attempt,
+      pageSession: identity.pageSession,
+      rendererGeneration: identity.rendererGeneration,
+      tabId: identity.tabId,
+      documentGeneration: identity.documentGeneration,
+      pathKey: identity.pathKey,
+    });
+  const acknowledgementsMatchDeliveries = (acknowledgements, deliveries) =>
+    Array.isArray(acknowledgements) &&
+    Array.isArray(deliveries) &&
+    acknowledgements.length === deliveries.length &&
+    (() => {
+      const deliveryCounts = new Map();
+      for (const entry of deliveries) {
+        const identity = deletionDeliveryIdentity(
+          entry && (entry.delivery || entry),
+        );
+        if (!identity || !identity.complete) return false;
+        const key = deletionIdentityKey(identity);
+        deliveryCounts.set(key, (deliveryCounts.get(key) || 0) + 1);
+      }
+      for (const acknowledgement of acknowledgements) {
+        const identity = deletionAckIdentity(acknowledgement);
+        const key = deletionIdentityKey(identity);
+        const count = key && deliveryCounts.get(key);
+        if (!count) return false;
+        if (count === 1) deliveryCounts.delete(key);
+        else deliveryCounts.set(key, count - 1);
+      }
+      return deliveryCounts.size === 0;
+    })();
+  const terminalDeletionAcknowledgement = (identity) =>
+    !!identity && (
+      (identity.consumed === true &&
+        ["consumed", "already-consumed"].includes(identity.why)) ||
+      (identity.consumed === false && [
+        "owner-closed",
+        "replacement-owner",
+        "foreign-session",
+        "owner-path-moved",
+      ].includes(identity.why))
+    );
+  const retryableDeletionAcknowledgement = (identity) =>
+    !!identity && identity.consumed === false &&
+    [
+      "owner-inactive",
+      "frozen",
+      "stale-selection",
+      "not-active",
+    ].includes(identity.why);
+  const terminalObservationSatisfiesContract = (observation) =>
+    !!observation &&
+    observation.attemptRetired === true &&
+    observation.recordRetired === true &&
+    observation.recordParked === false &&
+    observation.matchingDeliveryRecordRemains === false;
+  const retryableObservationSatisfiesContract = (observation) =>
+    !!observation &&
+    observation.attemptRetired === true &&
+    observation.recordRetired === false &&
+    observation.matchingDeliveryRecordRemains === true;
+  const acknowledgementObservationSatisfiesContract = (identity, observation) =>
+    terminalDeletionAcknowledgement(identity)
+      ? terminalObservationSatisfiesContract(observation)
+      : retryableDeletionAcknowledgement(identity) &&
+        retryableObservationSatisfiesContract(observation) &&
+        (identity.why === "frozen"
+          ? observation.recordParked === true &&
+            observation.retryScheduled === false
+          : observation.recordParked === false &&
+            (observation.watchedOwnerMatchesRecord === true
+              ? observation.retryScheduled === true
+              : identity.why === "owner-inactive" &&
+                observation.watchedOwnerIsDistinctTab === true &&
+                observation.retryScheduled === false));
+  const waitForMainDeletionAcknowledgement = async (identity) => {
+    if (!mainDeletionAckProbe) {
+      return {
+        identity,
+        count: 0,
+        acceptedAndRetired: false,
+        mainObservation: {
+          attemptRetired: false,
+          recordRetired: false,
+          recordParked: false,
+          matchingDeliveryRecordRemains: false,
+          tombstoneRetained: false,
+        },
+      };
+    }
+    const deadline = Date.now() + 5000;
+    let count = 0;
+    let acceptedAndRetired = false;
+    let mainObservation = null;
+    do {
+      count = mainDeletionAckProbe.count(identity);
+      mainObservation = mainDeletionAckProbe.observation(identity);
+      acceptedAndRetired =
+        mainDeletionAckProbe.acceptedAndRetired(identity) &&
+        acknowledgementObservationSatisfiesContract(identity, mainObservation);
+      if (acceptedAndRetired || Date.now() >= deadline) break;
+      await sleep(25);
+    } while (true);
+    return {
+      identity, count, acceptedAndRetired,
+      mainObservation,
+    };
+  };
+  const waitForDeletionAckQuiescence = async (start, filePath, identity) => {
+    const counts = () => exec(`
+      (() => {
+        const probe = window.__f22DeletionProtocolProbe;
+        const matching = probe.deliveries.slice(${start}).filter(entry =>
+          entry && entry.path === ${JSON.stringify(filePath)} &&
+          entry.delivery && entry.delivery.eventId === ${JSON.stringify(identity && identity.eventId)});
+        return {
+          deliveries: matching.length,
+          attempted: probe.attemptedAcknowledgements.filter(ack =>
+            ack && ack.eventId === ${JSON.stringify(identity && identity.eventId)}).length,
+          forwarded: probe.forwardedAcknowledgements.filter(ack =>
+            ack && ack.eventId === ${JSON.stringify(identity && identity.eventId)}).length,
+        };
+      })()
+    `);
+    const mainAcceptance = await waitForMainDeletionAcknowledgement(identity);
+    if (!mainAcceptance.acceptedAndRetired) {
+      return {
+        identity, before: await counts(), mainAcknowledgementCount: mainAcceptance.count,
+        acceptedAndRetired: false, mainProcessed: mainAcceptance.count > 0,
+        mainObservation: mainAcceptance.mainObservation,
+        retired: false,
+      };
+    }
+    // Start the no-retry oracle only after main's exact production listener
+    // accepted this exact acknowledgement and retired the relevant boundary.
+    const acceptedMainObservation = mainAcceptance.mainObservation;
+    const before = await counts();
+    const deadline = Date.now() + 4250;
+    while (Date.now() < deadline) {
+      await sleep(50);
+      if (JSON.stringify(await counts()) !== JSON.stringify(before)) {
+        return {
+          identity, before, mainAcknowledgementCount: mainAcceptance.count,
+          acceptedAndRetired: mainAcceptance.acceptedAndRetired,
+          mainProcessed: true, retired: false,
+          mainObservation: acceptedMainObservation,
+        };
+      }
+    }
+    return {
+      identity, before, mainAcknowledgementCount: mainAcceptance.count,
+      acceptedAndRetired: mainAcceptance.acceptedAndRetired,
+      mainProcessed: true, retired: true,
+      mainObservation: acceptedMainObservation,
+    };
+  };
   const deletionTabSnapshot = (tabId) => exec(`
     (() => {
       const tab = window.CustomTabs.getTabs().find(t => t.id === ${'${tabId}'});
@@ -9485,26 +12028,34 @@ async function runF22SaveAndReloadScenarios(win, exec) {
         content: tab.content, originalContent: tab.originalContent,
         live: window.originalMarkdown, dirty: tab.hasUnsavedChanges,
         reloadConflict: !!(state && state.reloadConflict),
+        deletionTombstone: !!(state && state.deletionTombstone),
+        deletionEventId: state ? state.deletionEventId : null,
+        reloadDiagnostics: typeof window.getReloadRequestDiagnostics === "function"
+          ? window.getReloadRequestDiagnostics()
+          : null,
       } : null;
     })()
   `.replace("${tabId}", String(tabId)));
   const saveWithAlertGuard = (filePath) => exec(`
     (async () => {
+      const filePath = ${JSON.stringify(filePath)};
       const ipc = require("electron").ipcRenderer;
       const oldAlert = window.alert; const alerts = [];
       let timer = null; let onResult = null;
       try {
         window.alert = message => alerts.push(String(message));
         return await new Promise((resolve) => {
-          timer = setTimeout(() => resolve({ timedOut: true, alerts }), 5000);
+          timer = setTimeout(() => resolve({ timedOut: true, filePath, alerts }), 5000);
           onResult = (_event, result) => {
-            if (!result || result.path !== ${JSON.stringify('${filePath}')}) return;
-            resolve({ timedOut: false, result, alerts });
+            if (!result || result.path !== filePath) return;
+            resolve({ timedOut: false, filePath, result, alerts });
           };
           ipc.on("save-markdown-result", onResult);
           document.getElementById("saveButton").click();
         });
-      } catch (error) { return { error: String(error && error.stack ? error.stack : error), alerts }; }
+      } catch (error) {
+        return { error: String(error && error.stack ? error.stack : error), filePath, alerts };
+      }
       finally {
         if (timer) clearTimeout(timer);
         if (onResult) ipc.removeListener("save-markdown-result", onResult);
@@ -9526,9 +12077,13 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     })()
   `);
   const realDeletionFor = (start, filePath) => exec(`
-    window.__f22DeletionProtocolProbe.deliveries.slice(${start})
-      .find(entry => entry && entry.path === ${JSON.stringify('${filePath}')}) || null
-  `.replace("${filePath}", filePath));
+    (() => {
+      const expectedPath = ${JSON.stringify(filePath)};
+      const entry = window.__f22DeletionProtocolProbe.deliveries.slice(${start})
+        .find(candidate => candidate && candidate.path === expectedPath);
+      return entry ? { ...entry, matchedPath: expectedPath } : null;
+    })()
+  `);
 
   // Active-owner consumption establishes the real tombstone used by the save
   // and explicit-reload checks below.
@@ -9536,6 +12091,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   fs.writeFileSync(deletedAFile, "F22_DELETED_A_BASE\r\n", "utf8");
   await clearTabs();
   const deletedA = await createActiveTab(deletedAFile, "F22_DELETED_A_BASE\r\n");
+  const deletedAWatcherAtStart = watcherProbe.snapshot();
   const deletedAOwner = await exec(`window.__f22DeletionProtocolProbe.selections
     .filter(entry => entry.filePath === ${JSON.stringify(deletedAFile)} && entry.owner && entry.owner.tabId === ${deletedA.id})
     .at(-1)?.owner || null`);
@@ -9558,12 +12114,54 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       };
     })()
   `.replace("${eventId}", String(deletedAEvent && deletedAEvent.delivery && deletedAEvent.delivery.eventId)));
+  const activeAckQuiescence = await waitForDeletionAckQuiescence(
+    deletionDeliveryStart,
+    deletedAFile,
+    deletionAckIdentity(deletedAProtocol.forwarded[0]),
+  );
+  const deletedADeletionProducerRetained = await waitUntil(
+    () => {
+      const snapshot = watcherProbe.snapshot();
+      return snapshot.live.length === 1 && snapshot.live[0].kind === "poll";
+    },
+    5000,
+  );
+  const deletedAWatcherAfterDeletion = watcherProbe.snapshot();
+  // Recreate and round-trip before attempting a Save.  That isolates the
+  // tombstone's cache semantics from any dirty/conflict outcome of a refused
+  // save, and proves path recreation cannot silently adopt external bytes.
+  const deletedAWasMissingBeforeRecreation = !fs.existsSync(deletedAFile);
+  fs.writeFileSync(deletedAFile, "F22_DELETED_A_EXTERNAL_REPLACEMENT\r\n", "utf8");
+  const deletedAWatcherRearmed = await waitUntil(
+    () => watcherProbe.snapshot().live.some(
+      (entry) => entry.kind === "fs.watch" && entry.filePath === deletedAFile &&
+        entry.id !== (deletedAWatcherAtStart.live[0] &&
+          deletedAWatcherAtStart.live[0].id),
+    ),
+    5000,
+  );
+  const deletionRoundTrip = await exec(`
+    (() => {
+      const other = window.CustomTabs.createTab(
+        ${JSON.stringify(deletedBFile)},
+        "F22_DELETED_B_BASE\\r\\n",
+        { activate: false },
+      );
+      window.CustomTabs.switchToTab(other.id);
+      window.CustomTabs.switchToTab(${deletedA.id});
+      return { otherId: other.id, active: (window.CustomTabs.getActiveTab() || {}).id };
+    })()
+  `);
+  const deletionAAfterRecreatedRoundTrip = await deletionTabSnapshot(deletedA.id);
+  const deletedAWatcherAfterRoundTrip = watcherProbe.snapshot();
+  // A tombstone guard must still refuse after an external recreation.  The
+  // saved path was proven missing immediately before recreation; this
+  // assertion then proves refusal leaves the replacement bytes unchanged.
   const deletionSave = await saveWithAlertGuard(deletedAFile);
   const deletionAAfterSave = await deletionTabSnapshot(deletedA.id);
-  fs.writeFileSync(deletedAFile, "F22_DELETED_A_EXTERNAL_REPLACEMENT\r\n", "utf8");
-  const replacementSave = await saveWithAlertGuard(deletedAFile);
   const replacementBytesAfterSave = fs.readFileSync(deletedAFile, "utf8");
   const replacementConflictAfterSave = await deletionTabSnapshot(deletedA.id);
+  const replacementSave = deletionSave;
   await exec(`window.reloadCurrentFile(); null;`);
   const explicitReplacementAdopted = await waitForCondition(
     exec, `window.originalMarkdown === "F22_DELETED_A_EXTERNAL_REPLACEMENT\\r\\n"`, 5000,
@@ -9602,15 +12200,20 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   const closedAcknowledgement = await exec(`window.__f22DeletionProtocolProbe.forwardedAcknowledgements
     .find(ack => ack && ack.eventId === ${'${eventId}'}) || null`
     .replace("${eventId}", String(closedDeletedEvent && closedDeletedEvent.delivery && closedDeletedEvent.delivery.eventId)));
+  const closedAckQuiescence = await waitForDeletionAckQuiescence(
+    0,
+    closedDeletedFile,
+    deletionAckIdentity(closedAcknowledgement),
+  );
 
-  // The same controlled producer boundary proves that a replacement tab cannot
-  // consume a deletion addressed to its closed predecessor. Recreate before
-  // selecting A2 so there is never a second watcher producer for this event.
+  // Keep the owning tab open and active, but explicitly adopt the recreated
+  // file before releasing its held old-generation envelope. This reaches the
+  // renderer's replacement-owner branch (same tab ID, new generation), while
+  // the preceding closed-owner scenario retains that distinct terminal reason.
   const replacementDeletedFile = path.join(dir, "f22-deleted-replacement-a.md");
   fs.writeFileSync(replacementDeletedFile, "F22_DELETED_REPLACEMENT_OLD\r\n", "utf8");
   await clearTabs();
   const replacementDeletedA = await createActiveTab(replacementDeletedFile, "F22_DELETED_REPLACEMENT_OLD\r\n");
-  const replacementDeletedB = await exec(`window.CustomTabs.createTab(${JSON.stringify(deletedBFile)}, "F22_DELETED_B_BASE\\r\\n", { activate: false })`);
   const heldReplacementDeliveries = [];
   const realReplacementSend = wc.send;
   const restoreReplacementSend = replaceMethod(wc, "send", function(channel, ...args) {
@@ -9624,22 +12227,493 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     fs.unlinkSync(replacementDeletedFile);
     replacementEnvelopeHeld = await waitUntil(() => heldReplacementDeliveries.length === 1, 5000);
   } finally { restoreReplacementSend(); }
-  await exec(`window.CustomTabs.switchToTab(${replacementDeletedB.id}); null;`);
-  await exec(`window.CustomTabs.closeTab(${replacementDeletedA.id}); null;`);
   fs.writeFileSync(replacementDeletedFile, "F22_DELETED_REPLACEMENT_NEW\r\n", "utf8");
-  const replacementDeletedA2 = await createActiveTab(replacementDeletedFile, "F22_DELETED_REPLACEMENT_NEW\r\n");
-  const replacementBefore = await deletionTabSnapshot(replacementDeletedA2.id);
+  // Let the renderer complete its real reload/adoption and advance its tab
+  // generation, but hold only the renderer-to-main adoption envelope. Sending
+  // that envelope would release the held delivery before its old generation
+  // reaches classifyDeletionDelivery(), making replacement-owner untestable.
+  await exec(`
+    (() => {
+      const ipc = require("electron").ipcRenderer;
+      const originalSend = ipc.send;
+      const probe = window.__f22ReplacementAdoptionProbe = {
+        held: [],
+        enabled: true,
+        restored: false,
+        originalSend,
+      };
+      const replacementAdoptionSend = function(channel, ...args) {
+        const payload = args[0];
+        if (
+          probe.enabled &&
+          (channel === "start-file-watching" || channel === "set-active-file") &&
+          payload && payload.adoptDeletion === true
+        ) {
+          probe.held.push({ channel, payload });
+          return undefined;
+        }
+        return originalSend.call(this, channel, ...args);
+      };
+      probe.wrapper = replacementAdoptionSend;
+      ipc.send = replacementAdoptionSend;
+      probe.restore = () => {
+        if (probe.restored) return false;
+        probe.restored = true;
+        probe.enabled = false;
+        if (ipc.send === replacementAdoptionSend) ipc.send = originalSend;
+        return true;
+      };
+      return null;
+    })()
+  `);
+  let replacementReloaded = false;
+  let replacementCurrentOwner = null;
+  let replacementAdoption = null;
+  try {
+    await exec(`window.reloadCurrentFile(); null;`);
+    replacementReloaded = await waitForCondition(
+      exec,
+      `window.originalMarkdown === "F22_DELETED_REPLACEMENT_NEW\\r\\n"`,
+      5000,
+    );
+    replacementCurrentOwner = await exec(
+      `window.CustomTabs.getActiveDocumentIdentity(
+        ${JSON.stringify(replacementDeletedFile)},
+        window.getReloadRequestSession(),
+      )`,
+    );
+  } finally {
+    replacementAdoption = await exec(`
+      (() => {
+        const probe = window.__f22ReplacementAdoptionProbe;
+        if (probe) probe.restore();
+        return probe ? { held: probe.held.slice() } : null;
+      })()
+    `);
+  }
+  const replacementBefore = await deletionTabSnapshot(replacementDeletedA.id);
   const replacementBeforeMessages = await deletedMessages();
   if (heldReplacementDeliveries[0]) realReplacementSend.call(wc, "file-deleted", heldReplacementDeliveries[0]);
   const replacementDelivered = await waitForCondition(exec, `window.__f22DeletionProtocolProbe.deliveries.some(entry => entry && entry.path === ${JSON.stringify(replacementDeletedFile)} && entry.delivery)`, 5000);
-  const replacementAfterStaleDelivery = await deletionTabSnapshot(replacementDeletedA2.id);
+  const replacementAfterStaleDelivery = await deletionTabSnapshot(replacementDeletedA.id);
   const replacementAfterStaleMessages = await deletedMessages();
-  const replacementAfter = await deletionTabSnapshot(replacementDeletedA2.id);
+  const replacementAfter = await deletionTabSnapshot(replacementDeletedA.id);
   const replacementAfterMessages = await deletedMessages();
   const replacementDeletedEvent = heldReplacementDeliveries[0] || null;
   const replacementAcknowledgement = await exec(`window.__f22DeletionProtocolProbe.forwardedAcknowledgements
     .find(ack => ack && ack.eventId === ${'${eventId}'}) || null`
     .replace("${eventId}", String(replacementDeletedEvent && replacementDeletedEvent.delivery && replacementDeletedEvent.delivery.eventId)));
+  const replacementAckQuiescence = await waitForDeletionAckQuiescence(
+    0,
+    replacementDeletedFile,
+    deletionAckIdentity(replacementAcknowledgement),
+  );
+
+  // Exercise the actual renderer listener/classifier with controlled false
+  // deliveries. These are classifier-only cases: their ACKs are deliberately
+  // dropped before main so they cannot disturb the held real record below.
+  const ownerPathMovedFile = path.join(dir, "f22-deleted-owner-path-moved.md");
+  fs.writeFileSync(ownerPathMovedFile, "F22_OWNER_PATH_MOVED\r\n", "utf8");
+  await clearTabs();
+  const ownerPathMovedTab = await createActiveTab(
+    ownerPathMovedFile,
+    "F22_OWNER_PATH_MOVED\r\n",
+  );
+  const ownerPathMovedDeliveryStart = await exec(
+    `window.__f22DeletionProtocolProbe.deliveries.length`,
+  );
+  const heldOwnerPathMovedDeliveries = [];
+  const realOwnerPathMovedSend = wc.send;
+  const restoreOwnerPathMovedSend = replaceMethod(
+    wc,
+    "send",
+    function (channel, ...args) {
+      if (
+        channel === "file-deleted" &&
+        args[0] &&
+        args[0].path === ownerPathMovedFile
+      ) {
+        heldOwnerPathMovedDeliveries.push(args[0]);
+        return undefined;
+      }
+      return realOwnerPathMovedSend.call(this, channel, ...args);
+    },
+  );
+  let ownerPathMovedEnvelopeHeld = false;
+  try {
+    fs.unlinkSync(ownerPathMovedFile);
+    ownerPathMovedEnvelopeHeld = await waitUntil(
+      () => heldOwnerPathMovedDeliveries.length === 1,
+      5000,
+    );
+  } finally {
+    restoreOwnerPathMovedSend();
+  }
+  const ownerPathMovedHeldIdentity = deletionDeliveryIdentity(
+    heldOwnerPathMovedDeliveries[0] && heldOwnerPathMovedDeliveries[0].delivery,
+  );
+  // `unusable-path` is a dead defensive renderer branch outside this
+  // harness's valid-envelope contract: main supplies validated file paths and
+  // the renderer rejects empty/NUL input before canonical reload handling.
+  const classifierReasonEvidence = await exec(`
+    (() => {
+      const ipc = require("electron").ipcRenderer;
+      const protocol = window.__f22DeletionProtocolProbe;
+      const raw = typeof ipc.rawListeners === "function"
+        ? ipc.rawListeners("file-deleted")
+        : [];
+      const registration = raw.find((candidate) => {
+        const source = Function.prototype.toString.call(
+          candidate.listener || candidate,
+        );
+        return /\\bclassifyDeletionDelivery\\b/.test(source) &&
+          /\\backnowledgeDeletionDelivery\\b/.test(source);
+      }) || null;
+      const listener = registration && (registration.listener || registration);
+      const tabs = window.CustomTabs;
+      const originalIdentity = tabs && tabs.getActiveDocumentIdentity;
+      const originalCurrentFilePath = window.currentFilePath;
+      const owner = ${JSON.stringify(
+        heldOwnerPathMovedDeliveries[0] &&
+          heldOwnerPathMovedDeliveries[0].delivery &&
+          heldOwnerPathMovedDeliveries[0].delivery.owner,
+      )};
+      const ownerTab = tabs && owner &&
+        typeof tabs.getTabs === "function"
+        ? tabs.getTabs().find((tab) => tab.id === owner.tabId) || null
+        : null;
+      const fire = (name, configure) => {
+        if (!listener || !protocol) {
+          return {
+            name, listener: false, acknowledgementCount: 0,
+            acknowledgements: [], acknowledgement: null,
+          };
+        }
+        const payload = JSON.parse(${JSON.stringify(JSON.stringify(
+          heldOwnerPathMovedDeliveries[0] || null,
+        ))});
+        if (!payload || !payload.delivery) {
+          return {
+            name, listener: true, acknowledgementCount: 0,
+            acknowledgements: [], acknowledgement: null,
+          };
+        }
+        const before = protocol.attemptedAcknowledgements.length;
+        const event = protocol.deletionEvents.at(-1) || null;
+        if (!event) {
+          return {
+            name, listener: true, realEvent: false, acknowledgementCount: 0,
+            acknowledgements: [], acknowledgement: null,
+          };
+        }
+        let cleanup = null;
+        let configuration = null;
+        try {
+          configuration = configure
+            ? configure({
+              payload, tabs, ownerTab, originalIdentity, originalCurrentFilePath,
+            })
+            : null;
+          cleanup = configuration && configuration.cleanup;
+          const { cleanup: _cleanup, ...evidence } = configuration || {};
+          protocol.dropAcknowledgements = true;
+          // Invoke only the selected production classifier. Emitting would
+          // invoke every listener, allowing an unrelated ACK to satisfy this
+          // classifier-only assertion.
+          listener.call(ipc, event, payload);
+          const acknowledgements =
+            protocol.attemptedAcknowledgements.slice(before);
+          return {
+            name,
+            listener: true,
+            realEvent: true,
+            ...evidence,
+            acknowledgementCount: acknowledgements.length,
+            acknowledgements,
+            acknowledgement:
+              acknowledgements.length === 1 ? acknowledgements[0] : null,
+          };
+        } finally {
+          protocol.dropAcknowledgements = false;
+          if (typeof cleanup === "function") cleanup();
+        }
+      };
+      const results = [
+        fire("foreign-session", ({ payload }) => {
+          const value = String(
+            payload.delivery.pageSession ||
+            (payload.delivery.owner && payload.delivery.owner.pageSession) ||
+            "fixture",
+          ) + "-foreign";
+          payload.delivery.pageSession = value;
+          if (payload.delivery.owner) payload.delivery.owner.pageSession = value;
+          return { mutation: "delivery.pageSession" };
+        }),
+        fire("owner-path-moved", ({ ownerTab }) => {
+          if (!ownerTab) return { mutation: "owner-tab-unavailable" };
+          const originalFilePath = ownerTab.filePath;
+          const movedFilePath = String(originalFilePath) + ".owner-path-moved";
+          ownerTab.filePath = movedFilePath;
+          return {
+            mutation: "ownerTab.filePath",
+            ownerPathBefore: originalFilePath,
+            ownerPathDuringDelivery: movedFilePath,
+            cleanup: () => {
+              if (ownerTab.filePath === movedFilePath) {
+                ownerTab.filePath = originalFilePath;
+              }
+            },
+          };
+        }),
+        fire("replacement-owner", ({ tabs, originalIdentity }) => {
+          if (!tabs || typeof originalIdentity !== "function") {
+            return { mutation: "active-identity-unavailable" };
+          }
+          const replacementIdentity = function(...args) {
+            const identity = originalIdentity.apply(this, args);
+            return identity && {
+              ...identity,
+              documentGeneration: identity.documentGeneration + 1,
+            };
+          };
+          tabs.getActiveDocumentIdentity = replacementIdentity;
+          return {
+            mutation: "active-document-identity",
+            identityHook: tabs.getActiveDocumentIdentity === replacementIdentity,
+            cleanup: () => {
+              if (tabs.getActiveDocumentIdentity === replacementIdentity) {
+                tabs.getActiveDocumentIdentity = originalIdentity;
+              }
+            },
+          };
+        }),
+        fire("not-active", ({ tabs, originalIdentity, originalCurrentFilePath }) => {
+          if (!tabs || typeof originalIdentity !== "function") {
+            return { mutation: "current-path-unavailable" };
+          }
+          const inactivePath = String(originalCurrentFilePath) + ".not-active";
+          const activeIdentityForDifferentCurrentPath = function(...args) {
+            return originalIdentity.call(
+              this,
+              originalCurrentFilePath,
+              ...args.slice(1),
+            );
+          };
+          window.currentFilePath = inactivePath;
+          tabs.getActiveDocumentIdentity = activeIdentityForDifferentCurrentPath;
+          return {
+            mutation: "currentFilePath",
+            currentPathBefore: originalCurrentFilePath,
+            currentPathDuringDelivery: inactivePath,
+            identityHook:
+              tabs.getActiveDocumentIdentity === activeIdentityForDifferentCurrentPath,
+            cleanup: () => {
+              if (
+                tabs.getActiveDocumentIdentity ===
+                activeIdentityForDifferentCurrentPath
+              ) {
+                tabs.getActiveDocumentIdentity = originalIdentity;
+              }
+              if (window.currentFilePath === inactivePath) {
+                window.currentFilePath = originalCurrentFilePath;
+              }
+            },
+          };
+        }),
+      ];
+      return results;
+    })()
+  `);
+  const classifierReasonDetail = () => JSON.stringify({
+    classifierReasonEvidence,
+  });
+  checkDeletionEvidence(
+    ["acknowledgementLifecycle"],
+    "F22 selected production classifier exclusively acknowledges foreign-session, owner-path-moved, replacement-owner, and not-active", () =>
+    ownerPathMovedEnvelopeHeld === true &&
+      ownerPathMovedHeldIdentity &&
+      ownerPathMovedHeldIdentity.complete === true &&
+      Array.isArray(classifierReasonEvidence) &&
+      classifierReasonEvidence.length === 4 &&
+      classifierReasonEvidence.every((entry) =>
+        entry.listener === true &&
+        entry.realEvent === true &&
+        entry.acknowledgementCount === 1 &&
+        Array.isArray(entry.acknowledgements) &&
+        entry.acknowledgements.length === 1 &&
+        entry.acknowledgements[0] &&
+        entry.acknowledgements[0].why === entry.name &&
+        entry.acknowledgement &&
+        entry.acknowledgement.consumed === false &&
+        entry.acknowledgement.why === entry.name) &&
+      classifierReasonEvidence[1].mutation === "ownerTab.filePath" &&
+      classifierReasonEvidence[1].ownerPathBefore !==
+        classifierReasonEvidence[1].ownerPathDuringDelivery &&
+      classifierReasonEvidence[2].mutation === "active-document-identity" &&
+      classifierReasonEvidence[2].identityHook === true &&
+      classifierReasonEvidence[3].mutation === "currentFilePath" &&
+      classifierReasonEvidence[3].identityHook === true &&
+      classifierReasonEvidence[3].currentPathBefore !==
+        classifierReasonEvidence[3].currentPathDuringDelivery &&
+      classifierReasonEvidence.every((entry) =>
+        !entry.acknowledgements.some((acknowledgement) =>
+          acknowledgement && acknowledgement.why !== entry.name)), () =>
+    classifierReasonDetail()
+  );
+  const ownerPathMovedForgedAcknowledgements = await exec(`
+    (() => {
+      const ipc = require("electron").ipcRenderer;
+      const delivery = ${JSON.stringify(
+        heldOwnerPathMovedDeliveries[0] &&
+          heldOwnerPathMovedDeliveries[0].delivery,
+      )};
+      if (!delivery) return [];
+      const canonicalAcknowledgement = Object.freeze({
+        eventId: delivery.eventId,
+        consumed: false,
+        why: "owner-path-moved",
+        pageSession: delivery.pageSession,
+        rendererGeneration: delivery.rendererGeneration,
+        tabId: delivery.owner && delivery.owner.tabId,
+        documentGeneration: delivery.owner && delivery.owner.documentGeneration,
+        pathKey: delivery.owner && delivery.owner.pathKey,
+        selectionGeneration: delivery.selectionGeneration,
+        watcherGeneration: delivery.watcherGeneration,
+        attempt: delivery.attempt,
+      });
+      const acknowledgement = () => ({ ...canonicalAcknowledgement });
+      const variants = [
+        ["pageSession", (ack) => {
+          ack.pageSession = String(ack.pageSession) + "-forged";
+        }],
+        ["rendererGeneration", (ack) => {
+          ack.rendererGeneration += 1000000;
+        }],
+        ["tabId", (ack) => { ack.tabId += 1000000; }],
+        ["documentGeneration", (ack) => { ack.documentGeneration += 1000000; }],
+        ["pathKey", (ack) => { ack.pathKey += "-forged"; }],
+        ["selectionGeneration", (ack) => { ack.selectionGeneration += 1000000; }],
+        ["watcherGeneration", (ack) => { ack.watcherGeneration += 1000000; }],
+        ["attempt", (ack) => { ack.attempt += 1000000; }],
+      ];
+      return variants.map(([field, mutate]) => {
+        const ack = acknowledgement();
+        mutate(ack);
+        const changedFields = Object.keys(canonicalAcknowledgement).filter(
+          (key) => ack[key] !== canonicalAcknowledgement[key],
+        );
+        ipc.send("file-deleted-ack", ack);
+        return {
+          field,
+          changedFields,
+          canonicalFields: Object.keys(canonicalAcknowledgement),
+          acknowledgement: ack,
+        };
+      });
+    })()
+  `);
+  const ownerPathMovedForgedObserved = await waitUntil(
+    () => mainDeletionAckProbe &&
+      ownerPathMovedForgedAcknowledgements.length === 8 &&
+      ownerPathMovedForgedAcknowledgements.every((entry) =>
+        mainDeletionAckProbe.rejectedAndUnchanged(
+          deletionAckIdentity(entry.acknowledgement),
+        )),
+    5000,
+  );
+  // The held message is still the actual main-produced record. Change only
+  // the live owner's path spelling; its session, owner identity, selection,
+  // and active-document identity remain the ones captured by main.
+  const ownerPathMovedDeliveryProbe = await exec(`
+    (() => {
+      const tabs = window.CustomTabs;
+      const originalIdentity = tabs && tabs.getActiveDocumentIdentity;
+      const owner = ${JSON.stringify(
+        heldOwnerPathMovedDeliveries[0] &&
+          heldOwnerPathMovedDeliveries[0].delivery &&
+          heldOwnerPathMovedDeliveries[0].delivery.owner,
+      )};
+      const ownerTab = tabs && owner && typeof tabs.getTabs === "function"
+        ? tabs.getTabs().find((tab) => tab.id === owner.tabId) || null
+        : null;
+      if (typeof originalIdentity !== "function" || !ownerTab) {
+        return { installed: false };
+      }
+      const originalFilePath = ownerTab.filePath;
+      const movedFilePath = String(originalFilePath) + ".owner-path-moved";
+      const probe = window.__f22OwnerPathMovedDeliveryProbe = {
+        originalIdentity,
+        ownerTab,
+        originalFilePath,
+        movedFilePath,
+        restored: false,
+      };
+      probe.restore = () => {
+        if (probe.restored) return false;
+        probe.restored = true;
+        if (ownerTab.filePath === movedFilePath) {
+          ownerTab.filePath = originalFilePath;
+        }
+        return true;
+      };
+      ownerTab.filePath = movedFilePath;
+      return {
+        installed: ownerTab.filePath === movedFilePath,
+        originalFilePath,
+        movedFilePath,
+        originalIdentityIntact: tabs.getActiveDocumentIdentity === originalIdentity,
+      };
+    })()
+  `);
+  if (heldOwnerPathMovedDeliveries[0]) {
+    realOwnerPathMovedSend.call(
+      wc,
+      "file-deleted",
+      heldOwnerPathMovedDeliveries[0],
+    );
+  }
+  const ownerPathMovedAcknowledged = await waitForCondition(
+    exec,
+    `window.__f22DeletionProtocolProbe.forwardedAcknowledgements.some(ack =>
+      ack && ack.eventId === ${JSON.stringify(
+        heldOwnerPathMovedDeliveries[0] &&
+          heldOwnerPathMovedDeliveries[0].delivery &&
+          heldOwnerPathMovedDeliveries[0].delivery.eventId,
+      )} && ack.consumed === false && ack.why === "owner-path-moved")`,
+    5000,
+  );
+  const ownerPathMovedAcknowledgement = await exec(`
+    window.__f22DeletionProtocolProbe.forwardedAcknowledgements.find(ack =>
+      ack && ack.eventId === ${JSON.stringify(
+        heldOwnerPathMovedDeliveries[0] &&
+          heldOwnerPathMovedDeliveries[0].delivery &&
+          heldOwnerPathMovedDeliveries[0].delivery.eventId,
+      )} && ack.consumed === false && ack.why === "owner-path-moved",
+    ) || null
+  `);
+  const ownerPathMovedMainAcceptance = await waitForMainDeletionAcknowledgement(
+    deletionAckIdentity(ownerPathMovedAcknowledgement),
+  );
+  const ownerPathMovedDeliveryCleanup = await exec(`
+    (() => {
+      const probe = window.__f22OwnerPathMovedDeliveryProbe;
+      return probe ? {
+        restored: probe.restore(),
+        restoredAgain: probe.restore(),
+        exactIdentityRestored:
+          window.CustomTabs.getActiveDocumentIdentity === probe.originalIdentity,
+        exactOwnerPathRestored:
+          probe.ownerTab.filePath === probe.originalFilePath,
+        noIdentityReinstall:
+          window.CustomTabs.getActiveDocumentIdentity === probe.originalIdentity,
+      } : null;
+    })()
+  `);
+  const ownerPathMovedAckQuiescence = await waitForDeletionAckQuiescence(
+    ownerPathMovedDeliveryStart,
+    ownerPathMovedFile,
+    deletionAckIdentity(ownerPathMovedAcknowledgement),
+  );
 
   // Hold main's real watcher envelope while A still owns the single watcher.
   // Only after the producer has captured A's identity do we select B and
@@ -9688,6 +12762,12 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     restoreInactiveDeletionSend();
   }
   await exec(`window.CustomTabs.switchToTab(${inactiveDeletedB.id}); null;`);
+  const inactiveWatcherMovedToB = await waitUntil(
+    () => watcherProbe.snapshot().live.some(
+      (entry) => entry.kind === "fs.watch" && entry.filePath === deletedBFile,
+    ),
+    5000,
+  );
   const inactiveBBefore = await deletionTabSnapshot(inactiveDeletedB.id);
   if (heldInactiveDeliveries[0]) {
     realInactiveDeletionSend.call(wc, "file-deleted", heldInactiveDeliveries[0]);
@@ -9711,6 +12791,17 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       .slice(${inactiveDeliveryStart})
       .find(entry => entry && entry.path === ${JSON.stringify(inactiveDeletedFile)}) || null
   `);
+  const inactiveInitialAcknowledgement = await exec(`
+    window.__f22DeletionProtocolProbe.forwardedAcknowledgements.find(ack =>
+      ack && ack.eventId === ${JSON.stringify(
+        inactiveFirstDelivery && inactiveFirstDelivery.delivery &&
+          inactiveFirstDelivery.delivery.eventId,
+      )} && ack.consumed === false,
+    ) || null
+  `);
+  const inactiveInitialMainAcceptance = await waitForMainDeletionAcknowledgement(
+    deletionAckIdentity(inactiveInitialAcknowledgement),
+  );
   const inactiveBAfterRefusal = await deletionTabSnapshot(inactiveDeletedB.id);
   const inactiveMessagesAfterRefusal = await deletedMessages();
   await exec(`window.CustomTabs.switchToTab(${inactiveDeletedA.id}); null;`);
@@ -9757,6 +12848,235 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     })()
   `);
   const inactiveAAfterConsumption = await deletionTabSnapshot(inactiveDeletedA.id);
+  const inactiveAckQuiescence = await waitForDeletionAckQuiescence(
+    inactiveDeliveryStart,
+    inactiveDeletedFile,
+    deletionAckIdentity(inactiveRecovery.acknowledgements.find(
+      (ack) => ack && ack.consumed === true,
+    )),
+  );
+
+  // Advance A's real selection generation while its held deletion envelope is
+  // in flight. Releasing that old envelope while A is watched again is the
+  // live stale-selection path: main must retain it, clear its attempt, retry
+  // after 100ms, and then accept the current-generation consumption.
+  const staleDeletedFile = path.join(dir, "f22-deleted-stale-selection.md");
+  fs.writeFileSync(staleDeletedFile, "F22_DELETED_STALE\r\n", "utf8");
+  await clearTabs();
+  const staleDeletedA = await createActiveTab(staleDeletedFile, "F22_DELETED_STALE\r\n");
+  const staleDeletedB = await exec(
+    `window.CustomTabs.createTab(${JSON.stringify(deletedBFile)}, "F22_DELETED_B_BASE\\r\\n", { activate: false })`,
+  );
+  const staleDeliveryStart = await exec(`window.__f22DeletionProtocolProbe.deliveries.length`);
+  const heldStaleDeliveries = [];
+  const realStaleDeletionSend = wc.send;
+  const restoreStaleDeletionSend = replaceMethod(wc, "send", function(channel, ...args) {
+    if (channel === "file-deleted" && args[0] && args[0].path === staleDeletedFile) {
+      heldStaleDeliveries.push(args[0]);
+      return undefined;
+    }
+    return realStaleDeletionSend.call(this, channel, ...args);
+  });
+  let staleEnvelopeHeld = false;
+  try {
+    fs.unlinkSync(staleDeletedFile);
+    staleEnvelopeHeld = await waitUntil(() => heldStaleDeliveries.length === 1, 5000);
+  } finally {
+    restoreStaleDeletionSend();
+  }
+  // Do not let renderer tab switches reach main yet. The inner wrapper is
+  // deliberately owner-aware: only the two real watcher/reassert messages for
+  // this A -> B -> A transition are held, while every unrelated IPC call still
+  // takes the normal deletion-protocol wrapper and transport.
+  let staleSelectionAdvance = null;
+  let staleSelectionCleanup = null;
+  let staleInitialRecordBeforeRelease = null;
+  let staleInitialAcknowledged = false;
+  let staleInitialAcknowledgement = null;
+  let staleInitialMainAcceptance = null;
+  let staleRestoreAndReassert = null;
+  let staleReplayed = false;
+  let staleRecovery = { deliveries: [], acknowledgements: [], currentOwner: null };
+  let staleTerminalAcknowledgement = null;
+  let staleAckQuiescence = null;
+  try {
+    staleSelectionAdvance = await exec(`
+      (() => {
+        const ipc = require("electron").ipcRenderer;
+        const originalSend = ipc.send;
+        const probe = window.__f22StaleSelectionProbe = {
+          originalSend,
+          enabled: true,
+          restored: false,
+          suppressed: [],
+        };
+        const expectedPathForOwner = (owner) => {
+          if (!owner) return null;
+          if (owner.tabId === ${staleDeletedA.id}) {
+            return ${JSON.stringify(staleDeletedFile)};
+          }
+          if (owner.tabId === ${staleDeletedB.id}) {
+            return ${JSON.stringify(deletedBFile)};
+          }
+          return null;
+        };
+        const staleSelectionSend = function(channel, ...args) {
+          const payload = args[0];
+          const owner = payload && payload.owner;
+          const expectedPath = expectedPathForOwner(owner);
+          if (
+            probe.enabled &&
+            (channel === "start-file-watching" || channel === "set-active-file") &&
+            owner &&
+            expectedPath &&
+            payload.filePath === expectedPath
+          ) {
+            probe.suppressed.push({
+              channel,
+              filePath: payload.filePath,
+              owner: { ...owner },
+            });
+            return undefined;
+          }
+          return originalSend.call(this, channel, ...args);
+        };
+        probe.wrapper = staleSelectionSend;
+        probe.restore = () => {
+          if (probe.restored) return false;
+          probe.restored = true;
+          probe.enabled = false;
+          if (ipc.send === staleSelectionSend) ipc.send = originalSend;
+          return true;
+        };
+        ipc.send = staleSelectionSend;
+        try {
+          window.CustomTabs.switchToTab(${staleDeletedB.id});
+          window.CustomTabs.switchToTab(${staleDeletedA.id});
+          return {
+            active: (window.CustomTabs.getActiveTab() || {}).id,
+            owner: window.CustomTabs.getActiveDocumentIdentity(
+              ${JSON.stringify(staleDeletedFile)},
+              window.getReloadRequestSession(),
+            ),
+            suppressed: probe.suppressed.slice(),
+            wrapperInstalled: ipc.send === staleSelectionSend,
+          };
+        } catch (error) {
+          probe.restore();
+          throw error;
+        }
+      })()
+    `);
+    const staleHeldIdentity = deletionDeliveryIdentity(
+      heldStaleDeliveries[0] && heldStaleDeliveries[0].delivery,
+    );
+    staleInitialRecordBeforeRelease = mainDeletionAckProbe
+      ? mainDeletionAckProbe.recordSnapshot(staleHeldIdentity)
+      : null;
+    // This is the only release of attempt 1. A main-side reselection would
+    // already have cleared it and emitted attempt 2, which these checks reject.
+    if (heldStaleDeliveries[0]) {
+      realStaleDeletionSend.call(wc, "file-deleted", heldStaleDeliveries[0]);
+    }
+    staleInitialAcknowledged = await waitForCondition(
+      exec,
+      `window.__f22DeletionProtocolProbe.forwardedAcknowledgements.some(ack =>
+        ack && ack.eventId === ${JSON.stringify(
+          heldStaleDeliveries[0] && heldStaleDeliveries[0].delivery &&
+            heldStaleDeliveries[0].delivery.eventId,
+        )} && ack.attempt === 1 && ack.why === "stale-selection")`,
+      5000,
+    );
+    staleInitialAcknowledgement = await exec(`
+      window.__f22DeletionProtocolProbe.forwardedAcknowledgements.find(ack =>
+        ack && ack.eventId === ${JSON.stringify(
+          heldStaleDeliveries[0] && heldStaleDeliveries[0].delivery &&
+            heldStaleDeliveries[0].delivery.eventId,
+        )} && ack.attempt === 1 && ack.why === "stale-selection",
+      ) || null
+    `);
+    staleInitialMainAcceptance = await waitForMainDeletionAcknowledgement(
+      deletionAckIdentity(staleInitialAcknowledgement),
+    );
+    // Restore this inner wrapper before the outer protocol wrapper, then use
+    // renderer's real ownership assertion to deliver current A ownership.
+    staleRestoreAndReassert = await exec(`
+      (() => {
+        const ipc = require("electron").ipcRenderer;
+        const probe = window.__f22StaleSelectionProbe;
+        const restored = probe ? probe.restore() : false;
+        const before = window.CustomTabs.getActiveDocumentIdentity(
+          ${JSON.stringify(staleDeletedFile)},
+          window.getReloadRequestSession(),
+        );
+        const reasserted =
+          typeof window.assertFileTrackingOwnership === "function" &&
+          window.assertFileTrackingOwnership(
+            ${JSON.stringify(staleDeletedFile)},
+            true,
+            { adoptBaseline: false },
+          );
+        const after = window.CustomTabs.getActiveDocumentIdentity(
+          ${JSON.stringify(staleDeletedFile)},
+          window.getReloadRequestSession(),
+        );
+        return {
+          restored,
+          reasserted,
+          before,
+          after,
+          outerProtocolRestored: ipc.send ===
+            window.__f22DeletionProtocolProbe.wrapper,
+        };
+      })()
+    `);
+    staleReplayed = await waitForCondition(
+      exec,
+      `window.__f22DeletionProtocolProbe.deliveries.slice(${staleDeliveryStart})
+        .filter(entry => entry && entry.path === ${JSON.stringify(staleDeletedFile)}).length === 2`,
+      5000,
+    );
+    staleRecovery = await exec(`
+      (() => {
+        const probe = window.__f22DeletionProtocolProbe;
+        const deliveries = probe.deliveries.slice(${staleDeliveryStart})
+          .filter(entry => entry && entry.path === ${JSON.stringify(staleDeletedFile)});
+        const eventId = deliveries[0] && deliveries[0].delivery && deliveries[0].delivery.eventId;
+        return {
+          deliveries,
+          acknowledgements: probe.acknowledgements.filter(ack => ack && ack.eventId === eventId),
+          currentOwner: window.CustomTabs.getActiveDocumentIdentity(
+            ${JSON.stringify(staleDeletedFile)},
+            window.getReloadRequestSession(),
+          ),
+        };
+      })()
+    `);
+    staleTerminalAcknowledgement = deletionAckIdentity(
+      staleRecovery.acknowledgements.find((ack) => ack && ack.consumed === true),
+    );
+    staleAckQuiescence = await waitForDeletionAckQuiescence(
+      staleDeliveryStart,
+      staleDeletedFile,
+      staleTerminalAcknowledgement,
+    );
+  } finally {
+    staleSelectionCleanup = await exec(`
+      (() => {
+        const ipc = require("electron").ipcRenderer;
+        const probe = window.__f22StaleSelectionProbe;
+        if (!probe) return null;
+        const restored = probe.restore();
+        return {
+          restored,
+          disabled: probe.enabled === false,
+          outerProtocolRestored: ipc.send ===
+            window.__f22DeletionProtocolProbe.wrapper,
+          suppressed: probe.suppressed.slice(),
+        };
+      })()
+    `);
+  }
 
   // Freeze while A remains the active watcher owner. This reaches the
   // renderer's frozen refusal rather than the earlier owner-inactive branch.
@@ -9811,8 +13131,24 @@ async function runF22SaveAndReloadScenarios(win, exec) {
         typeof entry.delivery.owner.pathKey === "string")`,
     5000,
   );
+  const frozenInitialDelivery = await exec(`
+    window.__f22DeletionProtocolProbe.deliveries
+      .slice(${frozenDeliveryStart})
+      .find(entry => entry && entry.path === ${JSON.stringify(frozenDeletedFile)}) || null
+  `);
   const frozenAAfterDelete = await deletionTabSnapshot(frozenDeletedA.id);
   const frozenMessagesBeforeThaw = await deletedMessages();
+  const frozenInitialAcknowledgement = await exec(`
+    window.__f22DeletionProtocolProbe.forwardedAcknowledgements.find(ack =>
+      ack && ack.eventId === ${JSON.stringify(
+        frozenInitialDelivery && frozenInitialDelivery.delivery &&
+          frozenInitialDelivery.delivery.eventId,
+      )} && ack.consumed === false,
+    ) || null
+  `);
+  const frozenInitialMainAcceptance = await waitForMainDeletionAcknowledgement(
+    deletionAckIdentity(frozenInitialAcknowledgement),
+  );
   await exec(`require("electron").ipcRenderer.emit("quit-approval-thaw", {}); null;`);
   const frozenThawed = await waitForCondition(
     exec,
@@ -9861,6 +13197,13 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       };
     })()
   `);
+  const frozenAckQuiescence = await waitForDeletionAckQuiescence(
+    frozenDeliveryStart,
+    frozenDeletedFile,
+    deletionAckIdentity(frozenRecovery.acknowledgements.find(
+      (ack) => ack && ack.consumed === true,
+    )),
+  );
 
   // A missing ACK is distinct from an explicit renderer refusal: main must
   // retire the timed-out attempt, replay the same event ID, and notify once.
@@ -9941,6 +13284,13 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     };
     observe();
   });
+  const lostAckQuiescence = await waitForDeletionAckQuiescence(
+    lostAckStart,
+    lostAckFile,
+    deletionAckIdentity(lostAckRecovery.forwarded.find(
+      (ack) => ack && ack.consumed === true,
+    )),
+  );
 
   // A synchronous webContents.send failure is another lost attempt, not a
   // reason to drop the deletion evidence. The retry must carry the original
@@ -9960,9 +13310,6 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   // a thrown send reaches the harness uncaught-exception exit handler. Do not
   // manufacture a crash/native dialog in order to test it. Once production
   // catches the send at this boundary, run the real producer retry below.
-  const deletionProducerSource = fs.readFileSync(
-    path.join(__dirname, "..", "src", "main.js"), "utf8",
-  );
   const deletionDeliveryStartInSource = deletionProducerSource.indexOf(
     "function deliverDeletionReport",
   );
@@ -9973,13 +13320,18 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     deletionDeliveryStartInSource,
     deletionDeliveryEndInSource < 0 ? undefined : deletionDeliveryEndInSource,
   );
-  const catchesDeletionSendFailure = /try\s*\{[\s\S]*?target\.send\("file-deleted"[\s\S]*?\}\s*catch/.test(
-    deletionDeliverySource,
-  );
-  check(
-    "F22 deletion send failures are caught before they can reach the unattended main-process exception handler",
-    catchesDeletionSendFailure === true,
-    JSON.stringify({ catchesDeletionSendFailure }),
+  const catchesDeletionSendFailure = deletionProductionPrerequisite.caughtSynchronousSend &&
+    /try\s*\{[\s\S]*?target\.send\("file-deleted"[\s\S]*?\}\s*catch/.test(
+      deletionDeliverySource,
+    );
+  checkDeletionEvidence(
+    ["synchronousSendRecovery"],
+    "F22 deletion send failures are caught before they can reach the unattended main-process exception handler", () =>
+    catchesDeletionSendFailure === true, () =>
+    JSON.stringify({
+      catchesDeletionSendFailure,
+      caughtSynchronousSend: deletionProductionPrerequisite.caughtSynchronousSend,
+    })
   );
   let thrownDeletionPayload = null;
   const realThrowDeletionSend = wc.send;
@@ -10041,85 +13393,292 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       };
     })()
   `);
+  const throwAckQuiescence = catchesDeletionSendFailure &&
+    await waitForDeletionAckQuiescence(
+      throwDeliveryStart,
+      throwDeletedFile,
+      deletionAckIdentity(throwRecovery.acknowledgements.find(
+        (ack) => ack && ack.consumed === true,
+      )),
+    );
 
-  const deletionDetail = JSON.stringify({
+  const deletionDetail = () => JSON.stringify({
     deletionProbe, deletedAOwner, deletedAProduced, deletedAEvent,
     deletionDeliveryStart, deletionMessageStart, deletionAAfterReplay,
-    deletionMessagesAfterA, deletedAProtocol, deletionSave,
-    deletedFileExists: fs.existsSync(deletedAFile), deletionAAfterSave,
+    deletionMessagesAfterA, deletedAProtocol, activeAckQuiescence, deletionSave,
+    deletedAWasMissingBeforeRecreation, deletionAAfterSave, deletionRoundTrip,
+    deletionAAfterRecreatedRoundTrip, deletedAWatcherAtStart,
+    deletedAWatcherAfterDeletion, deletedADeletionProducerRetained,
+    deletedAWatcherRearmed, deletedAWatcherAfterRoundTrip,
     closedDeletedA: closedDeletedA.id, closedDeletedB: closedDeletedB.id,
     closedDeletedEvent, closedAcknowledgement, closedEnvelopeHeld, closedDelivered,
-    closedDeletedGone, closedBeforeMessages, closedAfterMessages,
+    closedDeletedGone, closedBeforeMessages, closedAfterMessages, closedAckQuiescence,
     replacementDeletedA: replacementDeletedA.id,
-    replacementDeletedA2: replacementDeletedA2.id,
+    replacementReloaded, replacementCurrentOwner, replacementAdoption,
     replacementDeletedEvent, replacementAcknowledgement, replacementEnvelopeHeld,
     replacementDelivered, replacementBefore, replacementAfterStaleDelivery, replacementAfter,
     replacementBeforeMessages, replacementAfterStaleMessages, replacementAfterMessages,
+    replacementAckQuiescence,
+    ownerPathMovedTab: ownerPathMovedTab.id, ownerPathMovedEnvelopeHeld,
+    ownerPathMovedHeldIdentity, classifierReasonEvidence,
+    ownerPathMovedForgedAcknowledgements, ownerPathMovedForgedObserved,
+    ownerPathMovedDeliveryProbe, ownerPathMovedAcknowledged,
+    ownerPathMovedAcknowledgement, ownerPathMovedMainAcceptance,
+    ownerPathMovedDeliveryCleanup, ownerPathMovedAckQuiescence,
     inactiveDeletedA: inactiveDeletedA.id, inactiveDeletedB: inactiveDeletedB.id,
     inactiveSelectedOwner, inactiveBBefore, inactiveBAfterRefusal,
+    inactiveWatcherMovedToB,
     inactiveMessageStart, inactiveFirstDelivered, inactiveFirstDelivery,
-    inactiveMessagesAfterRefusal, inactiveReplaySelectedOwner,
-    inactiveReplayDelivered, inactiveRecovery, inactiveAAfterConsumption,
+    inactiveMessagesAfterRefusal, inactiveInitialAcknowledgement,
+    inactiveInitialMainAcceptance, inactiveReplaySelectedOwner,
+    inactiveReplayDelivered, inactiveRecovery, inactiveAAfterConsumption, inactiveAckQuiescence,
+    staleDeletedA: staleDeletedA.id, staleDeletedB: staleDeletedB.id,
+    staleEnvelopeHeld, staleSelectionAdvance, staleInitialRecordBeforeRelease,
+    staleInitialAcknowledged, staleInitialAcknowledgement,
+    staleInitialMainAcceptance, staleRestoreAndReassert, staleSelectionCleanup,
+    staleReplayed, staleRecovery, staleAckQuiescence,
     frozenDeletedA: frozenDeletedA.id, frozenDeletedB: frozenDeletedB.id,
     frozenSelectedOwner, frozenDeletion, frozenBeforeDelete, frozenDeliveryStart,
-    frozenFirstDelivered, frozenAInitial, frozenAAfterDelete, frozenMessageCount,
+    frozenFirstDelivered, frozenInitialDelivery, frozenAInitial, frozenAAfterDelete,
+    frozenMessageCount, frozenInitialAcknowledgement, frozenInitialMainAcceptance,
     frozenMessagesBeforeThaw, frozenThawed, frozenReplaySelectedOwner,
     frozenReplayDelivered, frozenAAfterThaw, frozenMessagesAfterThaw, frozenRecovery,
+    frozenAckQuiescence,
     lostAckTab: lostAckTab.id, lostAckReplayed, lostAckConsumed,
-    lostAckTimersTerminated, lostAckRecovery,
+    lostAckTimersTerminated, lostAckRecovery, lostAckQuiescence,
     throwDeletedTab: throwDeletedTab.id, catchesDeletionSendFailure,
-    thrownDeletionPayload, throwObserved, throwRecovered, throwRecovery, replacementSave, replacementBytesAfterSave,
+    thrownDeletionPayload, throwObserved, throwRecovered, throwRecovery, throwAckQuiescence,
+    replacementSave, replacementBytesAfterSave,
     replacementConflictAfterSave, explicitReplacementAdopted,
     replacementAfterExplicitAdoption,
   });
-  check(
-    "F22 watcher-produced active deletion carries a main identity and one forwarded consumed ACK",
+  checkDeletionEvidence(
+    ["producerGeneration"],
+    "F22 deletion producer generation carries a complete real owner identity", () =>
+    deletedAProduced === true &&
+      deletedAEvent &&
+      deletedAEvent.delivery &&
+      deletionDeliveryIdentity(deletedAEvent.delivery).complete === true &&
+      deletedAOwner &&
+      deletedAEvent.delivery.owner.pageSession === deletedAOwner.pageSession &&
+      deletedAEvent.delivery.owner.rendererGeneration ===
+        deletedAOwner.rendererGeneration &&
+      deletedAEvent.delivery.owner.tabId === deletedAOwner.tabId &&
+      deletedAEvent.delivery.owner.documentGeneration ===
+        deletedAOwner.documentGeneration &&
+      deletedAEvent.delivery.owner.pathKey === deletedAOwner.pathKey, () =>
+    deletionDetail()
+  );
+  checkDeletionEvidence(
+    ["acknowledgementLifecycle"],
+    "F22 production ACK listener rejects one-field top-level canonical ACK variants without mutating its held record", () =>
+    ownerPathMovedEnvelopeHeld === true &&
+      ownerPathMovedForgedAcknowledgements.length === 8 &&
+      JSON.stringify(ownerPathMovedForgedAcknowledgements.map(
+        (entry) => entry.field,
+      )) === JSON.stringify([
+        "pageSession",
+        "rendererGeneration",
+        "tabId",
+        "documentGeneration",
+        "pathKey",
+        "selectionGeneration",
+        "watcherGeneration",
+        "attempt",
+      ]) &&
+      ownerPathMovedForgedAcknowledgements.every((entry) => {
+        const identity = deletionAckIdentity(entry.acknowledgement);
+        return identity &&
+          identity.complete === true &&
+          identity.consumed === false &&
+          identity.why === "owner-path-moved" &&
+          JSON.stringify(entry.canonicalFields) === JSON.stringify([
+            "eventId",
+            "consumed",
+            "why",
+            "pageSession",
+            "rendererGeneration",
+            "tabId",
+            "documentGeneration",
+            "pathKey",
+            "selectionGeneration",
+            "watcherGeneration",
+            "attempt",
+          ]) &&
+          JSON.stringify(Object.keys(entry.acknowledgement)) ===
+            JSON.stringify(entry.canonicalFields) &&
+          JSON.stringify(entry.changedFields) === JSON.stringify([entry.field]) &&
+          JSON.stringify(
+            deletionIdentityDifferences(ownerPathMovedHeldIdentity, identity),
+          ) === JSON.stringify([entry.field]) &&
+          mainDeletionAckProbe.rejectedAndUnchanged(identity);
+      }) &&
+      ownerPathMovedForgedObserved === true, () =>
+    deletionDetail()
+  );
+  checkDeletionEvidence(
+    ["acknowledgementLifecycle"],
+    "F22 an exact owner-path-moved ACK from the production classifier retires its held owner-keyed record", () =>
+    ownerPathMovedDeliveryProbe &&
+      ownerPathMovedDeliveryProbe.installed === true &&
+    ownerPathMovedDeliveryProbe.originalIdentityIntact === true &&
+    ownerPathMovedDeliveryProbe.originalFilePath !==
+      ownerPathMovedDeliveryProbe.movedFilePath &&
+    ownerPathMovedAcknowledged === true &&
+      ownerPathMovedAcknowledgement &&
+      ownerPathMovedAcknowledgement.consumed === false &&
+      ownerPathMovedAcknowledgement.why === "owner-path-moved" &&
+      acknowledgementMatchesDelivery(
+        ownerPathMovedAcknowledgement,
+        heldOwnerPathMovedDeliveries[0].delivery,
+      ) &&
+      ownerPathMovedMainAcceptance.acceptedAndRetired === true &&
+      ownerPathMovedMainAcceptance.mainObservation.attemptRetired === true &&
+      ownerPathMovedMainAcceptance.mainObservation.recordRetired === true &&
+      ownerPathMovedMainAcceptance.mainObservation.recordParked === false &&
+      ownerPathMovedMainAcceptance.mainObservation.retryScheduled === false &&
+      ownerPathMovedDeliveryCleanup &&
+      ownerPathMovedDeliveryCleanup.restored === true &&
+      ownerPathMovedDeliveryCleanup.restoredAgain === false &&
+      ownerPathMovedDeliveryCleanup.exactIdentityRestored === true &&
+      ownerPathMovedDeliveryCleanup.exactOwnerPathRestored === true &&
+      ownerPathMovedDeliveryCleanup.noIdentityReinstall === true &&
+      ownerPathMovedAckQuiescence.acceptedAndRetired === true &&
+      ownerPathMovedAckQuiescence.mainObservation.recordRetired === true &&
+      ownerPathMovedAckQuiescence.retired === true, () =>
+    deletionDetail()
+  );
+  checkDeletionEvidence(
+    ["producerGeneration", "watcherOwnership", "rendererTombstoneCache", "acknowledgementLifecycle"],
+    "F22 watcher-produced active deletion records the real tombstone event and one forwarded consumed ACK", () =>
     deletionProbe === true && deletedAProduced === true && deletedAEvent &&
       deletedAEvent.delivery && Number.isSafeInteger(deletedAEvent.delivery.eventId) &&
       deletedAOwner && deletedAEvent.delivery.owner &&
       deletedAEvent.delivery.owner.pageSession === deletedAOwner.pageSession &&
+      deletedAEvent.delivery.owner.rendererGeneration ===
+        deletedAOwner.rendererGeneration &&
       deletedAEvent.delivery.owner.tabId === deletedAOwner.tabId &&
       deletedAEvent.delivery.owner.documentGeneration === deletedAOwner.documentGeneration &&
       deletedAEvent.delivery.owner.pathKey === deletedAOwner.pathKey &&
       deletionAAfterReplay && deletionAAfterReplay.active === deletedA.id &&
       deletionAAfterReplay.dirty === false && deletionAAfterReplay.reloadConflict === false &&
+      deletionAAfterReplay.deletionTombstone === true &&
+      deletionAAfterReplay.deletionEventId === deletedAEvent.delivery.eventId &&
       deletionMessagesAfterA === deletionMessageStart + 1 &&
       deletedAProtocol.deliveries.length === 1 &&
       deletedAProtocol.attempted.length === 1 && deletedAProtocol.forwarded.length === 1 &&
       deletedAProtocol.forwarded[0].consumed === true &&
+      deletedAProtocol.forwarded[0].why === "consumed" &&
+      acknowledgementMatchesDelivery(
+        deletedAProtocol.forwarded[0],
+        deletedAEvent.delivery,
+      ) &&
       deletedAProtocol.forwarded[0].selectionGeneration === deletedAEvent.delivery.selectionGeneration &&
-      deletedAProtocol.forwarded[0].watcherGeneration === deletedAEvent.delivery.watcherGeneration,
-    deletionDetail,
+      deletedAProtocol.forwarded[0].watcherGeneration === deletedAEvent.delivery.watcherGeneration &&
+      activeAckQuiescence.acceptedAndRetired === true &&
+      activeAckQuiescence.mainObservation.recordRetired === true &&
+      activeAckQuiescence.mainObservation.recordParked === false &&
+      activeAckQuiescence.mainObservation.tombstoneRetained === true &&
+      activeAckQuiescence.retired === true, () =>
+    deletionDetail()
   );
-  check(
-    "F22 unresolved watcher-produced deletion rejects Save without recreating the missing path",
+  checkDeletionEvidence(
+    ["deletionSaveRefusal"],
+    "F22 deletion-only Save refusal preserves a clean tombstoned tab and replacement bytes", () =>
     deletionSave && deletionSave.timedOut === false && deletionSave.result &&
+      deletionSave.filePath === deletedAFile && deletionSave.result.path === deletedAFile &&
       deletionSave.result.success === false && deletionSave.result.conflict === true &&
-      fs.existsSync(deletedAFile) === false && deletionAAfterSave &&
-      deletionAAfterSave.dirty === true && deletionAAfterSave.reloadConflict === true,
-    deletionDetail,
+      deletedAWasMissingBeforeRecreation === true &&
+      replacementBytesAfterSave === "F22_DELETED_A_EXTERNAL_REPLACEMENT\r\n" &&
+      deletionAAfterSave &&
+      deletionAAfterSave.dirty === false &&
+      deletionAAfterSave.reloadConflict === false &&
+      deletionAAfterSave.deletionTombstone === true &&
+      deletionAAfterSave.deletionEventId === deletedAEvent.delivery.eventId, () =>
+    deletionDetail()
   );
-  check(
-    "F22 production deletion delivery rejects closed and distinct replacement generations",
+  checkDeletionEvidence(
+    ["rendererTombstoneCache"],
+    "F22 renderer retains deletion-tombstone bytes through a real pre-save tab round-trip until explicit reload", () =>
+    deletionRoundTrip && deletionRoundTrip.active === deletedA.id &&
+      deletionAAfterRecreatedRoundTrip &&
+      deletionAAfterRecreatedRoundTrip.active === deletedA.id &&
+      deletionAAfterRecreatedRoundTrip.content === "F22_DELETED_A_BASE\r\n" &&
+      deletionAAfterRecreatedRoundTrip.originalContent === "F22_DELETED_A_BASE\r\n" &&
+      deletionAAfterRecreatedRoundTrip.live === "F22_DELETED_A_BASE\r\n" &&
+      deletionAAfterRecreatedRoundTrip.dirty === false &&
+      deletionAAfterRecreatedRoundTrip.reloadConflict === false &&
+      deletionAAfterRecreatedRoundTrip.deletionTombstone === true &&
+      deletionAAfterRecreatedRoundTrip.deletionEventId ===
+        deletedAEvent.delivery.eventId, () =>
+    deletionDetail()
+  );
+  checkDeletionEvidence(
+    ["watcherOwnership"],
+    "F22 owns exactly one actual watcher producer across deletion, recreation rearm, and tab switches", () =>
+    deletedAWatcherAtStart.live.length === 1 &&
+      deletedAWatcherAtStart.live[0].kind === "fs.watch" &&
+      deletedAWatcherAtStart.live[0].filePath === deletedAFile &&
+      deletedAWatcherAfterDeletion.live.length === 1 &&
+      deletedAWatcherAfterDeletion.live[0].kind === "poll" &&
+      deletedAWatcherAfterDeletion.live[0].filePath === deletedAFile &&
+      deletedAWatcherAfterDeletion.stops.some(
+        (entry) => entry.id === deletedAWatcherAtStart.live[0].id,
+      ) &&
+      deletedADeletionProducerRetained === true &&
+      deletedAWatcherRearmed === true &&
+      deletedAWatcherAfterRoundTrip.live.length === 1 &&
+      deletedAWatcherAfterRoundTrip.live[0].kind === "fs.watch" &&
+      deletedAWatcherAfterRoundTrip.live[0].filePath === deletedAFile &&
+      deletedAWatcherAfterRoundTrip.live[0].id !==
+        deletedAWatcherAtStart.live[0].id &&
+      deletedAProtocol.deliveries.length === 1, () =>
+    deletionDetail()
+  );
+  checkDeletionEvidence(
+    ["acknowledgementLifecycle"],
+    "F22 production deletion delivery rejects closed and distinct replacement generations", () =>
     closedEnvelopeHeld === true && closedDelivered === true && closedDeletedEvent &&
       closedDeletedEvent.delivery && closedDeletedGone === true &&
       closedAcknowledgement && closedAcknowledgement.consumed === false &&
       closedAcknowledgement.why === "owner-closed" &&
+      acknowledgementMatchesDelivery(
+        closedAcknowledgement,
+        closedDeletedEvent.delivery,
+      ) &&
+      closedAckQuiescence.acceptedAndRetired === true &&
+      closedAckQuiescence.mainObservation.recordRetired === true &&
+      closedAckQuiescence.mainObservation.recordParked === false &&
+      closedAckQuiescence.retired === true &&
       closedAfterMessages === closedBeforeMessages &&
       replacementEnvelopeHeld === true && replacementDelivered === true &&
       replacementDeletedEvent && replacementDeletedEvent.delivery &&
-      replacementDeletedA2.id !== replacementDeletedA.id &&
       replacementDeletedEvent.delivery.owner.tabId === replacementDeletedA.id &&
+      replacementReloaded === true &&
+      replacementAdoption && replacementAdoption.held.length === 1 &&
+      replacementCurrentOwner &&
+      replacementCurrentOwner.tabId === replacementDeletedA.id &&
+      replacementCurrentOwner.documentGeneration !==
+        replacementDeletedEvent.delivery.owner.documentGeneration &&
       replacementAcknowledgement && replacementAcknowledgement.consumed === false &&
-      replacementAcknowledgement.why === "owner-closed" &&
+      replacementAcknowledgement.why === "replacement-owner" &&
+      acknowledgementMatchesDelivery(
+        replacementAcknowledgement,
+        replacementDeletedEvent.delivery,
+      ) &&
+      replacementAckQuiescence.acceptedAndRetired === true &&
+      replacementAckQuiescence.mainObservation.recordRetired === true &&
+      replacementAckQuiescence.mainObservation.recordParked === false &&
+      replacementAckQuiescence.retired === true &&
       JSON.stringify(replacementAfterStaleDelivery) === JSON.stringify(replacementBefore) &&
       replacementAfterStaleMessages === replacementBeforeMessages &&
       JSON.stringify(replacementAfter) === JSON.stringify(replacementBefore) &&
-      replacementAfterMessages === replacementBeforeMessages,
-    deletionDetail,
+      replacementAfterMessages === replacementBeforeMessages, () =>
+    deletionDetail()
   );
-  check(
-    "F22 watcher-driven inactive deletion refusal retains the production owner envelope",
+  checkDeletionEvidence(
+    ["acknowledgementLifecycle"],
+    "F22 watcher-driven inactive deletion refusal retains the production owner envelope", () =>
     inactiveFirstDelivered === true &&
       inactiveFirstDelivery &&
       inactiveFirstDelivery.delivery &&
@@ -10127,6 +13686,8 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       inactiveSelectedOwner &&
       inactiveFirstDelivery.delivery.owner.pageSession ===
         inactiveSelectedOwner.pageSession &&
+      inactiveFirstDelivery.delivery.owner.rendererGeneration ===
+        inactiveSelectedOwner.rendererGeneration &&
       inactiveFirstDelivery.delivery.owner.tabId === inactiveSelectedOwner.tabId &&
       inactiveFirstDelivery.delivery.owner.documentGeneration ===
         inactiveSelectedOwner.documentGeneration &&
@@ -10138,9 +13699,26 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       inactiveBAfterRefusal.dirty === inactiveBBefore.dirty &&
       inactiveBAfterRefusal.reloadConflict === inactiveBBefore.reloadConflict &&
       inactiveMessagesAfterRefusal === inactiveMessageStart &&
+      inactiveInitialAcknowledgement &&
+      inactiveInitialAcknowledgement.consumed === false &&
+      inactiveInitialAcknowledgement.why === "owner-inactive" &&
+      acknowledgementMatchesDelivery(
+        inactiveInitialAcknowledgement,
+        inactiveFirstDelivery.delivery,
+      ) &&
+      inactiveInitialMainAcceptance.acceptedAndRetired === true &&
+      inactiveInitialMainAcceptance.mainObservation.attemptRetired === true &&
+      inactiveInitialMainAcceptance.mainObservation.recordParked === false &&
+      inactiveInitialMainAcceptance.mainObservation.watchedOwnerMatchesRecord === false &&
+      inactiveInitialMainAcceptance.mainObservation.watchedOwnerIsDistinctTab === true &&
+      inactiveInitialMainAcceptance.mainObservation.retryScheduled === false &&
+      inactiveInitialMainAcceptance.mainObservation.recordRetired === false &&
+      inactiveWatcherMovedToB === true &&
       inactiveRecovery.acknowledgements.some(ack =>
         ack.consumed === false &&
         ack.pageSession === inactiveFirstDelivery.delivery.owner.pageSession &&
+        ack.rendererGeneration ===
+          inactiveFirstDelivery.delivery.owner.rendererGeneration &&
         ack.tabId === inactiveFirstDelivery.delivery.owner.tabId &&
         ack.documentGeneration ===
           inactiveFirstDelivery.delivery.owner.documentGeneration &&
@@ -10149,11 +13727,16 @@ async function runF22SaveAndReloadScenarios(win, exec) {
           inactiveFirstDelivery.delivery.selectionGeneration &&
         ack.watcherGeneration ===
           inactiveFirstDelivery.delivery.watcherGeneration,
-      ),
-    deletionDetail,
+      ) &&
+      inactiveAckQuiescence.acceptedAndRetired === true &&
+      inactiveAckQuiescence.mainObservation.recordRetired === true &&
+      inactiveAckQuiescence.mainObservation.recordParked === false &&
+      inactiveAckQuiescence.retired === true, () =>
+    deletionDetail()
   );
-  check(
-    "F22 watcher-driven inactive deletion replays one event ID and consumes only its valid owner generation",
+  checkDeletionEvidence(
+    ["acknowledgementLifecycle"],
+    "F22 watcher-driven inactive deletion replays one event ID and consumes only its valid owner generation", () =>
     inactiveReplayDelivered === true &&
       inactiveRecovery.active === inactiveDeletedA.id &&
     inactiveReplaySelectedOwner &&
@@ -10165,6 +13748,8 @@ async function runF22SaveAndReloadScenarios(win, exec) {
         inactiveRecovery.deliveries[1].delivery.eventId &&
       inactiveRecovery.deliveries[1].delivery.owner.pageSession ===
         inactiveReplaySelectedOwner.pageSession &&
+      inactiveRecovery.deliveries[1].delivery.owner.rendererGeneration ===
+        inactiveReplaySelectedOwner.rendererGeneration &&
       inactiveRecovery.deliveries[1].delivery.owner.tabId ===
         inactiveReplaySelectedOwner.tabId &&
       inactiveRecovery.deliveries[1].delivery.owner.documentGeneration ===
@@ -10176,6 +13761,8 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       inactiveRecovery.acknowledgements.some(ack =>
         ack.consumed === true &&
         ack.pageSession === inactiveRecovery.deliveries[1].delivery.owner.pageSession &&
+        ack.rendererGeneration ===
+          inactiveRecovery.deliveries[1].delivery.owner.rendererGeneration &&
         ack.tabId === inactiveRecovery.deliveries[1].delivery.owner.tabId &&
         ack.documentGeneration ===
           inactiveRecovery.deliveries[1].delivery.owner.documentGeneration &&
@@ -10185,20 +13772,124 @@ async function runF22SaveAndReloadScenarios(win, exec) {
         ack.watcherGeneration ===
           inactiveRecovery.deliveries[1].delivery.watcherGeneration,
       ) &&
-      inactiveRecovery.messages === inactiveMessageStart + 1,
-    deletionDetail,
+      acknowledgementsMatchDeliveries(
+        [inactiveRecovery.acknowledgements.find(ack => ack && ack.consumed === true)],
+        [inactiveRecovery.deliveries[1]],
+      ) &&
+      inactiveRecovery.messages === inactiveMessageStart + 1 &&
+      inactiveAckQuiescence.acceptedAndRetired === true &&
+      inactiveAckQuiescence.retired === true, () =>
+    deletionDetail()
   );
-  check(
-    "F22 watcher-driven frozen deletion refusal preserves the real envelope until thaw",
+  checkDeletionEvidence(
+    ["acknowledgementLifecycle"],
+    "F22 stale-selection attempt 1 is accepted, retries exactly once as attempt 2, then has no third delivery for over 4s", () =>
+    staleEnvelopeHeld === true &&
+      heldStaleDeliveries[0] &&
+      heldStaleDeliveries[0].delivery &&
+      heldStaleDeliveries[0].delivery.attempt === 1 &&
+      staleSelectionAdvance &&
+      staleSelectionAdvance.active === staleDeletedA.id &&
+      staleSelectionAdvance.wrapperInstalled === true &&
+      staleSelectionAdvance.owner &&
+      staleSelectionAdvance.owner.tabId === staleDeletedA.id &&
+      staleSelectionAdvance.suppressed.length >= 2 &&
+      staleSelectionAdvance.suppressed.some(entry =>
+        entry.filePath === staleDeletedFile &&
+        entry.owner && entry.owner.tabId === staleDeletedA.id) &&
+      staleSelectionAdvance.suppressed.some(entry =>
+        entry.filePath === deletedBFile &&
+        entry.owner && entry.owner.tabId === staleDeletedB.id) &&
+      staleInitialRecordBeforeRelease &&
+      staleInitialRecordBeforeRelease.count >= 1 &&
+      staleInitialRecordBeforeRelease.records.every(record =>
+        record.ownerKeyed === true &&
+        record.identity &&
+        record.identity.eventId ===
+          heldStaleDeliveries[0].delivery.eventId &&
+        record.attempt &&
+        record.attempt.attempt === heldStaleDeliveries[0].delivery.attempt &&
+        record.attempt.inFlight === true &&
+        record.attempt.ackTimeoutActive === true &&
+        record.attempt.retryTimeoutActive === false) &&
+      staleSelectionAdvance.owner.selectionGeneration >
+        heldStaleDeliveries[0].delivery.selectionGeneration &&
+      staleInitialAcknowledged === true &&
+      staleInitialAcknowledgement &&
+      staleInitialAcknowledgement.consumed === false &&
+      staleInitialAcknowledgement.why === "stale-selection" &&
+      staleInitialAcknowledgement.attempt === 1 &&
+      acknowledgementMatchesDelivery(
+        staleInitialAcknowledgement,
+        heldStaleDeliveries[0].delivery,
+      ) &&
+      staleInitialMainAcceptance.acceptedAndRetired === true &&
+      staleInitialMainAcceptance.mainObservation.attemptBefore.attempt ===
+        1 &&
+      staleInitialMainAcceptance.mainObservation.attemptAfter.attempt === 1 &&
+      staleInitialMainAcceptance.mainObservation.recordRetired === false &&
+      staleInitialMainAcceptance.mainObservation.recordParked === false &&
+      staleInitialMainAcceptance.mainObservation.watchedOwnerMatchesRecord === true &&
+      staleInitialMainAcceptance.mainObservation.retryScheduled === true &&
+      staleRestoreAndReassert &&
+      staleRestoreAndReassert.restored === true &&
+      staleRestoreAndReassert.reasserted === true &&
+      staleRestoreAndReassert.outerProtocolRestored === true &&
+      staleRestoreAndReassert.after &&
+      staleRestoreAndReassert.after.tabId === staleDeletedA.id &&
+      staleSelectionCleanup &&
+      staleSelectionCleanup.disabled === true &&
+      staleSelectionCleanup.outerProtocolRestored === true &&
+      staleReplayed === true &&
+      staleRecovery.deliveries.length === 2 &&
+      staleRecovery.deliveries.every(entry =>
+        entry.delivery.eventId === staleRecovery.deliveries[0].delivery.eventId) &&
+      staleRecovery.deliveries[0].delivery.attempt === 1 &&
+      staleRecovery.deliveries[1].delivery.attempt === 2 &&
+      staleRecovery.deliveries[1].delivery.pageSession ===
+        staleRestoreAndReassert.after.pageSession &&
+      staleRecovery.deliveries[1].delivery.rendererGeneration ===
+        staleRestoreAndReassert.after.rendererGeneration &&
+      staleRecovery.deliveries[1].delivery.owner.tabId ===
+        staleRestoreAndReassert.after.tabId &&
+      staleRecovery.deliveries[1].delivery.owner.documentGeneration ===
+        staleRestoreAndReassert.after.documentGeneration &&
+      staleRecovery.deliveries[1].delivery.owner.pathKey ===
+        staleRestoreAndReassert.after.pathKey &&
+      staleRecovery.deliveries[1].delivery.selectionGeneration ===
+        staleRestoreAndReassert.after.selectionGeneration &&
+      staleRecovery.currentOwner &&
+      staleRecovery.currentOwner.selectionGeneration ===
+        staleRecovery.deliveries[1].delivery.selectionGeneration &&
+      staleTerminalAcknowledgement &&
+      staleTerminalAcknowledgement.consumed === true &&
+      staleTerminalAcknowledgement.attempt === 2 &&
+      acknowledgementMatchesDelivery(
+        staleTerminalAcknowledgement,
+        staleRecovery.deliveries[1].delivery,
+      ) &&
+      staleAckQuiescence.acceptedAndRetired === true &&
+      staleAckQuiescence.mainObservation.recordRetired === true &&
+      staleAckQuiescence.mainObservation.matchingDeliveryRecordRemains === false &&
+      staleAckQuiescence.before.deliveries === 2 &&
+      staleAckQuiescence.retired === true, () =>
+    deletionDetail()
+  );
+  checkDeletionEvidence(
+    ["acknowledgementLifecycle"],
+    "F22 watcher-driven frozen deletion refusal preserves the real envelope until thaw", () =>
     frozenDeletion &&
       frozenDeletion.ownerTabId === frozenDeletedA.id &&
       Number.isSafeInteger(frozenDeletion.gen) &&
       frozenBeforeDelete === true &&
       frozenFirstDelivered === true &&
+      frozenInitialDelivery &&
       frozenRecovery.deliveries[0] &&
       frozenSelectedOwner &&
       frozenRecovery.deliveries[0].delivery.owner.pageSession ===
         frozenSelectedOwner.pageSession &&
+      frozenRecovery.deliveries[0].delivery.owner.rendererGeneration ===
+        frozenSelectedOwner.rendererGeneration &&
       frozenRecovery.deliveries[0].delivery.owner.tabId === frozenSelectedOwner.tabId &&
       frozenRecovery.deliveries[0].delivery.owner.documentGeneration ===
         frozenSelectedOwner.documentGeneration &&
@@ -10208,6 +13899,18 @@ async function runF22SaveAndReloadScenarios(win, exec) {
         frozenSelectedOwner.selectionGeneration &&
       JSON.stringify(frozenAAfterDelete) === JSON.stringify(frozenAInitial) &&
       frozenMessagesBeforeThaw === frozenMessageCount &&
+      frozenInitialAcknowledgement &&
+      frozenInitialAcknowledgement.consumed === false &&
+      frozenInitialAcknowledgement.why === "frozen" &&
+      acknowledgementMatchesDelivery(
+        frozenInitialAcknowledgement,
+        frozenInitialDelivery.delivery,
+      ) &&
+      frozenInitialMainAcceptance.acceptedAndRetired === true &&
+      frozenInitialMainAcceptance.mainObservation.attemptRetired === true &&
+      frozenInitialMainAcceptance.mainObservation.recordParked === true &&
+      frozenInitialMainAcceptance.mainObservation.retryScheduled === false &&
+      frozenInitialMainAcceptance.mainObservation.recordRetired === false &&
       frozenRecovery.acknowledgements.some(ack =>
         ack.consumed === false &&
         ack.selectionGeneration ===
@@ -10223,6 +13926,8 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       frozenReplaySelectedOwner &&
       frozenRecovery.deliveries[1].delivery.owner.pageSession ===
         frozenReplaySelectedOwner.pageSession &&
+      frozenRecovery.deliveries[1].delivery.owner.rendererGeneration ===
+        frozenReplaySelectedOwner.rendererGeneration &&
       frozenRecovery.deliveries[1].delivery.owner.tabId ===
         frozenReplaySelectedOwner.tabId &&
       frozenRecovery.deliveries[1].delivery.owner.documentGeneration ===
@@ -10238,6 +13943,8 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       frozenRecovery.acknowledgements.some(ack =>
         ack.consumed === true &&
         ack.pageSession === frozenRecovery.deliveries[1].delivery.owner.pageSession &&
+        ack.rendererGeneration ===
+          frozenRecovery.deliveries[1].delivery.owner.rendererGeneration &&
         ack.tabId === frozenRecovery.deliveries[1].delivery.owner.tabId &&
         ack.documentGeneration ===
           frozenRecovery.deliveries[1].delivery.owner.documentGeneration &&
@@ -10246,28 +13953,53 @@ async function runF22SaveAndReloadScenarios(win, exec) {
           frozenRecovery.deliveries[1].delivery.selectionGeneration &&
         ack.watcherGeneration ===
           frozenRecovery.deliveries[1].delivery.watcherGeneration,
-      ),
-    deletionDetail,
+      ) &&
+      acknowledgementsMatchDeliveries(
+        [frozenRecovery.acknowledgements.find(ack => ack && ack.consumed === true)],
+        [frozenRecovery.deliveries[1]],
+      ) &&
+      frozenAckQuiescence.acceptedAndRetired === true &&
+      frozenAckQuiescence.mainObservation.recordRetired === true &&
+      frozenAckQuiescence.mainObservation.recordParked === false &&
+      frozenAckQuiescence.retired === true, () =>
+    deletionDetail()
   );
-  check(
-    "F22 dropped deletion ACKs replay one producer event, then exactly one ACK crosses to and is accepted by main",
+  checkDeletionEvidence(
+    ["acknowledgementLifecycle"],
+    "F22 dropped deletion ACKs replay one producer event, then exactly one ACK crosses to and is accepted by main", () =>
     lostAckReplayed === true && lostAckConsumed === true &&
       lostAckRecovery.active === lostAckTab.id && lostAckRecovery.deliveries.length >= 3 &&
       lostAckRecovery.deliveries.every(entry => entry.delivery &&
         entry.delivery.eventId === lostAckRecovery.deliveries[0].delivery.eventId) &&
+      lostAckRecovery.deliveries.every((entry, index, deliveries) =>
+        index === 0 ||
+        entry.delivery.attempt > deliveries[index - 1].delivery.attempt) &&
       lostAckRecovery.attempted.length >= 3 &&
       lostAckRecovery.dropped.length >= 2 &&
-      lostAckRecovery.dropped.every(ack => ack.consumed === true) &&
+      lostAckRecovery.dropped[0].consumed === true &&
+      lostAckRecovery.dropped[0].why === "consumed" &&
+      lostAckRecovery.dropped.slice(1).every(ack =>
+        ack.consumed === true && ack.why === "already-consumed") &&
       lostAckRecovery.forwarded.length === 1 &&
       lostAckRecovery.forwarded[0].consumed === true &&
+      lostAckRecovery.forwarded[0].why === "already-consumed" &&
       lostAckRecovery.attempted.length ===
         lostAckRecovery.dropped.length + lostAckRecovery.forwarded.length &&
+      acknowledgementsMatchDeliveries(
+        lostAckRecovery.attempted,
+        lostAckRecovery.deliveries,
+      ) &&
       lostAckTimersTerminated === true &&
-      lostAckRecovery.messages === lostAckMessageStart + 1,
-    JSON.stringify({ deletionDetail: JSON.parse(deletionDetail), lostAckTimersTerminated }),
+      lostAckQuiescence.acceptedAndRetired === true &&
+      lostAckQuiescence.mainObservation.recordRetired === true &&
+      lostAckQuiescence.mainObservation.recordParked === false &&
+      lostAckQuiescence.retired === true &&
+      lostAckRecovery.messages === lostAckMessageStart + 1, () =>
+    JSON.stringify({ deletionDetail: JSON.parse(deletionDetail()), lostAckTimersTerminated })
   );
-  check(
-    "F22 watcher-driven synchronous deletion send failure retains evidence and retries the same event ID",
+  if (catchesDeletionSendFailure) checkDeletionEvidence(
+    ["synchronousSendRecovery"],
+    "F22 watcher-driven synchronous deletion send failure retains evidence and retries the same event ID", () =>
     catchesDeletionSendFailure === true &&
       throwObserved === true &&
       thrownDeletionPayload &&
@@ -10277,40 +14009,161 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       throwRecovery.delivery &&
       throwRecovery.delivery.delivery &&
       throwRecovery.delivery.delivery.eventId === thrownDeletionPayload.delivery.eventId &&
+      throwRecovery.delivery.delivery.attempt > thrownDeletionPayload.delivery.attempt &&
       throwRecovery.acknowledgements.filter(ack => ack.consumed === true).length === 1 &&
-      throwRecovery.messages === throwMessageStart + 1,
-    deletionDetail,
+      throwRecovery.acknowledgements.find(ack => ack && ack.consumed === true).why ===
+        "consumed" &&
+      acknowledgementsMatchDeliveries(
+        throwRecovery.acknowledgements,
+        [throwRecovery.delivery],
+      ) &&
+      throwAckQuiescence.acceptedAndRetired === true &&
+      throwAckQuiescence.mainObservation.recordRetired === true &&
+      throwAckQuiescence.mainObservation.recordParked === false &&
+      throwAckQuiescence.retired === true &&
+      throwRecovery.messages === throwMessageStart + 1, () =>
+    deletionDetail()
   );
-  check(
-    "F22 deletion acknowledgement cannot adopt or save an externally recreated path",
+  checkDeletionEvidence(
+    ["rendererTombstoneCache"],
+    "F22 deletion tombstone cannot adopt or save an externally recreated path", () =>
     replacementSave &&
       replacementSave.timedOut === false &&
       replacementSave.result &&
+      replacementSave.filePath === deletedAFile &&
+      replacementSave.result.path === deletedAFile &&
       replacementSave.result.success === false &&
       replacementSave.result.conflict === true &&
       replacementBytesAfterSave === "F22_DELETED_A_EXTERNAL_REPLACEMENT\r\n" &&
-      replacementConflictAfterSave.dirty === true &&
-      replacementConflictAfterSave.reloadConflict === true &&
-      replacementConflictAfterSave.conflicts.length > 0,
-    deletionDetail,
+      replacementConflictAfterSave &&
+      replacementConflictAfterSave.dirty === false &&
+      replacementConflictAfterSave.reloadConflict === false &&
+      replacementConflictAfterSave.deletionTombstone === true &&
+      replacementConflictAfterSave.deletionEventId ===
+        deletedAEvent.delivery.eventId, () =>
+    deletionDetail()
   );
-  check(
-    "F22 explicit reload is the only path that adopts recreated deletion bytes",
+  checkDeletionEvidence(
+    ["rendererTombstoneCache"],
+    "F22 explicit reload is the only path that adopts recreated deletion bytes", () =>
     explicitReplacementAdopted === true &&
       replacementAfterExplicitAdoption &&
       replacementAfterExplicitAdoption.content === "F22_DELETED_A_EXTERNAL_REPLACEMENT\r\n" &&
       replacementAfterExplicitAdoption.originalContent === "F22_DELETED_A_EXTERNAL_REPLACEMENT\r\n" &&
       replacementAfterExplicitAdoption.dirty === false &&
-      replacementAfterExplicitAdoption.reloadConflict === false,
-    deletionDetail,
+      replacementAfterExplicitAdoption.reloadConflict === false &&
+      replacementAfterExplicitAdoption.deletionTombstone === false &&
+      replacementAfterExplicitAdoption.deletionEventId === 0, () =>
+    deletionDetail()
   );
-  await exec(`
-    window.__f22DeletionObserver && window.__f22DeletionObserver.disconnect();
-    window.__f22DeletionProtocolProbe && window.__f22DeletionProtocolProbe.restore();
-    null;
+  const deletionIpcWrapperCleanup = await exec(`
+    (() => {
+      const ipc = require("electron").ipcRenderer;
+      const protocol = window.__f22DeletionProtocolProbe;
+      const replacement = window.__f22ReplacementAdoptionProbe;
+      const stale = window.__f22StaleSelectionProbe;
+      window.__f22DeletionObserver && window.__f22DeletionObserver.disconnect();
+      // Inner wrappers were constructed after the outer protocol wrapper, so
+      // they must restore first. Their idempotent identity checks cannot put
+      // the protocol wrapper back after it has been removed.
+      const replacementFirst = replacement ? replacement.restore() : null;
+      const staleFirst = stale ? stale.restore() : null;
+      const outerFirst = protocol ? protocol.restore() : null;
+      const preProbeRestored = !!protocol && ipc.send === protocol.originalSend;
+      const replacementAgain = replacement ? replacement.restore() : null;
+      const staleAgain = stale ? stale.restore() : null;
+      const outerAgain = protocol ? protocol.restore() : null;
+      return {
+        replacementFirst,
+        staleFirst,
+        outerFirst,
+        replacementAgain,
+        staleAgain,
+        outerAgain,
+        replacementDisabled: !replacement || replacement.enabled === false,
+        staleDisabled: !stale || stale.enabled === false,
+        preProbeRestored,
+        noWrapperReinstalled: !!protocol && ipc.send === protocol.originalSend,
+      };
+    })()
   `);
+  checkDeletionEvidence(
+    ["acknowledgementLifecycle"],
+    "F22 nested deletion IPC wrappers restore in reverse order and remain unable to reinstall after cleanup", () =>
+    deletionIpcWrapperCleanup &&
+      deletionIpcWrapperCleanup.outerFirst === true &&
+      deletionIpcWrapperCleanup.preProbeRestored === true &&
+      deletionIpcWrapperCleanup.noWrapperReinstalled === true &&
+      deletionIpcWrapperCleanup.replacementDisabled === true &&
+      deletionIpcWrapperCleanup.staleDisabled === true &&
+      deletionIpcWrapperCleanup.replacementAgain === false &&
+      deletionIpcWrapperCleanup.staleAgain === false &&
+      deletionIpcWrapperCleanup.outerAgain === false, () =>
+    JSON.stringify(deletionIpcWrapperCleanup)
+  );
+  if (mainDeletionAckProbe) {
+    mainDeletionAckProbe.restore();
+    mainDeletionAckProbeRestored = true;
+  }
+  const deletionAckListenerSequenceRestored =
+    mainDeletionAckProbe && mainDeletionAckProbe.listenerSequenceIntact();
+  await clearTabs();
+  await sleep(50);
+  const deletionWatcherAfterFinalClose = watcherProbe.snapshot();
+  checkDeletionEvidence(
+    ["watcherOwnership"],
+    "F22 deletion watcher instrumentation observes producer stop after the final tab closes", () =>
+    deletionWatcherAfterFinalClose.live.length === 0, () =>
+    JSON.stringify(deletionWatcherAfterFinalClose)
+  );
+  checkDeletionEvidence(
+    ["acknowledgementLifecycle"],
+    "F22 ACK observation preserves the exact production listener sequence and identity", () =>
+    deletionAckListenerSequenceRestored === true, () =>
+    JSON.stringify({ deletionAckListenerSequenceRestored })
+  );
+  } finally {
+    // Reverse construction order. Every wrapper delegates unchanged while
+    // installed; this path also covers partial construction and thrown cases.
+    try {
+      await exec(`
+        window.__f22DeletionObserver && window.__f22DeletionObserver.disconnect();
+        window.__f22ReplacementAdoptionProbe && window.__f22ReplacementAdoptionProbe.restore();
+        window.__f22StaleSelectionProbe && window.__f22StaleSelectionProbe.restore();
+        window.__f22OwnerPathMovedDeliveryProbe &&
+          window.__f22OwnerPathMovedDeliveryProbe.restore();
+        window.__f22DeletionProtocolProbe && window.__f22DeletionProtocolProbe.restore();
+        null;
+      `);
+    } catch {}
+    try {
+      if (mainDeletionAckProbe && !mainDeletionAckProbeRestored) {
+        mainDeletionAckProbe.restore();
+      }
+      else if (restoreMainDeletionAckConstruction) {
+        restoreMainDeletionAckConstruction();
+      }
+    } finally {
+      if (watcherProbe) watcherProbe.restore();
+      else if (restoreWatcherConstruction) restoreWatcherConstruction();
+      f22WatcherProbe = null;
+    }
+  }
+  });
 
   // ---- F22 regression: stale save failures cannot roll back newer success --
+  if (!deletionProductionPrerequisite.saveResultCorrelation) {
+    reportDeletionCapability(
+      "F22 ordered save-result acceptance evidence requires saveRequest production support",
+      classifyDeletionCapability(
+        /\bsaveRequest\b/.test(saveHandlerSource),
+        deletionProductionPrerequisite.saveResultCorrelation,
+      ),
+      JSON.stringify({
+        saveResultCorrelation: deletionProductionPrerequisite.saveResultCorrelation,
+      }),
+    );
+  } else {
   // Manufacture the two replies in reverse order. The real save entry and its
   // pending promise are used; only IPC transport is held, so this has no race
   // against disk scheduling and cannot show a native failure dialog.
@@ -10351,8 +14204,14 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       const tab = window.CustomTabs.getTabs().find(tab => tab.id === ${orderedSaveTab.id});
       const state = tab && window.CustomTabs.__documentState(tab);
       return tab ? {
+        id: tab.id, activeTabId: window.CustomTabs.getActiveTabId(),
         content: tab.content, original: tab.originalContent, dirty: tab.hasUnsavedChanges,
-        state, failedSaves: saveFailedFor(${JSON.stringify(orderedSaveFile)}),
+        originalMarkdown: window.originalMarkdown,
+        editor: window.markdownEditor ? window.markdownEditor.value : null,
+        editMode: window.CustomTabs.__inEditMode(),
+        documentState: state,
+        deletionTombstone: !!(state && state.deletionTombstone),
+        failedSaves: saveFailedFor(${JSON.stringify(orderedSaveFile)}),
         reloadConflict: !!(state && state.reloadConflict),
         reloadDiagnostics: window.getReloadRequestDiagnostics(),
         pending: window.getPendingSaveStatus(${JSON.stringify(orderedSaveFile)}),
@@ -10366,10 +14225,21 @@ async function runF22SaveAndReloadScenarios(win, exec) {
           return { visible: !!(toast && toast.classList.contains("show")), text: message ? message.textContent : null };
         })(),
         alerts: window.__f22OrderedSaveProbe.alerts.slice(),
+        alertCount: window.__f22OrderedSaveProbe.alerts.length,
         controls: window.__f22OrderedSaveProbe.controls.slice(),
+        controlCount: window.__f22OrderedSaveProbe.controls.length,
+        notifications: window.__f22OrderedSaveProbe.notifications.slice(),
+        notificationCount: window.__f22OrderedSaveProbe.notifications.length,
+        saveSettlementEvents: window.__f22OrderedSaveProbe.saveSettlementEvents.slice(),
+        saveResultObservations: window.__f22OrderedSaveProbe.saveResultObservations.slice(),
       } : null;
     })()
   `);
+  const stableOrderedSnapshot = (snapshot) => {
+    if (!snapshot) return snapshot;
+    const { saveResultObservations, ...stable } = snapshot;
+    return stable;
+  };
   let producerCapturedSaves = null;
   let orderedSaveEvidence = null;
   try {
@@ -10379,8 +14249,40 @@ async function runF22SaveAndReloadScenarios(win, exec) {
         const tab = window.CustomTabs.getTabs().find(tab => tab.id === ${orderedSaveTab.id});
         const originalAlert = window.alert;
         const originalSend = ipc.send;
-        const probe = window.__f22OrderedSaveProbe = { requests: [], controls: [], alerts: [] };
-        window.__f22OrderedSaveCleanup = () => { ipc.send = originalSend; window.alert = originalAlert; };
+        const notificationMessage = document.getElementById("notificationMessage");
+        const probe = window.__f22OrderedSaveProbe = {
+          requests: [], controls: [], alerts: [], notifications: [], saveSettlementEvents: [],
+          saveResultObservations: [],
+        };
+        const onPendingSaveStatusChange = () =>
+          probe.saveSettlementEvents.push(window.getPendingSaveStatus(${JSON.stringify(orderedSaveFile)}));
+        const onSaveResult = (_event, result) => {
+          if (!result || !result.requestId) return;
+          const status = window.getPendingSaveStatus(${JSON.stringify(orderedSaveFile)});
+          probe.saveResultObservations.push({
+            requestId: result.requestId,
+            sequence: result.saveRequest && result.saveRequest.sequence,
+            success: result.success,
+            pending: status.count,
+            alertCount: probe.alerts.length,
+          });
+        };
+        const notificationObserver = new MutationObserver(() =>
+          probe.notifications.push(notificationMessage ? notificationMessage.textContent : ""));
+        window.addEventListener("folia-pending-save-status-changed", onPendingSaveStatusChange);
+        ipc.on("save-markdown-result", onSaveResult);
+        if (notificationMessage) {
+          notificationObserver.observe(notificationMessage, {
+            childList: true, characterData: true, subtree: true,
+          });
+        }
+        window.__f22OrderedSaveCleanup = () => {
+          ipc.send = originalSend;
+          window.alert = originalAlert;
+          window.removeEventListener("folia-pending-save-status-changed", onPendingSaveStatusChange);
+          ipc.removeListener("save-markdown-result", onSaveResult);
+          notificationObserver.disconnect();
+        };
         try {
           if (!tab) return { setupFailed: "ordered save tab is absent" };
           window.alert = message => probe.alerts.push(String(message));
@@ -10446,11 +14348,18 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       document.getElementById("saveButton").click(); null;
     `);
     const capturedC = await waitUntil(() => heldOrderedSaveResults.length === 3, 5000);
+    const requestC = await exec(`window.__f22OrderedSaveProbe.requests[2] || null`);
     const resultC = heldOrderedSaveResults[2];
+    const capturedIdentityC = capturedIdentity(requestC, resultC);
     if (resultC) realOrderedSaveSend.call(wc, "save-markdown-result", resultC);
     const latestFailureApplied = await waitForCondition(exec,
       `saveFailedFor(${JSON.stringify(orderedSaveFile)}) === true`, 5000);
-    const afterLatestFailure = await orderedSnapshot();
+    const afterFirstCAcceptedFailure = await orderedSnapshot();
+    // Re-deliver C through the same main-to-renderer delivery path. Unlike A,
+    // C is the current failure that was accepted and settled above.
+    if (resultC) realOrderedSaveSend.call(wc, "save-markdown-result", resultC);
+    await exec(`new Promise(resolve => setTimeout(() => resolve(null), 0))`);
+    const afterDuplicateCAcceptedFailure = await orderedSnapshot();
 
     await exec(`
       const tab = window.CustomTabs.getTabs().find(tab => tab.id === ${orderedSaveTab.id});
@@ -10460,22 +14369,35 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       document.getElementById("saveButton").click(); null;
     `);
     const capturedDE = await waitUntil(() => heldOrderedSaveResults.length === 5, 5000);
-    const resultD = heldOrderedSaveResults[3];
-    const resultE = heldOrderedSaveResults[4];
+    const requestD = await exec(`window.__f22OrderedSaveProbe.requests[3] || null`);
+    const requestE = await exec(`window.__f22OrderedSaveProbe.requests[4] || null`);
+    const resultD = resultFor(requestD);
+    const resultE = resultFor(requestE);
+    const capturedIdentityD = capturedIdentity(requestD, resultD);
+    const capturedIdentityE = capturedIdentity(requestE, resultE);
+    const beforeEFailure = await orderedSnapshot();
     await exec(`window.__f22OrderedSaveProbe.controls.length = 0; null;`);
     if (resultE) realOrderedSaveSend.call(wc, "save-markdown-result", resultE);
+    // C has already established saveFailedFor(), so it cannot establish that
+    // E was accepted.  E must retire only its own pending request and produce
+    // a fresh failure-visible transition before older D is delivered.
     const newerFailureApplied = await waitForCondition(exec,
-      `saveFailedFor(${JSON.stringify(orderedSaveFile)}) === true`, 5000);
+      `window.getPendingSaveStatus(${JSON.stringify(orderedSaveFile)}).count === 1 &&
+       window.__f22OrderedSaveProbe.alerts.length > ${beforeEFailure.alertCount}`, 5000);
     const afterNewerFailure = await orderedSnapshot();
     if (resultD) realOrderedSaveSend.call(wc, "save-markdown-result", resultD);
     const oldSuccessSettled = await waitForCondition(exec,
       `window.getPendingSaveStatus(${JSON.stringify(orderedSaveFile)}).count === 0`, 5000);
     const afterOldSuccess = await orderedSnapshot();
     orderedSaveEvidence = {
-      capturedAB, capturedC, capturedDE, requests, resultA, resultB, resultC, resultD, resultE,
+      capturedAB, capturedC, capturedDE, requests,
+      requestA, requestB, requestC, requestD, requestE,
+      resultA, resultB, resultC, resultD, resultE,
       capturedIdentityA: capturedIdentity(requestA, resultA), capturedIdentityB: capturedIdentity(requestB, resultB),
+      capturedIdentityC, capturedIdentityD, capturedIdentityE, beforeEFailure,
       newerApplied, staleSettled, latestFailureApplied, newerFailureApplied, oldSuccessSettled,
-      afterNewerSuccess, afterStaleFailure, afterDuplicateStaleFailure, afterLatestFailure,
+      afterNewerSuccess, afterStaleFailure, afterDuplicateStaleFailure,
+      afterFirstCAcceptedFailure, afterDuplicateCAcceptedFailure,
       afterNewerFailure, afterOldSuccess, orderedOpenCount,
       disk: fs.readFileSync(orderedSaveFile, "utf8"),
     };
@@ -10500,7 +14422,8 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   check(
     "F22 stale genuine A failure and its duplicate cannot change B content, baseline, dirty state, conflicts, alerts, selection, watcher or pending correlation",
     orderedSaveEvidence && orderedSaveEvidence.staleSettled === true &&
-      JSON.stringify(orderedSaveEvidence.afterStaleFailure) === JSON.stringify(orderedSaveEvidence.afterDuplicateStaleFailure) &&
+      JSON.stringify(stableOrderedSnapshot(orderedSaveEvidence.afterStaleFailure)) ===
+        JSON.stringify(stableOrderedSnapshot(orderedSaveEvidence.afterDuplicateStaleFailure)) &&
       orderedSaveEvidence.afterStaleFailure.content === "F22_SAVE_B_NEWER" &&
       orderedSaveEvidence.afterStaleFailure.original === "F22_SAVE_B_NEWER" &&
       orderedSaveEvidence.afterStaleFailure.dirty === false && orderedSaveEvidence.afterStaleFailure.failedSaves === false &&
@@ -10518,13 +14441,69 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     orderedSaveDetail,
   );
   check(
-    "F22 accepted duplicate failure and older success after newer failure retain their distinct ordering protections",
-    orderedSaveEvidence && orderedSaveEvidence.capturedC === true && orderedSaveEvidence.resultC.success === false &&
-      orderedSaveEvidence.latestFailureApplied === true && orderedSaveEvidence.afterLatestFailure.dirty === true &&
-      orderedSaveEvidence.afterLatestFailure.failedSaves === true &&
-      orderedSaveEvidence.afterLatestFailure.reloadConflict === false &&
-      orderedSaveEvidence.capturedDE === true && orderedSaveEvidence.resultD.success === true &&
-      orderedSaveEvidence.resultE.success === false && orderedSaveEvidence.newerFailureApplied === true &&
+    "F22 accepted current C failure duplicate is idempotent across document/editor and baseline, dirty/conflict/tombstone state, active selection, watcher controls, save settlement, alerts and notifications",
+    orderedSaveEvidence && orderedSaveEvidence.capturedC === true &&
+      orderedSaveEvidence.capturedIdentityC === true &&
+      orderedSaveEvidence.resultC.success === false &&
+      orderedSaveEvidence.latestFailureApplied === true &&
+      JSON.stringify(stableOrderedSnapshot(orderedSaveEvidence.afterFirstCAcceptedFailure)) ===
+        JSON.stringify(stableOrderedSnapshot(orderedSaveEvidence.afterDuplicateCAcceptedFailure)) &&
+      orderedSaveEvidence.afterDuplicateCAcceptedFailure.saveResultObservations.length ===
+        orderedSaveEvidence.afterFirstCAcceptedFailure.saveResultObservations.length + 1 &&
+      orderedSaveEvidence.afterDuplicateCAcceptedFailure.saveResultObservations.at(-1).requestId ===
+        orderedSaveEvidence.requestC.requestId &&
+      orderedSaveEvidence.afterDuplicateCAcceptedFailure.saveResultObservations.at(-1).pending === 0 &&
+      orderedSaveEvidence.afterFirstCAcceptedFailure.id === orderedSaveTab.id &&
+      orderedSaveEvidence.afterFirstCAcceptedFailure.activeTabId === orderedSaveTab.id &&
+      orderedSaveEvidence.afterFirstCAcceptedFailure.content === "F22_SAVE_C_LATEST_FAILURE" &&
+      orderedSaveEvidence.afterFirstCAcceptedFailure.original === "F22_SAVE_B_NEWER" &&
+      orderedSaveEvidence.afterFirstCAcceptedFailure.dirty === true &&
+      orderedSaveEvidence.afterFirstCAcceptedFailure.documentState.dirty === true &&
+      orderedSaveEvidence.afterFirstCAcceptedFailure.failedSaves === true &&
+      orderedSaveEvidence.afterFirstCAcceptedFailure.reloadConflict === false &&
+      orderedSaveEvidence.afterFirstCAcceptedFailure.deletionTombstone === false &&
+      orderedSaveEvidence.afterFirstCAcceptedFailure.reloadDiagnostics.conflicts.length === 0 &&
+      orderedSaveEvidence.afterFirstCAcceptedFailure.pending.count === 0 &&
+      orderedSaveEvidence.afterFirstCAcceptedFailure.saveSettlementEvents.length > 0 &&
+      orderedSaveEvidence.afterFirstCAcceptedFailure.saveSettlementEvents.at(-1).count === 0 &&
+      orderedSaveEvidence.afterFirstCAcceptedFailure.shutdownDirty.length > 0 &&
+      orderedSaveEvidence.afterFirstCAcceptedFailure.alertCount >= 1 &&
+      orderedSaveEvidence.afterFirstCAcceptedFailure.alertCount ===
+        orderedSaveEvidence.afterDuplicateCAcceptedFailure.alertCount &&
+      orderedSaveEvidence.afterFirstCAcceptedFailure.notificationCount ===
+        orderedSaveEvidence.afterDuplicateCAcceptedFailure.notificationCount &&
+      orderedSaveEvidence.afterFirstCAcceptedFailure.controlCount ===
+        orderedSaveEvidence.afterDuplicateCAcceptedFailure.controlCount &&
+      orderedSaveEvidence.afterFirstCAcceptedFailure.disk === "F22_SAVE_B_NEWER",
+    orderedSaveDetail,
+  );
+  check(
+    "F22 E failure has an event-specific acceptance transition before older D can settle",
+    orderedSaveEvidence && orderedSaveEvidence.capturedDE === true &&
+      orderedSaveEvidence.capturedIdentityD === true &&
+      orderedSaveEvidence.capturedIdentityE === true &&
+      orderedSaveEvidence.resultD.success === true &&
+      orderedSaveEvidence.resultE.success === false &&
+      orderedSaveEvidence.requestE.saveRequest.sequence >
+        orderedSaveEvidence.requestD.saveRequest.sequence &&
+      orderedSaveEvidence.beforeEFailure.failedSaves === true &&
+      orderedSaveEvidence.beforeEFailure.pending.count === 2 &&
+      orderedSaveEvidence.newerFailureApplied === true &&
+      orderedSaveEvidence.afterNewerFailure.pending.count === 1 &&
+      orderedSaveEvidence.afterNewerFailure.alertCount >
+        orderedSaveEvidence.beforeEFailure.alertCount &&
+      orderedSaveEvidence.afterNewerFailure.saveSettlementEvents.length >
+        orderedSaveEvidence.beforeEFailure.saveSettlementEvents.length &&
+      orderedSaveEvidence.afterNewerFailure.saveSettlementEvents.at(-1).count === 1 &&
+      orderedSaveEvidence.afterNewerFailure.saveResultObservations.some(
+        (observation) =>
+          observation.requestId === orderedSaveEvidence.requestE.requestId &&
+          observation.sequence ===
+            orderedSaveEvidence.requestE.saveRequest.sequence &&
+          observation.success === false &&
+          observation.pending === 1 &&
+          observation.alertCount > orderedSaveEvidence.beforeEFailure.alertCount,
+      ) &&
       orderedSaveEvidence.oldSuccessSettled === true &&
       orderedSaveEvidence.afterNewerFailure.content === "F22_SAVE_E_NEWER_FAILURE" &&
       orderedSaveEvidence.afterOldSuccess.content === "F22_SAVE_E_NEWER_FAILURE" &&
@@ -10535,6 +14514,11 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       orderedSaveEvidence.afterOldSuccess.shutdownDirty.length > 0,
     orderedSaveDetail,
   );
+  }
+  if (f22WatcherProbe) {
+    f22WatcherProbe.restore();
+    f22WatcherProbe = null;
+  }
 
   // Notification mutations are the user-visible oracle. A stale result is
   // released only after a newer reload request has superseded it; it must not
@@ -10642,7 +14626,15 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     if (heldReloadResults[1]) realReloadSend.call(wc, "file-reload-result", heldReloadResults[1]);
     await sleep(1300);
     const afterCurrentToastCount = await toastCount();
-    check(
+    if (!deletionProductionPrerequisite.reloadOwnerIdentity) {
+      reportDeletionCapability(
+        "F22 foreground reload toast ordering requires active document identity support",
+        deletionCapabilityContracts.reloadOwner,
+        JSON.stringify({
+          reloadOwnerIdentity: deletionProductionPrerequisite.reloadOwnerIdentity,
+        }),
+      );
+    } else check(
       "F22 a superseded reload completion produces no stale success toast while the accepted foreground reload produces exactly one",
       notificationProbe === true &&
         staleHeld === true &&
@@ -10695,7 +14687,15 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     await sleep(500);
     const afterFailedToastCount = await toastCount();
     const afterForegroundFailureCount = await failedToastCount();
-    check(
+    if (!deletionProductionPrerequisite.reloadOwnerIdentity) {
+      reportDeletionCapability(
+        "F22 background reload toast ownership requires active document identity support",
+        deletionCapabilityContracts.reloadOwner,
+        JSON.stringify({
+          reloadOwnerIdentity: deletionProductionPrerequisite.reloadOwnerIdentity,
+        }),
+      );
+    } else check(
       "F22 accepted background reload notifies once, while a failed reload never emits a success toast",
       backgroundHeld === true &&
         afterBackgroundToastCount === afterCurrentToastCount + 1 &&
@@ -17980,6 +21980,8 @@ app.whenReady().then(async () => {
     } else if (focusedCommitHarness) {
       await runF22CommitSendThrowScenario(win, (code) =>
         win.webContents.executeJavaScript(code, true));
+    } else if (companionSelfcheck) {
+      await runCompanionSettlementScenarios();
     } else {
       await run(win);
       // THE NEGATIVE TWIN OF THE PORTABLE BRANCH ASSERTION, in the process that
@@ -18100,9 +22102,15 @@ app.whenReady().then(async () => {
     const shot = await captureScreenshot(win, "tab-refresh-FAILED");
     if (shot) console.log("failure screenshot: " + shot);
   }
-  console.log(`\n=== ${results.length - failed}/${results.length} passed ===`);
+  console.log(
+    `\n=== ${results.length - failed}/${results.length} passed` +
+      (unavailableEvidence ? `; ${unavailableEvidence} unavailable` : "") +
+      " ===",
+  );
   // Keep the tail inside the full-suite budget. A failed screenshot or cleanup
   // must not turn a bounded failure into a silent hang after its last check.
   clearTimeout(watchdog);
-  app.exit(failed === 0 ? 0 : 1);
+  // Exit 2 is neither a behavioral pass nor failure: it states that this
+  // regression proof cannot run until its required production contract lands.
+  app.exit(failed === 0 ? (unavailableEvidence ? 2 : 0) : 1);
 });
