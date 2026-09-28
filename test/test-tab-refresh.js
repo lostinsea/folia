@@ -8218,24 +8218,198 @@ async function run(win) {
   // was stranded, `originalMarkdown` for A never adopted the write, and coming
   // back to A and clicking Exit sat on a 5s timeout and then offered to
   // DISCARD a save that had already succeeded.
+  // 9b leaves a dirty edit buffer behind while beta.md holds S9B_SENT. Discard
+  // that buffer, then let the real reload path adopt the physical file; calling
+  // updateTabContent(..., false) with invented bytes would falsely mark them
+  // as already saved and make strict Save protection reject this fixture.
+  const bgPhysicalPath = path.normalize(fs.realpathSync.native(path.resolve(fileB)));
+  const bgPhysicalPathKey = process.platform === "win32"
+    ? bgPhysicalPath.toLowerCase() : bgPhysicalPath;
+  const bgBaselineOut = await exec(`
+    (async () => {
+      const realConfirm = window.confirm;
+      window.confirm = () => true;
+      try {
+        if (isEditMode) toggleEditBtn.click();
+        await new Promise(r => setTimeout(r, 800));
+      } finally {
+        window.confirm = realConfirm;
+      }
+      const ipc = require('electron').ipcRenderer;
+      const before = window.getReloadRequestDiagnostics();
+      const startingTab = window.CustomTabs.getActiveTab();
+      const startingOwner = startingTab && window.CustomTabs.getActiveDocumentIdentity(
+        startingTab.filePath, before.session);
+      const expected = {
+        path: startingTab && startingTab.filePath,
+        session: before.session,
+        sequence: before.sequence + 1,
+        tabId: startingTab && startingTab.id,
+        documentGeneration: startingOwner && startingOwner.documentGeneration,
+        pathKey: startingOwner && startingOwner.pathKey,
+        rendererGeneration: startingOwner && startingOwner.rendererGeneration,
+        selectionGeneration: window.getActiveFileSelectionGeneration(),
+        snapshot: window.originalMarkdown,
+      };
+      const matchesRequest = (data) => {
+        const request = data && data.reloadRequest;
+        return request &&
+          data.path === expected.path &&
+          request.path === expected.pathKey &&
+          request.session === expected.session &&
+          request.sequence === expected.sequence &&
+          request.tabId === expected.tabId &&
+          request.documentGeneration === expected.documentGeneration &&
+          request.pathKey === expected.pathKey &&
+          request.rendererGeneration === expected.rendererGeneration &&
+          request.selectionGeneration === expected.selectionGeneration &&
+          request.snapshot === expected.snapshot &&
+          data.reloadSession &&
+          data.reloadSession.pageSession === expected.session &&
+          data.reloadSession.rendererGeneration === expected.rendererGeneration;
+      };
+      let reply = null;
+      let selection = null;
+      const onReply = (_event, data) => {
+        if (matchesRequest(data)) reply = data;
+      };
+      const select = window.selectStagedFileReload;
+      window.selectStagedFileReload = function (...args) {
+        const decision = select.apply(this, args);
+        if (matchesRequest(args[0])) selection = decision;
+        return decision;
+      };
+      const notice = document.getElementById('notificationMessage');
+      const successMessage = typeof window.i18n === 'function'
+        ? window.i18n('notif.fileReloaded')
+        : 'File reloaded successfully';
+      let renderSettled = false;
+      const noticeObserver = new MutationObserver(() => {
+        if (notice && notice.textContent === successMessage &&
+            window.CustomTabs.__reloadState().acceptedSequence === expected.sequence) {
+          renderSettled = true;
+        }
+      });
+      if (notice) noticeObserver.observe(notice, {
+        childList: true, characterData: true, subtree: true,
+      });
+      ipc.on('file-reload-result', onReply);
+      let reloadRequested;
+      let settled = false;
+      try {
+        reloadRequested = reloadCurrentFile();
+        const deadline = Date.now() + 8000;
+        while (reloadRequested && Date.now() < deadline) {
+          const tab = window.CustomTabs.getActiveTab();
+          if (reply && selection && renderSettled && reply.success === true &&
+              selection.accepted === true &&
+              window.CustomTabs.__reloadState().acceptedSequence === expected.sequence &&
+              tab && tab.originalContent === reply.content &&
+              window.originalMarkdown === reply.content &&
+              viewer.textContent.includes('S9B_SENT')) {
+            await new Promise(r => setTimeout(r, 300));
+            settled = true;
+            break;
+          }
+          if (reply && reply.success !== true) break;
+          await new Promise(r => setTimeout(r, 100));
+        }
+      } finally {
+        noticeObserver.disconnect();
+        ipc.removeListener('file-reload-result', onReply);
+        window.selectStagedFileReload = select;
+      }
+      const tab = window.CustomTabs.getActiveTab();
+      return JSON.stringify({
+        reloadRequested: reloadRequested,
+        expected: expected,
+        reply: reply && {
+          success: reply.success,
+          path: reply.path,
+          request: reply.reloadRequest,
+          session: reply.reloadSession,
+          content: reply.content,
+        },
+        selection: selection && {
+          accepted: selection.accepted,
+          trackingActive: selection.trackingActive,
+          unresolvedEvidence: selection.unresolvedEvidence,
+          trackingConflict: selection.trackingConflict,
+          pathKey: selection.pathKey,
+          owner: selection.owner,
+        },
+        settled: settled,
+        renderSettled: renderSettled,
+        reloadState: window.CustomTabs.__reloadState(),
+        tracking: window.getReloadRequestDiagnostics(),
+        activeSelectionGeneration: window.getActiveFileSelectionGeneration(),
+        owner: tab && window.CustomTabs.getActiveDocumentIdentity(
+          tab.filePath, expected.session),
+        documentState: tab && window.CustomTabs.__documentState(tab),
+        viewerShowsSaved: viewer.textContent.includes('S9B_SENT'),
+        path: tab && tab.filePath,
+        original: tab && tab.originalContent,
+        content: tab && tab.content,
+        tabDirty: tab && tab.hasUnsavedChanges,
+        renderer: window.originalMarkdown,
+        dirty: hasUnsavedChanges,
+        editMode: isEditMode,
+      });
+    })()
+  `);
+  const bgBaseline = JSON.parse(bgBaselineOut);
+  const diskBgBaseline = fs.readFileSync(fileB, "utf8");
+  const bgBaselineClean =
+    bgBaseline.reloadRequested === true &&
+    bgBaseline.reply?.success === true &&
+    bgBaseline.reply.request?.sequence === bgBaseline.expected.sequence &&
+    bgBaseline.expected.pathKey === bgPhysicalPathKey &&
+    bgBaseline.reply.request?.path === bgPhysicalPathKey &&
+    bgBaseline.reply.path === fileB &&
+    bgBaseline.reply.session?.epoch > 0 &&
+    bgBaseline.reply.session.pageSession === bgBaseline.expected.session &&
+    bgBaseline.selection?.accepted === true &&
+    bgBaseline.selection.trackingActive === true &&
+    bgBaseline.selection.unresolvedEvidence === false &&
+    bgBaseline.selection.trackingConflict === false &&
+    bgBaseline.selection.pathKey === bgBaseline.expected.pathKey &&
+    bgBaseline.selection.owner?.pageSession === bgBaseline.expected.session &&
+    bgBaseline.selection.owner.tabId === bgBaseline.expected.tabId &&
+    bgBaseline.selection.owner.rendererGeneration === bgBaseline.expected.rendererGeneration &&
+    bgBaseline.selection.owner.pathKey === bgBaseline.expected.pathKey &&
+    bgBaseline.selection.owner.documentGeneration === bgBaseline.owner?.documentGeneration &&
+    bgBaseline.selection.owner.selectionGeneration === bgBaseline.activeSelectionGeneration &&
+    bgBaseline.reloadState?.acceptedSequence === bgBaseline.expected.sequence &&
+    bgBaseline.tracking?.latestMainEpoch === bgBaseline.reply.session.epoch &&
+    bgBaseline.tracking?.isFileTrackingActive === true &&
+    bgBaseline.documentState?.reloadConflict === false &&
+    bgBaseline.settled === true &&
+    bgBaseline.renderSettled === true &&
+    bgBaseline.viewerShowsSaved === true &&
+    bgBaseline.path === fileB &&
+    diskBgBaseline === diskDuring &&
+    diskBgBaseline === "# Beta\n\nS9B_SENT\n" &&
+    bgBaseline.original === diskBgBaseline &&
+    bgBaseline.content === diskBgBaseline &&
+    bgBaseline.renderer === diskBgBaseline &&
+    bgBaseline.tabDirty === false &&
+    bgBaseline.dirty === false &&
+    bgBaseline.editMode === false;
+  check(
+    "the background-save fixture starts with a clean tab whose originalContent matches beta.md on disk",
+    bgBaselineClean,
+    bgBaselineOut + " disk=" + JSON.stringify(diskBgBaseline),
+  );
+  if (!bgBaselineClean) throw new Error("Scenario 9c requires a clean on-disk Save baseline");
+
   const bgOut = await exec(`
     (async () => {
       const seen = [];
       const realConfirm = window.confirm;
       window.confirm = (msg) => { seen.push(String(msg)); return true; };
-      if (isEditMode) toggleEditBtn.click();
-      await new Promise(r => setTimeout(r, 800));
-      // The preceding scenario deliberately leaves a dirty edit session open,
-      // so the cleanup click above raises its own discard confirm. Only the
-      // prompts this scenario provokes are being measured.
-      seen.length = 0;
       const tabs = window.CustomTabs.getTabs();
       const mine = window.CustomTabs.getActiveTab();
       const other = tabs.find(t => t.filePath !== mine.filePath);
-      window.originalMarkdown = '# Beta\\n\\nS9C_BASE\\n';
-      markdownEditor.value = window.originalMarkdown;
-      await renderMarkdown(window.originalMarkdown);
-      window.CustomTabs.updateTabContent(window.originalMarkdown, false);
       toggleEditBtn.click();
       await new Promise(r => setTimeout(r, 800));
       markdownEditor.value = '# Beta\\n\\nS9C_TYPED\\n';
