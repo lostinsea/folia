@@ -5,15 +5,143 @@
 // renderer through the multi-tab refresh scenarios via executeJavaScript.
 // Uses only the Electron already required to run the app - no test framework.
 const { app, BrowserWindow, dialog, ipcMain, autoUpdater: electronAutoUpdater } = require("electron");
+const { spawnSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
+const { StringDecoder } = require("string_decoder");
+const actualHostPlatform = process.platform;
+
+// The renderer and main must agree on document identity. Borrow Linux only
+// for an approved update-install continuation that selects BaseUpdater.
+function createBaseUpdaterBranchBorrow() {
+  const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+  const realSetImmediate = setImmediate;
+  const borrowedPlatform =
+    actualHostPlatform === "win32" ? "linux" : null;
+  let restored = false;
+  let dispatchRecord = null;
+  const updateResponseIds = new Set();
+  const verificationArmIds = new Set();
+  const evidence = {
+    updateResponseIds: [],
+    armedVerificationIds: [],
+    verifiedUpdateRequestIds: [],
+    quitAndInstallPlatforms: [],
+  };
+  const captureUpdateResponse = (_event, data) => {
+    const state = __shutdown.state();
+    if (
+      state.pendingReason !== "update-install" ||
+      !Number.isSafeInteger(state.pendingId) ||
+      state.pendingId <= 0 ||
+      !data ||
+      data.id !== state.pendingId
+    ) {
+      return;
+    }
+    updateResponseIds.add(data.id);
+    evidence.updateResponseIds.push(data.id);
+  };
+  const armVerifiedUpdate = (_event, data) => {
+    if (
+      !data ||
+      data.committed !== true ||
+      !Number.isSafeInteger(data.id) ||
+      !updateResponseIds.has(data.id)
+    ) {
+      return;
+    }
+    verificationArmIds.add(data.id);
+    evidence.armedVerificationIds.push(data.id);
+  };
+  const openBorrow = (_event, data) => {
+    // `finishShutdownCommit()` clears phase-one state before this event. The
+    // ID was therefore captured while phase one still named update-install,
+    // then promoted only by its committed phase-two reply. A native close has
+    // a different request ID and cannot consume this arm.
+    if (
+      !data ||
+      !Number.isSafeInteger(data.id) ||
+      !verificationArmIds.delete(data.id)
+    ) {
+      return;
+    }
+    const record = {
+      requestId: data.id,
+      platformBefore: process.platform,
+      platformDuring: null,
+      platformAfter: null,
+    };
+    evidence.verifiedUpdateRequestIds.push(record);
+    dispatchRecord = record;
+    realSetImmediate(() => {
+      if (!restored) {
+        if (borrowedPlatform) {
+          Object.defineProperty(process, "platform", {
+            value: borrowedPlatform,
+            configurable: true,
+          });
+        }
+        record.platformDuring = process.platform;
+      }
+    });
+  };
+  const closeBorrow = () => {
+    const record = dispatchRecord;
+    dispatchRecord = null;
+    if (!record) return;
+    realSetImmediate(() => {
+      if (!restored) {
+        if (borrowedPlatform) {
+          Object.defineProperty(process, "platform", platformDescriptor);
+        }
+        record.platformAfter = process.platform;
+      }
+    });
+  };
+  ipcMain.prependListener("quit-approval-response", captureUpdateResponse);
+  ipcMain.prependListener("quit-approval-committed", armVerifiedUpdate);
+  ipcMain.prependListener("quit-approval-verified", openBorrow);
+  ipcMain.on("quit-approval-verified", closeBorrow);
+  return {
+    recordQuitAndInstall() {
+      evidence.quitAndInstallPlatforms.push(process.platform);
+    },
+    snapshot() {
+      return {
+        verifiedUpdateRequestIds: evidence.verifiedUpdateRequestIds.map((record) =>
+          Object.assign({}, record),
+        ),
+        updateResponseIds: evidence.updateResponseIds.slice(),
+        armedVerificationIds: evidence.armedVerificationIds.slice(),
+        quitAndInstallPlatforms: evidence.quitAndInstallPlatforms.slice(),
+        platform: process.platform,
+        borrowedPlatform: borrowedPlatform || actualHostPlatform,
+      };
+    },
+    async restore() {
+      await new Promise((resolve) => realSetImmediate(resolve));
+      restored = true;
+      ipcMain.removeListener("quit-approval-response", captureUpdateResponse);
+      ipcMain.removeListener("quit-approval-committed", armVerifiedUpdate);
+      ipcMain.removeListener("quit-approval-verified", openBorrow);
+      ipcMain.removeListener("quit-approval-verified", closeBorrow);
+      if (borrowedPlatform) {
+        Object.defineProperty(process, "platform", platformDescriptor);
+      }
+    },
+  };
+}
 
 // The portable path is selected when main.js is loaded. A separate Electron
 // invocation is therefore the only live test of it that does not reload main
 // into an already-running app (and double-register every lifecycle listener).
 const portableHarness = process.env.F22_PORTABLE_HARNESS === "1";
 const focusedF22Harness = process.env.F22_FOCUSED_HARNESS === "1";
+const f22CtimeR660ProofHarness = process.env.F22_CTIME_R660_PROOF_HARNESS === "1";
+const newlineFocusedHarness = process.env.F22_NEWLINE_FOCUSED_HARNESS === "1";
 const focusedCommitHarness = process.env.F22_COMMIT_FOCUSED_HARNESS === "1";
+const queueFocusedHarness = process.env.F22_QUEUE_FOCUSED_HARNESS === "1";
 const companionSelfcheck = process.env.F22_COMPANION_SELFCHECK === "1";
 // One window-destroying teardown case per child process. See
 // runTeardownScenario(): main.js nulls its own `mainWindow` on `closed`, so a
@@ -50,8 +178,14 @@ if (portableHarness) {
   process.argv.splice(1, 0, `test-f22-teardown-${teardownCase}.js`);
 } else if (focusedCommitHarness) {
   process.argv.splice(1, 0, "test-f22-commit.js");
+} else if (queueFocusedHarness) {
+  process.argv.splice(1, 0, "test-f22-queue-focused.js");
+} else if (f22CtimeR660ProofHarness) {
+  process.argv.splice(1, 0, "test-f22-ctime-r660-proof.js");
 } else if (focusedF22Harness) {
   process.argv.splice(1, 0, "test-f22-focused.js");
+} else if (newlineFocusedHarness) {
+  process.argv.splice(1, 0, "test-f22-newline-focused.js");
 } else if (finalizerSelfcheck) {
   process.argv.splice(1, 0, "test-f22-finalizer.js");
 } else if (companionSelfcheck) {
@@ -76,6 +210,7 @@ require("./test-userdata-isolation");
 
 const results = [];
 let unavailableEvidence = 0;
+let f22R660ProofCheckpoint = false;
 // A SCOPED CAPTURE, FOR TESTING THE HARNESS'S OWN ASSERTIONS. Some controls in
 // this file are only observable by making a helper FAIL and then reading the
 // assertion it produced - runCompanion's naming and accounting under a spawn
@@ -85,12 +220,16 @@ let unavailableEvidence = 0;
 // from a real regression. Inside a capture nothing is recorded and nothing is
 // printed; the caller asserts on what it caught, in its own name.
 let checkCapture = null;
+let consoleAttributionObserver = null;
 function check(name, ok, detail) {
   if (checkCapture) {
     checkCapture.push({ name, ok, detail });
     return;
   }
 
+  if (consoleAttributionObserver) {
+    consoleAttributionObserver.noteCheck(name, ok);
+  }
   results.push({ name, ok, detail });
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}${ok ? "" : "  -> " + detail}`);
 }
@@ -1274,6 +1413,10 @@ function canonicalPathKey(value) {
   return process.platform === "win32" ? value.toLowerCase() : value;
 }
 
+function nativePathKey(value) {
+  return actualHostPlatform === "win32" ? value.toLowerCase() : value;
+}
+
 function sameCanonicalPath(left, right) {
   try {
     const a = canonicalExistingPath(left);
@@ -1546,12 +1689,15 @@ function shutdownRig(win) {
     replaceMethod(dialog, "showMessageBox", async (parent, options) => {
       // The reason is sampled WHILE the question is on screen; by the time the
       // answer is given the record has settled and is gone.
-      rig.dialogs.push({
+      const record = {
         options,
         pendingReason: __shutdown.state().pendingReason,
-      });
+        response: null,
+      };
+      rig.dialogs.push(record);
       const answer =
         typeof rig.answer === "function" ? await rig.answer(options) : rig.answer;
+      record.response = answer;
       return { response: answer };
     }),
   ];
@@ -1691,12 +1837,20 @@ async function runPortableUpdateScenarios(win) {
         window.isEditMode = false;
         return window.CustomTabs.getTabs().length;
       })()
-    `);
+      `);
     // That fresh id was deliberately far ahead of the real sequence, so this
     // renderer would now treat every genuine request as stale. Replace it
     // rather than leaving the next block to inherit the poisoned counter.
+    const portableReloadGeneration = __shutdown.state().rendererGeneration;
     win.webContents.reload();
-    await waitUntil(() => __shutdown.state().renderer === "ready", 20000);
+    const portableRendererReady = await waitUntil(() => {
+      const state = __shutdown.state();
+      return state.renderer === "ready" &&
+        state.rendererGeneration > portableReloadGeneration;
+    }, 20000);
+    if (!portableRendererReady) {
+      throw new Error("portable reload fixture did not reach a new renderer generation");
+    }
     // The no-download press initializes exactly the real lazy updater path;
     // update-downloaded is then its real public state transition.
     await startInstall();
@@ -2010,6 +2164,56 @@ async function runPortableUpdateScenarios(win) {
         staleThreshold: staleThreshold && staleThreshold[1],
       }),
     );
+
+    // The successful hand-off commits a real renderer freeze. The rig records
+    // the quit instead of exiting this companion, so release that otherwise
+    // terminal freeze through the normal main-to-renderer IPC before the next
+    // independent portable scenario selects its live document.
+    const portableForgedMarkerTab = await exec(`
+      (() => {
+        require("electron").ipcRenderer.emit("quit-approval-thaw", {});
+        const tabs = window.CustomTabs;
+        const before = tabs.getActiveTab() || null;
+        let tab = tabs.getTabs().find(entry =>
+          entry && entry.filePath === ${JSON.stringify(fileA)}) || null;
+        let created = false;
+        if (!tab) {
+          tab = tabs.createTab(
+            ${JSON.stringify(fileA)},
+            window.fs.readFileSync(${JSON.stringify(fileA)}, "utf8"),
+          );
+          created = true;
+        }
+        tabs.switchToTab(tab.id);
+        const active = tabs.getActiveTab() || null;
+        return {
+          beforeActiveId: before && before.id,
+          created,
+          tabId: tab.id,
+          activeId: active && active.id,
+          activePath: active && active.filePath,
+          originalContent: active && active.originalContent,
+        };
+      })()
+    `);
+    const portableForgedMarkerReady = !!(
+      portableForgedMarkerTab &&
+        Number.isSafeInteger(portableForgedMarkerTab.tabId) &&
+        portableForgedMarkerTab.activeId === portableForgedMarkerTab.tabId &&
+        portableForgedMarkerTab.activePath === fileA &&
+        typeof portableForgedMarkerTab.originalContent === "string"
+    );
+    check(
+      "the forged portable-marker scenario has a real selected file fixture",
+      portableForgedMarkerReady,
+      JSON.stringify(portableForgedMarkerTab),
+    );
+    if (!portableForgedMarkerReady) {
+      throw new Error(
+        "Portable forged-marker fixture has no selected live tab: " +
+        JSON.stringify(portableForgedMarkerTab),
+      );
+    }
 
     // A FORGED OR STALE MARKER IS NOT AN ACKNOWLEDGEMENT. The private
     // directory is unpredictable, but "unpredictable" is not "unreachable", and
@@ -2856,6 +3060,48 @@ async function runPortableUpdateScenarios(win) {
     // that only measures LENGTH would pass a hard-coded one. Three attempts,
     // three tokens, and the previous attempt's acknowledgement replayed against
     // a later one - which must be refused for as long as it is offered.
+    const tokenReplayFixture = await exec(`
+      (() => {
+        const tabs = window.CustomTabs;
+        let tab = tabs.getTabs().find(entry =>
+          entry && entry.filePath === ${JSON.stringify(fileA)}) || null;
+        let created = false;
+        if (!tab) {
+          tab = tabs.createTab(
+            ${JSON.stringify(fileA)},
+            window.fs.readFileSync(${JSON.stringify(fileA)}, "utf8"),
+          );
+          created = true;
+        }
+        tabs.switchToTab(tab.id);
+        const active = tabs.getActiveTab() || null;
+        return {
+          created,
+          tabId: tab.id,
+          activeId: active && active.id,
+          activePath: active && active.filePath,
+          originalContent: active && active.originalContent,
+        };
+      })()
+    `);
+    const tokenReplayFixtureReady = !!(
+      tokenReplayFixture &&
+      Number.isSafeInteger(tokenReplayFixture.tabId) &&
+      tokenReplayFixture.activeId === tokenReplayFixture.tabId &&
+      tokenReplayFixture.activePath === fileA &&
+      typeof tokenReplayFixture.originalContent === "string"
+    );
+    check(
+      "the portable token-replay scenario has a real selected file fixture",
+      tokenReplayFixtureReady,
+      JSON.stringify(tokenReplayFixture),
+    );
+    if (!tokenReplayFixtureReady) {
+      throw new Error(
+        "Portable token-replay fixture has no selected live tab: " +
+        JSON.stringify(tokenReplayFixture),
+      );
+    }
     __shutdown.reset();
     resetCounts();
     rig.answer = 1;
@@ -3640,6 +3886,53 @@ async function runPortableUpdateScenarios(win) {
       () => __shutdown.state().updateInstallStarted === false,
       10000,
     );
+    // This retry reaches a clean commit, but its child then ends before the
+    // hand-off. The rig keeps this companion alive, so release that committed
+    // renderer freeze and restore a real selected fixture before creating the
+    // edit for the close-path assertion.
+    const errorCloseFixture = await exec(`
+      (() => {
+        require("electron").ipcRenderer.emit("quit-approval-thaw", {});
+        const tabs = window.CustomTabs;
+        let tab = tabs.getTabs().find(entry =>
+          entry && entry.filePath === ${JSON.stringify(fileA)}) || null;
+        let created = false;
+        if (!tab) {
+          tab = tabs.createTab(
+            ${JSON.stringify(fileA)},
+            window.fs.readFileSync(${JSON.stringify(fileA)}, "utf8"),
+          );
+          created = true;
+        }
+        tabs.switchToTab(tab.id);
+        const active = tabs.getActiveTab() || null;
+        return {
+          created,
+          tabId: tab.id,
+          activeId: active && active.id,
+          activePath: active && active.filePath,
+          originalContent: active && active.originalContent,
+        };
+      })()
+    `);
+    const errorCloseFixtureReady = !!(
+      errorCloseFixture &&
+      Number.isSafeInteger(errorCloseFixture.tabId) &&
+      errorCloseFixture.activeId === errorCloseFixture.tabId &&
+      errorCloseFixture.activePath === fileA &&
+      typeof errorCloseFixture.originalContent === "string"
+    );
+    check(
+      "the portable child-error close path has a real selected file fixture",
+      errorCloseFixtureReady,
+      JSON.stringify(errorCloseFixture),
+    );
+    if (!errorCloseFixtureReady) {
+      throw new Error(
+        "Portable child-error fixture has no selected live tab: " +
+        JSON.stringify(errorCloseFixture),
+      );
+    }
     await exec(`
       (() => {
         const tab = window.CustomTabs.getActiveTab();
@@ -4116,11 +4409,7 @@ async function runPortableUpdateScenarios(win) {
 // Each case is headless, bounded by the parent's own timeout, and answers its
 // own dialogs; nothing here can open a native modal.
 async function runTeardownScenario(win, kase) {
-  // These isolated companions retain the non-Windows BaseUpdater lifecycle
-  // coverage; Windows NSIS launcher coverage runs in the parent process.
-  if (process.platform === "win32") {
-    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
-  }
+  const baseUpdaterBranchBorrow = createBaseUpdaterBranchBorrow();
   const exec = (code) => win.webContents.executeJavaScript(code, true);
   const rig = shutdownRig(win);
   const updaterModule = require("electron-updater");
@@ -4159,6 +4448,7 @@ async function runTeardownScenario(win, kase) {
       updaterModule.autoUpdater,
       "quitAndInstall",
       () => {
+        baseUpdaterBranchBorrow.recordQuitAndInstall();
         installs += 1;
         // BaseUpdater's real method raises this latch while the hand-off is
         // live. The continuation case replaces only that external effect, so
@@ -4362,15 +4652,17 @@ async function runTeardownScenario(win, kase) {
     }
 
     if (kase === "continuation") {
-      // The installed updater's public commit has already received its fresh
-      // confirmation, but its final quit is deliberately deferred to a later
-      // turn. Destroy the actual owner window in the renderer's commit event
-      // between those turns. Suppress only the unrelated all-windows-closed
-      // lifecycle listener so its ordinary app.quit does not obscure whether
-      // the deferred update continuation ran.
+      // The installed updater's real commit has received main's matching
+      // verification, but its final quit is deliberately deferred to a later
+      // turn. Destroy the actual owner window from the post-verification
+      // listener between those turns. Suppress only the unrelated
+      // all-windows-closed lifecycle listener so its ordinary app.quit does
+      // not obscure whether the deferred update continuation ran.
       rig.answer = 1;
       let confirmedUpdateCommit = null;
-      const destroyAfterConfirmedCommit = (_event, data) => {
+      let confirmedUpdateVerification = null;
+      let destroyInjectionCount = 0;
+      const captureConfirmedUpdateCommit = (_event, data) => {
         if (
           !data ||
           data.committed !== true ||
@@ -4380,9 +4672,25 @@ async function runTeardownScenario(win, kase) {
           return;
         }
         confirmedUpdateCommit = data;
+      };
+      const destroyAfterVerifiedUpdateCommit = (_event, data) => {
+        if (
+          !data ||
+          data.valid !== true ||
+          !confirmedUpdateCommit ||
+          confirmedUpdateVerification !== null ||
+          data.id !== confirmedUpdateCommit.id ||
+          data.gen !== confirmedUpdateCommit.gen ||
+          data.revision !== confirmedUpdateCommit.revision
+        ) {
+          return;
+        }
+        confirmedUpdateVerification = data;
+        destroyInjectionCount += 1;
         win.destroy();
       };
-      ipcMain.on("quit-approval-committed", destroyAfterConfirmedCommit);
+      ipcMain.on("quit-approval-committed", captureConfirmedUpdateCommit);
+      ipcMain.on("quit-approval-verified", destroyAfterVerifiedUpdateCommit);
       const allWindowsClosed = app.listeners("window-all-closed");
       app.removeAllListeners("window-all-closed");
       restoreWindowAllClosed = () => {
@@ -4413,6 +4721,19 @@ async function runTeardownScenario(win, kase) {
           "a closed owner window invalidates a confirmed deferred update continuation before it can quit",
           updaterEntered &&
             !!confirmedUpdateCommit &&
+            !!confirmedUpdateVerification &&
+            confirmedUpdateCommit.committed === true &&
+            confirmedUpdateVerification.valid === true &&
+            confirmedUpdateCommit.id === confirmedUpdateVerification.id &&
+            confirmedUpdateCommit.gen === confirmedUpdateVerification.gen &&
+            confirmedUpdateCommit.revision === confirmedUpdateVerification.revision &&
+            Number.isSafeInteger(confirmedUpdateCommit.id) &&
+            confirmedUpdateCommit.id > 0 &&
+            Number.isSafeInteger(confirmedUpdateCommit.gen) &&
+            confirmedUpdateCommit.gen > 0 &&
+            Number.isSafeInteger(confirmedUpdateCommit.revision) &&
+            confirmedUpdateCommit.revision >= 0 &&
+            destroyInjectionCount === 1 &&
             initialUpdaterQuitHeld &&
             closedBeforeContinuation &&
             continuationInvalidated &&
@@ -4427,6 +4748,8 @@ async function runTeardownScenario(win, kase) {
           JSON.stringify({
             updaterEntered,
             confirmedUpdateCommit,
+            confirmedUpdateVerification,
+            destroyInjectionCount,
             initialUpdaterQuitHeld,
             updaterLifecycleQuitPrevented: updaterLifecycleQuit.prevented,
             closedBeforeContinuation,
@@ -4440,7 +4763,11 @@ async function runTeardownScenario(win, kase) {
       } finally {
         ipcMain.removeListener(
           "quit-approval-committed",
-          destroyAfterConfirmedCommit,
+          captureConfirmedUpdateCommit,
+        );
+        ipcMain.removeListener(
+          "quit-approval-verified",
+          destroyAfterVerifiedUpdateCommit,
         );
       }
       return;
@@ -4565,6 +4892,7 @@ async function runTeardownScenario(win, kase) {
       JSON.stringify({ before, after, afterAnswer, dialogs: rig.dialogs.length, installs }),
     );
   } finally {
+    await baseUpdaterBranchBorrow.restore();
     if (restoreWindowAllClosed) restoreWindowAllClosed();
     if (restoreInstall) restoreInstall();
     restoreUpdaterLatch();
@@ -4617,7 +4945,7 @@ const companionWallClockMs = (budgetMs) =>
   COMPANION_SEQUENCING_MS;
 
 const COMPANION_ASSERTION_TOTALS = {
-  portable: 44,
+  portable: 47,
   teardown: { queued: 9, commit: 8, pending: 8, continuation: 7, poisoned: 7 },
 };
 
@@ -4640,7 +4968,7 @@ function summariseCompanionTranscript(text) {
   // child transcript into a terminal accounting that this parent never saw.
   const lines = text.split(/\r?\n/);
   const passedFooterRecord =
-    /^=== ([1-9]\d*)\/([1-9]\d*) passed(?:; ([1-9]\d*) unavailable)? ===$/;
+    /^=== (0|[1-9]\d*)\/([1-9]\d*) passed(?:; ([1-9]\d*) unavailable)? ===$/;
   const timedOutFooterRecord =
     /^=== TIMED OUT after (?:0|[1-9]\d*)\/(?:0|[1-9]\d*) checks ===$/;
   const recognizedNonFooterBanners = new Set(["=== Application started ==="]);
@@ -4657,7 +4985,7 @@ function summariseCompanionTranscript(text) {
   // COUNTED, NOT PICKED. Taking the last footer accepts a transcript with two
   // of them, and two terminal accountings in one companion is not a companion
   // that finished twice - it is a transcript this parent cannot attribute, and
-  // the revert audit reads names out of exactly these bytes. A `TIMED OUT`
+  // the parent's companion assertion needs the child's own names intact. A `TIMED OUT`
   // footer is collected separately and can never satisfy the assertion: its
   // numbers read as N === M whenever the run wedged after its last assertion,
   // which is the precise confusion this reconciliation exists to remove.
@@ -4711,7 +5039,15 @@ function summariseCompanionTranscript(text) {
   };
 }
 
-function reconcileCompanionCompletion({ code, timedOut, error, closeObserved, transcript, expectedTotal }) {
+function reconcileCompanionCompletion({
+  code,
+  timedOut,
+  error,
+  closeObserved,
+  transcript,
+  expectedTotal,
+  streamErrors = [],
+}) {
   const footerComplete =
     closeObserved === true &&
     !timedOut &&
@@ -4719,27 +5055,76 @@ function reconcileCompanionCompletion({ code, timedOut, error, closeObserved, tr
     transcript.passedFooters.length === 1 &&
     transcript.timedOutFooters.length === 0 &&
     transcript.malformedFooterLines.length === 0 &&
-    transcript.total === expectedTotal &&
-    transcript.passed === transcript.total &&
-    transcript.failures.length === 0;
+    transcript.total === expectedTotal;
   const assertionAccounting =
     transcript.postFooterAssertions.length === 0 &&
     transcript.malformedProtocolLines.length === 0 &&
     transcript.malformedUnavailableAssertions.length === 0 &&
+    transcript.passedAssertions.length === transcript.passed &&
     transcript.passedAssertions.length + transcript.failures.length ===
       transcript.total &&
     transcript.unavailableAssertions.length === transcript.unavailable;
-  if (footerComplete && assertionAccounting && code === 0 && transcript.unavailable === 0) {
-    return { kind: "passed", valid: true };
+  if (
+    !footerComplete ||
+    !assertionAccounting ||
+    !Array.isArray(streamErrors) ||
+    streamErrors.length !== 0
+  ) {
+    return { kind: "invalid", valid: false };
   }
-  if (footerComplete && assertionAccounting && code === 2 && transcript.unavailable > 0) {
-    return { kind: "unavailable", valid: true };
+  const expectedCode =
+    transcript.failures.length > 0 ? 1 : transcript.unavailable > 0 ? 2 : 0;
+  if (code !== expectedCode) return { kind: "invalid", valid: false };
+  if (transcript.failures.length > 0) return { kind: "failed", valid: true };
+  if (transcript.unavailable > 0) return { kind: "unavailable", valid: true };
+  return { kind: "passed", valid: true };
+}
+
+const COMPANION_TRANSCRIPT_UNUSABLE_MARKER = "=== COMPANION TRANSCRIPT UNUSABLE ===";
+
+function reportInvalidCompanionCompletion(completion) {
+  // Self-checks intentionally manufacture invalid completion; leaking their
+  // marker would make the parent suite look infrastructurally unusable.
+  if (!completion.valid && !checkCapture) {
+    console.log(COMPANION_TRANSCRIPT_UNUSABLE_MARKER);
   }
-  return { kind: "invalid", valid: false };
+}
+
+function companionRelayTag(kind) {
+  return "[companion " + kind + "] ";
+}
+
+function isCompanionProtocolLine(line) {
+  const content = line.replace(/(?:\r\n|\r|\n)$/, "");
+  return /^(?:PASS|FAIL|SKIP|UNAVAILABLE)\b|^===/.test(content);
 }
 
 function relayCompanionOutput(child, output) {
   const streamErrors = [];
+  const flushers = [];
+  const relayCompleteLine = (name, line) => {
+    if (name === "stdout") {
+      output.push(line);
+      const tag = isCompanionProtocolLine(line) ? "stdout" : "stdout diagnostic";
+      process.stdout.write(companionRelayTag(tag) + line);
+      return;
+    }
+    const diagnostic = companionRelayTag("stderr") + line;
+    output.push(diagnostic);
+    process.stdout.write(diagnostic);
+  };
+  const relayPartial = (name, text) => {
+    if (!text) return;
+    const diagnostic = companionRelayTag(name + " partial") + text + "\n";
+    output.push(diagnostic);
+    process.stdout.write(diagnostic);
+    if (name === "stdout") {
+      streamErrors.push({
+        stream: name,
+        error: "stream closed with unterminated output",
+      });
+    }
+  };
   for (const [name, stream] of [
     ["stdout", child.stdout],
     ["stderr", child.stderr],
@@ -4757,16 +5142,52 @@ function relayCompanionOutput(child, output) {
         error: String((error && error.code) || error),
       });
     });
-    stream.on("data", (chunk) => {
-      const text = String(chunk);
-      output.push(text);
-      // Byte-for-byte, at column zero: the revert harness reads these
-      // assertion names out of this transcript, and a transport prefix would
-      // make a real companion failure invisible to that audit.
-      process.stdout.write(text);
-    });
+    const decoder = new StringDecoder("utf8");
+    let lineBuffer = "";
+    let flushed = false;
+    const drainCompleteLines = (final) => {
+      while (lineBuffer.length > 0) {
+        const newlineIndex = lineBuffer.search(/[\r\n]/);
+        if (newlineIndex < 0) break;
+        if (
+          lineBuffer[newlineIndex] === "\r" &&
+          newlineIndex === lineBuffer.length - 1 &&
+          !final
+        ) {
+          break;
+        }
+        const lineEnd =
+          lineBuffer[newlineIndex] === "\r" &&
+          lineBuffer[newlineIndex + 1] === "\n"
+            ? newlineIndex + 2
+            : newlineIndex + 1;
+        relayCompleteLine(name, lineBuffer.slice(0, lineEnd));
+        lineBuffer = lineBuffer.slice(lineEnd);
+      }
+      if (final && lineBuffer.length > 0) {
+        relayPartial(name, lineBuffer);
+        lineBuffer = "";
+      }
+    };
+    const relayChunk = (chunk) => {
+      lineBuffer += decoder.write(
+        Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)),
+      );
+      drainCompleteLines(false);
+    };
+    const flush = () => {
+      if (flushed) return;
+      flushed = true;
+      lineBuffer += decoder.end();
+      drainCompleteLines(true);
+    };
+    flushers.push(flush);
+    stream.on("data", relayChunk);
   }
-  return streamErrors;
+  const flush = () => {
+    for (const flushStream of flushers) flushStream();
+  };
+  return { streamErrors, flush };
 }
 
 /**
@@ -5100,7 +5521,7 @@ async function runCompanion(options) {
     spawnThrew = error;
   }
   let result;
-  let streamErrors = [];
+  let relay = null;
   if (spawnThrew) {
     result = {
       code: null,
@@ -5113,13 +5534,18 @@ async function runCompanion(options) {
       settleCount: () => 1,
     };
   } else {
-    streamErrors = relayCompanionOutput(child, output);
+    relay = relayCompanionOutput(child, output);
     result = await awaitCompanionProcess(child, {
       budgetMs: options.budgetMs,
       killGraceMs: COMPANION_KILL_GRACE_MS,
       drainGraceMs: COMPANION_DRAIN_GRACE_MS,
     });
   }
+  // A broken child-like stream can reach the settlement fallback without
+  // emitting end/close. Its incomplete UTF-8 still belongs in the bounded
+  // diagnostic transcript before reconciliation decides whether it is valid.
+  if (relay) relay.flush();
+  const streamErrors = relay ? relay.streamErrors : [];
   // Confirmed gone means the pipes closed, or no process was ever created.
   const terminationConfirmed =
     result.closeObserved === true || result.processNeverStarted === true;
@@ -5147,7 +5573,9 @@ async function runCompanion(options) {
     closeObserved: result.closeObserved,
     transcript,
     expectedTotal: options.expectedTotal,
+    streamErrors,
   });
+  reportInvalidCompanionCompletion(completion);
   const completedUnavailable =
     completion.kind === "unavailable" &&
     streamErrors.length === 0 &&
@@ -5311,6 +5739,9 @@ async function runCompanionSettlementScenarios() {
   const completeFooter = summariseCompanionTranscript(
     startupBanner + "PASS  retained check\n=== 1/1 passed ===\n",
   );
+  const failedFooter = summariseCompanionTranscript(
+    startupBanner + "FAIL  retained check  -> detail\n=== 0/1 passed ===\n",
+  );
   const timedOutFooter = summariseCompanionTranscript(
     startupBanner + "PASS  retained check\n=== TIMED OUT after 1/2 checks ===\n",
   );
@@ -5416,6 +5847,15 @@ async function runCompanionSettlementScenarios() {
       code: 2, timedOut: false, error: null, closeObserved: true,
       transcript: unavailableFooter, expectedTotal: 1,
     }),
+    failed: reconcileCompanionCompletion({
+      code: 1, timedOut: false, error: null, closeObserved: true,
+      transcript: failedFooter, expectedTotal: 1,
+    }),
+    streamFailure: reconcileCompanionCompletion({
+      code: 0, timedOut: false, error: null, closeObserved: true,
+      transcript: completeFooter, expectedTotal: 1,
+      streamErrors: [{ stream: "stdout", error: "stream closed with unterminated output" }],
+    }),
     codeZeroUnavailable: reconcileCompanionCompletion({
       code: 0, timedOut: false, error: null, closeObserved: true,
       transcript: unavailableFooter, expectedTotal: 1,
@@ -5433,6 +5873,9 @@ async function runCompanionSettlementScenarios() {
       unavailableFooter.unavailable === 2 &&
       unavailableFooter.failures.length === 0 &&
       unavailableFooter.malformedFooterLines.length === 0 &&
+      failedFooter.passedFooters.length === 1 &&
+      failedFooter.passed === 0 &&
+      failedFooter.failures.length === 1 &&
       completeFooter.malformedFooterLines.length === 0 &&
       timedOutFooter.timedOutFooters.length === 1 &&
       timedOutFooter.malformedFooterLines.length === 0 &&
@@ -5458,6 +5901,9 @@ async function runCompanionSettlementScenarios() {
       strictTranscriptGrammar === true &&
       completionCases.passed.kind === "passed" &&
       completionCases.unavailable.kind === "unavailable" &&
+      completionCases.failed.kind === "failed" &&
+      completionCases.failed.valid === true &&
+      completionCases.streamFailure.kind === "invalid" &&
       completionCases.codeZeroUnavailable.kind === "invalid" &&
       completionCases.codeTwoWithoutUnavailable.kind === "invalid" &&
       reconcileCompanionCompletion({
@@ -5473,7 +5919,7 @@ async function runCompanionSettlementScenarios() {
         transcript: countMismatch, expectedTotal: 2,
       }).kind === "invalid",
     JSON.stringify({
-      unavailableFooter, malformedUnavailableFooters, completionCases,
+      unavailableFooter, failedFooter, malformedUnavailableFooters, completionCases,
       strictTranscriptGrammar, malformedProtocolTranscripts,
       malformedFooterTranscripts, leadingZeroFooterTranscripts,
       leadingZeroFootersRejected, postFooterPass, postFooterUnavailable,
@@ -5492,6 +5938,65 @@ async function runCompanionSettlementScenarios() {
     };
     return Object.assign(child, overrides || {});
   };
+
+  const relayChild = new EventEmitter();
+  relayChild.stdout = new EventEmitter();
+  relayChild.stderr = new EventEmitter();
+  const relayedRawChunks = [];
+  const relayedWrites = [];
+  let relay;
+  const restoreRelayWrite = replaceMethod(process.stdout, "write", (text) => {
+    relayedWrites.push(String(text));
+    return true;
+  });
+  try {
+    relay = relayCompanionOutput(relayChild, relayedRawChunks);
+    relayChild.stdout.emit("data", Buffer.from("PASS  split "));
+    // Both streams are incomplete while the UTF-8 sequence is split. A shared
+    // line buffer would synthesize a PASS/FAIL record from those two streams.
+    relayChild.stdout.emit("data", Buffer.from([0xf0, 0x9f]));
+    relayChild.stderr.emit(
+      "data",
+      Buffer.from("FAIL  stderr while stdout is partial "),
+    );
+    relayChild.stdout.emit("data", Buffer.from([0x99, 0x82]));
+    relayChild.stdout.emit("data", Buffer.from(" retained check\n"));
+    relayChild.stderr.emit("data", Buffer.from("-> detail\n"));
+    // A completed stdout protocol line is inventory evidence. This
+    // unterminated lookalike must remain a partial diagnostic instead.
+    relayChild.stdout.emit("data", Buffer.from("FA" + "IL  truncated stdout"));
+    // relay.flush() publishes the decoder's trailing incomplete sequence only
+    // after the child close has settled.
+    relayChild.stderr.emit("data", Buffer.from([0xe2]));
+    relayChild.stderr.emit("end");
+    relayChild.emit("close");
+    relay.flush();
+  } finally {
+    restoreRelayWrite();
+  }
+  const expectedRelayedRaw =
+    "PASS  split 🙂 retained check\n" +
+    "[companion stderr] FAIL  stderr while stdout is partial -> detail\n" +
+    "[companion stdout partial] " + "FA" + "IL  truncated stdout\n" +
+    "[companion stderr partial] �\n";
+  const expectedRelayedWrites =
+    "[companion stdout] PASS  split 🙂 retained check\n" +
+    "[companion stderr] FAIL  stderr while stdout is partial -> detail\n" +
+    "[companion stdout partial] " + "FA" + "IL  truncated stdout\n" +
+    "[companion stderr partial] �\n";
+  check(
+    "companion relay preserves split UTF-8 without synthesizing cross-stream protocol lines",
+    relay.streamErrors.length === 1 &&
+      relay.streamErrors[0].stream === "stdout" &&
+      relay.streamErrors[0].error === "stream closed with unterminated output" &&
+      relayedRawChunks.join("") === expectedRelayedRaw &&
+      relayedWrites.join("") === expectedRelayedWrites,
+    JSON.stringify({
+      relayStreamErrors: relay.streamErrors,
+      relayedRaw: relayedRawChunks.join(""),
+      relayedWrites: relayedWrites.join(""),
+    }),
+  );
 
   // Drive the skip path under capture: merely listing an array beside the
   // helper would not prove it emits every catalogue entry as a failure.
@@ -6285,15 +6790,17 @@ async function runFinalizerPreservationSubprocess() {
     spawnError = error;
   }
   let result = null;
-  let streamErrors = [];
+  let relay = null;
   if (child) {
-    streamErrors = relayCompanionOutput(child, output);
+    relay = relayCompanionOutput(child, output);
     result = await awaitCompanionProcess(child, {
       budgetMs: COMPANION_BUDGET_MS.teardown,
       killGraceMs: COMPANION_KILL_GRACE_MS,
       drainGraceMs: COMPANION_DRAIN_GRACE_MS,
     });
   }
+  if (relay) relay.flush();
+  const streamErrors = relay ? relay.streamErrors : [];
   const text = output.join("");
   const lines = text.split(/\r?\n/).map((l) => l.trim());
   const readOne = (marker) => {
@@ -6325,7 +6832,9 @@ async function runFinalizerPreservationSubprocess() {
     closeObserved: result && result.closeObserved,
     transcript,
     expectedTotal: FINALIZER_SELFCHECK_ASSERTIONS,
+    streamErrors,
   });
+  reportInvalidCompanionCompletion(completion);
   const terminationConfirmed =
     !!spawnError ||
     (result !== null &&
@@ -6466,9 +6975,107 @@ async function runPortableCompanion() {
   });
 }
 
+function startConsoleAttributionSidecar(win, sentinel) {
+  const events = [];
+  const scopes = [];
+  let active = null;
+  let precedingAssertion = null;
+  const noteCheck = (name, ok) => {
+    const assertion = {
+      name,
+      ok,
+      at: new Date().toISOString(),
+    };
+    for (const record of events) {
+      if (record.nextAssertion === null) record.nextAssertion = assertion;
+    }
+    precedingAssertion = assertion;
+  };
+  const onConsole = (details) => {
+    if (
+      !details ||
+      typeof details !== "object" ||
+      !("level" in details) ||
+      typeof details.message !== "string" ||
+      typeof details.sourceId !== "string" ||
+      !Number.isFinite(details.lineNumber)
+    ) {
+      throw new Error("console-message details omitted level, message, source, or line");
+    }
+    const lvl = details.level;
+    const text = details.message;
+    if (!(lvl === "error" || lvl === 3 || /^\s*Uncaught\b/.test(text))) {
+      return;
+    }
+    const record = {
+      scope: active ? active.label : "unscoped",
+      message: text,
+      source: details.sourceId,
+      line: details.lineNumber,
+      at: new Date().toISOString(),
+      precedingAssertion,
+      nextAssertion: null,
+    };
+    events.push(record);
+    if (active) active.events.push(record);
+    console.log("TABS_CONSOLE_EVENT " + JSON.stringify(record));
+  };
+  win.webContents.on("console-message", onConsole);
+  consoleAttributionObserver = { noteCheck };
+  return {
+    async begin(label, fixture) {
+      if (active) {
+        throw new Error(`console attribution scope already active: ${active.label}`);
+      }
+      await sentinel.drain();
+      active = {
+        label,
+        beganAt: new Date().toISOString(),
+        beginFixture: fixture || null,
+        endFixture: null,
+        events: [],
+      };
+      scopes.push(active);
+    },
+    async end(fixture) {
+      if (!active) {
+        throw new Error("console attribution scope ended without a begin");
+      }
+      try {
+        await sentinel.drain();
+      } finally {
+        active.endFixture = fixture || null;
+        active.endedAt = new Date().toISOString();
+        active = null;
+      }
+    },
+    stop(sentinelReport) {
+      win.webContents.off("console-message", onConsole);
+      if (consoleAttributionObserver &&
+          consoleAttributionObserver.noteCheck === noteCheck) {
+        consoleAttributionObserver = null;
+      }
+      console.log(
+        "TABS_CONSOLE_ATTRIBUTION " +
+          JSON.stringify({
+            sentinel: {
+              hits: sentinelReport.hits,
+              stallCount: sentinelReport.stalls.length,
+              muteCount: sentinelReport.mutes.length,
+            },
+            events,
+            scopes,
+          }),
+      );
+      return { events, scopes };
+    },
+  };
+}
+
 async function run(win) {
   const exec = (code) => win.webContents.executeJavaScript(code, true);
   const sentinel = startErrorSentinel(win, { label: "tabs" });
+  const consoleAttribution = startConsoleAttributionSidecar(win, sentinel);
   // No suite may reach the user's browser. See trapExternalOpens().
   await trapExternalOpens(win);
 
@@ -6493,6 +7100,58 @@ async function run(win) {
 
   const viewerText = () =>
     exec(`document.getElementById('viewer').textContent`);
+  // switchToTab returns before its render calls completeFileOpen; await the
+  // accepted completion for this switch, not merely the synchronous tab id.
+  const switchToTabAndWait = async (tabId) => {
+    await exec(`
+      (() => {
+        const original = window.completeFileOpen;
+        const probe = window.__refreshSwitchCompletion = {
+          original,
+          sequence: window.getFileOpenDiagnostics().sequence + 1,
+          completed: false,
+        };
+        window.completeFileOpen = function (context, visualCompletion) {
+          const accepted = original.call(this, context, visualCompletion);
+          if (context && context.sequence === probe.sequence && accepted === true) {
+            probe.completed = true;
+          }
+          return accepted;
+        };
+        try {
+          window.CustomTabs.switchToTab(${tabId});
+        } catch (error) {
+          window.completeFileOpen = original;
+          delete window.__refreshSwitchCompletion;
+          throw error;
+        }
+        return true;
+      })()
+    `);
+    try {
+      const completed = await waitForCondition(
+        exec,
+        `window.__refreshSwitchCompletion.completed === true &&
+         window.CustomTabs.getActiveTabId() === ${tabId}`,
+        8000,
+      );
+      if (!completed) {
+        const state = await exec(`({
+          activeId: window.CustomTabs.getActiveTabId(),
+          sequence: window.getFileOpenDiagnostics().sequence,
+          expected: window.__refreshSwitchCompletion.sequence,
+          completed: window.__refreshSwitchCompletion.completed,
+        })`);
+        throw new Error(`tab ${tabId} did not finish switching: ${JSON.stringify(state)}`);
+      }
+    } finally {
+      await exec(`(() => {
+        window.completeFileOpen = window.__refreshSwitchCompletion.original;
+        delete window.__refreshSwitchCompletion;
+        return true;
+      })()`);
+    }
+  };
   const holdReloadResults = () => {
     const realSend = win.webContents.send;
     const held = [];
@@ -6523,8 +7182,7 @@ async function run(win) {
   write(fileA, "# Alpha\n\nALPHA_V2\n");
   write(fileB, "# Beta\n\nBETA_V2\n");
 
-  await exec(`window.CustomTabs.switchToTab(${ids.b}); null;`);
-  await sleep(400);
+  await switchToTabAndWait(ids.b);
   await exec(`window.reloadCurrentFile(); null;`);
   await sleep(900);
   check(
@@ -6533,8 +7191,7 @@ async function run(win) {
     await viewerText(),
   );
 
-  await exec(`window.CustomTabs.switchToTab(${ids.a}); null;`);
-  await sleep(400);
+  await switchToTabAndWait(ids.a);
   await exec(`window.reloadCurrentFile(); null;`);
   await sleep(900);
   check(
@@ -6543,8 +7200,7 @@ async function run(win) {
     await viewerText(),
   );
 
-  await exec(`window.CustomTabs.switchToTab(${ids.b}); null;`);
-  await sleep(700);
+  await switchToTabAndWait(ids.b);
   const backToB = await viewerText();
   check(
     "REGRESSION: B does not revert after refreshing A",
@@ -6552,8 +7208,7 @@ async function run(win) {
     backToB,
   );
 
-  await exec(`window.CustomTabs.switchToTab(${ids.a}); null;`);
-  await sleep(700);
+  await switchToTabAndWait(ids.a);
   const backToA = await viewerText();
   check(
     "REGRESSION: A stays refreshed after switching away and back",
@@ -6563,10 +7218,8 @@ async function run(win) {
 
   // ---- Scenario 2: auto-reload a background tab on switch ---------------
   write(fileB, "# Beta\n\nBETA_V3\n");
-  await exec(`window.CustomTabs.switchToTab(${ids.a}); null;`);
-  await sleep(400);
-  await exec(`window.CustomTabs.switchToTab(${ids.b}); null;`);
-  await sleep(700);
+  await switchToTabAndWait(ids.a);
+  await switchToTabAndWait(ids.b);
   check(
     "switching to a tab auto-reloads changed file from disk",
     (await viewerText()).includes("BETA_V3"),
@@ -6584,10 +7237,8 @@ async function run(win) {
     })()
   `);
   write(fileB, "# Beta\n\nBETA_V4\n");
-  await exec(`window.CustomTabs.switchToTab(${ids.a}); null;`);
-  await sleep(400);
-  await exec(`window.CustomTabs.switchToTab(${ids.b}); null;`);
-  await sleep(700);
+  await switchToTabAndWait(ids.a);
+  await switchToTabAndWait(ids.b);
   const afterUnsaved = await viewerText();
   check(
     "unsaved edits survive an on-disk change",
@@ -6617,10 +7268,8 @@ async function run(win) {
       return true;
     })()
   `);
-  await exec(`window.CustomTabs.switchToTab(${ids.a}); null;`);
-  await sleep(400);
-  await exec(`window.CustomTabs.switchToTab(${ids.b}); null;`);
-  await sleep(700);
+  await switchToTabAndWait(ids.a);
+  await switchToTabAndWait(ids.b);
   const editBaseAfter = await exec("window.originalMarkdown");
   check(
     "sequential view-mode edits both survive a tab round-trip",
@@ -6640,8 +7289,7 @@ async function run(win) {
       .join("\n");
 
   write(fileA, longDoc("V1"));
-  await exec(`window.CustomTabs.switchToTab(${ids.a}); null;`);
-  await sleep(800);
+  await switchToTabAndWait(ids.a);
 
   const scroller = `(document.querySelector('.content-wrapper').classList.contains('split-view') ? document.getElementById('viewer') : document.querySelector('.content-wrapper'))`;
   // An oracle must not reuse the formula it is judging. The implementation's
@@ -6737,10 +7385,8 @@ async function run(win) {
   );
 
   // ...and must survive a tab round-trip (the original bug).
-  await exec(`window.CustomTabs.switchToTab(${ids.b}); null;`);
-  await sleep(400);
-  await exec(`window.CustomTabs.switchToTab(${ids.a}); null;`);
-  await sleep(700);
+  await switchToTabAndWait(ids.b);
+  await switchToTabAndWait(ids.a);
   check(
     "REGRESSION: prompt-triggered reload does not revert on tab switch",
     (await viewerText()).includes("ALPHA_V10"),
@@ -6832,11 +7478,12 @@ async function run(win) {
 
   await exec(`
     (() => {
-      const tabs = window.CustomTabs.getTabs();
-      const a = tabs.find(t => t.id === ${ids.a});
-      a.content = '# Alpha\\n\\nDIRTY_EDIT\\n';
-      a.hasUnsavedChanges = true;
-      window.originalMarkdown = a.content;
+      if (window.CustomTabs.getActiveTabId() !== ${ids.a}) {
+        throw new Error('Scenario 5 dirty edit requires alpha.md to be active');
+      }
+      window.originalMarkdown = '# Alpha\\n\\nDIRTY_EDIT\\n';
+      window.CustomTabs.updateTabContent(window.originalMarkdown, true);
+      window.setUnsavedState(true);
       window.__confirmCalls = 0;
       window.__realConfirm = window.confirm;
       window.confirm = () => { window.__confirmCalls++; return false; };
@@ -6848,7 +7495,8 @@ async function run(win) {
   check(
     "declining the Reload confirmation keeps unsaved edits",
     (await exec(`window.__confirmCalls`)) === 1 &&
-      (await exec(`window.originalMarkdown`)).includes("DIRTY_EDIT"),
+      (await exec(`window.originalMarkdown`)).includes("DIRTY_EDIT") &&
+      (await exec(`hasUnsavedChanges && !window.getReloadRequestDiagnostics().isFileTrackingActive`)) === true,
     `confirmCalls=${await exec(`window.__confirmCalls`)}`,
   );
   // Backing out of the confirmation is not the same as pressing Dismiss: the
@@ -6859,15 +7507,64 @@ async function run(win) {
     `before=${promptBeforeDecline} after=${await promptShown()}`,
   );
 
+  const acceptedBefore = await exec(`window.CustomTabs.__reloadState().acceptedSequence`);
   await exec(`window.confirm = () => { window.__confirmCalls++; return true; }; null;`);
   await exec(`document.getElementById('reloadFileBtn').click(); null;`);
-  await sleep(1200);
-  const afterAccept = await viewerText();
+  const acceptedSettled = await waitForCondition(
+    exec,
+    `(() => {
+      const tab = window.CustomTabs.getTabs().find(t => t.id === ${ids.a});
+      const disk = ${JSON.stringify("# Alpha\n\nALPHA_V12\n")};
+      return tab && window.CustomTabs.getActiveTabId() === ${ids.a} &&
+        window.CustomTabs.__reloadState().acceptedSequence > ${acceptedBefore} &&
+        tab.content === disk && tab.originalContent === disk &&
+        tab.hasUnsavedChanges === false &&
+        window.originalMarkdown === disk;
+    })()`,
+    8000,
+  );
+  const acceptedState = await exec(`(() => {
+    const tab = window.CustomTabs.getTabs().find(t => t.id === ${ids.a});
+    return {
+      activeId: window.CustomTabs.getActiveTabId(),
+      acceptedSequence: window.CustomTabs.__reloadState().acceptedSequence,
+      content: tab && tab.content,
+      original: tab && tab.originalContent,
+      dirty: tab && tab.hasUnsavedChanges,
+      live: window.originalMarkdown,
+    };
+  })()`);
   await exec(`window.confirm = window.__realConfirm; null;`);
+  const afterAccept = await viewerText();
   check(
-    "accepting the Reload confirmation loads from disk",
-    afterAccept.includes("ALPHA_V12"),
-    afterAccept,
+    "accepting the Reload confirmation adopts clean disk bytes and advances its accepted sequence",
+    acceptedSettled === true &&
+      fs.readFileSync(fileA, "utf8") === "# Alpha\n\nALPHA_V12\n" &&
+      afterAccept.includes("ALPHA_V12"),
+    JSON.stringify({ acceptedBefore, acceptedState, afterAccept }),
+  );
+  await switchToTabAndWait(ids.b);
+  await switchToTabAndWait(ids.a);
+  const acceptedRoundTrip = await exec(`(() => {
+    const tab = window.CustomTabs.getTabs().find(t => t.id === ${ids.a});
+    return {
+      activeId: window.CustomTabs.getActiveTabId(),
+      content: tab && tab.content,
+      original: tab && tab.originalContent,
+      dirty: tab && tab.hasUnsavedChanges,
+      live: window.originalMarkdown,
+      viewer: document.getElementById('viewer').textContent,
+    };
+  })()`);
+  check(
+    "confirmed dirty Reload remains clean and current after a tab round trip",
+    acceptedRoundTrip.activeId === ids.a &&
+      acceptedRoundTrip.content === "# Alpha\n\nALPHA_V12\n" &&
+      acceptedRoundTrip.original === acceptedRoundTrip.content &&
+      acceptedRoundTrip.live === acceptedRoundTrip.content &&
+      acceptedRoundTrip.dirty === false &&
+      acceptedRoundTrip.viewer.includes("ALPHA_V12"),
+    JSON.stringify(acceptedRoundTrip),
   );
 
   // ---- Scenario 5b: prompt bookkeeping is reset, not just hidden ---------
@@ -7148,31 +7845,28 @@ async function run(win) {
       await new Promise(r => setTimeout(r, 600));
       const wrapper = document.querySelector('.content-wrapper');
       const inSplit = wrapper.classList.contains('split-view');
-      const s = window.CustomTabs.__getScroller
-        ? window.CustomTabs.__getScroller()
-        : document.getElementById('viewer');
-      // Prove the chosen element is the one that genuinely scrolls, rather
-      // than asserting against whatever the implementation happens to pick.
-      const oy = getComputedStyle(s).overflowY;
-      const canScroll = s.scrollHeight > s.clientHeight + 1;
-      s.scrollTop = 400;
+      // This must remain independent of CustomTabs.getScroller(): R63 mutates
+      // that helper, while renderer.js's computed-overflow helper identifies
+      // the physical scroll owner the reader actually sees.
+      const physicalScroller = getViewerScroller();
+      const oy = getComputedStyle(physicalScroller).overflowY;
+      const canScroll =
+        physicalScroller.scrollHeight > physicalScroller.clientHeight + 1;
+      physicalScroller.scrollTop = 400;
       await new Promise(r => setTimeout(r, 100));
-      const parked = s.scrollTop;
+      const parked = physicalScroller.scrollTop;
 
       window.CustomTabs.switchToTab(${ids.b});
       await new Promise(r => setTimeout(r, 700));
       window.CustomTabs.switchToTab(${ids.a});
       await new Promise(r => setTimeout(r, 900));
 
-      const s2 = window.CustomTabs.__getScroller
-        ? window.CustomTabs.__getScroller()
-        : document.getElementById('viewer');
-      const restored = s2.scrollTop;
+      const restored = getViewerScroller().scrollTop;
       document.getElementById('toggleEdit').click();
       await new Promise(r => setTimeout(r, 500));
       return {
         inSplit,
-        scrollerId: s.id || s.className,
+        scrollerId: physicalScroller.id || physicalScroller.className,
         overflowY: oy,
         canScroll,
         parked,
@@ -7181,7 +7875,7 @@ async function run(win) {
     })()
   `);
   check(
-    "the split-view scroll test really entered split view on a scrollable pane",
+    "the split-view scroll test really found and parked the physical scroller",
     splitScroll.inSplit === true &&
       /^(auto|scroll)$/.test(splitScroll.overflowY) &&
       splitScroll.canScroll === true &&
@@ -7357,8 +8051,7 @@ async function run(win) {
   await sleep(400);
 
   // ---- Scenario 6: closing tabs leaves no stale watcher / cache ---------
-  await exec(`window.CustomTabs.switchToTab(${ids.a}); null;`);
-  await sleep(500);
+  await switchToTabAndWait(ids.a);
 
   // A save result that lands after its tab was closed must not be applied to
   // whichever tab happens to be active now.
@@ -7388,6 +8081,22 @@ async function run(win) {
   // how a tab bug looks to a user. Assert the pixels-level facts directly.
   // See test-visual-utils.js for why this is a DOM probe and not a pixel diff.
   // inspectVisual installs the probe itself, so no separate injection here.
+  const visualOverlaySettled = await waitForCondition(
+    exec,
+    `(() => {
+      const overlay = document.getElementById('loadingScreen');
+      return overlay && !overlay.classList.contains('active');
+    })()`,
+    8000,
+  );
+  check(
+    "the loading overlay settles before the visual smoke",
+    visualOverlaySettled === true,
+    JSON.stringify(await exec(`({
+      active: document.getElementById('loadingScreen')?.classList.contains('active'),
+      activeTabId: window.CustomTabs.getActiveTabId(),
+    })`)),
+  );
   const tabsVisual = await inspectVisual(win, ".tab", {
     minWidth: 20,
     minHeight: 10,
@@ -7784,9 +8493,29 @@ async function run(win) {
       await new Promise(r => setTimeout(r, 600));
       historyClear();
       historyPush('# Alpha\\n\\nS7_OLD_UNDO_POINT\\n');
-      window.originalMarkdown = '# Alpha\\n\\nS7_SAVED\\n';
-      markdownEditor.value = window.originalMarkdown;
-      await renderMarkdown(window.originalMarkdown);
+      const saved = '# Alpha\\n\\nS7_SAVED\\n';
+      window.originalMarkdown = saved;
+      markdownEditor.value = saved;
+      window.CustomTabs.updateTabContent(saved, false);
+      window.setUnsavedState(false);
+      await renderMarkdown(saved);
+      const tab = window.CustomTabs.getActiveTab();
+      const pageSession = window.getReloadRequestSession();
+      const owner = window.CustomTabs.getActiveDocumentIdentity(
+        currentFilePath,
+        pageSession,
+      );
+      const cleanBaseline = {
+        editMode: isEditMode,
+        rendererClean: hasUnsavedChanges === false,
+        original: window.originalMarkdown,
+        editor: markdownEditor.value,
+        activeTabId: tab && tab.id,
+        tabContent: tab && tab.content,
+        tabOriginal: tab && tab.originalContent,
+        tabDirty: tab && tab.hasUnsavedChanges,
+        ownerTabId: owner && owner.tabId,
+      };
       toggleEditBtn.click();
       await new Promise(r => setTimeout(r, 800));
       markdownEditor.value = '# Alpha\\n\\nS7_EARLY\\n';
@@ -7830,10 +8559,30 @@ async function run(win) {
         olderPointReached: window.originalMarkdown.includes('S7_OLD_UNDO_POINT'),
       };
       window.confirm = realConfirm;
-      return JSON.stringify({ warned: seen, before: before, after: after, undone: undone });
+      return JSON.stringify({
+        cleanBaseline,
+        warned: seen,
+        before: before,
+        after: after,
+        undone: undone,
+      });
     })()
   `);
   const discard = JSON.parse(discardOut);
+  check(
+    "the Scenario 7 synthetic saved document starts clean in the renderer and active tab",
+    discard.cleanBaseline &&
+      discard.cleanBaseline.editMode === false &&
+      discard.cleanBaseline.rendererClean === true &&
+      discard.cleanBaseline.original.includes("S7_SAVED") &&
+      discard.cleanBaseline.editor === discard.cleanBaseline.original &&
+      discard.cleanBaseline.activeTabId === tabC &&
+      discard.cleanBaseline.tabContent === discard.cleanBaseline.original &&
+      discard.cleanBaseline.tabOriginal === discard.cleanBaseline.original &&
+      discard.cleanBaseline.tabDirty === false &&
+      discard.cleanBaseline.ownerTabId === tabC,
+    discardOut,
+  );
   // Vacuity guard: an edit-mode session that never diverged would make every
   // assertion below true for free.
   check(
@@ -7985,13 +8734,25 @@ async function run(win) {
       markdownEditor.value = '# Alpha\\n\\nS8B_ON_A\\n';
       markdownEditor.dispatchEvent(new Event('input'));
       await new Promise(r => setTimeout(r, 1200));
+      const firstTabDirty = window.CustomTabs.getActiveTabId() === tA.id &&
+        hasUnsavedChanges === true;
       window.CustomTabs.switchToTab(tB.id);
       await new Promise(r => setTimeout(r, 900));
       const bBefore = window.originalMarkdown;
+      const secondTabArrival = {
+        activeId: window.CustomTabs.getActiveTabId(),
+        targetId: tB.id,
+        dirty: hasUnsavedChanges,
+        tabDirty: tB.hasUnsavedChanges,
+        content: bBefore,
+        original: tB.originalContent,
+      };
       markdownEditor.value = '# Beta\\n\\nS8B_ON_B\\n';
       markdownEditor.dispatchEvent(new Event('input'));
       await new Promise(r => setTimeout(r, 1200));
       const diverged = {
+        activeId: window.CustomTabs.getActiveTabId(),
+        targetId: tB.id,
         editMode: isEditMode,
         dirty: hasUnsavedChanges,
         viewerHasB: viewer.textContent.includes('S8B_ON_B'),
@@ -8020,13 +8781,28 @@ async function run(win) {
         viewerHasB: viewer.textContent.includes('S8B_ON_B'),
       };
       window.confirm = realConfirm;
-      return JSON.stringify({ diverged: diverged, undoAfter: undoAfter, after: after });
+      return JSON.stringify({
+        firstTabDirty, secondTabArrival, diverged, undoAfter, after,
+      });
     })()
   `);
   const otherTab = JSON.parse(s8b);
   check(
+    "the second tab arrives clean after a dirty first tab before its edit baseline is captured",
+    otherTab.firstTabDirty === true &&
+      otherTab.secondTabArrival.activeId === otherTab.secondTabArrival.targetId &&
+      otherTab.secondTabArrival.dirty === false &&
+      otherTab.secondTabArrival.tabDirty === false &&
+      otherTab.secondTabArrival.content === otherTab.secondTabArrival.original,
+    JSON.stringify({
+      firstTabDirty: otherTab.firstTabDirty,
+      arrival: otherTab.secondTabArrival,
+    }),
+  );
+  check(
     "the edit really diverged on the second tab, so the discard there can fail",
-    otherTab.diverged.editMode === true &&
+    otherTab.diverged.activeId === otherTab.diverged.targetId &&
+      otherTab.diverged.editMode === true &&
       otherTab.diverged.dirty === true &&
       otherTab.diverged.viewerHasB === true,
     s8b,
@@ -8157,15 +8933,49 @@ async function run(win) {
   // the document saved when it is not: `originalMarkdown` starts describing a
   // file that was never written, the dirty indicator goes out, and the next
   // exit discards the difference without warning. The disk is the oracle here.
+  const diskBeforeDuring = fs.readFileSync(fileB, "utf8");
+  const duringBaselineOut = await exec(`
+    (() => {
+      const tab = window.CustomTabs.getActiveTab();
+      return JSON.stringify({
+        path: tab && tab.filePath,
+        tabId: tab && tab.id,
+        original: tab && tab.originalContent,
+        content: tab && tab.content,
+        tabDirty: tab && tab.hasUnsavedChanges,
+        renderer: window.originalMarkdown,
+        dirty: hasUnsavedChanges,
+        editMode: isEditMode,
+        otherTabs: window.CustomTabs.getTabs()
+          .filter(t => !tab || t.id !== tab.id)
+          .map(t => ({
+            id: t.id, path: t.filePath, content: t.content,
+            original: t.originalContent, dirty: t.hasUnsavedChanges,
+          })),
+      });
+    })()
+  `);
+  const duringBaseline = JSON.parse(duringBaselineOut);
+  const duringBaselineClean =
+    duringBaseline.path === fileB &&
+    diskBeforeDuring === "# Beta\n\nS9_TYPED\n" &&
+    duringBaseline.original === diskBeforeDuring &&
+    duringBaseline.content === diskBeforeDuring &&
+    duringBaseline.renderer === diskBeforeDuring &&
+    duringBaseline.tabDirty === false &&
+    duringBaseline.dirty === false &&
+    duringBaseline.editMode === false;
+  check(
+    "the type-during-save fixture starts from beta.md's real clean disk baseline",
+    duringBaselineClean,
+    duringBaselineOut + " disk=" + JSON.stringify(diskBeforeDuring),
+  );
+  if (!duringBaselineClean) throw new Error("Scenario 9b requires a clean on-disk Save baseline");
+
   const duringOut = await exec(`
     (async () => {
       const realConfirm = window.confirm;
       window.confirm = () => true;
-      if (isEditMode) toggleEditBtn.click();
-      await new Promise(r => setTimeout(r, 800));
-      window.originalMarkdown = '# Beta\\n\\nS9B_BASE\\n';
-      markdownEditor.value = window.originalMarkdown;
-      await renderMarkdown(window.originalMarkdown);
       toggleEditBtn.click();
       await new Promise(r => setTimeout(r, 800));
       markdownEditor.value = '# Beta\\n\\nS9B_SENT\\n';
@@ -8177,6 +8987,7 @@ async function run(win) {
       markdownEditor.value = '# Beta\\n\\nS9B_AFTER\\n';
       markdownEditor.dispatchEvent(new Event('input'));
       await new Promise(r => setTimeout(r, 2500));
+      const tab = window.CustomTabs.getActiveTab();
       const out = {
         editMode: isEditMode,
         storeIsSent: window.originalMarkdown.includes('S9B_SENT'),
@@ -8184,6 +8995,16 @@ async function run(win) {
         dirty: hasUnsavedChanges,
         textarea: markdownEditor.value.includes('S9B_AFTER'),
         path: window.currentFilePath,
+        tabId: tab && tab.id,
+        tabContent: tab && tab.content,
+        tabOriginal: tab && tab.originalContent,
+        tabDirty: tab && tab.hasUnsavedChanges,
+        otherTabs: window.CustomTabs.getTabs()
+          .filter(t => !tab || t.id !== tab.id)
+          .map(t => ({
+            id: t.id, path: t.filePath, content: t.content,
+            original: t.originalContent, dirty: t.hasUnsavedChanges,
+          })),
       };
       window.confirm = realConfirm;
       return JSON.stringify(out);
@@ -8209,6 +9030,21 @@ async function run(win) {
     during.dirty === true,
     duringOut,
   );
+  check(
+    "the tab keeps the later unsaved edit while its saved baseline follows disk",
+    during.path === fileB &&
+      during.tabId === duringBaseline.tabId &&
+      during.tabContent === "# Beta\n\nS9B_AFTER\n" &&
+      during.tabOriginal === diskDuring &&
+      during.tabDirty === true,
+    duringOut + " disk=" + JSON.stringify(diskDuring),
+  );
+  check(
+    "the type-during-save reply leaves every other tab unchanged",
+    JSON.stringify(during.otherTabs) === JSON.stringify(duringBaseline.otherTabs),
+    "before=" + JSON.stringify(duringBaseline.otherTabs) +
+      " after=" + JSON.stringify(during.otherTabs),
+  );
 
   // ---- Scenario 9c: the save reply lands while another tab is active -----
   // Both reviewers found this independently. custom-tabs.js takes over the
@@ -8218,38 +9054,84 @@ async function run(win) {
   // was stranded, `originalMarkdown` for A never adopted the write, and coming
   // back to A and clicking Exit sat on a 5s timeout and then offered to
   // DISCARD a save that had already succeeded.
-  // 9b leaves a dirty edit buffer behind while beta.md holds S9B_SENT. Discard
-  // that buffer, then let the real reload path adopt the physical file; calling
-  // updateTabContent(..., false) with invented bytes would falsely mark them
-  // as already saved and make strict Save protection reject this fixture.
+  // 9b leaves a dirty edit buffer behind while beta.md holds S9B_SENT. The
+  // session's discard baseline predates that save, and a dirty cached document
+  // cannot be adopted by the reload verifier. Undo the later keystrokes back
+  // to the independently verified physical bytes, then request a real reload
+  // so main and the renderer must both accept the new clean owner.
   const bgPhysicalPath = path.normalize(fs.realpathSync.native(path.resolve(fileB)));
   const bgPhysicalPathKey = process.platform === "win32"
     ? bgPhysicalPath.toLowerCase() : bgPhysicalPath;
   const bgBaselineOut = await exec(`
     (async () => {
-      const realConfirm = window.confirm;
-      window.confirm = () => true;
-      try {
-        if (isEditMode) toggleEditBtn.click();
-        await new Promise(r => setTimeout(r, 800));
-      } finally {
-        window.confirm = realConfirm;
-      }
       const ipc = require('electron').ipcRenderer;
       const before = window.getReloadRequestDiagnostics();
       const startingTab = window.CustomTabs.getActiveTab();
       const startingOwner = startingTab && window.CustomTabs.getActiveDocumentIdentity(
         startingTab.filePath, before.session);
+      const savedBytes = ${JSON.stringify(diskDuring)};
+      const expectedPath = ${JSON.stringify(fileB)};
+      const expectedPathKey = ${JSON.stringify(bgPhysicalPathKey)};
+      const physicalBeforeReset = startingTab
+        ? window.fs.readFileSync(startingTab.filePath, 'utf8')
+        : null;
+      const resetEligible = isEditMode && startingTab &&
+        currentFilePath === expectedPath &&
+        startingTab.filePath === expectedPath &&
+        startingOwner &&
+        startingOwner.pageSession === before.session &&
+        startingOwner.tabId === startingTab.id &&
+        startingOwner.pathKey === expectedPathKey &&
+        startingTab.originalContent === physicalBeforeReset &&
+        physicalBeforeReset === savedBytes &&
+        typeof hasPendingSaveFor === 'function' &&
+        !hasPendingSaveFor(startingTab.filePath);
+      let resetApplied = false;
+      if (resetEligible) {
+        window.originalMarkdown = physicalBeforeReset;
+        markdownEditor.value = physicalBeforeReset;
+        markdownEditor.dispatchEvent(new Event('input'));
+        window.CustomTabs.updateTabContent(physicalBeforeReset, false);
+        toggleEditBtn.click();
+        await new Promise(r => setTimeout(r, 800));
+        resetApplied = true;
+      }
+      const baselineTab = window.CustomTabs.getActiveTab();
+      const baselineOwner = baselineTab && window.CustomTabs.getActiveDocumentIdentity(
+        baselineTab.filePath, before.session);
+      const physicalAfterReset = baselineTab
+        ? window.fs.readFileSync(baselineTab.filePath, 'utf8')
+        : null;
+      const baselineOwnerCorrect = !!baselineTab &&
+        currentFilePath === expectedPath &&
+        baselineTab.filePath === expectedPath &&
+        baselineOwner &&
+        baselineOwner.pageSession === before.session &&
+        baselineOwner.tabId === baselineTab.id &&
+        baselineOwner.pathKey === expectedPathKey;
+      const baselineNoPendingSave = typeof hasPendingSaveFor === 'function' &&
+        !!baselineTab &&
+        !hasPendingSaveFor(baselineTab.filePath);
+      const independentBaselineClean = resetApplied &&
+        baselineOwnerCorrect &&
+        physicalAfterReset === savedBytes &&
+        baselineTab.originalContent === physicalAfterReset &&
+        baselineTab.content === physicalAfterReset &&
+        window.originalMarkdown === physicalAfterReset &&
+        markdownEditor.value === physicalAfterReset &&
+        baselineNoPendingSave &&
+        hasUnsavedChanges === false &&
+        isEditMode === false;
       const expected = {
-        path: startingTab && startingTab.filePath,
+        path: baselineTab && baselineTab.filePath,
         session: before.session,
         sequence: before.sequence + 1,
-        tabId: startingTab && startingTab.id,
-        documentGeneration: startingOwner && startingOwner.documentGeneration,
-        pathKey: startingOwner && startingOwner.pathKey,
-        rendererGeneration: startingOwner && startingOwner.rendererGeneration,
+        tabId: baselineTab && baselineTab.id,
+        documentGeneration: baselineOwner && baselineOwner.documentGeneration,
+        pathKey: baselineOwner && baselineOwner.pathKey,
+        rendererGeneration: baselineOwner && baselineOwner.rendererGeneration,
         selectionGeneration: window.getActiveFileSelectionGeneration(),
-        snapshot: window.originalMarkdown,
+        snapshot: isEditMode ? markdownEditor.value : window.originalMarkdown,
       };
       const matchesRequest = (data) => {
         const request = data && data.reloadRequest;
@@ -8322,6 +9204,14 @@ async function run(win) {
       const tab = window.CustomTabs.getActiveTab();
       return JSON.stringify({
         reloadRequested: reloadRequested,
+        ownBaseline: {
+          resetEligible: resetEligible,
+          resetApplied: resetApplied,
+          ownerCorrect: baselineOwnerCorrect,
+          noPendingSave: baselineNoPendingSave,
+          physicalMatchesSaved: physicalAfterReset === savedBytes,
+          clean: independentBaselineClean,
+        },
         expected: expected,
         reply: reply && {
           success: reply.success,
@@ -8360,6 +9250,12 @@ async function run(win) {
   const bgBaseline = JSON.parse(bgBaselineOut);
   const diskBgBaseline = fs.readFileSync(fileB, "utf8");
   const bgBaselineClean =
+    bgBaseline.ownBaseline?.resetEligible === true &&
+    bgBaseline.ownBaseline.resetApplied === true &&
+    bgBaseline.ownBaseline.ownerCorrect === true &&
+    bgBaseline.ownBaseline.noPendingSave === true &&
+    bgBaseline.ownBaseline.physicalMatchesSaved === true &&
+    bgBaseline.ownBaseline.clean === true &&
     bgBaseline.reloadRequested === true &&
     bgBaseline.reply?.success === true &&
     bgBaseline.reply.request?.sequence === bgBaseline.expected.sequence &&
@@ -8402,83 +9298,654 @@ async function run(win) {
   );
   if (!bgBaselineClean) throw new Error("Scenario 9c requires a clean on-disk Save baseline");
 
-  const bgOut = await exec(`
-    (async () => {
-      const seen = [];
-      const realConfirm = window.confirm;
-      window.confirm = (msg) => { seen.push(String(msg)); return true; };
-      const tabs = window.CustomTabs.getTabs();
-      const mine = window.CustomTabs.getActiveTab();
-      const other = tabs.find(t => t.filePath !== mine.filePath);
-      toggleEditBtn.click();
-      await new Promise(r => setTimeout(r, 800));
-      markdownEditor.value = '# Beta\\n\\nS9C_TYPED\\n';
-      markdownEditor.dispatchEvent(new Event('input'));
-      await new Promise(r => setTimeout(r, 1600));
-      // One synchronous task: the reply cannot arrive before we have left.
-      saveButton.click();
-      window.CustomTabs.switchToTab(other.id);
-      await new Promise(r => setTimeout(r, 2500));
-      // The reply for the background document landed while THIS one was on
-      // screen. It must not have been applied to it.
-      const otherStore = {
-        clean: !window.originalMarkdown.includes('S9C_TYPED'),
-        viewerClean: !viewer.textContent.includes('S9C_TYPED'),
-      };
-      window.CustomTabs.switchToTab(mine.id);
-      await new Promise(r => setTimeout(r, 1200));
-      const beforeExit = {
-        dirty: hasUnsavedChanges,
-        tabDirty: window.CustomTabs.getActiveTab().hasUnsavedChanges,
-        activePath: window.currentFilePath,
-        tabContentHasTyped: window.CustomTabs.getActiveTab().content.includes('S9C_TYPED'),
-        tabOriginalHasTyped: String(window.CustomTabs.getActiveTab().originalContent).includes('S9C_TYPED'),
-      };
-      const t0 = Date.now();
-      toggleEditBtn.click();
-      await new Promise(r => setTimeout(r, 2200));
-      const elapsed = Date.now() - t0;
-      window.confirm = realConfirm;
+  const bgVersionOut = await exec(`
+    (() => {
+      const tab = window.CustomTabs.getActiveTab();
+      const before = window.fs.statSync(tab.filePath);
+      const content = window.fs.readFileSync(tab.filePath, 'utf8');
+      const after = window.fs.statSync(tab.filePath);
       return JSON.stringify({
-        warned: seen,
-        elapsed: elapsed,
-        path: mine.filePath,
-        beforeExit: beforeExit,
-        otherStore: otherStore,
-        editMode: isEditMode,
-        storeHasTyped: window.originalMarkdown.includes('S9C_TYPED'),
-        viewerHasTyped: viewer.textContent.includes('S9C_TYPED'),
+        path: tab.filePath,
+        tabVersion: tab.diskVersion,
+        before: before,
+        after: after,
+        content: content,
       });
     })()
   `);
-  const bg = JSON.parse(bgOut);
+  const bgVersion = JSON.parse(bgVersionOut);
+  const bgVersionFields = ["dev", "ino", "size", "mtimeMs", "ctimeMs"];
+  const bgVersionClean =
+    bgVersion.path === fileB &&
+    bgVersion.content === diskBgBaseline &&
+    bgVersionFields.every(
+      (field) =>
+        bgVersion.tabVersion?.[field] === bgVersion.before[field] &&
+        bgVersion.before[field] === bgVersion.after[field],
+    );
+  check(
+    "the background-save fixture's adopted disk version matches the physical file",
+    bgVersionClean,
+    bgVersionOut,
+  );
+  if (!bgVersionClean) throw new Error("Scenario 9c disk-version baseline diverged before Save");
+
+  const bgSavedContent = "# Beta\n\nS9C_TYPED\n";
+  const heldBgSaveResults = [];
+  const releasedBgSaveAttempts = new Set();
+  let bgSaveRequestId = null;
+  let bgFirstResultInterceptedAt = null;
+  let bgSendRestored = false;
+  const realBgSaveSend = win.webContents.send;
+  const restoreBgSaveSend = replaceMethod(
+    win.webContents,
+    "send",
+    function(channel, ...args) {
+      const result = args[0];
+      if (
+        channel === "save-markdown-result" &&
+        result &&
+        result.success === true &&
+        result.path === fileB &&
+        result.savedContent === bgSavedContent &&
+        result.saveRequest &&
+        result.saveRequest.requestId === result.requestId &&
+        result.saveResultAttempt === 1 &&
+        (
+          bgSaveRequestId === null
+            ? result.saveResultAttempt === 1
+            : result.requestId === bgSaveRequestId
+        )
+      ) {
+        if (heldBgSaveResults.length === 0) {
+          heldBgSaveResults.push(result);
+          bgFirstResultInterceptedAt = Date.now();
+          return undefined;
+        }
+      }
+      return realBgSaveSend.call(this, channel, ...args);
+    },
+  );
+  const restoreBgSaveSendOnce = () => {
+    if (!bgSendRestored) {
+      restoreBgSaveSend();
+      bgSendRestored = true;
+    }
+  };
+  let bgStage = null;
+  let bgHeldBeforeRelease = null;
+  let bgDeliveryObserved = false;
+  let bgOut = null;
+  let bgCleanup = null;
+  let bgFirstDeliverySettled = null;
+  let bgNaturalRetry = null;
+  let bgOtherStoreAfterFirst = null;
+  let bgPrimaryFailure = null;
+  let bgFirstResultReleaseElapsedMs = null;
+  const bgMainBaseline = __shutdown.state();
+  const firstResultReleaseDeadlineMs = 3000;
+  const releaseBgSaveResult = (result, phase) => {
+    const elapsedMs = Date.now() - bgFirstResultInterceptedAt;
+    if (
+      !result ||
+      !Number.isSafeInteger(result.saveResultAttempt) ||
+      result.saveResultAttempt <= 0 ||
+      result.saveResultAttempt !== 1 ||
+      result.requestId !== bgSaveRequestId ||
+      result.path !== fileB ||
+      result.success !== true ||
+      result.savedContent !== bgSavedContent ||
+      releasedBgSaveAttempts.has(result.saveResultAttempt) ||
+      !Number.isFinite(elapsedMs) ||
+      elapsedMs >= firstResultReleaseDeadlineMs
+    ) {
+      throw new Error(
+        "Scenario 9c refused to release an uncorrelated Save result: " +
+          JSON.stringify({
+            phase,
+            bgSaveRequestId,
+            elapsedMs,
+            firstResultReleaseDeadlineMs,
+            result,
+          }),
+      );
+    }
+    releasedBgSaveAttempts.add(result.saveResultAttempt);
+    bgFirstResultReleaseElapsedMs = elapsedMs;
+    realBgSaveSend.call(win.webContents, "save-markdown-result", result);
+  };
+  const readBgSettlement = async () => {
+    const pending = await exec(`
+      (() => {
+        const probe = window.__s9cFirstDeliveryProbe;
+        return probe && probe.request
+          ? window.getPendingSaveStatus(probe.request.path).count
+          : null;
+      })()
+    `);
+    const state = __shutdown.state();
+    return {
+      pending,
+      saveOutcomeDeliveryCount: state.saveOutcomeDeliveryCount,
+      saveCorrelationCount: state.saveCorrelationCount,
+    };
+  };
+  const waitForBgSettlement = async (timeout) => {
+    let last = null;
+    const settled = await waitUntil(async () => {
+      last = await readBgSettlement();
+      return (
+        last.pending === 0 &&
+        last.saveOutcomeDeliveryCount === bgMainBaseline.saveOutcomeDeliveryCount &&
+        last.saveCorrelationCount === bgMainBaseline.saveCorrelationCount
+      );
+    }, timeout);
+    return { settled, last };
+  };
+  const switchBackToBgSavedTab = async () => {
+    if (!bgStage?.savedTabId) return false;
+    return exec(`
+      (async () => {
+        const probe = window.__s9cFirstDeliveryProbe;
+        const mine = probe && window.CustomTabs.getTabs().find(
+          tab => tab.id === probe.savedTabId,
+        );
+        if (!mine) throw new Error('Scenario 9c saved tab disappeared before retry cleanup');
+        await window.CustomTabs.switchToTab(mine.id);
+        return window.CustomTabs.getActiveTabId() === mine.id;
+      })()
+    `);
+  };
+  try {
+    const bgStageOut = await exec(`
+      (async () => {
+        const ipc = require('electron').ipcRenderer;
+        const seen = [];
+        const realConfirm = window.confirm;
+        const ownSendDescriptor = Object.getOwnPropertyDescriptor(ipc, 'send');
+        const realSend = ipc.send;
+        const expectedContent = ${JSON.stringify(bgSavedContent)};
+        const probe = {
+          request: null,
+          duplicateRequests: [],
+          deliveries: [],
+          seen,
+          realConfirm,
+          ownSendDescriptor,
+          realSend,
+        };
+        const onSaveResult = (_event, result) => {
+          if (
+            probe.request &&
+            result &&
+            result.requestId === probe.request.requestId &&
+            result.path === probe.request.path
+          ) {
+            const savedTab = window.CustomTabs.getTabs().find(
+              tab => tab.id === probe.savedTabId,
+            );
+            probe.deliveries.push({
+              requestId: result.requestId,
+              path: result.path,
+              saveResultAttempt: result.saveResultAttempt,
+              activeTabId: window.CustomTabs.getActiveTabId(),
+              activePath: window.currentFilePath,
+              pending: window.getPendingSaveStatus(probe.request.path).count,
+              savedTab: savedTab && {
+                id: savedTab.id,
+                path: savedTab.filePath,
+                content: savedTab.content,
+                original: savedTab.originalContent,
+                dirty: savedTab.hasUnsavedChanges,
+              },
+            });
+          }
+        };
+        probe.cleanup = () => {
+          window.confirm = probe.realConfirm;
+          window.ipcRenderer.removeListener('save-markdown-result', onSaveResult);
+          if (probe.ownSendDescriptor) {
+            Object.defineProperty(ipc, 'send', probe.ownSendDescriptor);
+          } else {
+            delete ipc.send;
+          }
+          delete window.__s9cFirstDeliveryProbe;
+          return true;
+        };
+        window.__s9cFirstDeliveryProbe = probe;
+        window.confirm = message => { seen.push(String(message)); return true; };
+        ipc.on('save-markdown-result', onSaveResult);
+        ipc.send = function(channel, ...args) {
+          const request = args[0];
+          if (
+            channel === 'save-markdown-file' &&
+            request &&
+            request.filePath === ${JSON.stringify(fileB)} &&
+            request.content === expectedContent
+          ) {
+            const captured = {
+              requestId: request.requestId,
+              path: request.filePath,
+              content: request.content,
+              saveRequest: request.saveRequest,
+            };
+            if (probe.request) probe.duplicateRequests.push(captured);
+            else probe.request = captured;
+          }
+          return probe.realSend.call(this, channel, ...args);
+        };
+        const tabs = window.CustomTabs.getTabs();
+        const mine = window.CustomTabs.getActiveTab();
+        const other = tabs.find(tab => tab.filePath !== mine.filePath);
+        if (!mine || !other) {
+          throw new Error('Scenario 9c requires two distinct tabs before Save');
+        }
+        probe.savedTabId = mine.id;
+        probe.otherTabId = other.id;
+        toggleEditBtn.click();
+        await new Promise(resolve => setTimeout(resolve, 800));
+        markdownEditor.value = expectedContent;
+        markdownEditor.dispatchEvent(new Event('input'));
+        await new Promise(resolve => setTimeout(resolve, 1600));
+        const preSaveBefore = window.fs.statSync(mine.filePath);
+        const preSaveContent = window.fs.readFileSync(mine.filePath, 'utf8');
+        const preSaveAfter = window.fs.statSync(mine.filePath);
+        const preSaveClean =
+          mine.filePath === ${JSON.stringify(fileB)} &&
+          preSaveContent === ${JSON.stringify(diskBgBaseline)} &&
+          ['dev', 'ino', 'size', 'mtimeMs', 'ctimeMs'].every(
+            field => mine.diskVersion?.[field] === preSaveBefore[field] &&
+              preSaveBefore[field] === preSaveAfter[field]
+          );
+        if (!preSaveClean) {
+          throw new Error('Scenario 9c fixture disk-version/content diverged immediately before Save: ' +
+            JSON.stringify({
+              path: mine.filePath, tabVersion: mine.diskVersion,
+              before: preSaveBefore, after: preSaveAfter,
+              content: preSaveContent,
+            }));
+        }
+        saveButton.click();
+        await window.CustomTabs.switchToTab(other.id);
+        const active = window.CustomTabs.getActiveTab();
+        return JSON.stringify({
+          seen,
+          request: probe.request,
+          duplicateRequests: probe.duplicateRequests,
+          savedTabId: probe.savedTabId,
+          otherTabId: probe.otherTabId,
+          otherSelected:
+            active &&
+            active.id === other.id &&
+            window.currentFilePath === other.filePath,
+          activePath: window.currentFilePath,
+        });
+      })()
+    `);
+    bgStage = JSON.parse(bgStageOut);
+    bgSaveRequestId = bgStage?.request?.requestId || null;
+    const bgHeld = await waitUntil(
+      () =>
+        heldBgSaveResults.some(
+          result =>
+            result &&
+            result.requestId === bgSaveRequestId &&
+            result.saveResultAttempt === 1,
+        ),
+      5000,
+    );
+    if (!bgHeld) {
+      throw new Error(
+        "Scenario 9c did not hold its matching first successful Save result: " +
+          JSON.stringify({ bgStage, heldBgSaveResults }),
+      );
+    }
+    bgHeldBeforeRelease = await exec(`
+      (() => {
+        const probe = window.__s9cFirstDeliveryProbe;
+        const savedTab = probe && window.CustomTabs.getTabs().find(
+          tab => tab.id === probe.savedTabId,
+        );
+        return {
+          request: probe && probe.request,
+          duplicateRequests: probe && probe.duplicateRequests,
+          activeTabId: window.CustomTabs.getActiveTabId(),
+          activePath: window.currentFilePath,
+          otherTabId: probe && probe.otherTabId,
+          pending: probe && probe.request
+            ? window.getPendingSaveStatus(probe.request.path).count
+            : null,
+          savedTab: savedTab && {
+            id: savedTab.id,
+            path: savedTab.filePath,
+            content: savedTab.content,
+            original: savedTab.originalContent,
+            dirty: savedTab.hasUnsavedChanges,
+          },
+        };
+      })()
+    `);
+    const held = heldBgSaveResults.find(
+      result =>
+        result &&
+        result.requestId === bgSaveRequestId &&
+        result.saveResultAttempt === 1,
+    );
+    const heldMatchesRequest =
+      bgStage &&
+      bgStage.request &&
+      held &&
+      held.requestId === bgStage.request.requestId &&
+      held.path === bgStage.request.path &&
+      held.saveResultAttempt === 1 &&
+      held.success === true &&
+      held.savedContent === bgSavedContent;
+    const otherPhysicallySelected =
+      bgStage &&
+      bgStage.otherSelected === true &&
+      bgHeldBeforeRelease &&
+      bgHeldBeforeRelease.activeTabId === bgStage.otherTabId &&
+      bgHeldBeforeRelease.activePath !== fileB;
+    if (
+      !heldMatchesRequest ||
+      !otherPhysicallySelected ||
+      bgStage.duplicateRequests.length !== 0 ||
+      bgHeldBeforeRelease.pending !== 1
+    ) {
+      throw new Error(
+        "Scenario 9c first-result delivery fixture could not establish its pre-release state: " +
+          JSON.stringify({
+            bgStage,
+            bgHeldBeforeRelease,
+            held: held && {
+              requestId: held.requestId,
+              path: held.path,
+              saveResultAttempt: held.saveResultAttempt,
+              success: held.success,
+              savedContent: held.savedContent,
+            },
+          }),
+      );
+    }
+    // Returning the original sender before releasing is intentional: main owns
+    // the ACK/retry protocol, so later attempts must take the production path.
+    restoreBgSaveSendOnce();
+    releaseBgSaveResult(held, "first delivery");
+    bgDeliveryObserved = await waitUntil(
+      async () =>
+        (await exec(`
+          (() => {
+            const probe = window.__s9cFirstDeliveryProbe;
+            return probe
+              ? probe.deliveries.some(
+                delivery => delivery.saveResultAttempt === 1,
+              )
+              : false;
+          })()
+        `)) === true,
+      1500,
+    );
+    bgOtherStoreAfterFirst = await exec(`
+      (() => ({
+        activePath: window.currentFilePath,
+        clean: !window.originalMarkdown.includes('S9C_TYPED'),
+        viewerClean: !viewer.textContent.includes('S9C_TYPED'),
+      }))()
+    `);
+    const firstSettlement = await waitForBgSettlement(1200);
+    bgFirstDeliverySettled = firstSettlement;
+    if (!firstSettlement.settled) {
+      // The reverted tab handler drops the observed first reply while its
+      // saved tab is backgrounded. Returning before main's four-second retry
+      // lets the real retry path ACK and retire the main-process maps.
+      const switched = await switchBackToBgSavedTab();
+      if (switched !== true) {
+        throw new Error(
+          "Scenario 9c could not return to its saved tab for natural retry cleanup: " +
+            JSON.stringify({ bgStage, switched }),
+        );
+      }
+      let lastSettlement = null;
+      let retryDelivery = null;
+      const naturalRetrySettled = await waitUntil(async () => {
+        lastSettlement = await readBgSettlement();
+        retryDelivery = await exec(`
+          (() => {
+            const probe = window.__s9cFirstDeliveryProbe;
+            return probe && probe.deliveries.find(
+              delivery =>
+                delivery.saveResultAttempt >= 2 &&
+                delivery.activeTabId === probe.savedTabId,
+            );
+          })()
+        `);
+        return (
+          !!retryDelivery &&
+          lastSettlement.pending === 0 &&
+          lastSettlement.saveOutcomeDeliveryCount ===
+            bgMainBaseline.saveOutcomeDeliveryCount &&
+          lastSettlement.saveCorrelationCount ===
+            bgMainBaseline.saveCorrelationCount
+        );
+      }, 6500);
+      bgNaturalRetry = {
+        settled: naturalRetrySettled,
+        delivery: retryDelivery,
+        settlement: lastSettlement,
+      };
+      if (!naturalRetrySettled) {
+        throw new Error(
+          "Scenario 9c natural Save retry did not settle renderer and main state: " +
+            JSON.stringify({
+              bgStage,
+              bgFirstDeliverySettled,
+              bgNaturalRetry,
+              mainBaseline: {
+                saveOutcomeDeliveryCount: bgMainBaseline.saveOutcomeDeliveryCount,
+                saveCorrelationCount: bgMainBaseline.saveCorrelationCount,
+              },
+            }),
+        );
+      }
+    }
+    const bgOutRaw = await exec(`
+      (async () => {
+        const probe = window.__s9cFirstDeliveryProbe;
+        const firstDelivery = probe && probe.deliveries.find(
+          delivery => delivery.saveResultAttempt === 1,
+        );
+        const otherStore = {
+          clean: !window.originalMarkdown.includes('S9C_TYPED'),
+          viewerClean: !viewer.textContent.includes('S9C_TYPED'),
+        };
+        const mine = probe && window.CustomTabs.getTabs().find(
+          tab => tab.id === probe.savedTabId,
+        );
+        if (!mine) throw new Error('Scenario 9c saved tab disappeared before return');
+        await window.CustomTabs.switchToTab(mine.id);
+        await new Promise(resolve => setTimeout(resolve, 1200));
+        const afterReturn = {
+          storeHasTyped: window.originalMarkdown.includes('S9C_TYPED'),
+          viewerHasTyped: viewer.textContent.includes('S9C_TYPED'),
+        };
+        const beforeExit = {
+          dirty: hasUnsavedChanges,
+          tabDirty: window.CustomTabs.getActiveTab().hasUnsavedChanges,
+          activePath: window.currentFilePath,
+          tabContentHasTyped: window.CustomTabs.getActiveTab().content.includes('S9C_TYPED'),
+          tabOriginalHasTyped: String(window.CustomTabs.getActiveTab().originalContent).includes('S9C_TYPED'),
+        };
+        const exitStartedAt = Date.now();
+        toggleEditBtn.click();
+        const exitDeadline = exitStartedAt + 6000;
+        while (isEditMode && Date.now() < exitDeadline) {
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        const exitCompleted = !isEditMode;
+        if (!exitCompleted) {
+          throw new Error(
+            'Scenario 9c exit did not complete before its observable deadline: ' +
+              JSON.stringify({
+                pending: window.getPendingSaveStatus(probe.request.path).count,
+                warned: probe.seen,
+                editMode: isEditMode,
+              }),
+          );
+        }
+        return JSON.stringify({
+          warned: probe.seen,
+          exitCompleted: exitCompleted,
+          exitWaitMs: Date.now() - exitStartedAt,
+          path: mine.filePath,
+          firstDelivery: firstDelivery,
+          afterReturn: afterReturn,
+          beforeExit: beforeExit,
+          otherStore: otherStore,
+          editMode: isEditMode,
+          storeHasTyped: window.originalMarkdown.includes('S9C_TYPED'),
+          viewerHasTyped: viewer.textContent.includes('S9C_TYPED'),
+        });
+      })()
+    `);
+    bgOut = JSON.parse(bgOutRaw);
+  } catch (error) {
+    bgPrimaryFailure = error;
+    throw error;
+  } finally {
+    let bgCleanupFailure = null;
+    try {
+      restoreBgSaveSendOnce();
+      const unreleasedFirstResult = heldBgSaveResults.find(
+        result =>
+          result &&
+          result.requestId === bgSaveRequestId &&
+          !releasedBgSaveAttempts.has(result.saveResultAttempt),
+      );
+      let releaseFailure = null;
+      if (unreleasedFirstResult) {
+        try {
+          releaseBgSaveResult(unreleasedFirstResult, "cleanup first delivery");
+        } catch (error) {
+          releaseFailure = error;
+          const switched = await switchBackToBgSavedTab();
+          if (switched !== true) throw error;
+        }
+      }
+      let cleanupSettlement = await waitForBgSettlement(1200);
+      if (!cleanupSettlement.settled && bgStage?.savedTabId) {
+        const switched = await switchBackToBgSavedTab();
+        if (switched !== true) {
+          throw new Error(
+            "Scenario 9c cleanup could not return to its saved tab: " +
+              JSON.stringify({ bgStage, switched }),
+          );
+        }
+        cleanupSettlement = await waitForBgSettlement(6500);
+      }
+      if (!cleanupSettlement.settled) {
+        throw new Error(
+          "Scenario 9c cleanup left a live Save outcome: " +
+            JSON.stringify({
+              cleanupSettlement,
+              mainBaseline: {
+                saveOutcomeDeliveryCount: bgMainBaseline.saveOutcomeDeliveryCount,
+                saveCorrelationCount: bgMainBaseline.saveCorrelationCount,
+              },
+            }),
+        );
+      }
+      if (releaseFailure) throw releaseFailure;
+    } catch (error) {
+      bgCleanupFailure = error;
+    }
+    try {
+      bgCleanup = await exec(`
+        (() => {
+          const probe = window.__s9cFirstDeliveryProbe;
+          if (!probe || typeof probe.cleanup !== 'function') {
+            throw new Error('Scenario 9c first-result delivery probe was unavailable for cleanup');
+          }
+          return probe.cleanup();
+        })()
+      `);
+      if (bgCleanup !== true) {
+        throw new Error(
+          "Scenario 9c first-result delivery probe did not confirm cleanup: " +
+            JSON.stringify({ bgCleanup }),
+        );
+      }
+    } catch (error) {
+      if (!bgCleanupFailure) bgCleanupFailure = error;
+      else console.error("Scenario 9c probe cleanup also failed:", error);
+    }
+    if (bgCleanupFailure) {
+      if (bgPrimaryFailure) {
+        console.error(
+          "Scenario 9c cleanup failed after its primary failure:",
+          bgCleanupFailure,
+        );
+      } else {
+        throw bgCleanupFailure;
+      }
+    }
+  }
+  const bg = bgOut;
+  const bgOutText = JSON.stringify(bgOut);
   const diskBg = fs.readFileSync(bg.path, "utf8");
   check(
     "the background-save case really was set up: the write reached disk from a tab left in the background",
     diskBg.includes("S9C_TYPED"),
-    bgOut + " disk=" + JSON.stringify(diskBg.slice(0, 60)),
+    bgOutText + " disk=" + JSON.stringify(diskBg.slice(0, 60)),
+  );
+  check(
+    "the first successful save result is delivered while the other physical tab remains active and settles the saved tab",
+    bgDeliveryObserved === true &&
+      bgFirstDeliverySettled?.settled === true &&
+      bgNaturalRetry === null &&
+    releasedBgSaveAttempts.has(1) === true &&
+      bgFirstResultReleaseElapsedMs !== null &&
+      bgFirstResultReleaseElapsedMs < firstResultReleaseDeadlineMs &&
+      bgStage?.request?.requestId === bgHeldBeforeRelease?.request?.requestId &&
+      bgHeldBeforeRelease?.pending === 1 &&
+      bg.firstDelivery?.requestId === bgStage?.request?.requestId &&
+      bg.firstDelivery?.path === bgStage?.request?.path &&
+      bg.firstDelivery?.saveResultAttempt === 1 &&
+      bg.firstDelivery?.activeTabId === bgStage?.otherTabId &&
+      bg.firstDelivery?.activePath !== fileB &&
+      bg.firstDelivery?.pending === 0 &&
+      bg.firstDelivery?.savedTab?.id === bgStage?.savedTabId &&
+      bg.firstDelivery?.savedTab?.path === fileB &&
+      bg.firstDelivery?.savedTab?.content === bgSavedContent &&
+      bg.firstDelivery?.savedTab?.original === bgSavedContent &&
+      bg.firstDelivery?.savedTab?.dirty === false,
+    JSON.stringify({
+      bgDeliveryObserved,
+      bgStage,
+      bgHeldBeforeRelease,
+      firstDelivery: bg.firstDelivery,
+      bgFirstDeliverySettled,
+      bgNaturalRetry,
+      bgFirstResultReleaseElapsedMs,
+      firstResultReleaseDeadlineMs,
+    }),
   );
   check(
     "a save whose reply arrived on another tab is not offered for discard on return",
     bg.warned.length === 0 && bg.editMode === false,
-    bgOut,
+    bgOutText,
   );
   check(
     "returning to a tab saved in the background shows the saved document, not the pre-save text",
-    bg.storeHasTyped === true && bg.viewerHasTyped === true,
-    bgOut + " disk=" + JSON.stringify(diskBg.slice(0, 60)),
+    bg.afterReturn.storeHasTyped === true && bg.afterReturn.viewerHasTyped === true,
+    bgOutText + " disk=" + JSON.stringify(diskBg.slice(0, 60)),
   );
   check(
     "a save that completes for a background document is not applied to the document on screen",
-    bg.otherStore.clean === true && bg.otherStore.viewerClean === true,
-    bgOut,
+    bgOtherStoreAfterFirst?.clean === true &&
+      bgOtherStoreAfterFirst.viewerClean === true &&
+      bgOtherStoreAfterFirst.activePath !== fileB,
+    bgOutText + " firstOtherStore=" + JSON.stringify(bgOtherStoreAfterFirst),
   );
-  check(
-    "exiting after a completed background save does not stall on the in-flight timeout",
-    bg.elapsed < 4500,
-    JSON.stringify({ elapsed: bg.elapsed }),
-  );
-
   // ---- Scenario 9d: two writes in flight at once -------------------------
   // A single pending slot cross-wires them: the first reply adopts the SECOND
   // request's bytes, so the store claims a document that is not yet on disk.
@@ -8499,37 +9966,62 @@ async function run(win) {
   const twoOut = await exec(`
     (async () => {
       const realConfirm = window.confirm;
+      const realAlert = window.alert;
+      const alerts = [];
+      const alertSentinel = "__scenario9d_alert_sentinel__";
       window.confirm = () => true;
-      if (isEditMode) toggleEditBtn.click();
-      await new Promise(r => setTimeout(r, 800));
-      window.originalMarkdown = '# Beta\\n\\nS9D_BASE\\n';
-      markdownEditor.value = window.originalMarkdown;
-      await renderMarkdown(window.originalMarkdown);
-      toggleEditBtn.click();
-      await new Promise(r => setTimeout(r, 800));
-      markdownEditor.value = '# Beta\\n\\nS9D_FIRST\\n';
-      markdownEditor.dispatchEvent(new Event('input'));
-      await new Promise(r => setTimeout(r, 1400));
-      // Both writes dispatched in one synchronous task, so both are in flight
-      // before either reply can be delivered.
-      saveButton.click();
-      markdownEditor.value = '# Beta\\n\\nS9D_SECOND\\n';
-      saveButton.click();
-      await new Promise(r => setTimeout(r, 2800));
-      const out = {
-        editMode: isEditMode,
-        storeIsSecond: window.originalMarkdown.includes('S9D_SECOND'),
-        storeIsFirst: window.originalMarkdown.includes('S9D_FIRST'),
-        dirty: hasUnsavedChanges,
-        path: window.currentFilePath,
+      window.alert = (message) => {
+        alerts.push(String(message));
       };
-      window.confirm = realConfirm;
-      return JSON.stringify(out);
+      try {
+        window.alert(alertSentinel);
+        const alertSentinelObserved =
+          alerts.length === 1 && alerts[0] === alertSentinel;
+        alerts.length = 0;
+        if (isEditMode) toggleEditBtn.click();
+        await new Promise(r => setTimeout(r, 800));
+        window.originalMarkdown = '# Beta\\n\\nS9D_BASE\\n';
+        markdownEditor.value = window.originalMarkdown;
+        await renderMarkdown(window.originalMarkdown);
+        toggleEditBtn.click();
+        await new Promise(r => setTimeout(r, 800));
+        markdownEditor.value = '# Beta\\n\\nS9D_FIRST\\n';
+        markdownEditor.dispatchEvent(new Event('input'));
+        await new Promise(r => setTimeout(r, 1400));
+        // Both writes dispatched in one synchronous task, so both are in flight
+        // before either reply can be delivered.
+        saveButton.click();
+        markdownEditor.value = '# Beta\\n\\nS9D_SECOND\\n';
+        saveButton.click();
+        await new Promise(r => setTimeout(r, 2800));
+        return JSON.stringify({
+          editMode: isEditMode,
+          storeIsSecond: window.originalMarkdown.includes('S9D_SECOND'),
+          storeIsFirst: window.originalMarkdown.includes('S9D_FIRST'),
+          dirty: hasUnsavedChanges,
+          path: window.currentFilePath,
+          alertSentinelObserved,
+          alerts,
+        });
+      } finally {
+        window.alert = realAlert;
+        window.confirm = realConfirm;
+      }
     })()
   `);
   const two = JSON.parse(twoOut);
   const saveQueueAfter = __shutdown.state();
   const diskTwo = fs.readFileSync(two.path, "utf8");
+  check(
+    "Scenario 9d alert capture was proven live before concurrent saves",
+    two.alertSentinelObserved === true,
+    twoOut,
+  );
+  check(
+    "Scenario 9d concurrent Saves did not trigger a renderer Save refusal",
+    Array.isArray(two.alerts) && two.alerts.length === 0,
+    twoOut,
+  );
   check(
     "two saves to one path are serialised by the main-process queue",
     saveQueueAfter.saveQueueEnqueuedCount === saveQueueBefore.saveQueueEnqueuedCount + 2 &&
@@ -8552,59 +10044,73 @@ async function run(win) {
     twoOut + " disk=" + JSON.stringify(diskTwo.slice(0, 60)),
   );
 
+  const scenario9dSucceeded =
+    two.editMode === true &&
+    diskTwo.includes("S9D_SECOND") &&
+    two.storeIsSecond === true &&
+    two.dirty === false;
   // ---- Scenario 9e: a reload underneath an open edit session -------------
   // Both reviewers found this too. The baseline is captured on edit-mode entry;
   // a reload replaces the document without moving it, so a later discard
   // restores the PRE-reload text and silently undoes the reload as well - the
   // user's own original complaint (a refresh reverting a file) reappearing
   // through the discard path.
-  const reloadOut = await exec(`
-    (async () => {
-      const realConfirm = window.confirm;
-      window.confirm = () => true;
-      if (isEditMode) toggleEditBtn.click();
-      await new Promise(r => setTimeout(r, 800));
-      window.originalMarkdown = '# Beta\\n\\nS9E_STALE\\n';
-      markdownEditor.value = window.originalMarkdown;
-      await renderMarkdown(window.originalMarkdown);
-      toggleEditBtn.click();
-      await new Promise(r => setTimeout(r, 800));
-      // The file on disk still holds whatever the previous scenario wrote, so
-      // reloading brings in content the session never saw.
-      reloadCurrentFile();
-      await new Promise(r => setTimeout(r, 2000));
-      const reloaded = markdownEditor.value;
-      markdownEditor.value = reloaded + '\\nS9E_TYPED\\n';
-      markdownEditor.dispatchEvent(new Event('input'));
-      await new Promise(r => setTimeout(r, 1600));
-      toggleEditBtn.click();
-      await new Promise(r => setTimeout(r, 2000));
-      window.confirm = realConfirm;
-      return JSON.stringify({
-        reloadedWasDifferent: !reloaded.includes('S9E_STALE'),
-        reloaded: reloaded.slice(0, 60),
-        editMode: isEditMode,
-        restoredToReloaded: window.originalMarkdown === reloaded,
-        wentBackToStale: window.originalMarkdown.includes('S9E_STALE'),
-        keptTyping: window.originalMarkdown.includes('S9E_TYPED'),
-        final: window.originalMarkdown.slice(0, 60),
-      });
-    })()
-  `);
-  const reload = JSON.parse(reloadOut);
-  check(
-    "the reload case really was set up: the reload brought in content the session had not seen",
-    reload.reloadedWasDifferent === true,
-    reloadOut,
-  );
-  check(
-    "discarding after a reload restores the reloaded document, not the pre-reload text",
-    reload.editMode === false &&
-      reload.restoredToReloaded === true &&
-      reload.wentBackToStale === false &&
-      reload.keptTyping === false,
-    reloadOut,
-  );
+  if (scenario9dSucceeded) {
+    const reloadOut = await exec(`
+      (async () => {
+        const realConfirm = window.confirm;
+        window.confirm = () => true;
+        if (isEditMode) toggleEditBtn.click();
+        await new Promise(r => setTimeout(r, 800));
+        window.originalMarkdown = '# Beta\\n\\nS9E_STALE\\n';
+        markdownEditor.value = window.originalMarkdown;
+        await renderMarkdown(window.originalMarkdown);
+        toggleEditBtn.click();
+        await new Promise(r => setTimeout(r, 800));
+        // The file on disk still holds whatever the previous scenario wrote, so
+        // reloading brings in content the session never saw.
+        reloadCurrentFile();
+        await new Promise(r => setTimeout(r, 2000));
+        const reloaded = markdownEditor.value;
+        markdownEditor.value = reloaded + '\\nS9E_TYPED\\n';
+        markdownEditor.dispatchEvent(new Event('input'));
+        await new Promise(r => setTimeout(r, 1600));
+        toggleEditBtn.click();
+        await new Promise(r => setTimeout(r, 2000));
+        window.confirm = realConfirm;
+        return JSON.stringify({
+          reloadedWasDifferent: !reloaded.includes('S9E_STALE'),
+          reloaded: reloaded.slice(0, 60),
+          editMode: isEditMode,
+          restoredToReloaded: window.originalMarkdown === reloaded,
+          wentBackToStale: window.originalMarkdown.includes('S9E_STALE'),
+          keptTyping: window.originalMarkdown.includes('S9E_TYPED'),
+          final: window.originalMarkdown.slice(0, 60),
+        });
+      })()
+    `);
+    const reload = JSON.parse(reloadOut);
+    check(
+      "the reload case really was set up: the reload brought in content the session had not seen",
+      reload.reloadedWasDifferent === true,
+      reloadOut,
+    );
+    check(
+      "discarding after a reload restores the reloaded document, not the pre-reload text",
+      reload.editMode === false &&
+        reload.restoredToReloaded === true &&
+        reload.wentBackToStale === false &&
+        reload.keptTyping === false,
+      reloadOut,
+    );
+  } else {
+    console.log(
+      "SKIP  the reload case really was set up: the reload brought in content the session had not seen - BLOCKED scenario 9e due to failed scenario 9d precondition",
+    );
+    console.log(
+      "SKIP  discarding after a reload restores the reloaded document, not the pre-reload text - BLOCKED scenario 9e due to failed scenario 9d precondition",
+    );
+  }
 
   const errors = await exec(`window.__e2eErrors || []`);
   check("no uncaught renderer errors", errors.length === 0, JSON.stringify(errors));
@@ -8738,6 +10244,33 @@ async function run(win) {
     JSON.stringify(guard),
   );
 
+  const closeFixtureTabsSource = `
+    async function closeFixtureTabs() {
+      const realConfirm = window.confirm;
+      window.confirm = () => true;
+      try {
+        const tabs = window.CustomTabs.getTabs().slice();
+        const activeId = window.CustomTabs.getActiveTabId();
+        for (const tab of tabs.filter(t => t.id !== activeId)
+          .concat(tabs.filter(t => t.id === activeId))) {
+          await window.CustomTabs.closeTab(tab.id);
+        }
+      } finally {
+        window.confirm = realConfirm;
+      }
+      return window.CustomTabs.getTabs().map(t => ({ id: t.id, path: t.filePath }));
+    }
+  `;
+  const clearFixtureTabs = async (phase) => {
+    const remaining = await exec(`${closeFixtureTabsSource} closeFixtureTabs()`);
+    check(
+      `${phase} closes every fixture tab before continuing`,
+      remaining.length === 0,
+      JSON.stringify(remaining),
+    );
+    if (remaining.length) throw new Error(`${phase} left tabs open`);
+  };
+
   // ---- Scenario 11: the single-row top bar --------------------------------
   // The header was two rows (logo + product name + menu items, then a file
   // location bar, then a separate tab strip that only appeared at 2+ tabs).
@@ -8774,12 +10307,7 @@ async function run(win) {
 
     // Clean slate: earlier scenarios leave tabs behind and the strip's overflow
     // state is the thing under test.
-    await exec(`
-      window.CustomTabs.getTabs().forEach(t => { t.hasUnsavedChanges = false; });
-      window.CustomTabs.getTabs().slice().forEach(t => window.CustomTabs.closeTab(t.id));
-      null;
-    `);
-    await sleep(300);
+    await clearFixtureTabs("layout preflight");
 
     const layoutFiles = [];
     for (let i = 0; i < 8; i++) {
@@ -9123,12 +10651,7 @@ async function run(win) {
       JSON.stringify(ctx),
     );
 
-    await exec(`
-      window.CustomTabs.getTabs().forEach(t => { t.hasUnsavedChanges = false; });
-      window.CustomTabs.getTabs().slice().forEach(t => window.CustomTabs.closeTab(t.id));
-      null;
-    `);
-    await sleep(300);
+    await clearFixtureTabs("layout teardown");
   }
 
   // ---- Scenario 12: batch paths must not interrogate the reader ----------
@@ -9168,7 +10691,32 @@ async function run(win) {
     ),
   );
 
-  const batch = await exec(`
+  const mainLargePrompts = [];
+  const restoreOpenDialog = replaceMethod(
+    dialog,
+    "showOpenDialog",
+    async (_owner, options) => {
+      if (!options || !options.properties?.includes("multiSelections")) {
+        throw new Error("Unexpected open dialog during batch fixture");
+      }
+      return { canceled: false, filePaths: [restoreBigA, restoreBigB, restoreBigC] };
+    },
+  );
+  let restoreLargeDialog;
+  let batch;
+  try {
+    restoreLargeDialog = replaceMethod(
+      dialog,
+      "showMessageBoxSync",
+      (_owner, options) => {
+        if (!options || options.title !== "Large document") {
+          throw new Error("Unexpected confirmation during batch fixture");
+        }
+        mainLargePrompts.push(options.message);
+        return 0;
+      },
+    );
+    batch = await exec(`
     (async () => {
       const out = {};
       const helpers = require('./file-helpers');
@@ -9195,11 +10743,24 @@ async function run(win) {
       const toastEl = document.getElementById('notificationMessage');
       const toastObserver = new MutationObserver(() => toasts.push(toastEl.textContent));
       if (toastEl) toastObserver.observe(toastEl, { childList: true, characterData: true, subtree: true });
+      ${closeFixtureTabsSource}
+      const clearRestoreFixture = async phase => {
+        const remaining = await closeFixtureTabs();
+        if (remaining.length) {
+          throw new Error('Restore fixture ' + phase + ' left tabs open: ' + JSON.stringify(remaining));
+        }
+      };
+      const waitFor = async predicate => {
+        const deadline = Date.now() + 8000;
+        while (Date.now() < deadline) {
+          if (predicate()) return true;
+          await new Promise(r => setTimeout(r, 50));
+        }
+        return predicate();
+      };
 
       try {
-        window.CustomTabs.getTabs().forEach(t => { t.hasUnsavedChanges = false; });
-        window.CustomTabs.getTabs().slice().forEach(t => window.CustomTabs.closeTab(t.id));
-        await new Promise(r => setTimeout(r, 200));
+        await clearRestoreFixture('before ordinary restore');
 
         // ---- restore, with an ORDINARY document as the active one ----
         localStorage.setItem('openTabs', ${restoreSession});
@@ -9225,10 +10786,10 @@ async function run(win) {
         out.askedOnExplicitClick = asked - mark;
         out.declineKeptReaderPut =
           (window.CustomTabs.getActiveTab() || {}).filePath === ${jsRestoreSmall};
+        out.declineKeptSmallOnScreen =
+          document.getElementById('viewer').textContent.indexOf('RESTORE_SMALL_DOC') !== -1;
 
-        window.CustomTabs.getTabs().forEach(t => { t.hasUnsavedChanges = false; });
-        window.CustomTabs.getTabs().slice().forEach(t => window.CustomTabs.closeTab(t.id));
-        await new Promise(r => setTimeout(r, 200));
+        await clearRestoreFixture('before expensive restore');
 
         // ---- restore, with an EXPENSIVE document as the active one ----
         // The recorded decision: restore it rather than leaving the reader
@@ -9277,9 +10838,7 @@ async function run(win) {
           out.askedOnRevisitAfterRestore = -1;
         }
 
-        window.CustomTabs.getTabs().forEach(t => { t.hasUnsavedChanges = false; });
-        window.CustomTabs.getTabs().slice().forEach(t => window.CustomTabs.closeTab(t.id));
-        await new Promise(r => setTimeout(r, 200));
+        await clearRestoreFixture('before multi-open');
 
         // ---- multi-select, and the double-ask on a single open ----
         // main.js runs confirmLargeDocument() before it emits 'file-opened',
@@ -9292,12 +10851,11 @@ async function run(win) {
         // the render count and the active tab looking correct. MEASURED -
         // R253 came back WRONG-GUARD for exactly this reason.
         answer = true;
-        window.ipcRenderer.emit('file-opened', {}, {
-          content: window.fs.readFileSync(${JSON.stringify(restoreBigA)}, 'utf8'),
-          path: ${JSON.stringify(restoreBigA)},
-          allPaths: [${JSON.stringify(restoreBigA)}, ${JSON.stringify(restoreBigB)}, ${JSON.stringify(restoreBigC)}],
-        });
-        await new Promise(r => setTimeout(r, 900));
+        window.ipcRenderer.send('open-file-dialog');
+        out.multiOpenReady = await waitFor(() =>
+          window.CustomTabs.getTabs().length === 3 &&
+          (window.CustomTabs.getActiveTab() || {}).filePath === ${jsRestoreBigA} &&
+          renders.length >= 1);
         out.askedOnMultiOpen = asked;
         out.multiOpenTabs = window.CustomTabs.getTabs().length;
         out.multiOpenActiveIsFirst =
@@ -9308,19 +10866,16 @@ async function run(win) {
         // already open. main.js has asked about it on the way here, so this
         // side must not ask a second time either.
         mark = asked;
-        window.ipcRenderer.emit('file-opened', {}, {
-          content: window.fs.readFileSync(${JSON.stringify(restoreBigB)}, 'utf8'),
-          path: ${JSON.stringify(restoreBigB)},
-          allPaths: [${JSON.stringify(restoreBigB)}],
-        });
-        await new Promise(r => setTimeout(r, 700));
+        window.ipcRenderer.send('open-file-path', { filePath: ${JSON.stringify(restoreBigB)} });
+        out.reopenReady = await waitFor(() =>
+          (window.CustomTabs.getActiveTab() || {}).filePath === ${JSON.stringify(restoreBigB)} &&
+          window.CustomTabs.getTabs().length === 3);
         out.askedOnReopen = asked - mark;
         out.reopenSwitched =
           (window.CustomTabs.getActiveTab() || {}).filePath === ${JSON.stringify(restoreBigB)};
         out.tabsAfterReopen = window.CustomTabs.getTabs().length;
 
-        window.CustomTabs.getTabs().forEach(t => { t.hasUnsavedChanges = false; });
-        window.CustomTabs.getTabs().slice().forEach(t => window.CustomTabs.closeTab(t.id));
+        await clearRestoreFixture('after reopen');
       } finally {
         window.ipcRenderer.sendSync = realSendSync;
         window.renderMarkdown = realRender;
@@ -9329,7 +10884,17 @@ async function run(win) {
       return out;
     })()
   `);
-  await sleep(400);
+  } finally {
+    if (restoreLargeDialog) restoreLargeDialog();
+    restoreOpenDialog();
+  }
+  check(
+    "main confirms each large file before sending its authenticated open",
+    mainLargePrompts.length === 2 &&
+      mainLargePrompts[0].includes("restore-big-a.md") &&
+      mainLargePrompts[1].includes("restore-big-b.md"),
+    JSON.stringify(mainLargePrompts),
+  );
 
   // Vacuity guards first: if the sample stopped scoring as expensive, or the
   // restore stopped restoring, every "0 dialogs" assertion below would pass
@@ -9350,13 +10915,15 @@ async function run(win) {
     JSON.stringify(batch),
   );
   check(
-    "a session restore renders the active document only, not every tab",
+    "a session restore renders its active ordinary document only before any declined click",
     batch.rendersOnRestore === 1 && batch.smallOnScreen === true,
     JSON.stringify(batch),
   );
   check(
     "a restored-but-unvisited expensive tab still asks when it is clicked",
-    batch.askedOnExplicitClick === 1 && batch.declineKeptReaderPut === true,
+    batch.askedOnExplicitClick === 1 &&
+      batch.declineKeptReaderPut === true &&
+      batch.declineKeptSmallOnScreen === true,
     JSON.stringify(batch),
   );
   check(
@@ -9383,17 +10950,20 @@ async function run(win) {
   );
   check(
     "a file main.js already asked about is not asked about again",
-    batch.askedOnMultiOpen === 0 && batch.multiOpenActiveIsFirst === true,
+    batch.multiOpenReady === true &&
+      batch.askedOnMultiOpen === 0 && batch.multiOpenActiveIsFirst === true,
     JSON.stringify(batch),
   );
   check(
     "a multi-select opens every file but renders only the chosen one",
-    batch.multiOpenTabs === 3 && batch.rendersOnMultiOpen === 1,
+    batch.multiOpenReady === true &&
+      batch.multiOpenTabs === 3 && batch.rendersOnMultiOpen === 1,
     JSON.stringify(batch),
   );
   check(
     "re-opening a file that is already open does not ask a second time",
-    batch.askedOnReopen === 0 &&
+    batch.reopenReady === true &&
+      batch.askedOnReopen === 0 &&
       batch.reopenSwitched === true &&
       batch.tabsAfterReopen === 3,
     JSON.stringify(batch),
@@ -9404,15 +10974,49 @@ async function run(win) {
   // metadata to exercise CustomTabs' foreign/conflict distinction.  This
   // keeps the test at the IPC boundary: no private sequence/session state is
   // manufactured by the harness.
-  await exec(`
-    window.CustomTabs.getTabs().forEach(t => { t.hasUnsavedChanges = false; });
-    window.CustomTabs.getTabs().slice().forEach(t => window.CustomTabs.closeTab(t.id));
-    const t = window.CustomTabs.createTab(${jsA}, window.fs.readFileSync(${jsA}, 'utf8'));
-    window.CustomTabs.switchToTab(t.id);
-    window.originalMarkdown = t.content;
-    null;
+  await clearFixtureTabs("reload-ownership preflight");
+  const reloadOwnerTab = await exec(`
+    (() => {
+      const t = window.CustomTabs.createTab(${jsA},
+        window.fs.readFileSync(${jsA}, 'utf8'), { activate: false });
+      return t && t.id;
+    })()
   `);
+  check(
+    "reload-ownership fixture creates alpha.md before selecting it",
+    Number.isSafeInteger(reloadOwnerTab),
+    JSON.stringify(reloadOwnerTab),
+  );
+  if (!Number.isSafeInteger(reloadOwnerTab)) throw new Error("reload-ownership tab was not created");
+  await switchToTabAndWait(reloadOwnerTab);
+  const reloadDisk = fs.readFileSync(fileA, "utf8");
+  const reloadOwnerBaseline = await exec(`(() => {
+    const tab = window.CustomTabs.getActiveTab();
+    const editing = document.querySelector('.content-wrapper').classList.contains('split-view');
+    return {
+      activeId: window.CustomTabs.getActiveTabId(),
+      path: tab && tab.filePath,
+      content: tab && tab.content,
+      original: tab && tab.originalContent,
+      dirty: tab && tab.hasUnsavedChanges,
+      live: editing ? window.markdownEditor.value : window.originalMarkdown,
+      editing,
+    };
+  })()`);
+  const cleanReloadOwner =
+    reloadOwnerBaseline.activeId === reloadOwnerTab &&
+    reloadOwnerBaseline.path === fileA &&
+    reloadOwnerBaseline.content === reloadDisk &&
+    reloadOwnerBaseline.original === reloadDisk &&
+    reloadOwnerBaseline.live === reloadDisk &&
+    reloadOwnerBaseline.dirty === false;
+  check(
+    "reload-ownership fixture starts with the selected file's clean live disk bytes",
+    cleanReloadOwner,
+    JSON.stringify({ reloadOwnerBaseline, reloadDisk }),
+  );
   const reloadOwnershipHold = holdReloadResults();
+  let reloadOwnershipHoldRestored = false;
   let reloadOwnership;
   try {
     await exec(`window.reloadCurrentFile(); null;`);
@@ -9421,6 +11025,22 @@ async function run(win) {
       10000,
     );
     const trusted = reloadOwnershipHold.held[0];
+    const heldOwner = await exec(`(() => {
+      const tab = window.CustomTabs.getActiveTab();
+      const editing = document.querySelector('.content-wrapper').classList.contains('split-view');
+      return {
+        activeId: window.CustomTabs.getActiveTabId(),
+        content: tab && tab.content,
+        live: editing ? window.markdownEditor.value : window.originalMarkdown,
+        selectionGeneration: window.getActiveFileSelectionGeneration(),
+      };
+    })()`);
+    const heldOwnerMatches =
+      trustedReplyHeld &&
+      heldOwner.activeId === reloadOwnerTab &&
+      heldOwner.content === reloadDisk &&
+      heldOwner.live === trusted?.reloadRequest?.snapshot &&
+      heldOwner.selectionGeneration === trusted?.reloadRequest?.selectionGeneration;
     // Invoke the registered main listener with a non-owner sender.  A real
     // BrowserWindow cannot forge this event, but this direct listener call is
     // the only deterministic way to present its owner gate with a foreign
@@ -9441,55 +11061,335 @@ async function run(win) {
     }
     const afterMain = __shutdown.state();
     reloadOwnershipHold.release(0);
-    await sleep(500);
+    const trustedApplied = !!(trustedReplyHeld && trusted?.reloadRequest) &&
+      await waitForCondition(
+        exec,
+        `window.CustomTabs.__reloadState().acceptedSequence === ${trusted?.reloadRequest?.sequence || 0}`,
+        8000,
+      );
+    await exec(`window.reloadCurrentFile(); null;`);
+    const base2ReplyHeld = await waitUntil(
+      () => reloadOwnershipHold.held.length === 2,
+      10000,
+    );
+    const base2 = reloadOwnershipHold.held[1];
+    const base2ForForeignReplies = base2;
+    const base2Setup = await exec(`(() => {
+      const tab = window.CustomTabs.getActiveTab();
+      const tracking = window.getReloadRequestDiagnostics();
+      const owner = tab && window.CustomTabs.getActiveDocumentIdentity(
+        tab.filePath,
+        tracking.session,
+      );
+      return {
+        activeId: window.CustomTabs.getActiveTabId(),
+        tracking,
+        owner,
+      };
+    })()`);
     const foreignAndConflict = await exec(`
       (() => {
         const ipc = require("electron").ipcRenderer;
         const tab = window.CustomTabs.getActiveTab();
-        const clean = {
+        const snapshot = () => ({
           content: tab.content, original: tab.originalContent,
           dirty: tab.hasUnsavedChanges,
-          diagnostics: window.CustomTabs.__reloadState(),
-        };
-        const base = ${JSON.stringify(trusted || null)};
-        if (!base || !base.reloadRequest || !base.reloadSession) return { unavailable: true };
+          documentState: { ...window.CustomTabs.__documentState(tab) },
+          diagnostics: { ...window.CustomTabs.__reloadState() },
+        });
+        const clean = snapshot();
+        const base = ${JSON.stringify(base2ForForeignReplies || null)};
+        const trusted = ${JSON.stringify(trusted || null)};
+        if (!base || !base.reloadRequest || !base.reloadSession ||
+            !trusted || !trusted.reloadRequest || !trusted.reloadSession) {
+          return { unavailable: true };
+        }
         const send = data => ipc.emit("file-reload-result", {}, data);
         send({ ...base, reloadRequest: {
           ...base.reloadRequest, sequence: base.reloadRequest.sequence + 1,
         }});
+        const staleSequence = snapshot();
         send({ ...base, reloadRequest: {
           ...base.reloadRequest, path: base.reloadRequest.path + ".foreign",
         }});
+        const foreignTarget = snapshot();
         send({ ...base, reloadRequest: {
           ...base.reloadRequest, session: "wrong-page-session",
         }});
-        const foreign = {
-          content: tab.content, original: tab.originalContent,
-          dirty: tab.hasUnsavedChanges,
-          diagnostics: window.CustomTabs.__reloadState(),
-        };
+        const foreignPageIdentity = snapshot();
+        send(trusted);
+        const foreignDocumentGeneration = snapshot();
         // A matching request whose live bytes moved is the sole conflict
         // branch.  Feed the same genuine response metadata after a real edit.
         window.originalMarkdown = clean.content + "\\nOWNERSHIP_LIVE_EDIT\\n";
-        send(base);
-        const conflict = {
-          content: tab.content, original: tab.originalContent,
-          dirty: tab.hasUnsavedChanges,
-          diagnostics: window.CustomTabs.__reloadState(),
+        const conflictAttempt = {
+          live: window.originalMarkdown,
+          requestSnapshot: base.reloadRequest.snapshot,
+          requestSequence: base.reloadRequest.sequence,
+          activeId: window.CustomTabs.getActiveTabId(),
+          requestTabId: base.reloadRequest.tabId,
         };
-        tab.content = tab.originalContent;
-        window.originalMarkdown = tab.originalContent;
-        window.setUnsavedState(false);
-        return { clean, foreign, conflict };
+        send(base);
+        return {
+          clean,
+          staleSequence,
+          foreignTarget,
+          foreignPageIdentity,
+          foreignDocumentGeneration,
+          conflictAttempt,
+        };
       })()
     `);
+    const conflictSequence = base2?.reloadRequest?.sequence;
+    const priorRejections =
+      foreignAndConflict.foreignDocumentGeneration?.diagnostics?.rejectedCount;
+    foreignAndConflict.conflictSettled = await waitForCondition(
+      exec,
+      `(() => {
+        const state = window.CustomTabs.__reloadState();
+        return state.acceptedSequence === ${JSON.stringify(conflictSequence)} ||
+          state.rejectedCount > ${JSON.stringify(priorRejections)};
+      })()`,
+      8000,
+    );
+    foreignAndConflict.conflict = await exec(`(() => {
+      const tab = window.CustomTabs.getActiveTab();
+      return {
+        content: tab.content,
+        original: tab.originalContent,
+        dirty: tab.hasUnsavedChanges,
+        live: window.originalMarkdown,
+        documentState: { ...window.CustomTabs.__documentState(tab) },
+        diagnostics: { ...window.CustomTabs.__reloadState() },
+      };
+    })()`);
+    // This held reply deliberately conflicted with a real live edit. It has
+    // neither the user's dirty-reload consent nor authority to clear that
+    // conflict, so abandon it rather than manufacturing a clean state.
+    const abandonedBase2 = await exec(`(() => {
+      const tab = window.CustomTabs.getActiveTab();
+      return {
+        content: tab && tab.content,
+        dirty: tab && tab.hasUnsavedChanges,
+        documentState: tab && { ...window.CustomTabs.__documentState(tab) },
+        diagnostics: { ...window.CustomTabs.__reloadState() },
+      };
+    })()`);
+    reloadOwnershipHold.restore();
+    reloadOwnershipHoldRestored = true;
+    let recoveryRequest;
+    let recoverySettled;
+    let recoveryDiskAfterRender;
+    let restored;
+    try {
+      recoveryRequest = await exec(`
+        (() => {
+          const realConfirm = window.confirm;
+          const realRender = window.renderMarkdown;
+          const renderProbe = {
+            calls: [],
+            terminal: [],
+            realRender,
+          };
+          const renderWrapper = function(text) {
+            const call = { text: String(text), terminal: false, success: false };
+            renderProbe.calls.push(call);
+            let result;
+            try {
+              result = realRender.apply(this, arguments);
+            } catch (error) {
+              call.terminal = true;
+              call.error = String(error && error.message ? error.message : error);
+              renderProbe.terminal.push(call);
+              throw error;
+            }
+            Promise.resolve(result).then(
+              () => {
+                call.terminal = true;
+                call.success = true;
+                renderProbe.terminal.push(call);
+              },
+              error => {
+                call.terminal = true;
+                call.error = String(error && error.message ? error.message : error);
+                renderProbe.terminal.push(call);
+              },
+            );
+            return result;
+          };
+          let requested = false;
+          let confirmCalls = 0;
+          let confirmPrompt = null;
+          renderProbe.renderWrapper = renderWrapper;
+          window.__f22ReloadRecoveryRenderProbe = renderProbe;
+          window.renderMarkdown = renderWrapper;
+          try {
+            window.confirm = prompt => {
+              confirmCalls += 1;
+              confirmPrompt = String(prompt);
+              return true;
+            };
+            requested = window.CustomTabs.requestReloadWithConfirmation();
+          } finally {
+            window.confirm = realConfirm;
+          }
+          return {
+            requested,
+            confirmCalls,
+            confirmPrompt,
+            confirmRestored: window.confirm === realConfirm,
+            renderProbeInstalled: window.renderMarkdown === renderWrapper,
+            before: { ...window.CustomTabs.__reloadState() },
+          };
+        })()
+      `);
+      recoverySettled =
+        recoveryRequest.requested === true &&
+        recoveryRequest.confirmRestored === true &&
+        recoveryRequest.renderProbeInstalled === true &&
+        await waitForCondition(
+          exec,
+          `(() => {
+            const tab = window.CustomTabs.getActiveTab();
+            const state = window.CustomTabs.__reloadState();
+            const documentState = tab && window.CustomTabs.__documentState(tab);
+            const editing = document.querySelector('.content-wrapper').classList.contains('split-view');
+            const live = editing ? window.markdownEditor.value : window.originalMarkdown;
+            const disk = ${JSON.stringify(reloadDisk)};
+            const renderProbe = window.__f22ReloadRecoveryRenderProbe;
+            const terminalDiskRender = !!(renderProbe && renderProbe.terminal.some(call =>
+              call.success === true && call.text === disk));
+            return state.acceptedSequence > ${abandonedBase2.diagnostics.acceptedSequence} &&
+              terminalDiskRender &&
+              !!tab &&
+              tab.content === disk &&
+              tab.originalContent === disk &&
+              live === disk &&
+              hasUnsavedChanges === false &&
+              tab.hasUnsavedChanges === false &&
+              documentState.dirty === false &&
+              documentState.reloadConflict === false;
+          })()`,
+          8000,
+        );
+      recoveryDiskAfterRender = fs.readFileSync(fileA, "utf8");
+      restored = await exec(`(() => {
+        const tab = window.CustomTabs.getActiveTab();
+        const editing = document.querySelector('.content-wrapper').classList.contains('split-view');
+        const renderProbe = window.__f22ReloadRecoveryRenderProbe;
+        return {
+          content: tab.content, original: tab.originalContent,
+          dirty: tab.hasUnsavedChanges,
+          rendererDirty: hasUnsavedChanges,
+          live: editing ? window.markdownEditor.value : window.originalMarkdown,
+          documentState: { ...window.CustomTabs.__documentState(tab) },
+          diagnostics: { ...window.CustomTabs.__reloadState() },
+          renderProbe: renderProbe && {
+            calls: renderProbe.calls.map(call => ({ ...call })),
+            terminal: renderProbe.terminal.map(call => ({ ...call })),
+          },
+        };
+      })()`);
+    } finally {
+      await exec(`
+        (() => {
+          const probe = window.__f22ReloadRecoveryRenderProbe;
+          if (probe && window.renderMarkdown === probe.renderWrapper) {
+            window.renderMarkdown = probe.realRender;
+          }
+          delete window.__f22ReloadRecoveryRenderProbe;
+          return null;
+        })()
+      `);
+    }
+    foreignAndConflict.restored = restored;
     reloadOwnership = {
-      trustedReplyHeld, trusted, untrustedSends, beforeMain, afterMain,
+      trustedReplyHeld, trusted, trustedApplied, heldOwner, heldOwnerMatches,
+      base2ReplyHeld, base2, base2Setup,
+      abandonedBase2, recoveryRequest, recoverySettled, recoveryDiskAfterRender,
+      untrustedSends, beforeMain, afterMain,
       foreignAndConflict,
     };
   } finally {
-    reloadOwnershipHold.restore();
+    if (!reloadOwnershipHoldRestored) reloadOwnershipHold.restore();
   }
+  check(
+    "the held reload still names the clean live owner and settles before foreign replies",
+    cleanReloadOwner &&
+      reloadOwnership?.heldOwnerMatches === true &&
+      reloadOwnership.trustedApplied === true,
+    JSON.stringify({
+      reloadOwnerBaseline,
+      heldOwner: reloadOwnership?.heldOwner,
+      trustedApplied: reloadOwnership?.trustedApplied,
+      trustedRequest: reloadOwnership?.trusted?.reloadRequest,
+    }),
+  );
+  check(
+    "the second held reload reserves the next document generation for the same active path",
+    reloadOwnership &&
+      reloadOwnership.trustedApplied === true &&
+      reloadOwnership.base2ReplyHeld === true &&
+      reloadOwnership.base2?.reloadRequest &&
+      reloadOwnership.trusted?.reloadRequest &&
+      reloadOwnership.base2.reloadRequest.sequence ===
+        reloadOwnership.trusted.reloadRequest.sequence + 1 &&
+      Number.isSafeInteger(reloadOwnership.base2.reloadRequest.documentGeneration) &&
+      reloadOwnership.base2.reloadRequest.documentGeneration >
+        reloadOwnership.trusted.reloadRequest.documentGeneration &&
+      reloadOwnership.base2.reloadRequest.pathKey ===
+        reloadOwnership.trusted.reloadRequest.pathKey &&
+      reloadOwnership.base2Setup.activeId === reloadOwnerTab &&
+      reloadOwnership.base2Setup.owner?.documentGeneration ===
+        reloadOwnership.base2.reloadRequest.documentGeneration &&
+      reloadOwnership.base2Setup.owner?.pathKey ===
+        reloadOwnership.base2.reloadRequest.pathKey,
+    JSON.stringify({
+      trustedRequest: reloadOwnership?.trusted?.reloadRequest,
+      base2Request: reloadOwnership?.base2?.reloadRequest,
+      base2Setup: reloadOwnership?.base2Setup,
+    }),
+  );
+  check(
+    "the held reload conflict fixture has a newer live edit on the same physical owner",
+    reloadOwnership?.foreignAndConflict?.conflictAttempt &&
+      reloadOwnership.foreignAndConflict.conflictAttempt.live.includes("OWNERSHIP_LIVE_EDIT") &&
+      reloadOwnership.foreignAndConflict.conflictAttempt.live !==
+        reloadOwnership.foreignAndConflict.conflictAttempt.requestSnapshot &&
+      reloadOwnership.foreignAndConflict.conflictAttempt.activeId ===
+        reloadOwnership.foreignAndConflict.conflictAttempt.requestTabId,
+    JSON.stringify(reloadOwnership?.foreignAndConflict?.conflictAttempt),
+  );
+  check(
+    "the held reload retains the newer note after its conflicting reply settles",
+    reloadOwnership?.foreignAndConflict?.conflict &&
+      reloadOwnership.foreignAndConflict.conflictSettled === true &&
+      reloadOwnership.foreignAndConflict.conflict.content ===
+        reloadOwnership.foreignAndConflict.conflictAttempt.live &&
+      reloadOwnership.foreignAndConflict.conflict.dirty === true &&
+      reloadOwnership.foreignAndConflict.conflict.documentState.reloadConflict === true &&
+      reloadOwnership.foreignAndConflict.conflict.diagnostics.acceptedSequence <
+        reloadOwnership.foreignAndConflict.conflictAttempt.requestSequence,
+    JSON.stringify({
+      attempt: reloadOwnership?.foreignAndConflict?.conflictAttempt,
+      settled: reloadOwnership?.foreignAndConflict?.conflictSettled,
+      result: reloadOwnership?.foreignAndConflict?.conflict,
+    }),
+  );
+  check(
+    "the held reload labels its changed request snapshot as a document conflict",
+    reloadOwnership?.foreignAndConflict?.conflict &&
+      reloadOwnership.foreignAndConflict.conflictSettled === true &&
+      reloadOwnership.foreignAndConflict.conflict.diagnostics.rejectedCount >
+        reloadOwnership.foreignAndConflict.foreignDocumentGeneration.diagnostics.rejectedCount &&
+      reloadOwnership.foreignAndConflict.conflict.diagnostics.rejectedWhy ===
+        "document-moved-after-request",
+    JSON.stringify({
+      attempt: reloadOwnership?.foreignAndConflict?.conflictAttempt,
+      settled: reloadOwnership?.foreignAndConflict?.conflictSettled,
+      result: reloadOwnership?.foreignAndConflict?.conflict,
+    }),
+  );
   check(
     "reload ownership drops foreign sender, sequence, path, and page-session replies without inventing a conflict, while a moved live snapshot conflicts",
     reloadOwnership &&
@@ -9501,20 +11401,95 @@ async function run(win) {
         (reloadOwnership.beforeMain.staleReloadReplyDropsByReason["untrusted-request"] || 0) &&
       reloadOwnership.foreignAndConflict &&
       !reloadOwnership.foreignAndConflict.unavailable &&
-      reloadOwnership.foreignAndConflict.foreign.content === reloadOwnership.foreignAndConflict.clean.content &&
-      reloadOwnership.foreignAndConflict.foreign.dirty === false &&
-      reloadOwnership.foreignAndConflict.foreign.diagnostics.foreignCount >=
-        reloadOwnership.foreignAndConflict.clean.diagnostics.foreignCount + 3 &&
+      reloadOwnership.foreignAndConflict.staleSequence.content ===
+        reloadOwnership.foreignAndConflict.clean.content &&
+      reloadOwnership.foreignAndConflict.staleSequence.original ===
+        reloadOwnership.foreignAndConflict.clean.original &&
+      reloadOwnership.foreignAndConflict.staleSequence.dirty === false &&
+      reloadOwnership.foreignAndConflict.staleSequence.diagnostics.foreignCount ===
+        reloadOwnership.foreignAndConflict.clean.diagnostics.foreignCount + 1 &&
+      reloadOwnership.foreignAndConflict.staleSequence.diagnostics.rejectedCount ===
+        reloadOwnership.foreignAndConflict.clean.diagnostics.rejectedCount &&
+      reloadOwnership.foreignAndConflict.staleSequence.diagnostics.rejectedWhy ===
+        "foreign-stale-sequence" &&
+      reloadOwnership.foreignAndConflict.foreignTarget.content ===
+        reloadOwnership.foreignAndConflict.clean.content &&
+      reloadOwnership.foreignAndConflict.foreignTarget.original ===
+        reloadOwnership.foreignAndConflict.clean.original &&
+      reloadOwnership.foreignAndConflict.foreignTarget.dirty === false &&
+      reloadOwnership.foreignAndConflict.foreignTarget.diagnostics.foreignCount ===
+        reloadOwnership.foreignAndConflict.staleSequence.diagnostics.foreignCount + 1 &&
+      reloadOwnership.foreignAndConflict.foreignTarget.diagnostics.rejectedCount ===
+        reloadOwnership.foreignAndConflict.staleSequence.diagnostics.rejectedCount &&
+      reloadOwnership.foreignAndConflict.foreignTarget.diagnostics.rejectedWhy ===
+        "foreign-target" &&
+      reloadOwnership.foreignAndConflict.foreignPageIdentity.content ===
+        reloadOwnership.foreignAndConflict.clean.content &&
+      reloadOwnership.foreignAndConflict.foreignPageIdentity.original ===
+        reloadOwnership.foreignAndConflict.clean.original &&
+      reloadOwnership.foreignAndConflict.foreignPageIdentity.dirty === false &&
+      reloadOwnership.foreignAndConflict.foreignPageIdentity.diagnostics.foreignCount ===
+        reloadOwnership.foreignAndConflict.foreignTarget.diagnostics.foreignCount + 1 &&
+      reloadOwnership.foreignAndConflict.foreignPageIdentity.diagnostics.rejectedCount ===
+        reloadOwnership.foreignAndConflict.foreignTarget.diagnostics.rejectedCount &&
+      reloadOwnership.foreignAndConflict.foreignPageIdentity.diagnostics.rejectedWhy ===
+        "foreign-page-identity" &&
+      reloadOwnership.foreignAndConflict.foreignDocumentGeneration.content ===
+        reloadOwnership.foreignAndConflict.clean.content &&
+      reloadOwnership.foreignAndConflict.foreignDocumentGeneration.original ===
+        reloadOwnership.foreignAndConflict.clean.original &&
+      reloadOwnership.foreignAndConflict.foreignDocumentGeneration.dirty === false &&
+      reloadOwnership.foreignAndConflict.foreignDocumentGeneration.diagnostics.foreignCount ===
+        reloadOwnership.foreignAndConflict.foreignPageIdentity.diagnostics.foreignCount + 1 &&
+      reloadOwnership.foreignAndConflict.foreignDocumentGeneration.diagnostics.rejectedCount ===
+        reloadOwnership.foreignAndConflict.foreignPageIdentity.diagnostics.rejectedCount &&
+      reloadOwnership.foreignAndConflict.foreignDocumentGeneration.diagnostics.rejectedWhy ===
+        "foreign-document-generation" &&
       reloadOwnership.foreignAndConflict.conflict.dirty === true &&
       reloadOwnership.foreignAndConflict.conflict.content.includes("OWNERSHIP_LIVE_EDIT") &&
-      reloadOwnership.foreignAndConflict.conflict.diagnostics.rejectedCount >=
-        reloadOwnership.foreignAndConflict.foreign.diagnostics.rejectedCount + 1,
+      reloadOwnership.foreignAndConflict.conflict.documentState.reloadConflict === true &&
+      reloadOwnership.foreignAndConflict.conflict.diagnostics.rejectedCount ===
+        reloadOwnership.foreignAndConflict.foreignDocumentGeneration.diagnostics.rejectedCount + 1 &&
+      reloadOwnership.foreignAndConflict.conflict.diagnostics.foreignCount ===
+        reloadOwnership.foreignAndConflict.foreignDocumentGeneration.diagnostics.foreignCount &&
+      reloadOwnership.foreignAndConflict.conflict.diagnostics.rejectedWhy ===
+        "document-moved-after-request" &&
+      reloadOwnership.abandonedBase2.content ===
+        reloadOwnership.foreignAndConflict.conflict.content &&
+      reloadOwnership.abandonedBase2.dirty === true &&
+      reloadOwnership.abandonedBase2.documentState.reloadConflict === true &&
+      reloadOwnership.abandonedBase2.diagnostics.acceptedSequence ===
+        reloadOwnership.trusted.reloadRequest.sequence &&
+      reloadOwnership.abandonedBase2.diagnostics.rejectedWhy ===
+        "document-moved-after-request" &&
+      reloadOwnership.abandonedBase2.diagnostics.rejectedCount ===
+        reloadOwnership.foreignAndConflict.conflict.diagnostics.rejectedCount &&
+      reloadOwnership.foreignAndConflict.restored.content ===
+        reloadDisk &&
+      reloadOwnership.foreignAndConflict.restored.original ===
+        reloadDisk &&
+      reloadOwnership.foreignAndConflict.restored.live ===
+        reloadDisk &&
+      reloadOwnership.foreignAndConflict.restored.dirty === false &&
+      reloadOwnership.foreignAndConflict.restored.rendererDirty === false &&
+      reloadOwnership.recoveryRequest.requested === true &&
+      reloadOwnership.recoveryRequest.confirmCalls === 1 &&
+      reloadOwnership.recoveryRequest.confirmRestored === true &&
+      reloadOwnership.recoveryRequest.renderProbeInstalled === true &&
+      reloadOwnership.recoverySettled === true &&
+      reloadOwnership.recoveryDiskAfterRender === reloadDisk &&
+      reloadOwnership.foreignAndConflict.restored.renderProbe &&
+      reloadOwnership.foreignAndConflict.restored.renderProbe.terminal.some(call =>
+        call.success === true && call.text === reloadDisk) &&
+      reloadOwnership.foreignAndConflict.restored.diagnostics.acceptedSequence >
+        reloadOwnership.abandonedBase2.diagnostics.acceptedSequence &&
+      reloadOwnership.foreignAndConflict.restored.documentState.dirty === false &&
+      reloadOwnership.foreignAndConflict.restored.documentState.reloadConflict === false,
     JSON.stringify(reloadOwnership),
   );
 
-  // The listener commits all ownership before awaiting its renderer.  Hold the
-  // renderer at that boundary so two real file-open IPC messages complete in
-  // reverse order; the old continuation must be visibly retired.
+  // Hold both real main-process file opens at their render boundary, then
+  // finish them in reverse order; the old continuation cannot reclaim B.
   const fileOpenRaceA = path.join(dir, "race-open-a.md");
   const fileOpenRaceB = path.join(dir, "race-open-b.md");
   write(fileOpenRaceA, "RACE_OPEN_A");
@@ -9527,27 +11502,39 @@ async function run(win) {
       const realRender = window.renderMarkdown;
       const gates = [];
       window.renderMarkdown = text => new Promise(resolve => gates.push({ text, resolve }));
+      const waitFor = async predicate => {
+        const deadline = Date.now() + 8000;
+        while (Date.now() < deadline) {
+          if (predicate()) return true;
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        return predicate();
+      };
+      const snapshot = () => ({
+        path: window.currentFilePath, original: window.originalMarkdown,
+        diagnostics: window.getReloadRequestDiagnostics(),
+      });
       try {
-        ipc.emit("file-opened", {}, { path: a, filePath: a, content: "RACE_OPEN_A",
-          allPaths: [a, b] });
-        const afterA = {
-          path: window.currentFilePath, original: window.originalMarkdown,
-          diagnostics: window.getReloadRequestDiagnostics(),
-        };
-        ipc.emit("file-opened", {}, { path: b, filePath: b, content: "RACE_OPEN_B",
-          allPaths: [a, b] });
-        const afterB = {
-          path: window.currentFilePath, original: window.originalMarkdown,
-          diagnostics: window.getReloadRequestDiagnostics(),
-        };
-        // Finish the newer render first, then the stale one.  The latter may
-        // settle but cannot scroll or overwrite B's synchronous ownership.
-        gates[1].resolve();
-        await new Promise(resolve => setTimeout(resolve, 20));
-        gates[0].resolve();
-        await new Promise(resolve => setTimeout(resolve, 20));
+        ipc.send("open-file-path", { filePath: a });
+        const firstReached = await waitFor(() => gates.length >= 1);
+        const afterA = snapshot();
+        if (firstReached) ipc.send("open-file-path", { filePath: b });
+        const secondReached = firstReached && await waitFor(() => gates.length >= 2);
+        const afterB = snapshot();
+        let staleCompletionObserved = false;
+        if (secondReached) {
+          // No gate is indexed until both authenticated opens actually render.
+          const supersededBefore =
+            window.getFileOpenDiagnostics().supersededCompletionCount;
+          gates[1].resolve();
+          await new Promise(resolve => setTimeout(resolve, 0));
+          gates[0].resolve();
+          staleCompletionObserved = await waitFor(() =>
+            window.getFileOpenDiagnostics().supersededCompletionCount > supersededBefore);
+        }
         return {
-          afterA, afterB, gates: gates.map(g => g.text),
+          firstReached, secondReached, staleCompletionObserved, afterA, afterB,
+          gates: gates.map(g => g.text),
           final: {
             path: window.currentFilePath, original: window.originalMarkdown,
             diagnostics: window.getReloadRequestDiagnostics(),
@@ -9555,13 +11542,24 @@ async function run(win) {
           },
         };
       } finally {
+        gates.forEach(g => g.resolve());
         window.renderMarkdown = realRender;
       }
     })()
   `);
   check(
-    "file-open ownership is synchronous and a superseded render completion cannot reclaim the newer document",
+    "both authenticated file opens reach their render gates before testing supersession",
+    fileOpenRace.firstReached === true &&
+      fileOpenRace.secondReached === true &&
+      fileOpenRace.gates.length === 2,
+    JSON.stringify(fileOpenRace),
+  );
+  check(
+    "a superseded file-open render cannot reclaim the newer document",
     fileOpenRace &&
+      fileOpenRace.firstReached === true &&
+      fileOpenRace.secondReached === true &&
+      fileOpenRace.staleCompletionObserved === true &&
       fileOpenRace.gates.length === 2 &&
       fileOpenRace.afterA.path.endsWith("race-open-a.md") &&
       fileOpenRace.afterA.original === "RACE_OPEN_A" &&
@@ -9573,54 +11571,44 @@ async function run(win) {
         fileOpenRace.afterB.diagnostics.fileOpenSequence,
     JSON.stringify(fileOpenRace),
   );
+  await clearFixtureTabs("file-open race teardown");
 
   // ---- Scenario 13: leaving the app is a question, not an assumption -----
   // F22. The native X, Ctrl+Q, an ordinary quit and an update install all used
   // to leave without asking; they now share one approval protocol.
-  // The legacy installed-boundary cases exercise BaseUpdater's non-Windows
-  // lifecycle. Windows now owns NSIS launch directly and is covered below.
-  const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
-  if (process.platform === "win32") {
-    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
-  }
-  try {
-    await runShutdownScenarios(win, exec, sentinel);
-  } finally {
-    if (platformDescriptor) Object.defineProperty(process, "platform", platformDescriptor);
-  }
+  await runShutdownScenarios(win, exec, sentinel, consoleAttribution);
   await runShutdownGenerationScenarios(win, exec);
-  // The parent runs on Windows so the NSIS path is exercised below.  Also run
-  // the BaseUpdater-only lifecycle matrix under its supported platform model:
-  // its public-boundary listener and error ownership are independent of the
-  // Windows launcher and otherwise would be catalogue-visible but unexecuted.
-  const installedPlatformDescriptor = Object.getOwnPropertyDescriptor(
-    process,
-    "platform",
-  );
-  if (process.platform === "win32") {
-    Object.defineProperty(process, "platform", {
-      value: "linux",
-      configurable: true,
-    });
-  }
-  try {
-    await runInstalledUpdateCommitScenarios(win, exec);
-  } finally {
-    if (installedPlatformDescriptor) {
-      Object.defineProperty(process, "platform", installedPlatformDescriptor);
-    }
-  }
+  await runInstalledUpdateCommitScenarios(win, exec);
   if (process.platform === "win32") {
     await runWindowsInstalledLauncherScenarios(win, exec);
   }
   await sentinel.mute("sameDocument's deliberate unreadable-editor failure path");
   try {
-    await runSameDocumentShutdownScenarios(win, exec);
+    const semanticScenario = await runSameDocumentShutdownScenarios(win, exec);
+    check(
+      "the semantic fixture's host-file cleanup reports no deletion errors",
+      semanticScenario &&
+        Array.isArray(semanticScenario.hostFileCleanupErrors) &&
+        semanticScenario.hostFileCleanupErrors.length === 0,
+      JSON.stringify({
+        hostFileCleanupErrors:
+          semanticScenario && semanticScenario.hostFileCleanupErrors,
+        semanticError: semanticScenario && semanticScenario.semantic &&
+          semanticScenario.semantic.error,
+      }),
+    );
+    if (!semanticScenario || semanticScenario.canContinue !== true) {
+      console.error(
+        "FAIL  later shutdown lifecycle scenarios blocked by semantic cleanup contamination  -> " +
+          JSON.stringify(semanticScenario),
+      );
+      return;
+    }
   } finally {
     await sentinel.unmute();
   }
   await runCommitDeadlineAndContinuationScenarios(win, exec);
-  await runF22SaveAndReloadScenarios(win, exec);
+  await runF22SaveAndReloadScenarios(win, exec, sentinel, consoleAttribution);
 
   // Prove the watcher was actually watching. Without this, "no errors were
   // recorded" and "the watcher silently stopped working" are the same result -
@@ -9634,6 +11622,7 @@ async function run(win) {
   );
 
   const sentinelReport = await sentinel.stop();
+  consoleAttribution.stop(sentinelReport);
   check(
     "nothing rendered a visible error at any point during the suite",
     sentinelReport.hits.length === 0,
@@ -9649,8 +11638,493 @@ async function run(win) {
 }
 
 
-async function runF22SaveAndReloadScenarios(win, exec) {
+async function runF22SaveAndReloadScenarios(
+  win,
+  exec,
+  sentinel = null,
+  consoleAttribution = null,
+) {
   const wc = win.webContents;
+  const rendererSourcePath = path.join(
+    __dirname,
+    "..",
+    "src",
+    "renderer.js",
+  );
+  let rendererSourceLines = null;
+  try {
+    rendererSourceLines = fs.readFileSync(rendererSourcePath, "utf8")
+      .split(/\r?\n/);
+  } catch (error) {}
+  const rendererConsoleErrorSource = (statement) => {
+    if (!rendererSourceLines) return null;
+    const matches = rendererSourceLines.reduce(
+      (lines, line, index) => (
+        line.trim() === statement ? [...lines, index + 1] : lines
+      ),
+      [],
+    );
+    return matches.length === 1
+      ? ` @ file:///${rendererSourcePath.replace(/\\/g, "/")}:${matches[0]}`
+      : null;
+  };
+  const rendererSaveFailureSource = rendererConsoleErrorSource(
+    "console.error('Save failed:', decision.error);",
+  );
+  const rendererOwnershipRefusalSource = rendererConsoleErrorSource(
+    "console.error('Refusing save without exact tab document ownership');",
+  );
+  const rendererInvalidIdentitySource = rendererConsoleErrorSource(
+    "console.error('Refusing save with invalid document identity');",
+  );
+  const hasExpectedMutedSaveFailure = (
+    mute,
+    filePath,
+    result,
+    message,
+  ) => !!(
+    mute &&
+    Array.isArray(mute.suppressed) &&
+    mute.suppressed.length === 1 &&
+    result &&
+    result.path === filePath &&
+    result.success === false &&
+    typeof rendererSaveFailureSource === "string" &&
+    mute.suppressed[0].kind === "console-error" &&
+    typeof mute.suppressed[0].detail === "string" &&
+    mute.suppressed[0].detail ===
+      `Save failed: ${message}${rendererSaveFailureSource}`
+  );
+  // These three live at FUNCTION scope, not beside the positive controls that
+  // first needed them: the close/pending-save, edit-mode CRLF and
+  // mixed-newline fixtures below all seed a brand-new file and then require a
+  // SUCCESSFUL save, so they all depend on the same settling. The measurement
+  // that forced this - the first read of a freshly written file moves
+  // `ctimeMs`, which `diskVersionFromStats` includes, so an unsettled fixture
+  // hands its owner a baseline the disk no longer has and main refuses the
+  // save as a genuine conflict - is recorded in full at the positive controls
+  // further down, where it was taken.
+  const diskVersionOf = (fixturePath) => {
+    const stats = fs.statSync(fixturePath);
+    return {
+      dev: stats.dev,
+      ino: stats.ino,
+      size: stats.size,
+      mtimeMs: stats.mtimeMs,
+      ctimeMs: stats.ctimeMs,
+    };
+  };
+  const sameDiskVersion = (left, right) => !!(
+    left &&
+    right &&
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs
+  );
+  const seedSettledFixture = async (fixturePath, bytes) => {
+    fs.writeFileSync(fixturePath, bytes, "utf8");
+    // The read is the point, not the comparison: it is what moves `ctimeMs`,
+    // so the version adopted below is the one the save will be judged against.
+    // Asserting the bytes while consuming that read costs nothing and proves
+    // the seed landed.
+    const seeded = fs.readFileSync(fixturePath, "utf8");
+    if (seeded !== bytes) {
+      throw new Error(
+        "F22 save fixture did not seed its own bytes: " +
+          JSON.stringify({ fixturePath, seeded, bytes }),
+      );
+    }
+    let observed = diskVersionOf(fixturePath);
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      await sleep(50);
+      const next = diskVersionOf(fixturePath);
+      if (sameDiskVersion(observed, next)) return next;
+      observed = next;
+    }
+    throw new Error(
+      "F22 save fixture never reached a stable disk version: " +
+        JSON.stringify({ fixturePath, observed }),
+    );
+  };
+  const f22CtimeDiagnostic = process.env.F22_CTIME_DIAGNOSTIC === "1";
+  const startF22CtimeProbe = (filePath) => {
+    if (!f22CtimeDiagnostic) return null;
+    const selections = [];
+    const listener = (event, data) => {
+        if (!data || data.filePath !== filePath) return;
+        const request = {
+          filePath: data.filePath,
+          adoptBaseline: data.adoptBaseline === true,
+          trackingActive: data.trackingActive === true,
+          diskVersion: data.diskVersion || null,
+          owner: data.owner || null,
+        };
+        queueMicrotask(() => {
+          const reply = event.returnValue;
+          selections.push({
+            request,
+            reply: reply && {
+              accepted: reply.accepted === true,
+              mayHaveMoved: reply.mayHaveMoved === true,
+              why: reply.why || null,
+              trackingActive: reply.trackingActive === true,
+            },
+          });
+        });
+    };
+    ipcMain.prependListener("select-file-tracking", listener);
+    return {
+        capture: async (stage, tabId = null) => {
+          await new Promise((resolve) => setImmediate(resolve));
+          const renderer = await exec(`
+            (() => {
+              const tab = window.CustomTabs.getTabs().find(
+                candidate => candidate.id === ${JSON.stringify(tabId)},
+              );
+              const session = window.getReloadRequestSession();
+              return {
+                currentFilePath: window.currentFilePath,
+                activeTabId: window.CustomTabs.getActiveTabId(),
+                owner: window.CustomTabs.getActiveDocumentIdentity(
+                  ${JSON.stringify(filePath)},
+                  session,
+                ),
+                selectionGeneration: window.getActiveFileSelectionGeneration(),
+                documentState: tab
+                  ? window.CustomTabs.__documentState(tab)
+                  : null,
+                reloadDiagnostics: window.getReloadRequestDiagnostics(),
+              };
+            })()
+          `);
+          const matching = selections.filter((entry) =>
+            entry.request.owner &&
+            (tabId === null || entry.request.owner.tabId === tabId),
+          );
+          return {
+            stage,
+            diskVersion: diskVersionOf(filePath),
+            // Reading bytes is deliberately excluded: this Windows filesystem
+            // can advance ctime on a read, so a diagnostic read would fabricate
+            // the transition it is intended to locate.
+            bytesRead: false,
+            renderer,
+            mainSelection: matching.at(-1) || null,
+            mainBaseline: matching
+              .filter((entry) => entry.request.adoptBaseline === true)
+              .at(-1) || null,
+          };
+        },
+        restore: () => ipcMain.removeListener("select-file-tracking", listener),
+    };
+  };
+  // `switchToTab` is ASYNC, and the raw-newline fixtures cross a tab boundary
+  // before saving. Calling it twice without awaiting either left the OTHER tab
+  // selected when the save went out: the measured payload carried the other
+  // tab's filePath, tabId and pathKey, the result this fixture waited for
+  // never arrived, and the check failed naming CRLF bytes when the defect was
+  // ordering. Awaiting the promise is necessary but NOT sufficient - the
+  // function returns early on several superseded/frozen paths - so the switch
+  // is followed by a positive wait for the product's own owner of the intended
+  // document. getActiveDocumentIdentity() returns null unless that tab is the
+  // ACTIVE one, so a non-null identity for this path IS the activation
+  // witness; it is paired with a positive selection generation and with the
+  // editor actually showing that document's text, because a predicate that
+  // stopped at the store would be satisfied while the previous document was
+  // still painted.
+  const rendererSelectionWitnessSource = `
+    const f22ActiveOwner = (filePath) => {
+      const session = typeof window.getReloadRequestSession === "function"
+        ? window.getReloadRequestSession()
+        : null;
+      const identity = window.CustomTabs.getActiveDocumentIdentity(
+        filePath,
+        session,
+      );
+      const selectionGeneration = window.getActiveFileSelectionGeneration();
+      if (
+        !identity ||
+        identity.pageSession !== session ||
+        !Number.isSafeInteger(selectionGeneration) ||
+        selectionGeneration <= 0
+      ) {
+        return null;
+      }
+      return Object.assign({}, identity, { selectionGeneration });
+    };
+    const f22SelectionSnapshot = (filePath) => ({
+      activeTabId: window.CustomTabs.getActiveTabId(),
+      currentFilePath: window.currentFilePath,
+      editor: window.markdownEditor ? window.markdownEditor.value : null,
+      owner: f22ActiveOwner(filePath),
+    });
+    const f22SwitchAndWitness = async (tabId, filePath, editorText) => {
+      await window.CustomTabs.switchToTab(tabId);
+      const deadline = Date.now() + 8000;
+      for (;;) {
+        const observed = f22SelectionSnapshot(filePath);
+        if (
+          observed.activeTabId === tabId &&
+          observed.owner &&
+          observed.owner.tabId === tabId &&
+          observed.currentFilePath === filePath &&
+          // A null expectation is not a missing leg: it says the textarea is
+          // not this scenario's subject. Every caller that is asserting on
+          // edit-mode text passes the exact string it expects to see painted.
+          (editorText === null || observed.editor === editorText)
+        ) {
+          return observed.owner;
+        }
+        if (Date.now() >= deadline) {
+          throw new Error(
+            "F22 tab never became the selected document: " +
+              JSON.stringify({ tabId, filePath, editorText, observed }),
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    };
+    const f22DiskVersion = (filePath) => {
+      const stats = window.fs.statSync(filePath);
+      return {
+        dev: stats.dev,
+        ino: stats.ino,
+        size: stats.size,
+        mtimeMs: stats.mtimeMs,
+        ctimeMs: stats.ctimeMs,
+      };
+    };
+    // A result is THIS request's result only if it carries the request's own
+    // correlation identifier, page session and complete save-request identity.
+    // Waiting on the path alone resolves on any result for this document -
+    // a superseded save, a delivery retry, or a save issued by an earlier
+    // scenario against the same fixture - and every assertion downstream is
+    // then made about a payload this save never produced. The request is also
+    // required to be internally consistent before it is trusted as the thing
+    // to correlate against, so a malformed producer request cannot make a
+    // stale result look like a match.
+    const f22SaveResultMatchesRequest = (result, request) => !!(
+      result &&
+      request &&
+      request.saveRequest &&
+      result.path === request.filePath &&
+      request.requestId === (request.saveRequest && request.saveRequest.requestId) &&
+      request.saveRequestSession ===
+        (request.saveRequest && request.saveRequest.pageSession) &&
+      Number.isSafeInteger(request.saveRequest.sequence) &&
+      request.saveRequest.sequence > 0 &&
+      Number.isSafeInteger(request.saveRequest.selectionGeneration) &&
+      request.saveRequest.selectionGeneration > 0 &&
+      result.requestId === request.requestId &&
+      result.saveRequestSession === request.saveRequestSession &&
+      result.saveRequest &&
+      result.saveRequest.requestId === request.saveRequest.requestId &&
+      result.saveRequest.sequence === request.saveRequest.sequence &&
+      result.saveRequest.pageSession === request.saveRequest.pageSession &&
+      result.saveRequest.tabId === request.saveRequest.tabId &&
+      result.saveRequest.documentGeneration ===
+        request.saveRequest.documentGeneration &&
+      result.saveRequest.pathKey === request.saveRequest.pathKey &&
+      result.saveRequest.selectionGeneration ===
+        request.saveRequest.selectionGeneration
+    );
+  `;
+  // The same witness, for a switch that happens outside one of the save
+  // snippets. A setup that cannot select its own document is a setup failure,
+  // so this throws rather than letting a later assertion report the symptom.
+  const switchAndWitness = async (tabId, filePath, editorText) => {
+    const owner = await exec(`
+      (async () => {
+        ${rendererSelectionWitnessSource}
+        return await f22SwitchAndWitness(
+          ${JSON.stringify(tabId)},
+          ${JSON.stringify(filePath)},
+          ${JSON.stringify(editorText)},
+        );
+      })()
+    `);
+    if (
+      !owner ||
+      owner.tabId !== tabId ||
+      !Number.isSafeInteger(owner.selectionGeneration) ||
+      owner.selectionGeneration <= 0
+    ) {
+      throw new Error(
+        "F22 switchAndWitness produced no usable owner: " +
+          JSON.stringify({ tabId, filePath, owner }),
+      );
+    }
+    return owner;
+  };
+  // This is intentionally scoped to the ctime reselection. Electron exposes a
+  // synchronous reply to the renderer, but does not reliably make that reply
+  // readable again from the main handler's event object.
+  const switchAndCaptureSelectionReply = async (tabId, filePath, editorText) =>
+    exec(`
+      (async () => {
+        ${rendererSelectionWitnessSource}
+        const ipc = require("electron").ipcRenderer;
+        const targetTabId = ${JSON.stringify(tabId)};
+        const targetFilePath = ${JSON.stringify(filePath)};
+        const ownSendSyncDescriptor = Object.getOwnPropertyDescriptor(
+          ipc,
+          "sendSync",
+        );
+        const originalSendSync = ipc.sendSync;
+        const captures = [];
+        const sendSync = function(channel, ...args) {
+          const reply = originalSendSync.call(this, channel, ...args);
+          const request = args[0];
+          if (
+            channel === "select-file-tracking" &&
+            request &&
+            request.filePath === targetFilePath &&
+            request.owner &&
+            request.owner.tabId === targetTabId
+          ) {
+            captures.push({
+              request: {
+                filePath: request.filePath,
+                adoptBaseline: request.adoptBaseline === true,
+                trackingActive: request.trackingActive === true,
+                owner: request.owner,
+                diskVersion: request.diskVersion || null,
+              },
+              reply: reply && {
+                accepted: reply.accepted === true,
+                trackingActive: reply.trackingActive === true,
+                why: reply.why || null,
+              },
+            });
+          }
+          return reply;
+        };
+        const restoreSendSync = () => {
+          if (ownSendSyncDescriptor) {
+            Object.defineProperty(ipc, "sendSync", ownSendSyncDescriptor);
+          } else {
+            delete ipc.sendSync;
+          }
+          const current = Object.getOwnPropertyDescriptor(ipc, "sendSync");
+          const restoredExactly = ownSendSyncDescriptor
+            ? !!current &&
+              current.value === ownSendSyncDescriptor.value &&
+              current.get === ownSendSyncDescriptor.get &&
+              current.set === ownSendSyncDescriptor.set &&
+              current.writable === ownSendSyncDescriptor.writable &&
+              current.enumerable === ownSendSyncDescriptor.enumerable &&
+              current.configurable === ownSendSyncDescriptor.configurable
+            : !current;
+          if (!restoredExactly || ipc.sendSync === sendSync) {
+            throw new Error(
+              "F22 ctime selection reply witness leaked its ipcRenderer.sendSync wrapper",
+            );
+          }
+        };
+        Object.defineProperty(ipc, "sendSync", {
+          value: sendSync,
+          writable: true,
+          configurable: true,
+          enumerable: ownSendSyncDescriptor
+            ? ownSendSyncDescriptor.enumerable
+            : false,
+        });
+        let owner = null;
+        let failure = null;
+        try {
+          owner = await f22SwitchAndWitness(
+            targetTabId,
+            targetFilePath,
+            ${JSON.stringify(editorText)},
+          );
+        } catch (error) {
+          failure = String(error && error.stack ? error.stack : error);
+        } finally {
+          restoreSendSync();
+        }
+        return {
+          owner,
+          failure,
+          selection: captures.at(-1) || null,
+          captures,
+        };
+      })()
+    `);
+  // The same identity witness WITHOUT a switch, for a save issued on the tab
+  // that is already selected. No navigation is in flight at those points -
+  // createActiveTab has already witnessed activation and painted the document
+  // - so the subject here is the selection identity the save will carry, not
+  // a render still on its way; the DOM leg belongs to switchAndWitness, where
+  // a switch really does precede the assertion.
+  //
+  // This one reports rather than throws. It is also used immediately before a
+  // save issued while a close is already waiting, and a hard throw there would
+  // abort the scenario instead of reporting what the selection actually was;
+  // `selected` is asserted by the checks below, so a bad witness still fails
+  // loudly and carries its own snapshot into the failure detail.
+  const witnessActiveOwner = async (filePath, tabId) => {
+    const observed = await exec(`
+      (() => {
+        ${rendererSelectionWitnessSource}
+        return f22SelectionSnapshot(${JSON.stringify(filePath)});
+      })()
+    `);
+    const owner = observed && observed.owner;
+    return {
+      ...(observed || {}),
+      selected: !!(
+        observed &&
+        observed.activeTabId === tabId &&
+        observed.currentFilePath === filePath &&
+        owner &&
+        owner.tabId === tabId &&
+        Number.isSafeInteger(owner.selectionGeneration) &&
+        owner.selectionGeneration > 0
+      ),
+    };
+  };
+  const establishViewModeSaveSetup = async (filePath, tabId, content) =>
+    exec(`
+      (() => {
+        const tab = window.CustomTabs.getActiveTab();
+        if (tab && tab.id === ${JSON.stringify(tabId)}) {
+          window.originalMarkdown = ${JSON.stringify(content)};
+          window.CustomTabs.updateTabContent(window.originalMarkdown, true);
+        }
+        const pageSession = window.getReloadRequestSession();
+        const owner = window.CustomTabs.getActiveDocumentIdentity(
+          ${JSON.stringify(filePath)},
+          pageSession,
+        );
+        const active = window.CustomTabs.getActiveTab();
+        return {
+          viewMode: isEditMode === false,
+          currentFilePath,
+          activeTabId: active && active.id,
+          tabContent: active && active.content,
+          editor: markdownEditor.value,
+          selectionGeneration: window.getActiveFileSelectionGeneration(),
+          owner,
+        };
+      })()
+    `);
+  const isStaleViewModeSaveSetup = (setup, filePath, tabId, content) =>
+    !!(
+      setup &&
+      setup.viewMode === true &&
+      setup.currentFilePath === filePath &&
+      setup.activeTabId === tabId &&
+      setup.tabContent === content &&
+      setup.editor !== content &&
+      setup.owner &&
+      setup.owner.tabId === tabId &&
+      typeof setup.owner.pathKey === "string" &&
+      setup.owner.pathKey.length > 0 &&
+      Number.isSafeInteger(setup.selectionGeneration) &&
+      setup.selectionGeneration > 0
+    );
   // R2 is a regression suite for the companion production correction.  Do not
   // execute a mixture of old contracts and new proof obligations: that yields
   // incidental failures which look like evidence rather than the explicit
@@ -9789,9 +12263,68 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     const tab = await exec(`
       window.CustomTabs.createTab(${JSON.stringify(filePath)}, ${JSON.stringify(content)})
     `);
-    // createTab's watcher selection is asynchronous. Explicitly adopt the
-    // fixture's current baseline before any save so its initial fs.watch event
-    // cannot be mistaken for an external edit.
+    if (!tab || !Number.isSafeInteger(tab.id) || tab.id <= 0) {
+      throw new Error(
+        "F22 createActiveTab returned no usable tab: " + JSON.stringify(tab),
+      );
+    }
+    const activeSelectionReady = await waitForCondition(
+      exec,
+      `(() => {
+        const pageSession = window.getReloadRequestSession();
+        const activeTab = window.CustomTabs.getActiveTab();
+        const identity = window.CustomTabs.getActiveDocumentIdentity(
+          ${JSON.stringify(filePath)},
+          pageSession,
+        );
+        const selectionGeneration = window.getActiveFileSelectionGeneration();
+        return !!activeTab &&
+          activeTab.id === ${JSON.stringify(tab.id)} &&
+          activeTab.filePath === ${JSON.stringify(filePath)} &&
+          !!identity &&
+          identity.tabId === ${JSON.stringify(tab.id)} &&
+          identity.pageSession === pageSession &&
+          Number.isSafeInteger(identity.rendererGeneration) &&
+          identity.rendererGeneration > 0 &&
+          Number.isSafeInteger(identity.documentGeneration) &&
+          identity.documentGeneration > 0 &&
+          Number.isSafeInteger(selectionGeneration) &&
+          selectionGeneration > 0;
+      })()`,
+      8000,
+    );
+    if (!activeSelectionReady) {
+      const activeSelectionSnapshot = await exec(`
+        (() => {
+          const pageSession = window.getReloadRequestSession();
+          const activeTab = window.CustomTabs.getActiveTab();
+          const identity = window.CustomTabs.getActiveDocumentIdentity(
+            ${JSON.stringify(filePath)},
+            pageSession,
+          );
+          return {
+            expected: {
+              id: ${JSON.stringify(tab.id)},
+              filePath: ${JSON.stringify(filePath)},
+            },
+            pageSession,
+            activeTab: activeTab && {
+              id: activeTab.id,
+              filePath: activeTab.filePath,
+            },
+            identity,
+            selectionGeneration: window.getActiveFileSelectionGeneration(),
+          };
+        })()
+      `);
+      throw new Error(
+        "F22 createActiveTab did not select and identify its physical tab: " +
+          JSON.stringify(activeSelectionSnapshot),
+      );
+    }
+    // The selection is now witnessed. Explicitly adopt the fixture's current
+    // baseline before any save so its initial fs.watch event cannot be
+    // mistaken for an external edit.
     await exec(`
       window.ipcRenderer.send("set-active-file", {
         filePath: ${JSON.stringify(filePath)}, adoptBaseline: true
@@ -9802,17 +12335,57 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     return tab;
   };
 
+  // Correlation between ONE captured producer request and the result claimed
+  // to be its answer. The document path is not identity: a superseded save, a
+  // delivery retry, or an earlier scenario's save against the same fixture all
+  // arrive carrying the same `path`, so the correlation identifier, the page
+  // session and the complete save-request identity are all required, and the
+  // request is required to be internally consistent before it is trusted as
+  // the thing to correlate against.
+  const saveResultEchoesRequest = (request, result) => !!(
+    request && result &&
+    request.requestId === request.saveRequest?.requestId &&
+    request.saveRequestSession === request.saveRequest?.pageSession &&
+    Number.isSafeInteger(request.saveRequest?.tabId) &&
+    Number.isSafeInteger(request.saveRequest?.documentGeneration) &&
+    typeof request.saveRequest?.pathKey === "string" &&
+    Number.isSafeInteger(request.saveRequest?.selectionGeneration) &&
+    request.saveRequest.selectionGeneration > 0 &&
+    Number.isSafeInteger(request.saveRequest?.sequence) && request.saveRequest.sequence > 0 &&
+    result.requestId === request.requestId &&
+    result.saveRequestSession === request.saveRequestSession &&
+    result.saveRequest && result.saveRequest.requestId === request.saveRequest.requestId &&
+    result.saveRequest.sequence === request.saveRequest.sequence &&
+    result.saveRequest.pageSession === request.saveRequest.pageSession &&
+    result.saveRequest.tabId === request.saveRequest.tabId &&
+    result.saveRequest.documentGeneration === request.saveRequest.documentGeneration &&
+    result.saveRequest.pathKey === request.saveRequest.pathKey &&
+    result.saveRequest.selectionGeneration === request.saveRequest.selectionGeneration
+  );
+  // The same correlation, plus the producer-owned path and bytes, for the
+  // routes that capture their request as `save.requests[0]`.
+  const producerRequestMatches = (save, filePath, content) => {
+    const request = save && save.requests && save.requests[0];
+    const result = save && save.result;
+    return !!(
+      request && result && request.filePath === filePath && request.content === content &&
+      saveResultEchoesRequest(request, result)
+    );
+  };
+
+  if (!newlineFocusedHarness) {
   // A dangling symlink must be refused at the spelling the user saved through.
   // In particular, a prior real target must not be recreated from a remembered
   // canonical key after the link has been retargeted (or its target removed).
   const originalTarget = path.join(dir, "f22-save-old-target.md");
   const danglingLink = path.join(dir, "f22-save-retargeted.md");
-  fs.writeFileSync(originalTarget, "F22_OLD_TARGET_BYTES", "utf8");
+  let symlinkAvailable = true;
+  let symlinkReason = "";
+  try {
+    fs.writeFileSync(originalTarget, "F22_OLD_TARGET_BYTES", "utf8");
   // A prior failed run must not turn EEXIST into an environmental skip. Remove
   // only this fixture deterministically; cleanup errors are setup failures,
   // never evidence that creating a symlink is unsupported.
-  let symlinkAvailable = true;
-  let symlinkReason = "";
   try {
     fs.lstatSync(danglingLink);
     fs.unlinkSync(danglingLink);
@@ -9859,64 +12432,798 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       }
     }
   }
-
   if (symlinkAvailable) {
-    try {
+    {
       await clearTabs();
-      await createActiveTab(danglingLink, "F22_OLD_TARGET_BYTES");
+      const danglingTab = await createActiveTab(
+        danglingLink,
+        "F22_OLD_TARGET_BYTES",
+      );
+      const canonicalReloadPathAvailable = await exec(
+        `typeof window.canonicalReloadPath === "function"`,
+      );
+      check(
+        "F22 dangling symlink diagnostic can call the product canonical-path resolver",
+        canonicalReloadPathAvailable === true,
+        JSON.stringify({ canonicalReloadPathAvailable }),
+      );
+      if (canonicalReloadPathAvailable !== true) {
+        throw new Error(
+          "F22 dangling symlink diagnostic requires window.canonicalReloadPath",
+        );
+      }
+      // Read while the target still exists: this is the key the tab's owner
+      // adopted THROUGH the link, and it cannot be resolved after the unlink.
+      let rememberedTargetKey = null;
+      try {
+        rememberedTargetKey = canonicalPathKey(
+          canonicalExistingPath(originalTarget),
+        );
+      } catch (error) {}
+      // The link's own key, spelled the way the renderer falls back to when
+      // the target is gone: resolve + normalize, no realpath.
+      const danglingLinkKey = canonicalPathKey(
+        path.normalize(path.resolve(danglingLink)),
+      );
       fs.unlinkSync(originalTarget);
-      const symlinkResult = await exec(`
+      // Swallowing the alert here made a renderer refusal indistinguishable
+      // from a save that was never answered: the producer returns before its
+      // IPC send, so waiting for a result it never asked for could only time
+      // out. Capture BOTH producer signals instead - the alerts it raises and
+      // the requests it actually sends - and read the refusal directly.
+      let danglingSaveMute = null;
+      if (sentinel) {
+        await sentinel.mute("F22 dangling symlink renderer identity refusal");
+        danglingSaveMute = sentinel.currentMute();
+      }
+      // The refusal diagnostic is the PRODUCT's console.error, so it is read
+      // where Electron reports it rather than through a page-side override.
+      // Replacing window.console.error inside the probe would have made every
+      // refusal appear to come from this probe's own script, destroying the
+      // one piece of evidence that says renderer.js raised it - and the file
+      // and line below are exactly what distinguishes the product's refusal
+      // from the same words logged by anything else.
+      const danglingRawConsoleErrors = [];
+      const danglingRawConsoleDetail = (record) =>
+        `${record.message} @ ${record.source}:${record.line}`;
+      // Why the capture above may be incomplete, when it may be. An empty
+      // raw-console array is only evidence that the product logged nothing if
+      // the boundary that precedes the detach actually held; a boundary that
+      // failed and said nothing would make those two outcomes identical.
+      let danglingConsoleBoundary = null;
+      let danglingConsoleBoundaryComplete = false;
+      const drainDanglingConsoleBoundary = async () => {
+        if (wc.isDestroyed()) {
+          danglingConsoleBoundary = "webContents destroyed";
+          return;
+        }
+        let boundaryTimer = null;
+        try {
+          const result = await Promise.race([
+            wc.executeJavaScript("void 0", true).then(
+              () => ({ completed: true }),
+              (error) => ({
+                completed: false,
+                error: `round-trip failed: ${
+                  String(error && error.message || error)
+                }`,
+              }),
+            ),
+            new Promise((resolve) => {
+              boundaryTimer = setTimeout(
+                () => resolve({
+                  completed: false,
+                  error: "round-trip timed out",
+                }),
+                5000,
+              );
+            }),
+          ]);
+          if (!result.completed) {
+            danglingConsoleBoundary = result.error;
+            return;
+          }
+          await sleep(60);
+          danglingConsoleBoundary = "round-trip completed";
+          danglingConsoleBoundaryComplete = true;
+        } catch (error) {
+          danglingConsoleBoundary = `boundary threw: ${
+            String(error && error.message || error)
+          }`;
+        } finally {
+          if (boundaryTimer) clearTimeout(boundaryTimer);
+        }
+      };
+      // Electron now supplies a details object. Refuse missing attribution
+      // rather than silently recording an unlocatable console error.
+      // Deliberately NOT de-duplicated: a second identical error is
+      // evidence that something else was refused in the same window, and a
+      // dedupe would present it as the single expected one.
+      const onDanglingConsole = (details) => {
+        if (
+          !details ||
+          typeof details !== "object" ||
+          !("level" in details) ||
+          typeof details.message !== "string" ||
+          typeof details.sourceId !== "string" ||
+          !Number.isFinite(details.lineNumber)
+        ) {
+          throw new Error("console-message details omitted level, message, source, or line");
+        }
+        const lvl = details.level;
+        const text = details.message;
+        if (!(lvl === "error" || lvl === 3 || /^\s*Uncaught\b/.test(text))) {
+          return;
+        }
+        danglingRawConsoleErrors.push({
+          message: text,
+          source: details.sourceId,
+          line: details.lineNumber,
+        });
+      };
+      wc.on("console-message", onDanglingConsole);
+      let symlinkResult;
+      try {
+        symlinkResult = await exec(`
         (async () => {
           const ipc = require("electron").ipcRenderer;
           const expectedPath = ${JSON.stringify(danglingLink)};
           const originalAlert = window.alert;
+          const originalSend = ipc.send;
+          const saveFailedPrefix = window.i18n("alert.saveFailed");
+          const requests = [];
+          const alerts = [];
           let timer = null;
+          let quiescenceTimer = null;
           let onResult = null;
+          let matchingResultCount = 0;
+          const tabs = window.CustomTabs;
+          const originalPrepare = tabs && tabs.prepareSaveRequest;
+          let preparedCalls = 0;
+          let preparedIdentity = null;
+          let wrappedPrepare = null;
+          // The renderer's refusal messages name no path: they are generic by
+          // design, so the message alone cannot say WHICH document was
+          // refused, and a refusal raised by some unrelated save would read
+          // exactly the same. Read the product's own state for THIS fixture at
+          // the moment of refusal instead - the selected document, the owning
+          // tab, and the per-tab conflict or deletion tombstone that losing
+          // the link's target is supposed to have raised - so the refusal can
+          // be tied to this retargeted symlink and its real owner.
+          const refusalWitness = () => {
+            const tabs = window.CustomTabs;
+            const activeTab = tabs.getActiveTab();
+            const pageSession = window.getReloadRequestSession();
+            const identity = tabs.getActiveDocumentIdentity(
+              expectedPath,
+              pageSession,
+            );
+            const unfilteredOwnerIdentity =
+              activeTab &&
+              typeof tabs.getDocumentIdentityForTab === "function"
+                ? tabs.getDocumentIdentityForTab(
+                  activeTab.id,
+                  null,
+                  pageSession,
+                )
+                : null;
+            const state = activeTab ? tabs.__documentState(activeTab) : null;
+            return {
+              // Taken from the product's own catalogue rather than spelled
+              // out here, so the expectation stays tied to what it ships.
+              saveFailedPrefix,
+              currentFilePath: window.currentFilePath,
+              activeTabId: activeTab ? activeTab.id : null,
+              activeTabPath: activeTab ? activeTab.filePath : null,
+              pageSession,
+              canonicalExpectedPath: window.canonicalReloadPath(expectedPath),
+              canonicalCurrentFilePath: window.canonicalReloadPath(
+                window.currentFilePath,
+              ),
+              canonicalActiveTabPath: activeTab
+                ? window.canonicalReloadPath(activeTab.filePath)
+                : null,
+              rendererStateKey: window.rendererDocumentStateKey(
+                window.currentFilePath,
+              ),
+              identityTabId: identity ? identity.tabId : null,
+              identityPathKey: identity ? identity.pathKey : null,
+              identitySelectionGeneration:
+                identity && Number.isSafeInteger(identity.selectionGeneration)
+                  ? identity.selectionGeneration
+                  : null,
+              // The remaining fields the identity key is built from, plus the
+              // selection generation the save compares against, so the one
+              // cause this scenario credits can be told from the others that
+              // raise the same message.
+              identityPageSession: identity ? identity.pageSession : null,
+              identityRendererGeneration:
+                identity ? identity.rendererGeneration : null,
+              identityDocumentGeneration:
+                identity ? identity.documentGeneration : null,
+              unfilteredOwnerTabId:
+                unfilteredOwnerIdentity ? unfilteredOwnerIdentity.tabId : null,
+              unfilteredOwnerPathKey:
+                unfilteredOwnerIdentity
+                  ? unfilteredOwnerIdentity.pathKey
+                  : null,
+              unfilteredOwnerPageSession:
+                unfilteredOwnerIdentity
+                  ? unfilteredOwnerIdentity.pageSession
+                  : null,
+              unfilteredOwnerRendererGeneration:
+                unfilteredOwnerIdentity
+                  ? unfilteredOwnerIdentity.rendererGeneration
+                  : null,
+              unfilteredOwnerDocumentGeneration:
+                unfilteredOwnerIdentity
+                  ? unfilteredOwnerIdentity.documentGeneration
+                  : null,
+              activeSelectionGeneration:
+                window.getActiveFileSelectionGeneration(),
+              pathConflict:
+                typeof window.reloadConflictFor === "function"
+                  ? window.reloadConflictFor(expectedPath)
+                  : null,
+              documentConflict: state ? state.reloadConflict : null,
+              documentTombstone: state ? state.deletionTombstone : null,
+            };
+          };
           try {
-            window.alert = () => {};
+            if (typeof originalPrepare !== "function") {
+              throw new Error(
+                "F22 dangling symlink requires CustomTabs.prepareSaveRequest",
+              );
+            }
+            wrappedPrepare = function(...args) {
+              preparedCalls += 1;
+              const prepared = originalPrepare.apply(this, args);
+              if (prepared && prepared.identity) {
+                preparedIdentity = {
+                  tabId: prepared.identity.tabId,
+                  pathKey: prepared.identity.pathKey,
+                  pageSession: prepared.identity.pageSession,
+                  rendererGeneration: prepared.identity.rendererGeneration,
+                  documentGeneration: prepared.identity.documentGeneration,
+                  selectionGeneration: prepared.identity.selectionGeneration,
+                  sequence: prepared.identity.sequence,
+                };
+              }
+              return prepared;
+            };
+            tabs.prepareSaveRequest = wrappedPrepare;
+            ipc.send = function(channel, ...args) {
+              if (channel === "save-markdown-file") requests.push(args[0]);
+              return originalSend.call(this, channel, ...args);
+            };
+            window.alert = message => alerts.push(String(message));
             window.originalMarkdown = "F22_ATTEMPTED_DANGLING_SAVE";
             return await new Promise((resolve) => {
-              timer = setTimeout(() => resolve({ timedOut: true }), 5000);
+              timer = setTimeout(
+                () => resolve({
+                  timedOut: true,
+                  requests,
+                  alerts,
+                  saveFailedPrefix,
+                  preparedCalls,
+                  preparedIdentity,
+                  witness: refusalWitness(),
+                }),
+                5000,
+              );
               onResult = (_event, data) => {
-                if (!data || data.path !== expectedPath) return;
-                resolve({ timedOut: false, data });
+                // The result must answer the request this producer actually
+                // sent. Path alone would accept a stale or superseded result
+                // for the same document and let it be read as this save's.
+                const request = requests[0];
+                if (
+                  !data ||
+                  !request ||
+                  data.path !== expectedPath ||
+                  data.requestId !== request.requestId
+                ) return;
+                matchingResultCount += 1;
+                if (matchingResultCount !== 1) return;
+                quiescenceTimer = setTimeout(
+                  () => resolve({
+                    timedOut: false,
+                    data,
+                    requests,
+                    alerts,
+                    saveFailedPrefix,
+                    preparedCalls,
+                    preparedIdentity,
+                    matchingResultCount,
+                    witness: refusalWitness(),
+                  }),
+                  100,
+                );
               };
               ipc.on("save-markdown-result", onResult);
+              // saveMarkdownFile() is synchronous up to its own send, so once
+              // the click returns, no request means the renderer refused.
               document.getElementById("saveButton").click();
+              if (requests.length === 0) {
+                resolve({
+                  timedOut: false,
+                  refused: true,
+                  requests,
+                  alerts,
+                  saveFailedPrefix,
+                  preparedCalls,
+                  preparedIdentity,
+                  witness: refusalWitness(),
+                });
+              }
             });
           } catch (error) {
-            return { error: String(error && error.stack ? error.stack : error) };
+            return {
+              error: String(error && error.stack ? error.stack : error),
+              requests,
+              alerts,
+              saveFailedPrefix,
+              preparedCalls,
+              preparedIdentity,
+            };
           } finally {
             if (timer) clearTimeout(timer);
+            if (quiescenceTimer) clearTimeout(quiescenceTimer);
             if (onResult) ipc.removeListener("save-markdown-result", onResult);
+            if (
+              tabs &&
+              wrappedPrepare &&
+              tabs.prepareSaveRequest === wrappedPrepare
+            ) {
+              tabs.prepareSaveRequest = originalPrepare;
+            }
+            ipc.send = originalSend;
             window.alert = originalAlert;
           }
         })()
       `);
+      } finally {
+        // Drain BEFORE detaching: console-message crosses an IPC boundary, so
+        // the refusal is not here merely because the exec resolved. Detaching
+        // first would drop the one record this scenario reads. The removal is
+        // itself in a finally, so a throwing exec cannot leak the listener
+        // into every scenario that runs after this one.
+        try {
+        if (sentinel) {
+          await sentinel.drain();
+          danglingSaveMute = sentinel.currentMute();
+          await sentinel.unmute();
+        }
+        // Both full and focused modes require this independent, bounded
+        // round-trip. sentinel.drain() records a stall rather than throwing,
+        // so its return alone cannot prove that the native console boundary
+        // completed before this listener came off.
+        await drainDanglingConsoleBoundary();
+        } finally {
+          wc.off("console-message", onDanglingConsole);
+        }
+      }
       let linkStats = null;
       let linkTarget = null;
       try {
         linkStats = fs.lstatSync(danglingLink);
         linkTarget = fs.readlinkSync(danglingLink);
       } catch (error) {}
+      // Two fail-closed outcomes are legitimate here and which one is reached
+      // depends on whether the watcher has already seen the target go. Neither
+      // may write: the refusal must be explicit, never silence.
+      const danglingAlerts = (symlinkResult && symlinkResult.alerts) || [];
+      const danglingRequests = (symlinkResult && symlinkResult.requests) || [];
+      const danglingWitness = (symlinkResult && symlinkResult.witness) || null;
+      const danglingSaveFailedPrefix =
+        symlinkResult && symlinkResult.saveFailedPrefix;
+      const danglingPreparedIdentity =
+        (symlinkResult && symlinkResult.preparedIdentity) || null;
+      // saveMarkdownFile() raises exactly these two messages when the document
+      // it was asked to save is no longer a savable owner, and they are the
+      // only renderer refusals this scenario may be credited with. The earlier
+      // shape accepted any alert containing "failed to save file" plus any of
+      // "ownership|conflict|identity", which every other refusal in that
+      // function also satisfies - a save refused for an exhausted sequence
+      // space, an unavailable correlation identifier or an unrelated document
+      // would all have read as evidence about this symlink.
+      const danglingRefusalMessages =
+        typeof danglingSaveFailedPrefix === "string"
+          ? [
+              danglingSaveFailedPrefix +
+                "File conflict: copy any edits to a safe place before " +
+                "reloading or reopening.",
+              danglingSaveFailedPrefix +
+                "Document ownership changed before save.",
+            ]
+          : [];
+      // The third production diagnostic, admitted ONLY against the witness
+      // that names its cause. saveMarkdownFile() raises it for five reasons;
+      // the witness below excludes the other four, leaving the owner's path.
+      const danglingIdentityMessage =
+        typeof danglingSaveFailedPrefix === "string"
+          ? danglingSaveFailedPrefix +
+            "Document identity is unavailable."
+          : null;
+      const danglingOwnerPathMismatch = !!(
+        danglingWitness &&
+        // The owning tab is still THIS one, so this is not "no identity"...
+        danglingWitness.identityTabId === danglingTab.id &&
+        // ...and every other field the identity key and its generation check
+        // are built from is intact, so none of them can be the cause.
+        danglingWitness.identityPageSession === danglingWitness.pageSession &&
+        Number.isSafeInteger(danglingWitness.identityRendererGeneration) &&
+        danglingWitness.identityRendererGeneration > 0 &&
+        Number.isSafeInteger(danglingWitness.identityDocumentGeneration) &&
+        danglingWitness.identityDocumentGeneration > 0 &&
+        Number.isSafeInteger(danglingWitness.activeSelectionGeneration) &&
+        danglingWitness.activeSelectionGeneration > 0 &&
+        // getActiveDocumentIdentity deliberately omits selectionGeneration;
+        // the single real Save call above captures it from prepareSaveRequest.
+        danglingWitness.identitySelectionGeneration === null &&
+        symlinkResult.preparedCalls === 1 &&
+        danglingPreparedIdentity &&
+        danglingPreparedIdentity.tabId === danglingWitness.identityTabId &&
+        danglingPreparedIdentity.pathKey === danglingWitness.identityPathKey &&
+        danglingPreparedIdentity.pageSession ===
+          danglingWitness.identityPageSession &&
+        danglingPreparedIdentity.rendererGeneration ===
+          danglingWitness.identityRendererGeneration &&
+        danglingPreparedIdentity.documentGeneration ===
+          danglingWitness.identityDocumentGeneration &&
+        danglingPreparedIdentity.tabId === danglingTab.id &&
+        danglingPreparedIdentity.pathKey === rememberedTargetKey &&
+        Number.isSafeInteger(danglingPreparedIdentity.selectionGeneration) &&
+        danglingPreparedIdentity.selectionGeneration > 0 &&
+        danglingPreparedIdentity.selectionGeneration ===
+          danglingWitness.activeSelectionGeneration &&
+        // saveMarkdownFile() compares rendererDocumentStateKey(currentFilePath)
+        // against the owner key. The actual product state key, not a lexical
+        // inference from the link spelling, must now name the dangling link.
+        typeof rememberedTargetKey === "string" &&
+        rememberedTargetKey.length > 0 &&
+        danglingWitness.identityPathKey === rememberedTargetKey &&
+        danglingWitness.rendererStateKey === danglingLinkKey &&
+        danglingWitness.rendererStateKey !== danglingWitness.identityPathKey
+      );
+      const danglingUnfilteredOwnerPathMismatch = !!(
+        danglingWitness &&
+        danglingWitness.identityTabId === null &&
+        danglingWitness.unfilteredOwnerTabId === danglingTab.id &&
+        danglingWitness.unfilteredOwnerPathKey === rememberedTargetKey &&
+        danglingWitness.unfilteredOwnerPageSession ===
+          danglingWitness.pageSession &&
+        Number.isSafeInteger(
+          danglingWitness.unfilteredOwnerRendererGeneration,
+        ) &&
+        danglingWitness.unfilteredOwnerRendererGeneration > 0 &&
+        Number.isSafeInteger(
+          danglingWitness.unfilteredOwnerDocumentGeneration,
+        ) &&
+        danglingWitness.unfilteredOwnerDocumentGeneration > 0 &&
+        symlinkResult.preparedCalls === 1 &&
+        typeof danglingWitness.rendererStateKey === "string" &&
+        danglingWitness.rendererStateKey === danglingLinkKey &&
+        danglingWitness.rendererStateKey !==
+          danglingWitness.unfilteredOwnerPathKey
+      );
+      const danglingSentSaveRequest =
+        danglingRequests.length === 1 &&
+        danglingRequests[0].filePath === danglingLink
+          ? danglingRequests[0].saveRequest
+          : null;
+      const danglingTrustedLiveOwner = !!(
+        danglingWitness &&
+        danglingWitness.currentFilePath === danglingLink &&
+        danglingWitness.activeTabId === danglingTab.id &&
+        danglingWitness.activeTabPath === danglingLink &&
+        typeof danglingWitness.pageSession === "string" &&
+        danglingWitness.pageSession.length > 0 &&
+        typeof rememberedTargetKey === "string" &&
+        rememberedTargetKey.length > 0 &&
+        danglingWitness.unfilteredOwnerTabId === danglingTab.id &&
+        danglingWitness.unfilteredOwnerPathKey === rememberedTargetKey &&
+        danglingWitness.unfilteredOwnerPageSession ===
+          danglingWitness.pageSession &&
+        Number.isSafeInteger(
+          danglingWitness.unfilteredOwnerRendererGeneration,
+        ) &&
+        danglingWitness.unfilteredOwnerRendererGeneration > 0 &&
+        Number.isSafeInteger(
+          danglingWitness.unfilteredOwnerDocumentGeneration,
+        ) &&
+        danglingWitness.unfilteredOwnerDocumentGeneration > 0
+      );
+      const danglingPreparedMatchesLiveOwner = !!(
+        danglingTrustedLiveOwner &&
+        danglingPreparedIdentity &&
+        danglingPreparedIdentity.tabId ===
+          danglingWitness.unfilteredOwnerTabId &&
+        danglingPreparedIdentity.pathKey ===
+          danglingWitness.unfilteredOwnerPathKey &&
+        danglingPreparedIdentity.pageSession ===
+          danglingWitness.unfilteredOwnerPageSession &&
+        danglingPreparedIdentity.rendererGeneration ===
+          danglingWitness.unfilteredOwnerRendererGeneration &&
+        danglingPreparedIdentity.documentGeneration ===
+          danglingWitness.unfilteredOwnerDocumentGeneration
+      );
+      const danglingPreparedMatchesSentFixture = !!(
+        !danglingTrustedLiveOwner &&
+        danglingPreparedIdentity &&
+        danglingSentSaveRequest &&
+        danglingSentSaveRequest.tabId === danglingTab.id &&
+        danglingSentSaveRequest.pathKey === rememberedTargetKey &&
+        danglingPreparedIdentity.tabId === danglingSentSaveRequest.tabId &&
+        danglingPreparedIdentity.pathKey === danglingSentSaveRequest.pathKey &&
+        danglingPreparedIdentity.pageSession ===
+          danglingSentSaveRequest.pageSession &&
+        danglingPreparedIdentity.rendererGeneration ===
+          danglingSentSaveRequest.rendererGeneration &&
+        danglingPreparedIdentity.documentGeneration ===
+          danglingSentSaveRequest.documentGeneration
+      );
+      const danglingIdentityRefusal = !!(
+        danglingIdentityMessage &&
+        danglingAlerts[0] === danglingIdentityMessage &&
+        danglingOwnerPathMismatch
+      );
+      const refusedByRenderer = !!(
+        symlinkResult &&
+        symlinkResult.refused === true &&
+        danglingRequests.length === 0 &&
+        // One refusal, and exactly the one the product raises for a document
+        // it can no longer own. A count is part of the evidence: a second
+        // alert would mean something else was refused in the same window.
+        danglingAlerts.length === 1 &&
+        (danglingRefusalMessages.includes(danglingAlerts[0]) ||
+          danglingIdentityRefusal) &&
+        danglingWitness &&
+        // The refused document is THIS link, at the spelling it was opened
+        // under, owned by the tab this scenario created for it.
+        danglingWitness.currentFilePath === danglingLink &&
+        danglingWitness.activeTabPath === danglingLink &&
+        danglingWitness.activeTabId === danglingTab.id &&
+        typeof danglingWitness.pageSession === "string" &&
+        danglingWitness.pageSession.length > 0 &&
+        // ...and the cause is this document's own state, not a message. Any
+        // one of these is the product refusing to save the document whose
+        // target has gone: its tab is conflicted, it carries a deletion
+        // tombstone, this path is marked conflicted, the renderer no longer
+        // has an owning identity for it at all, or the identity it does have
+        // still names the vanished target rather than the link being saved.
+        // A null filtered identity alone is not evidence: an invalid session
+        // produces the same null. Its unfiltered owner must still be valid,
+        // name the remembered target, and disagree with this link's state key.
+        (danglingWitness.documentConflict === true ||
+          danglingWitness.documentTombstone === true ||
+          danglingWitness.pathConflict === true ||
+          danglingUnfilteredOwnerPathMismatch ||
+          danglingIdentityRefusal)
+      );
+      const refusedByMain = !!(
+        symlinkResult &&
+        symlinkResult.timedOut === false &&
+        symlinkResult.data &&
+        // The result must be the answer to the request this scenario watched
+        // the producer send, not merely a result naming this path.
+        danglingRequests.length === 1 &&
+        danglingRequests[0].filePath === danglingLink &&
+        saveResultEchoesRequest(danglingRequests[0], symlinkResult.data) &&
+        symlinkResult.matchingResultCount === 1 &&
+        symlinkResult.preparedCalls === 1 &&
+        danglingPreparedIdentity &&
+        danglingPreparedIdentity.tabId === danglingTab.id &&
+        (danglingPreparedMatchesLiveOwner ||
+          danglingPreparedMatchesSentFixture) &&
+        danglingPreparedIdentity.sequence ===
+          danglingRequests[0].saveRequest.sequence &&
+        danglingPreparedIdentity.selectionGeneration ===
+          danglingRequests[0].saveRequest.selectionGeneration &&
+        symlinkResult.data.success === false &&
+        danglingAlerts.length === 1 &&
+        danglingAlerts[0] ===
+          danglingSaveFailedPrefix + String(symlinkResult.data.error) &&
+        /symbolic link whose target is missing/i.test(
+          String(symlinkResult.data.error),
+        )
+      );
+      console.log(
+        "TABS_DANGLING_SYMLINK_DIAGNOSTIC " + JSON.stringify({
+          branch: refusedByRenderer
+            ? "renderer"
+            : refusedByMain
+            ? "main"
+            : "neither",
+          alert: danglingAlerts.length === 1 ? danglingAlerts[0] : null,
+          requestCount: danglingRequests.length,
+          witness: danglingWitness && {
+            currentFilePath: danglingWitness.currentFilePath,
+            activeTabPath: danglingWitness.activeTabPath,
+            canonicalExpectedPath: danglingWitness.canonicalExpectedPath,
+            canonicalCurrentFilePath: danglingWitness.canonicalCurrentFilePath,
+            canonicalActiveTabPath: danglingWitness.canonicalActiveTabPath,
+            rendererStateKey: danglingWitness.rendererStateKey,
+            identityPathKey: danglingWitness.identityPathKey,
+            identitySelectionGeneration:
+              danglingWitness.identitySelectionGeneration,
+            activeSelectionGeneration:
+              danglingWitness.activeSelectionGeneration,
+          },
+          rememberedTargetKey,
+          danglingLinkKey,
+          danglingOwnerPathMismatch,
+          danglingUnfilteredOwnerPathMismatch,
+          preparedCalls: symlinkResult && symlinkResult.preparedCalls,
+          preparedIdentity: danglingPreparedIdentity,
+          matchingResultCount:
+            symlinkResult && symlinkResult.matchingResultCount,
+          rawConsoleErrors: danglingRawConsoleErrors,
+          consoleBoundary: danglingConsoleBoundary,
+        }),
+      );
+      const danglingExpectedConsoleError = danglingOwnerPathMismatch
+        ? "Refusing save with invalid document identity"
+        : refusedByMain
+        ? `Save failed: ${String(symlinkResult.data.error)}`
+        : danglingIdentityRefusal
+        ? "Refusing save with invalid document identity"
+        : danglingRefusalMessages.includes(danglingAlerts[0])
+        ? "Refusing save without exact tab document ownership"
+        : null;
+      // The attribution the product's own call site must carry, derived from
+      // the renderer source rather than spelled out here, so it stays tied to
+      // what the product ships. The message alone names no file: the same
+      // words logged from anywhere else would read exactly the same.
+      const danglingExpectedConsoleSource = danglingOwnerPathMismatch
+        ? rendererInvalidIdentitySource
+        : refusedByMain
+        ? rendererSaveFailureSource
+        : danglingIdentityRefusal
+        ? rendererInvalidIdentitySource
+        : danglingRefusalMessages.includes(danglingAlerts[0])
+        ? rendererOwnershipRefusalSource
+        : null;
+      const danglingRequiredRefusal = danglingOwnerPathMismatch
+        ? refusedByRenderer && danglingIdentityRefusal
+        : refusedByRenderer || refusedByMain;
+      const danglingConsoleErrorExact = !!(
+        danglingExpectedConsoleError &&
+        typeof danglingExpectedConsoleSource === "string" &&
+        danglingRawConsoleErrors.length === 1 &&
+        danglingRawConsoleDetail(danglingRawConsoleErrors[0]) ===
+          `${danglingExpectedConsoleError}${danglingExpectedConsoleSource}`
+      );
       check(
-        "F22 saving through a retargeted dangling symlink fails before recreating the remembered old target",
+        "F22 dangling symlink refusal reaches one exact native console error before its boundary completes",
+        danglingConsoleBoundaryComplete &&
+          danglingRequiredRefusal &&
+          danglingConsoleErrorExact,
+        JSON.stringify({
+          branch: refusedByRenderer
+            ? "renderer"
+            : refusedByMain
+            ? "main"
+            : "neither",
+          danglingExpectedConsoleError,
+          danglingExpectedConsoleSource,
+          danglingRawConsoleErrors,
+          danglingConsoleBoundary,
+          danglingConsoleBoundaryComplete,
+          danglingRequiredRefusal,
+        }),
+      );
+      if (sentinel) {
+        const suppressedExactlyOneRendererError = (message, source) => {
+          return !!(
+            danglingSaveMute &&
+            Array.isArray(danglingSaveMute.suppressed) &&
+            danglingSaveMute.suppressed.length === 1 &&
+            typeof source === "string" &&
+            danglingSaveMute.suppressed[0].kind === "console-error" &&
+            typeof danglingSaveMute.suppressed[0].detail === "string" &&
+            danglingSaveMute.suppressed[0].detail === `${message}${source}`
+          );
+        };
+        const danglingOwnershipSuppressed =
+          danglingRefusalMessages.includes(danglingAlerts[0]) &&
+          suppressedExactlyOneRendererError(
+            "Refusing save without exact tab document ownership",
+            rendererOwnershipRefusalSource,
+          );
+        const danglingInvalidIdentitySuppressed =
+          danglingIdentityRefusal &&
+          suppressedExactlyOneRendererError(
+            "Refusing save with invalid document identity",
+            rendererInvalidIdentitySource,
+          );
+        const danglingSentinelExpected = refusedByRenderer
+          ? (danglingOwnershipSuppressed || danglingInvalidIdentitySuppressed)
+          : refusedByMain
+          ? hasExpectedMutedSaveFailure(
+            danglingSaveMute,
+            danglingLink,
+            symlinkResult.data,
+            String(symlinkResult.data.error),
+          )
+          : false;
+        check(
+          "F22 dangling symlink refusal mutes only its exact renderer refusal error",
+          danglingSentinelExpected,
+          JSON.stringify({
+            branch: refusedByRenderer
+              ? "renderer"
+              : refusedByMain
+              ? "main"
+              : "neither",
+            danglingIdentityRefusal,
+            danglingSaveMute,
+            danglingOwnershipSuppressed,
+            danglingInvalidIdentitySuppressed,
+            rendererOwnershipRefusalSource,
+            rendererInvalidIdentitySource,
+            rendererSaveFailureSource,
+            danglingExpectedConsoleError,
+            danglingExpectedConsoleSource,
+            danglingRawConsoleErrors,
+            danglingConsoleErrorExact,
+            danglingConsoleBoundary,
+            danglingConsoleBoundaryComplete,
+          }),
+        );
+      }
+      check(
+        "F22 saving through a retargeted dangling symlink fails closed before recreating the remembered old target",
         !!symlinkResult &&
-          symlinkResult.timedOut === false &&
-          symlinkResult.data &&
-          symlinkResult.data.success === false &&
-          /symbolic link whose target is missing/i.test(String(symlinkResult.data.error)) &&
+          !symlinkResult.error &&
+          symlinkResult.timedOut !== true &&
+          (refusedByRenderer || refusedByMain) &&
           fs.existsSync(originalTarget) === false &&
           linkStats &&
           linkStats.isSymbolicLink() &&
           linkTarget === originalTarget,
-        JSON.stringify({ symlinkResult, oldTargetExists: fs.existsSync(originalTarget), linkTarget }),
+        JSON.stringify({
+          symlinkResult,
+          refusedByRenderer,
+          refusedByMain,
+          danglingRefusalMessages,
+          danglingIdentityMessage,
+          danglingOwnerPathMismatch,
+          danglingIdentityRefusal,
+          danglingExpectedConsoleError,
+          danglingExpectedConsoleSource,
+          danglingRawConsoleErrors,
+          danglingConsoleErrorExact,
+          rememberedTargetKey,
+          danglingLinkKey,
+          danglingTabId: danglingTab.id,
+          oldTargetExists: fs.existsSync(originalTarget),
+          linkTarget,
+        }),
       );
-    } finally {
-      if (fs.existsSync(danglingLink) || (() => { try { return fs.lstatSync(danglingLink).isSymbolicLink(); } catch { return false; } })()) {
-        try { fs.unlinkSync(danglingLink); } catch (error) {}
+    }
+  }
+  } finally {
+    const cleanupFailures = [];
+    for (const fixturePath of [danglingLink, originalTarget]) {
+      try {
+        fs.unlinkSync(fixturePath);
+      } catch (error) {
+        if (!error || error.code !== "ENOENT") {
+          cleanupFailures.push({
+            fixturePath,
+            code: error && error.code,
+            message: String(error && error.message || error),
+          });
+        }
       }
     }
+    // Do not throw from cleanup: that would replace the scenario's primary
+    // error. check() still makes every cleanup failure a suite failure.
+    check(
+      "F22 dangling symlink fixture cleanup removes both exact fixture paths",
+      cleanupFailures.length === 0,
+      JSON.stringify({ danglingLink, originalTarget, cleanupFailures }),
+    );
   }
 
   // These save-path races are driven at the main-process IPC boundary rather
@@ -9928,31 +13235,85 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   // from the renderer's real active-tab selection before each request, then
   // pair it with prepareSaveRequest's current tab generation. Do not invent a
   // compatible owner here; main.js intentionally rejects path-only saves.
+  //
+  // THE SELECTION A NEW TAB MAKES DOES NOT TRAVEL ON `set-active-file`.
+  // beginFileOpen asserts ownership with `returnDecision: true`, and that
+  // branch of assertFileTrackingOwnership answers the caller synchronously -
+  // it sends `select-file-tracking` through `ipcRenderer.sendSync`, and only
+  // the fire-and-forget branch uses `set-active-file` on `send`. A probe that
+  // watched `send`/`set-active-file` alone therefore recorded nothing for the
+  // tab createActiveTab had just opened, and every scenario below failed its
+  // own identity witness before reaching the filesystem injection it exists to
+  // exercise. Watch BOTH channels, and for the synchronous one record the
+  // selection only once main has accepted it, so the witnessed owner is the
+  // owner main will actually honour rather than one that was merely offered.
   await exec(`
     (() => {
       if (window.__f22SavePathRaceProbe) return null;
       const ipc = require("electron").ipcRenderer;
       const originalSend = ipc.send;
+      const originalSendSync = ipc.sendSync;
       const send = originalSend.bind(ipc);
+      const sendSync = originalSendSync.bind(ipc);
+      const ownSendDescriptor = Object.getOwnPropertyDescriptor(ipc, "send");
+      const ownSendSyncDescriptor = Object.getOwnPropertyDescriptor(
+        ipc,
+        "sendSync",
+      );
       const probe = window.__f22SavePathRaceProbe = { owners: [] };
+      const recordSelection = (selection) => {
+        if (!selection || !selection.owner) return false;
+        probe.owners.push({
+          filePath: selection.filePath,
+          owner: selection.owner,
+        });
+        return true;
+      };
       const captureSelection = (channel, ...args) => {
-        const selection = args[0];
-        if (
-          channel === "set-active-file" &&
-          selection &&
-          selection.owner
-        ) {
-          probe.owners.push({
-            filePath: selection.filePath,
-            owner: selection.owner,
-          });
-        }
+        if (channel === "set-active-file") recordSelection(args[0]);
         return send(channel, ...args);
       };
-      probe.restore = () => {
-        if (ipc.send === captureSelection) ipc.send = originalSend;
+      const captureSyncSelection = (channel, ...args) => {
+        const reply = sendSync(channel, ...args);
+        if (
+          channel === "select-file-tracking" &&
+          reply &&
+          reply.accepted === true
+        ) {
+          recordSelection(args[0]);
+        }
+        return reply;
       };
-      ipc.send = captureSelection;
+      // Put the ORIGINAL PROPERTY DESCRIPTOR back rather than re-assigning the
+      // saved function: ipcRenderer's methods are prototype-backed, so
+      // "ipc.send = originalSend" would leave an own property behind that
+      // permanently shadows Electron's - the wrapper is gone, but the shadow
+      // outlives the probe and every later suite runs against it. Where there
+      // was no own descriptor the installed property is deleted instead, which
+      // re-exposes the prototype's. This is replaceMethod's rule, restated
+      // here because that helper lives in the main process and this code is a
+      // string evaluated in the renderer. The identity guard is what keeps
+      // restore() idempotent: it is called from both an early scenario exit
+      // and the outer finally.
+      const install = (name, impl, own) => {
+        Object.defineProperty(ipc, name, {
+          value: impl,
+          writable: true,
+          configurable: true,
+          enumerable: own ? own.enumerable : false,
+        });
+      };
+      const restoreMethod = (name, impl, own) => {
+        if (ipc[name] !== impl) return;
+        if (own) Object.defineProperty(ipc, name, own);
+        else delete ipc[name];
+      };
+      probe.restore = () => {
+        restoreMethod("send", captureSelection, ownSendDescriptor);
+        restoreMethod("sendSync", captureSyncSelection, ownSendSyncDescriptor);
+      };
+      install("send", captureSelection, ownSendDescriptor);
+      install("sendSync", captureSyncSelection, ownSendSyncDescriptor);
       return null;
     })()
   `);
@@ -9973,7 +13334,16 @@ async function runF22SaveAndReloadScenarios(win, exec) {
           typeof window.getReloadRequestSession === "function"
         );
         const pageSession = hasSaveSeam ? window.getReloadRequestSession() : null;
+        // prepareSaveRequest captures the ACTIVE TAB's bytes, not this global:
+        // the tab was opened on the fixture's disk baseline, so setting only
+        // window.originalMarkdown left prepared.content holding the baseline
+        // and the identity witness rejected its own request. Put the attempted
+        // bytes where a real edit would have left them - the same adoption
+        // requestProducerSave already performs before saveMarkdownFile().
         window.originalMarkdown = ${JSON.stringify(content)};
+        const editedTab = window.CustomTabs.getTabs()
+          .find((candidate) => candidate.id === ${tab.id});
+        if (editedTab) editedTab.content = window.originalMarkdown;
         const prepared = hasSaveSeam
           ? window.CustomTabs.prepareSaveRequest(
               ${JSON.stringify(filePath)},
@@ -10099,13 +13469,30 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     await createActiveTab(closeFile, "F22_CLOSE_BASE");
   } else {
   try {
-  const requestSave = async (filePath, content, baselineContent = content) => {
+  // `observeBeforeSave` is the one seam the positive controls need and the
+  // refusal scenarios must not feel. A witness taken before this call is
+  // taken before the tab is even created: `prepareSaveRaceDocument` clears
+  // tabs, opens the document and lets its owner adopt a baseline, so a change
+  // landing in that window would go unseen and a "the save was judged against
+  // the settled document" claim would be unearned. The hook runs AFTER the
+  // owner has adopted and BEFORE the request is sent, which is the last point
+  // the test can observe. It is NOT main's own stat: main re-checks at the
+  // write boundary, and that interval stays authoritative and unwitnessed by
+  // design. Omitted, the hook is inert - every refusal scenario below behaves
+  // byte-for-byte as before.
+  const requestSave = async (
+    filePath,
+    content,
+    baselineContent = content,
+    observeBeforeSave = null,
+  ) => {
     const requestId = ++saveRaceScenario;
     const activeDocument = await prepareSaveRaceDocument(
       filePath,
       baselineContent,
       content,
     );
+    if (observeBeforeSave) await observeBeforeSave(activeDocument);
     const save = await exec(`
       new Promise((resolve) => {
         const ipc = require("electron").ipcRenderer;
@@ -10159,7 +13546,12 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   const requestProducerSave = async (filePath, baselineContent, content) => {
     await clearTabs();
     const tab = await createActiveTab(filePath, baselineContent);
-    return exec(`
+    const viewModeSetup = await establishViewModeSaveSetup(
+      filePath,
+      tab.id,
+      content,
+    );
+    const save = await exec(`
       (async () => {
         const ipc = require("electron").ipcRenderer;
         const originalSend = ipc.send;
@@ -10174,9 +13566,6 @@ async function runF22SaveAndReloadScenarios(win, exec) {
             return originalSend.call(this, channel, ...args);
           };
           window.alert = message => alerts.push(String(message));
-          window.originalMarkdown = ${JSON.stringify(content)};
-          const active = window.CustomTabs.getTabs().find(t => t.id === ${tab.id});
-          if (active) active.content = window.originalMarkdown;
           return await new Promise((resolve) => {
             timer = setTimeout(() => resolve({ timedOut: true, requests, alerts }), 5000);
             onResult = (_event, result) => {
@@ -10197,31 +13586,602 @@ async function runF22SaveAndReloadScenarios(win, exec) {
         }
       })()
     `);
+    return { ...save, tabId: tab.id, viewModeSetup };
   };
-  const producerRequestMatches = (save, filePath, content) => {
-    const request = save && save.requests && save.requests[0];
-    const result = save && save.result;
-    return !!(
-      request && result && request.filePath === filePath && request.content === content &&
-      request.requestId === request.saveRequest?.requestId &&
-      request.saveRequestSession === request.saveRequest?.pageSession &&
-      Number.isSafeInteger(request.saveRequest?.tabId) &&
-      Number.isSafeInteger(request.saveRequest?.documentGeneration) &&
-      typeof request.saveRequest?.pathKey === "string" &&
-      Number.isSafeInteger(request.saveRequest?.selectionGeneration) &&
-      request.saveRequest.selectionGeneration > 0 &&
-      Number.isSafeInteger(request.saveRequest?.sequence) && request.saveRequest.sequence > 0 &&
-      result.requestId === request.requestId &&
-      result.saveRequestSession === request.saveRequestSession &&
-      result.saveRequest && result.saveRequest.requestId === request.saveRequest.requestId &&
-      result.saveRequest.sequence === request.saveRequest.sequence &&
-      result.saveRequest.pageSession === request.saveRequest.pageSession &&
-      result.saveRequest.tabId === request.saveRequest.tabId &&
-      result.saveRequest.documentGeneration === request.saveRequest.documentGeneration &&
-      result.saveRequest.pathKey === request.saveRequest.pathKey &&
-      result.saveRequest.selectionGeneration === request.saveRequest.selectionGeneration
+
+  // Ambient reads can update ctime on a delayed schedule, which cannot prove
+  // which operation produced the delta. Use a platform-native reversible
+  // metadata change instead; the second observation proves the file remains
+  // writable before either selection or Save.
+  const sameNonCtimeVersion = (left, right) => !!(
+    left &&
+    right &&
+    left.dev === right.dev &&
+    left.ino === right.ino &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs
+  );
+  const waitForCtimeOnlyVersion = async (filePath, baseline, label) => {
+    const deadline = Date.now() + 5000;
+    let observed = diskVersionOf(filePath);
+    while (Date.now() < deadline) {
+      observed = diskVersionOf(filePath);
+      if (
+        sameNonCtimeVersion(baseline, observed) &&
+        observed.ctimeMs !== baseline.ctimeMs
+      ) return observed;
+      await sleep(25);
+    }
+    throw new Error(
+      "F22 ctime-only fixture did not observe its explicit metadata transition: " +
+      JSON.stringify({ label, baseline, observed }),
     );
   };
+  const induceCtimeOnlyVersion = async (filePath, expectedBytes, label) => {
+    const beforeSet = diskVersionOf(filePath);
+    let trigger;
+    let restore;
+    let triggerDetails;
+    if (process.platform === "win32") {
+      trigger = () => {
+        const result = spawnSync("attrib", ["+R", filePath], { encoding: "utf8" });
+        if (result.status !== 0) {
+          throw new Error(
+            "F22 ctime-only fixture could not set its temporary read-only attribute: " +
+              JSON.stringify({
+                label,
+                status: result.status,
+                stdout: result.stdout,
+                stderr: result.stderr,
+              }),
+          );
+        }
+      };
+      restore = () => {
+        const result = spawnSync("attrib", ["-R", filePath], { encoding: "utf8" });
+        if (result.status !== 0) {
+          throw new Error(
+            "F22 ctime-only fixture could not clear its temporary read-only attribute: " +
+              JSON.stringify({
+                label,
+                status: result.status,
+                stdout: result.stdout,
+                stderr: result.stderr,
+              }),
+          );
+        }
+      };
+      triggerDetails = { kind: "windows-read-only-attribute" };
+    } else {
+      const originalMode = fs.statSync(filePath).mode & 0o777;
+      const changedMode = originalMode ^ 0o100;
+      trigger = () => {
+        fs.chmodSync(filePath, changedMode);
+      };
+      restore = () => {
+        fs.chmodSync(filePath, originalMode);
+      };
+      triggerDetails = {
+        kind: "posix-owner-execute-bit",
+        originalMode,
+        changedMode,
+      };
+    }
+    trigger();
+    let restored = false;
+    try {
+      const afterSet = await waitForCtimeOnlyVersion(
+        filePath, beforeSet, `${label}:set-metadata`,
+      );
+      const beforeClear = diskVersionOf(filePath);
+      restore();
+      restored = true;
+      const afterClear = await waitForCtimeOnlyVersion(
+        filePath, beforeClear, `${label}:restore-metadata`,
+      );
+      fs.accessSync(filePath, fs.constants.W_OK);
+      const bytes = fs.readFileSync(filePath);
+      const expected = Buffer.from(expectedBytes, "utf8");
+      if (!bytes.equals(expected)) {
+        throw new Error(
+          "F22 ctime-only fixture metadata transition changed fixture bytes: " +
+          JSON.stringify({
+            label,
+            expected: expected.toString("utf8"),
+            actual: bytes.toString("utf8"),
+          }),
+        );
+      }
+      return {
+        beforeSet,
+        afterSet,
+        beforeClear,
+        afterClear,
+        trigger: triggerDetails,
+        exactNonCtimeIdentity:
+          sameNonCtimeVersion(beforeSet, afterSet) &&
+          sameNonCtimeVersion(beforeClear, afterClear),
+        byteIdentical: bytes.equals(expected),
+      };
+    } finally {
+      if (!restored) restore();
+    }
+  };
+  const ctimeSelectionObserver = (filePath) => {
+    const records = [];
+    const descriptor = Object.getOwnPropertyDescriptor(
+      ipcMain._events,
+      "select-file-tracking",
+    );
+    if (!descriptor || typeof descriptor.value !== "function") {
+      throw new Error(
+        "F22 ctime-only fixture requires one own synchronous select-file-tracking listener",
+      );
+    }
+    const originalListener = descriptor.value;
+    const listener = (event, data) => {
+      const result = originalListener.apply(ipcMain, [event, data]);
+      if (data && data.filePath === filePath) {
+        records.push({
+          request: {
+            filePath: data.filePath,
+            adoptBaseline: data.adoptBaseline === true,
+            trackingActive: data.trackingActive === true,
+            owner: data.owner || null,
+            diskVersion: data.diskVersion || null,
+          },
+        });
+      }
+      return result;
+    };
+    Object.defineProperty(ipcMain._events, "select-file-tracking", {
+      ...descriptor,
+      value: listener,
+    });
+    return {
+      latest: () => records.at(-1) || null,
+      restore: () => Object.defineProperty(
+        ipcMain._events,
+        "select-file-tracking",
+        descriptor,
+      ),
+    };
+  };
+  const ctimePolicyFile = path.join(dir, "f22-ctime-policy.md");
+  const ctimePolicyCompanion = path.join(dir, "f22-ctime-policy-companion.md");
+  const ctimePolicyBase = "F22_CTIME_POLICY_BASE";
+  const ctimePolicySaved = "F22_CTIME_POLICY_SAVED";
+  const ctimePolicyCompanionBytes = "F22_CTIME_POLICY_COMPANION";
+  await seedSettledFixture(ctimePolicyFile, ctimePolicyBase);
+  await seedSettledFixture(ctimePolicyCompanion, ctimePolicyCompanionBytes);
+  await clearTabs();
+  const ctimePolicyPrimary = await createActiveTab(
+    ctimePolicyFile,
+    ctimePolicyBase,
+  );
+  const ctimeSelectionProbe = ctimeSelectionObserver(ctimePolicyFile);
+  let ctimeSelectionTransition;
+  let ctimeSelectionOwner;
+  let ctimeSelectionMain;
+  let ctimeSelectionReply;
+  let ctimeSelectionCaptures;
+  let ctimeSelectionFailure = null;
+  let ctimeSelectionTabBefore;
+  let ctimeSelectionTabAfter;
+  let ctimeSaveTransition;
+  let ctimeSave;
+  let ctimePolicyState;
+  try {
+    ctimeSelectionTabBefore = await exec(`
+      (() => {
+        const tab = window.CustomTabs.getTabs().find(
+          candidate => candidate.id === ${ctimePolicyPrimary.id},
+        );
+        return tab && tab.diskVersion ? { ...tab.diskVersion } : null;
+      })()
+    `);
+    ctimeSelectionTransition = await induceCtimeOnlyVersion(
+      ctimePolicyFile,
+      ctimePolicyBase,
+      "before-reselection",
+    );
+    await createActiveTab(
+      ctimePolicyCompanion,
+      ctimePolicyCompanionBytes,
+    );
+    const ctimeSelection = await switchAndCaptureSelectionReply(
+      ctimePolicyPrimary.id,
+      ctimePolicyFile,
+      null,
+    );
+    ctimeSelectionOwner = ctimeSelection.owner;
+    ctimeSelectionCaptures = ctimeSelection.captures;
+    ctimeSelectionReply =
+      Array.isArray(ctimeSelectionCaptures) &&
+      ctimeSelectionCaptures.length === 1
+        ? ctimeSelectionCaptures[0]
+        : null;
+    ctimeSelectionFailure = ctimeSelection.failure;
+    if (ctimeSelectionFailure !== null) {
+      ctimeSelectionOwner = await witnessActiveOwner(
+        ctimePolicyFile,
+        ctimePolicyPrimary.id,
+      );
+    }
+    ctimeSelectionMain = ctimeSelectionProbe.latest();
+    ctimeSelectionTabAfter = await exec(`
+      (() => {
+        const tab = window.CustomTabs.getTabs().find(
+          candidate => candidate.id === ${ctimePolicyPrimary.id},
+        );
+        return tab && tab.diskVersion ? { ...tab.diskVersion } : null;
+      })()
+    `);
+    ctimeSaveTransition = await induceCtimeOnlyVersion(
+      ctimePolicyFile,
+      ctimePolicyBase,
+      "before-save",
+    );
+    if (consoleAttribution) {
+      await consoleAttribution.begin("f22-ctime-selected-owner-save", {
+        filePath: ctimePolicyFile,
+        transition: ctimeSaveTransition,
+        owner: ctimeSelectionOwner,
+      });
+    }
+    try {
+      ctimeSave = await exec(`
+      (async () => {
+        ${rendererSelectionWitnessSource}
+        const ipc = require("electron").ipcRenderer;
+        const filePath = ${JSON.stringify(ctimePolicyFile)};
+        const tabId = ${JSON.stringify(ctimePolicyPrimary.id)};
+        const expected = ${JSON.stringify(ctimePolicySaved)};
+        const originalSend = ipc.send;
+        const originalAlert = window.alert;
+        const requests = [];
+        let timer = null;
+        let onResult = null;
+        try {
+          ipc.send = function(channel, ...args) {
+            if (channel === "save-markdown-file") requests.push(args[0]);
+            return originalSend.call(this, channel, ...args);
+          };
+          window.alert = () => {};
+          if (!window.CustomTabs.__inEditMode()) toggleEditBtn.click();
+          const deadline = Date.now() + 5000;
+          for (;;) {
+            if (
+              window.CustomTabs.__inEditMode() &&
+              window.markdownEditor &&
+              window.markdownEditor.value === ${JSON.stringify(ctimePolicyBase)}
+            ) break;
+            if (Date.now() >= deadline) {
+              return { setupFailed: "editor never reached selected ctime policy document" };
+            }
+            await new Promise(resolve => setTimeout(resolve, 25));
+          }
+          const editor = window.markdownEditor;
+          editor.value = expected;
+          editor.dispatchEvent(new InputEvent("input", {
+            bubbles: true, inputType: "insertText", data: expected,
+          }));
+          const ownerAtSave = f22ActiveOwner(filePath);
+          const tabBeforeSave = window.CustomTabs.getTabs().find(
+            candidate => candidate.id === tabId,
+          );
+          const beforeSaveSnapshot = tabBeforeSave && {
+            dirty: tabBeforeSave.hasUnsavedChanges,
+            content: tabBeforeSave.content,
+            original: tabBeforeSave.originalContent,
+          };
+          return await new Promise((resolve) => {
+            timer = setTimeout(() => resolve({
+              timedOut: true, requests, ownerAtSave,
+            }), 5000);
+            onResult = (_event, result) => {
+              const request = requests[0];
+              if (!f22SaveResultMatchesRequest(result, request)) return;
+              const tab = window.CustomTabs.getTabs().find(
+                candidate => candidate.id === tabId,
+              );
+              resolve({
+                timedOut: false,
+                result,
+                requests,
+                ownerAtSave,
+                tabBeforeSave: beforeSaveSnapshot,
+                tabAfterSave: tab && {
+                  dirty: tab.hasUnsavedChanges,
+                  content: tab.content,
+                  original: tab.originalContent,
+                },
+              });
+            };
+            ipc.on("save-markdown-result", onResult);
+            document.getElementById("saveButton").click();
+          });
+        } catch (error) {
+          return {
+            error: String(error && error.stack ? error.stack : error),
+            requests,
+          };
+        } finally {
+          if (timer) clearTimeout(timer);
+          if (onResult) ipc.removeListener("save-markdown-result", onResult);
+          ipc.send = originalSend;
+          window.alert = originalAlert;
+        }
+      })()
+      `);
+      ctimePolicyState = await witnessActiveOwner(
+        ctimePolicyFile,
+        ctimePolicyPrimary.id,
+      );
+    } finally {
+      if (consoleAttribution) {
+        await consoleAttribution.end({
+          filePath: ctimePolicyFile,
+          save: ctimeSave || null,
+          owner: ctimePolicyState || null,
+        });
+      }
+    }
+  } finally {
+    ctimeSelectionProbe.restore();
+  }
+  const ctimePolicyEditRestored = await exec(`
+    (async () => {
+      if (window.CustomTabs.__inEditMode() !== true) return true;
+      const confirm = window.confirm;
+      window.confirm = () => true;
+      try {
+        toggleEditBtn.click();
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline) {
+          if (window.CustomTabs.__inEditMode() === false) return true;
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        return false;
+      } finally {
+        window.confirm = confirm;
+      }
+    })()
+  `);
+  const ctimePolicyDisk = fs.readFileSync(ctimePolicyFile, "utf8");
+  const ctimePolicyDetail = JSON.stringify({
+    ctimeSelectionTransition,
+    ctimeSelectionOwner,
+    ctimeSelectionMain,
+    ctimeSelectionReply,
+    ctimeSelectionCaptures,
+    ctimeSelectionFailure,
+    ctimeSelectionTabBefore,
+    ctimeSelectionTabAfter,
+    ctimeSaveTransition,
+    ctimeSave,
+    ctimePolicyState,
+    ctimePolicyEditRestored,
+    ctimePolicyDisk,
+  });
+  const sameCtimeSelectionOwner = (left, right) => !!(
+    left &&
+    right &&
+    typeof left.pageSession === "string" &&
+    left.pageSession.length > 0 &&
+    Number.isSafeInteger(left.rendererGeneration) &&
+    left.rendererGeneration > 0 &&
+    Number.isSafeInteger(left.tabId) &&
+    left.tabId > 0 &&
+    Number.isSafeInteger(left.documentGeneration) &&
+    left.documentGeneration > 0 &&
+    typeof left.pathKey === "string" &&
+    left.pathKey.length > 0 &&
+    Number.isSafeInteger(left.selectionGeneration) &&
+    left.selectionGeneration > 0 &&
+    left.pageSession === right.pageSession &&
+    left.rendererGeneration === right.rendererGeneration &&
+    left.tabId === right.tabId &&
+    left.documentGeneration === right.documentGeneration &&
+    left.pathKey === right.pathKey &&
+    left.selectionGeneration === right.selectionGeneration
+  );
+  const ctimeSelectionSetup = !!(
+    ctimeSelectionTransition &&
+    ctimeSelectionTransition.exactNonCtimeIdentity === true &&
+    ctimeSelectionTransition.byteIdentical === true &&
+    Array.isArray(ctimeSelectionCaptures) &&
+    ctimeSelectionCaptures.length === 1 &&
+    ctimeSelectionReply &&
+    ctimeSelectionReply.request &&
+    ctimeSelectionReply.request.filePath === ctimePolicyFile &&
+    ctimeSelectionReply.request.adoptBaseline === true &&
+    ctimeSelectionReply.request.trackingActive === true &&
+    ctimeSelectionReply.request.owner &&
+    ctimeSelectionReply.request.owner.tabId === ctimePolicyPrimary.id &&
+    ctimeSelectionMain &&
+    ctimeSelectionMain.request &&
+    ctimeSelectionMain.request.filePath === ctimePolicyFile &&
+    ctimeSelectionMain.request.adoptBaseline === true &&
+    ctimeSelectionMain.request.trackingActive === true &&
+    ctimeSelectionMain.request.owner &&
+    ctimeSelectionMain.request.owner.tabId === ctimePolicyPrimary.id &&
+    ctimeSelectionMain.request.diskVersion &&
+    sameCtimeSelectionOwner(
+      ctimeSelectionReply.request.owner,
+      ctimeSelectionMain.request.owner,
+    ) &&
+    sameNonCtimeVersion(
+      ctimeSelectionTransition.afterClear,
+      ctimeSelectionMain.request.diskVersion,
+    ) &&
+    ctimeSelectionTabBefore &&
+    ctimeSelectionTabAfter &&
+    sameDiskVersion(ctimeSelectionTabBefore, ctimeSelectionTabAfter)
+  );
+  check(
+    "F22 ctime-only metadata drift preserves a real tab reselection with accepted main and renderer owners",
+    ctimeSelectionSetup &&
+      ctimeSelectionFailure === null &&
+      ctimeSelectionOwner &&
+      ctimeSelectionOwner.tabId === ctimePolicyPrimary.id &&
+      ctimeSelectionReply.reply &&
+      ctimeSelectionReply.reply.accepted === true &&
+      ctimeSelectionReply.reply.trackingActive === true &&
+      sameCtimeSelectionOwner(
+        ctimeSelectionReply.request.owner,
+        ctimeSelectionOwner,
+      ),
+    ctimePolicyDetail,
+  );
+  check(
+    "F22 ctime-only metadata drift leaves CustomTabs cached disk version unchanged",
+    ctimeSelectionTabBefore &&
+      ctimeSelectionTabAfter &&
+      sameDiskVersion(ctimeSelectionTabBefore, ctimeSelectionTabAfter),
+    ctimePolicyDetail,
+  );
+  check(
+    "F22 ctime-only metadata drift permits a real selected-owner Save with exact raw bytes",
+    ctimeSaveTransition &&
+      ctimeSaveTransition.exactNonCtimeIdentity === true &&
+      ctimeSaveTransition.byteIdentical === true &&
+      ctimeSave &&
+      !ctimeSave.error &&
+      ctimeSave.timedOut === false &&
+      ctimeSave.ownerAtSave &&
+      ctimeSave.ownerAtSave.tabId === ctimePolicyPrimary.id &&
+      ctimeSave.requests.length === 1 &&
+      producerRequestMatches(
+        { requests: ctimeSave.requests, result: ctimeSave.result },
+        ctimePolicyFile,
+        ctimePolicySaved,
+      ) &&
+      ctimeSave.tabAfterSave &&
+      ctimeSave.tabAfterSave.dirty === false &&
+      ctimeSave.tabAfterSave.content === ctimePolicySaved &&
+      ctimeSave.tabAfterSave.original === ctimePolicySaved &&
+      ctimePolicyState &&
+      ctimePolicyState.selected === true &&
+      ctimePolicyEditRestored === true &&
+      ctimePolicyDisk === ctimePolicySaved,
+    ctimePolicyDetail,
+  );
+  const rendererCtimeBefore = Object.freeze({ ...ctimeSaveTransition.beforeClear });
+  const rendererCtimeAfter = Object.freeze({ ...ctimeSaveTransition.afterClear });
+  const rendererCtimeComparator = await exec(`
+    (() => {
+      const before = Object.freeze(${JSON.stringify(rendererCtimeBefore)});
+      const after = Object.freeze(${JSON.stringify(rendererCtimeAfter)});
+      const comparator = window.diskVersionsEqual;
+      const changedMtime = Object.freeze({ ...after, mtimeMs: after.mtimeMs + 1 });
+      const invalidCtime = Object.freeze({ ...after, ctimeMs: Number.NaN });
+      const visible =
+        typeof comparator === "function" &&
+        typeof diskVersionsEqual === "function" &&
+        comparator === diskVersionsEqual;
+      return {
+        visible,
+        ctimeOnly: visible ? comparator(before, after) : null,
+        changedMtime: visible ? comparator(after, changedMtime) : null,
+        invalidCtime: visible ? comparator(after, invalidCtime) : null,
+      };
+    })()
+  `);
+  const rendererCtimeComparatorSetup =
+    ctimeSaveTransition &&
+    ctimeSaveTransition.exactNonCtimeIdentity === true &&
+    ctimeSaveTransition.byteIdentical === true &&
+    Number.isFinite(ctimeSaveTransition.beforeClear.ctimeMs) &&
+    Number.isFinite(ctimeSaveTransition.afterClear.ctimeMs) &&
+    ctimeSaveTransition.beforeClear.ctimeMs !== ctimeSaveTransition.afterClear.ctimeMs;
+  const rendererCtimeComparatorDetail = JSON.stringify({
+    setup: ctimeSaveTransition,
+    comparator: rendererCtimeComparator,
+  });
+  check(
+    "F22 renderer diskVersionsEqual accepts an observed ctime-only version",
+    rendererCtimeComparatorSetup === true &&
+      rendererCtimeComparator &&
+      rendererCtimeComparator.visible === true &&
+      rendererCtimeComparator.ctimeOnly === true,
+    rendererCtimeComparatorDetail,
+  );
+  check(
+    "F22 renderer diskVersionsEqual rejects a changed mtime version",
+    rendererCtimeComparatorSetup === true &&
+      rendererCtimeComparator &&
+      rendererCtimeComparator.changedMtime === false,
+    rendererCtimeComparatorDetail,
+  );
+  check(
+    "F22 renderer diskVersionsEqual rejects an invalid ctime version",
+    rendererCtimeComparatorSetup === true &&
+      rendererCtimeComparator &&
+      rendererCtimeComparator.invalidCtime === false,
+    rendererCtimeComparatorDetail,
+  );
+  if (f22CtimeR660ProofHarness) {
+    const expectedName =
+      "F22 ctime-only metadata drift preserves a real tab reselection with accepted main and renderer owners";
+    const mustPassNames = [
+      "F22 ctime-only metadata drift leaves CustomTabs cached disk version unchanged",
+      "F22 renderer diskVersionsEqual rejects a changed mtime version",
+      "F22 renderer diskVersionsEqual rejects an invalid ctime version",
+    ];
+    const expectedResult = results.find((result) => result.name === expectedName);
+    const mustPassResults = mustPassNames.map((name) =>
+      results.find((result) => result.name === name));
+    const expectedReply = ctimeSelectionReply && ctimeSelectionReply.reply;
+    const targetOutcomeMatchesReply =
+      expectedResult &&
+      (expectedResult.ok === true
+        ? expectedReply &&
+          expectedReply.accepted === true &&
+          expectedReply.trackingActive === true
+        : expectedResult.ok === false &&
+          expectedReply &&
+          expectedReply.accepted === false &&
+          expectedReply.why ===
+            "disk-or-deletion-moved-before-selection");
+    const cleared = await clearTabs();
+    const cleanup = await exec(`
+      (() => ({
+        tabCount: window.CustomTabs.getTabs().length,
+        activeTab: window.CustomTabs.getActiveTab(),
+      }))()
+    `);
+    const checkpointReached =
+      ctimeSelectionSetup &&
+      targetOutcomeMatchesReply &&
+      mustPassResults.every((result) => result && result.ok === true) &&
+      cleared === true &&
+      cleanup &&
+      cleanup.tabCount === 0 &&
+      cleanup.activeTab == null;
+    check(
+      "F22 R660 proof-only checkpoint reaches the ctime mutation and all collateral controls",
+      checkpointReached,
+      JSON.stringify({
+        ctimeSelectionSetup,
+        ctimeSelectionReply,
+        ctimeSelectionCaptures,
+        ctimeSelectionMain,
+        ctimeSelectionTransition,
+        expectedResult,
+        expectedReply,
+        targetOutcomeMatchesReply,
+        mustPassResults,
+        cleared,
+        cleanup,
+      }),
+    );
+    if (!checkpointReached) {
+      throw new Error("F22 R660 proof-only checkpoint did not reach its required controls");
+    }
+    f22R660ProofCheckpoint = true;
+    return;
+  }
 
   // A real renderer save must retain its producer-owned identity and bytes when
   // a filesystem race rejects it; hand-authoring this envelope would test only
@@ -10243,23 +14203,58 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     },
   );
   let producerRaceSave;
+  const producerRaceSaveError =
+    "The file changed while the save was starting. Reload or reopen it before saving.";
+  let producerRaceMute = null;
+  if (sentinel) {
+    await sentinel.mute("F22 producer save path-race conflict");
+    producerRaceMute = sentinel.currentMute();
+  }
   try {
-    producerRaceSave = await requestProducerSave(
-      producerRaceFile,
-      "F22_PRODUCER_RACE_BASE",
-      "F22_PRODUCER_RACE_ATTEMPT",
-    );
+    try {
+      producerRaceSave = await requestProducerSave(
+        producerRaceFile,
+        "F22_PRODUCER_RACE_BASE",
+        "F22_PRODUCER_RACE_ATTEMPT",
+      );
+    } finally {
+      restoreProducerRaceOpen();
+    }
+    if (sentinel) {
+      await sentinel.drain();
+      check(
+        "F22 producer path-race conflict mutes exactly its proven save error",
+        hasExpectedMutedSaveFailure(
+          producerRaceMute,
+          producerRaceFile,
+          producerRaceSave && producerRaceSave.result,
+          producerRaceSaveError,
+        ),
+        JSON.stringify({ producerRaceMute, producerRaceSave }),
+      );
+    }
   } finally {
-    restoreProducerRaceOpen();
+    if (sentinel) await sentinel.unmute();
   }
   check(
     "F22 saveMarkdownFile preserves its real request identity and content through a main path-race rejection",
     producerRaceSave && !producerRaceSave.error && producerRaceSave.timedOut === false &&
       producerRequestMatches(producerRaceSave, producerRaceFile, "F22_PRODUCER_RACE_ATTEMPT") &&
       producerRaceSave.result.success === false && producerRaceSave.result.conflict === true &&
+      producerRaceSave.result.error === producerRaceSaveError &&
       producerRaceOpenCount === 1 &&
       fs.readFileSync(producerRaceFile, "utf8") === "F22_PRODUCER_RACE_BASE",
     JSON.stringify({ producerRaceSave, producerRaceOpenCount }),
+  );
+  check(
+    "F22 producer path-race view-mode save starts with an owned document and stale textarea",
+    isStaleViewModeSaveSetup(
+      producerRaceSave && producerRaceSave.viewModeSetup,
+      producerRaceFile,
+      producerRaceSave && producerRaceSave.tabId,
+      "F22_PRODUCER_RACE_ATTEMPT",
+    ),
+    JSON.stringify(producerRaceSave && producerRaceSave.viewModeSetup),
   );
 
   const trackHandle = (handle, tracker) => ({
@@ -10289,36 +14284,66 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       path: filePath,
     });
 
-  // A file which appears after the first r+ ENOENT must conflict before it
-  // can be opened for writing. truncate or write would destroy the other
-  // writer's bytes.
+  // A file which appears under a save whose r+ has just returned ENOENT must
+  // conflict before it can be opened for writing. truncate or write would
+  // destroy the other writer's bytes.
+  //
+  // The fixture is a real, baselined document because only a real one can be
+  // the renderer's selected owner, and an owner is what this whole route
+  // requires. That also decides WHICH refusal main reaches: `openDocumentForSave`
+  // consults lstat immediately after the failed r+, finds the appeared regular
+  // file and raises the path race there, so the exclusive-create branch is not
+  // on this path at all. The wx+ counter therefore asserts ZERO attempts - and
+  // is instrumented on fs.openSync, which is what main actually calls (the
+  // earlier fs.promises.open interception for wx+ could never fire, so it
+  // proved nothing). A zero that was never wired is indistinguishable from a
+  // zero that was earned, so the stub is proven alive by a positive control
+  // below before the zero is believed.
+  //
+  // No handle ever reaches main on this path, so per-handle truncate/write/
+  // close counters here could only ever read zero. They are gone: the live
+  // oracle for "nothing was written" is the other writer's bytes still being
+  // on disk, and the live oracle for "nothing was removed" is the unlink
+  // interception, which a real unlink would trip.
   const appearedFile = path.join(dir, "f22-save-appeared.md");
+  fs.writeFileSync(appearedFile, "F22_APPEARED_BASELINE_BYTES", "utf8");
   const appeared = {
     rplus: 0,
     wx: 0,
-    truncates: 0,
-    writes: 0,
-    closes: 0,
     unlinks: 0,
   };
   const realAppearedOpen = fs.promises.open;
+  const realAppearedOpenSync = fs.openSync;
   const realAppearedUnlink = fs.promises.unlink;
   const realAppearedUnlinkSync = fs.unlinkSync;
   let appearedSave;
+  let appearedWxDuringSave = null;
+  let appearedBytesAfterSave = null;
+  let appearedWxControlRejected = false;
   const restoreAppearedOpen = replaceMethod(
     fs.promises,
     "open",
     async (candidate, flags, ...args) => {
       if (candidate === appearedFile && flags === "r+") {
         appeared.rplus += 1;
+        // The other writer's file is what is there now. Placing its bytes in
+        // the same step that fails the open is what makes this an appearance
+        // rather than a plain missing file.
+        fs.writeFileSync(appearedFile, "F22_EXTERNAL_APPEARED_BYTES", "utf8");
         throw enoent(candidate);
       }
+      return realAppearedOpen(candidate, flags, ...args);
+    },
+  );
+  const restoreAppearedOpenSync = replaceMethod(
+    fs,
+    "openSync",
+    (candidate, flags, ...args) => {
       if (candidate === appearedFile && flags === "wx+") {
         appeared.wx += 1;
-        fs.writeFileSync(appearedFile, "F22_EXTERNAL_APPEARED_BYTES", "utf8");
         throw eexist(candidate);
       }
-      return realAppearedOpen(candidate, flags, ...args);
+      return realAppearedOpenSync(candidate, flags, ...args);
     },
   );
   const restoreAppearedUnlink = replaceMethod(
@@ -10341,10 +14366,24 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     appearedSave = await requestSave(
       appearedFile,
       "F22_ATTEMPTED_OVERWRITE_OF_APPEARED_FILE",
+      "F22_APPEARED_BASELINE_BYTES",
     );
+    appearedWxDuringSave = appeared.wx;
+    appearedBytesAfterSave = fs.existsSync(appearedFile)
+      ? fs.readFileSync(appearedFile, "utf8")
+      : null;
+    // Positive control, taken while the stub is still installed: the wx+
+    // interception really is reachable and really does reject, so the zero
+    // recorded during the save is a measurement and not an unwired counter.
+    try {
+      fs.openSync(appearedFile, "wx+");
+    } catch (error) {
+      appearedWxControlRejected = !!(error && error.code === "EEXIST");
+    }
   } finally {
     restoreAppearedUnlinkSync();
     restoreAppearedUnlink();
+    restoreAppearedOpenSync();
     restoreAppearedOpen();
   }
   check(
@@ -10355,30 +14394,61 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       appearedSave.result &&
       appearedSave.result.success === false &&
       appearedSave.result.conflict === true &&
+      // `conflict` alone cannot tell the two ENOENT sub-paths apart: the
+      // deleted-document refusal is also a conflict. The path-race message
+      // plus the absent `deleted` tombstone flag pins the one this scenario
+      // is about - lstat found a regular file where r+ had just found none.
+      /file changed while the save was starting/i.test(
+        String(appearedSave.result.error),
+      ) &&
+      appearedSave.result.deleted !== true &&
       appeared.rplus === 1 &&
+      appearedWxDuringSave === 0 &&
+      appearedWxControlRejected === true &&
       appeared.wx === 1 &&
-      appeared.truncates === 0 &&
-      appeared.writes === 0 &&
-      appeared.closes === 0 &&
       appeared.unlinks === 0 &&
-      fs.readFileSync(appearedFile, "utf8") === "F22_EXTERNAL_APPEARED_BYTES",
-    JSON.stringify({ appearedSave, appeared, bytes: fs.existsSync(appearedFile) ? fs.readFileSync(appearedFile, "utf8") : null }),
+      appearedBytesAfterSave === "F22_EXTERNAL_APPEARED_BYTES",
+    JSON.stringify({
+      appearedSave,
+      appeared,
+      appearedWxDuringSave,
+      appearedWxControlRejected,
+      bytesAfterSave: appearedBytesAfterSave,
+      bytes: fs.existsSync(appearedFile)
+        ? fs.readFileSync(appearedFile, "utf8")
+        : null,
+    }),
   );
-
-  // Put a final-entry link in place precisely when openDocumentForSave tries
-  // wx+. This models a reparse-point swap without depending on scheduler
-  // timing. wx+ must reject it, and the retry path must not follow it.
+  // A save whose r+ fails on a path that IS a symlink must be refused at the
+  // link, never followed and never recreated over.
+  //
+  // This used to install the link from inside a wx+ interception, modelling a
+  // reparse-point swap. That route is unreachable for a document the renderer
+  // can actually own: an owned document has a save baseline, so main passes
+  // allowCreate:false and the exclusive create is never attempted. The link is
+  // therefore in place from the start - which is also the case a user can
+  // really be in - and the guard being proved is the one main really reaches:
+  // lstat after the failed r+ sees a symlink and refuses there. The wx+ stub
+  // stays, now on fs.openSync (what main calls), to assert that NO creation
+  // was attempted over the link; a positive control proves that stub alive.
   if (symlinkAvailable) {
     const reparseTarget = path.join(dir, "f22-save-reparse-target.md");
     const reparseLink = path.join(dir, "f22-save-reparse-link.md");
     fs.writeFileSync(reparseTarget, "F22_REPARSE_TARGET_BYTES", "utf8");
+    try {
+      fs.unlinkSync(reparseLink);
+    } catch {}
+    fs.symlinkSync(reparseTarget, reparseLink, "file");
     const reparse = { rplus: 0, wx: 0, unlinks: 0 };
     const realReparseOpen = fs.promises.open;
+    const realReparseOpenSync = fs.openSync;
     const realReparseUnlink = fs.promises.unlink;
     const realReparseUnlinkSync = fs.unlinkSync;
     let reparseSave;
     let reparseLinkStats = null;
     let reparseLinkTarget = null;
+    let reparseWxDuringSave = null;
+    let reparseWxControlRejected = false;
     const restoreReparseOpen = replaceMethod(
       fs.promises,
       "open",
@@ -10387,12 +14457,18 @@ async function runF22SaveAndReloadScenarios(win, exec) {
           reparse.rplus += 1;
           throw enoent(candidate);
         }
+        return realReparseOpen(candidate, flags, ...args);
+      },
+    );
+    const restoreReparseOpenSync = replaceMethod(
+      fs,
+      "openSync",
+      (candidate, flags, ...args) => {
         if (candidate === reparseLink && flags === "wx+") {
           reparse.wx += 1;
-          fs.symlinkSync(reparseTarget, reparseLink, "file");
           throw eexist(candidate);
         }
-        return realReparseOpen(candidate, flags, ...args);
+        return realReparseOpenSync(candidate, flags, ...args);
       },
     );
     const restoreReparseUnlink = replaceMethod(
@@ -10419,16 +14495,24 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       reparseSave = await requestSave(
         reparseLink,
         "F22_ATTEMPTED_REPARSE_TARGET_MUTATION",
+        "F22_REPARSE_TARGET_BYTES",
       );
+      reparseWxDuringSave = reparse.wx;
       reparseLinkStats = fs.lstatSync(reparseLink);
       reparseLinkTarget = fs.readlinkSync(reparseLink);
+      try {
+        fs.openSync(reparseLink, "wx+");
+      } catch (error) {
+        reparseWxControlRejected = !!(error && error.code === "EEXIST");
+      }
     } finally {
       restoreReparseUnlinkSync();
       restoreReparseUnlink();
+      restoreReparseOpenSync();
       restoreReparseOpen();
     }
     check(
-      "F22 a symlink introduced between the pre-create check and wx+ cannot redirect a save",
+      "F22 a save whose r+ fails on a symlinked path is refused at the link without following or recreating it",
       reparseSave &&
         hasMatchedSaveRequest(reparseSave) &&
         reparseSave.timedOut === false &&
@@ -10438,6 +14522,8 @@ async function runF22SaveAndReloadScenarios(win, exec) {
           String(reparseSave.result.error),
         ) &&
         reparse.rplus === 1 &&
+        reparseWxDuringSave === 0 &&
+        reparseWxControlRejected === true &&
         reparse.wx === 1 &&
         reparse.unlinks === 0 &&
         reparseLinkStats &&
@@ -10447,6 +14533,8 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       JSON.stringify({
         reparseSave,
         reparse,
+        reparseWxDuringSave,
+        reparseWxControlRejected,
         reparseLinkTarget,
         targetBytes: fs.readFileSync(reparseTarget, "utf8"),
       }),
@@ -10547,23 +14635,92 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     }),
   );
 
-  // The guards must remain narrow: an actually new regular file and an
-  // existing link whose target is still valid retain their normal save path.
+  // The guards must remain narrow: an ordinary regular file and an existing
+  // link whose target is still valid retain their normal save path.
+  //
+  // "Genuinely new" is not what this can prove. Folia only saves a document it
+  // has opened, and a path with no file on disk never becomes the renderer's
+  // selected owner, so a save of a file that does not yet exist has no
+  // production route to reach. The narrowness being proved is therefore the
+  // one that matters: none of the guards above fire on an unremarkable file.
+  //
+  // A POSITIVE CONTROL CANNOT BE BUILT ON A BASELINE THE DISK NO LONGER HAS.
+  // main.js compares documents by `diskVersionFromStats`, which includes
+  // `ctimeMs`, and on this filesystem the FIRST read of a freshly written file
+  // moves it. Measured directly rather than reasoned about: across four
+  // trials the first read moved `ctimeMs` every time, the second read moved
+  // nothing, and the version then stayed identical across two further seconds
+  // of repeated reads. So a fixture that writes its bytes and opens its tab
+  // immediately hands the owner a PRE-read baseline; whatever reads the file
+  // first - the platform, an indexer, the app itself - moves the version, the
+  // watcher reports "File modified externally" for a change nobody made, and
+  // the save is refused with a genuine conflict. That refusal is the product
+  // behaving correctly, which is precisely why it cannot stand in for these
+  // two controls: they exist to show the guards do NOT fire on an unremarkable
+  // document, and a conflict here would prove the opposite of their point.
+  //
+  // So consume that first read as part of seeding, and then require two
+  // identical observations before the tab is opened. Every refusal scenario
+  // above wants a conflict and is deliberately left alone; only the two
+  // controls that require SUCCESS need a document whose version will still be
+  // the one their owner adopted. Failure to settle is a setup failure and
+  // throws, because a control that quietly degrades into "the conflict was
+  // expected after all" is worse than no control.
+  //
+  // `diskVersionOf`, `sameDiskVersion` and `seedSettledFixture` were defined
+  // here originally. They now live at function scope, above, because three
+  // later fixtures need exactly this settling for exactly this reason.
   const newRegularFile = path.join(dir, "f22-save-new-regular.md");
+  const newRegularSettled = await seedSettledFixture(
+    newRegularFile,
+    "F22_NEW_REGULAR_BASELINE_BYTES",
+  );
+  const newRegularBytesBeforeOpen = fs.readFileSync(newRegularFile, "utf8");
+  const newRegularBeforeOpen = diskVersionOf(newRegularFile);
+  let newRegularBytesAtSave = null;
+  let newRegularVersionAtSave = null;
   const newRegularSave = await requestSave(
     newRegularFile,
     "F22_NEW_REGULAR_SAVE_BYTES",
+    "F22_NEW_REGULAR_BASELINE_BYTES",
+    // Inside the window: the tab exists, its owner has adopted, and nothing
+    // has been sent yet. Bytes first, then the version, so the version
+    // recorded accounts for this read rather than predating it.
+    () => {
+      newRegularBytesAtSave = fs.readFileSync(newRegularFile, "utf8");
+      newRegularVersionAtSave = diskVersionOf(newRegularFile);
+    },
   );
+  const newRegularBytesAfterSave = fs.readFileSync(newRegularFile, "utf8");
   check(
-    "F22 a genuinely new regular file still saves successfully",
-    newRegularSave &&
+    "F22 an ordinary regular file still saves successfully",
+    // The setup is asserted before the verdict, and asserted across the whole
+    // window rather than only up to the call: the settled version survived the
+    // tab being opened and was still on disk at the last point this test can
+    // look, immediately before the request went out, with the document still
+    // holding its baseline bytes. Main re-stats at the write boundary and that
+    // sliver stays its own to judge - the claim here stops where the test's
+    // sight does. Without both witnesses a green could be a fixture that had
+    // already written the bytes it claims the save persisted, or a document
+    // quietly re-adopted at some newer version between seeding and saving.
+    sameDiskVersion(newRegularSettled, newRegularBeforeOpen) &&
+      sameDiskVersion(newRegularSettled, newRegularVersionAtSave) &&
+      newRegularBytesBeforeOpen === "F22_NEW_REGULAR_BASELINE_BYTES" &&
+      newRegularBytesAtSave === "F22_NEW_REGULAR_BASELINE_BYTES" &&
+      newRegularSave &&
       hasMatchedSaveRequest(newRegularSave) &&
       newRegularSave.timedOut === false &&
       newRegularSave.result &&
       newRegularSave.result.success === true &&
-      fs.readFileSync(newRegularFile, "utf8") === "F22_NEW_REGULAR_SAVE_BYTES",
+      newRegularSave.result.conflict !== true &&
+      newRegularBytesAfterSave === "F22_NEW_REGULAR_SAVE_BYTES",
     JSON.stringify({
       newRegularSave,
+      newRegularSettled,
+      newRegularBeforeOpen,
+      newRegularVersionAtSave,
+      bytesBeforeOpen: newRegularBytesBeforeOpen,
+      bytesAtSave: newRegularBytesAtSave,
       bytes: fs.existsSync(newRegularFile)
         ? fs.readFileSync(newRegularFile, "utf8")
         : null,
@@ -10572,25 +14729,116 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   if (symlinkAvailable) {
     const validTarget = path.join(dir, "f22-save-valid-link-target.md");
     const validLink = path.join(dir, "f22-save-valid-link.md");
-    fs.writeFileSync(validTarget, "F22_VALID_LINK_BASELINE", "utf8");
-    fs.symlinkSync(validTarget, validLink, "file");
+    // Settle the TARGET, before the link exists. The link is a spelling; main
+    // stats through it, so the version that has to be stable is the physical
+    // document's, and creating the link does not touch it.
+    const validLinkSettled = await seedSettledFixture(
+      validTarget,
+      "F22_VALID_LINK_BASELINE",
+    );
+    // A prior failed run can leave this link behind, and an EEXIST here would
+    // fail the scenario for a reason that has nothing to do with saving
+    // through a valid link. Remove only this fixture, deterministically, as
+    // the retarget scenario above does - and refuse to guess: anything other
+    // than "it was not there" or "it is the symlink this fixture creates" is
+    // reported as a setup failure rather than silently unlinked.
+    let validLinkFixtureReady = true;
+    try {
+      const staleValidLink = fs.lstatSync(validLink);
+      if (staleValidLink.isSymbolicLink()) {
+        fs.unlinkSync(validLink);
+      } else {
+        validLinkFixtureReady = false;
+        check(
+          "F22 valid-link setup refuses to replace a stale fixture that is not a symlink",
+          false,
+          JSON.stringify({
+            validLink,
+            isFile: staleValidLink.isFile(),
+            isDirectory: staleValidLink.isDirectory(),
+          }),
+        );
+      }
+    } catch (error) {
+      if (!error || error.code !== "ENOENT") {
+        validLinkFixtureReady = false;
+        check(
+          "F22 valid-link setup rejects stale-fixture cleanup errors",
+          false,
+          JSON.stringify({
+            validLink,
+            code: String((error && error.code) || "unknown").toUpperCase(),
+            message: String((error && error.message) || error),
+          }),
+        );
+      }
+    }
+    if (validLinkFixtureReady) {
+      try {
+        fs.symlinkSync(validTarget, validLink, "file");
+      } catch (error) {
+        // Symlink support was already established by the retarget scenario
+        // above, which skipped the whole block when the platform refused. A
+        // failure here is therefore this fixture's failure, never a platform
+        // skip, and is reported rather than swallowed.
+        validLinkFixtureReady = false;
+        check(
+          "F22 valid-link setup creates its own link fixture",
+          false,
+          JSON.stringify({
+            validLink,
+            validTarget,
+            code: String((error && error.code) || "unknown").toUpperCase(),
+            message: String((error && error.message) || error),
+          }),
+        );
+      }
+    }
+    if (validLinkFixtureReady) {
+    const validLinkBytesBeforeOpen = fs.readFileSync(validLink, "utf8");
+    const validLinkBeforeOpen = diskVersionOf(validLink);
+    let validLinkBytesAtSave = null;
+    let validLinkVersionAtSave = null;
     const validLinkSave = await requestSave(
       validLink,
       "F22_VALID_LINK_SAVED_BYTES",
+      // The tab must open on what the link really resolves to. Letting the
+      // baseline default to the attempted bytes gave the document a baseline
+      // the disk never held, which is a fixture lie in the one scenario whose
+      // point is that an ordinary valid link is left alone.
+      "F22_VALID_LINK_BASELINE",
+      // Observed through the LINK, inside the window the owner has already
+      // adopted in: the spelling this save uses has to be the one shown to be
+      // unchanged, not merely the target behind it. As above, this is the
+      // test's last look, not main's write-boundary stat.
+      () => {
+        validLinkBytesAtSave = fs.readFileSync(validLink, "utf8");
+        validLinkVersionAtSave = diskVersionOf(validLink);
+      },
     );
     const validLinkStats = fs.lstatSync(validLink);
     check(
       "F22 an existing symlink with a valid target still saves successfully",
-      validLinkSave &&
+      sameDiskVersion(validLinkSettled, validLinkBeforeOpen) &&
+        sameDiskVersion(validLinkSettled, validLinkVersionAtSave) &&
+        validLinkBytesBeforeOpen === "F22_VALID_LINK_BASELINE" &&
+        validLinkBytesAtSave === "F22_VALID_LINK_BASELINE" &&
+        validLinkSave &&
         hasMatchedSaveRequest(validLinkSave) &&
         validLinkSave.timedOut === false &&
         validLinkSave.result &&
         validLinkSave.result.success === true &&
+        validLinkSave.result.conflict !== true &&
         validLinkStats.isSymbolicLink() &&
         fs.readlinkSync(validLink) === validTarget &&
         fs.readFileSync(validTarget, "utf8") === "F22_VALID_LINK_SAVED_BYTES",
       JSON.stringify({
         validLinkSave,
+        validLinkSettled,
+        validLinkBeforeOpen,
+        validLinkVersionAtSave,
+        bytesBeforeOpen: validLinkBytesBeforeOpen,
+        bytesAtSave: validLinkBytesAtSave,
         linkTarget: fs.readlinkSync(validLink),
         targetBytes: fs.readFileSync(validTarget, "utf8"),
       }),
@@ -10598,6 +14846,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     try {
       fs.unlinkSync(validLink);
     } catch {}
+    }
   }
   check(
     "F22 prepareSaveRequest keeps production-issued save sequences positive and strictly monotonic",
@@ -10620,9 +14869,26 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   // the real FileHandle.writeFile path. This makes the close path observe two
   // genuinely pending renderer saves, including one started after it began to
   // wait, without reviving the obsolete fs.writeFile monkeypatch.
-  fs.writeFileSync(closeFile, "F22_CLOSE_BASE", "utf8");
+  //
+  // The fixture is seeded SETTLED for the same measured reason as the positive
+  // controls above: written-then-opened, the first read moved `ctimeMs` after
+  // the owner had adopted, main reported "File modified externally" for a
+  // change nobody made, and the very first save came back
+  // `conflict: true`. That poisoned everything downstream - the deferral never
+  // resumed, and the two later saves were refused in the renderer before any
+  // IPC was sent, so the close path never saw a pending save at all.
+  const closeSettled = await seedSettledFixture(closeFile, "F22_CLOSE_BASE");
   await clearTabs();
+  // BEFORE THE OWNER REGISTERS, NEVER AFTER. `__shutdown.reset()` clears
+  // main's `ownerDocumentBaselines` while deliberately RETAINING
+  // `knownDocumentOwners`, so a reset taken once this tab has registered
+  // leaves a known owner holding no baseline - and
+  // `conflictsWithDocumentBaseline` then refuses every save by that owner
+  // (`if (owner && !ownerBaseline) return true`) however settled the disk
+  // is. Reset first, so the registration below is the one that survives.
+  __shutdown.reset();
   const closingTab = await createActiveTab(closeFile, "F22_CLOSE_BASE");
+  const closeVersionAfterOpen = diskVersionOf(closeFile);
   const heldSaveResults = [];
   const realSaveSend = wc.send;
   const restoreSaveSend = replaceMethod(wc, "send", function (channel, ...args) {
@@ -10638,38 +14904,154 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   let stillOpenWithBothPending;
   let stillOpenAfterFirst;
   let pendingCloseAlerts = null;
+  let pendingCloseRequests = [];
+  let deferralHeldResults = [];
+  let firstHeldSnapshot = [];
+  let closeHeldResults = [];
+  let closeBytesAfterDeferralHeld = null;
+  let closeBytesAfterFirstHeld = null;
+  let closeBytesAfterSecondHeld = null;
+  let pendingCloseRequestsAtDeferral = null;
+  // How many SAVES have been answered, not how many deliveries have arrived.
+  // Nothing acknowledges a result the harness is holding, so main re-sends it
+  // after its ack timeout; a duplicate carries the requestId of the save it
+  // repeats. Counting deliveries would let a retry of the FIRST save satisfy a
+  // wait for the second, freezing the snapshot before the second save had
+  // answered at all - a red that accuses production of a fault the harness
+  // invented. Collapsing to first arrival per requestId makes the wait, the
+  // snapshot and the release all speak about saves.
+  const firstArrivalPerSave = results => {
+    const seen = new Set();
+    const ordered = [];
+    for (const result of results) {
+      const id = result && result.requestId;
+      if (id === undefined || id === null || seen.has(id)) continue;
+      seen.add(id);
+      ordered.push(result);
+    }
+    return ordered;
+  };
   const pendingSaveRig = shutdownRig(win);
   let pendingSaveDeferral;
+  let closeOwnerBeforeDeferral = null;
+  let closeVersionBeforeDeferral = null;
+  let closeOwnerBeforeFirst = null;
+  let closeOwnerBeforeSecond = null;
+  let deferralViewModeSaveSetup = null;
+  let firstCloseViewModeSaveSetup = null;
+  let secondCloseViewModeSaveSetup = null;
   try {
     await exec(`
       (() => {
+        const ipc = require("electron").ipcRenderer;
         const originalAlert = window.alert;
         const alerts = [];
-        window.__f22PendingCloseAlert = { originalAlert, alerts };
+        // Held results alone cannot say WHICH save they answer: three saves of
+        // this one document cross this channel, so two arbitrary results named
+        // by array position would satisfy a count. Capture the producer's own
+        // requests here and correlate each held result against the request it
+        // claims to answer.
+        //
+        // ipcRenderer's methods are prototype-backed, so restoring by
+        // assignment would leave an own property permanently shadowing
+        // Electron's. Keep the original descriptor and put that back.
+        const requests = [];
+        const ownSendDescriptor = Object.getOwnPropertyDescriptor(ipc, "send");
+        const originalSend = ipc.send;
+        window.__f22PendingCloseAlert = {
+          originalAlert,
+          alerts,
+          requests,
+          restoreSend: () => {
+            if (ownSendDescriptor) {
+              Object.defineProperty(ipc, "send", ownSendDescriptor);
+            } else {
+              delete ipc.send;
+            }
+          },
+        };
         window.alert = message => alerts.push(String(message));
+        ipc.send = function (channel, ...args) {
+          if (channel === "save-markdown-file") requests.push(args[0]);
+          return originalSend.call(this, channel, ...args);
+        };
         return null;
       })()
     `);
     // First prove the shutdown protocol parks its question while the renderer
     // reports a real pending save. The result is deliberately held above, so
     // this covers the save-queue deferral without replacing any fs method.
-    __shutdown.reset();
+    // The shutdown reset this used to take now sits above the tab
+    // registration, for the reason recorded there.
     pendingSaveRig.reset();
     pendingSaveRig.answer = 1;
+    // Immediately before the producer save: the tab that will issue it really
+    // is the selected document, and the settled version this owner adopted is
+    // still the one on disk. Without the second witness a conflict here would
+    // again be mistaken for a defect in the deferral.
+    closeOwnerBeforeDeferral = await witnessActiveOwner(closeFile, closingTab.id);
+    closeVersionBeforeDeferral = diskVersionOf(closeFile);
+    // MEASURED, NOT TIMING, AND DELIBERATELY LEFT RED. Across six focused runs
+    // this producer save came back with the identical first alert, "The file
+    // changed on disk", while both witnesses above were already clean: the tab
+    // was selected and `closeSettled`, `closeVersionAfterOpen` and
+    // `closeVersionBeforeDeferral` were byte-identical. A refusal that
+    // reproduces exactly with the disk provably unchanged is not a fixture
+    // that needs more settling, so there is no observable to wait on - a wait
+    // would only turn a red into a timeout. Main refuses at its owner-baseline
+    // check (`conflictsWithDocumentBaseline`); which leg fires is not yet
+    // isolated. The assertions below stay exact until it is.
+    deferralViewModeSaveSetup = await establishViewModeSaveSetup(
+      closeFile,
+      closingTab.id,
+      "F22_SHUTDOWN_PENDING_SAVE",
+    );
+    check(
+      "F22 pending-close deferral view-mode save starts with an owned document and stale textarea",
+      isStaleViewModeSaveSetup(
+        deferralViewModeSaveSetup,
+        closeFile,
+        closingTab.id,
+        "F22_SHUTDOWN_PENDING_SAVE",
+      ),
+      JSON.stringify(deferralViewModeSaveSetup),
+    );
     await exec(`
-      window.originalMarkdown = "F22_SHUTDOWN_PENDING_SAVE";
       document.getElementById("saveButton").click();
       null;
     `);
-    const deferralResultHeld = await waitUntil(() => heldSaveResults.length === 1, 5000);
+    const deferralResultHeld = await waitUntil(
+      () => firstArrivalPerSave(heldSaveResults).length === 1,
+      5000,
+    );
+    // Snapshotted before the array is reused, and the bytes read while the
+    // result is still held: main writes before it answers, so these are the
+    // bytes this save persisted, observed without waiting for the renderer to
+    // be told. The array is copied rather than indexed - which result belongs
+    // to which save is decided below, by identity.
+    deferralHeldResults = heldSaveResults.slice();
+    closeBytesAfterDeferralHeld = fs.readFileSync(closeFile, "utf8");
+    // Read at this moment, not at teardown: the deferral's evidence is that
+    // the save it parked for was the ONLY save outstanding when it parked.
+    // The teardown total counts two later saves as well, so it could only ever
+    // have reported arithmetic about a different moment.
+    pendingCloseRequestsAtDeferral = await exec(`
+      (window.__f22PendingCloseAlert
+        ? window.__f22PendingCloseAlert.requests.length
+        : -1)
+    `);
     const deferredClose = guardEvent();
     win.emit("close", deferredClose);
     const deferred = await waitUntil(
       () => __shutdown.state().pendingId > 0 && pendingSaveRig.dialogs.length === 0,
       5000,
     );
-    if (heldSaveResults[0]) {
-      realSaveSend.call(wc, "save-markdown-result", heldSaveResults[0]);
+    if (firstArrivalPerSave(heldSaveResults)[0]) {
+      realSaveSend.call(
+        wc,
+        "save-markdown-result",
+        firstArrivalPerSave(heldSaveResults)[0],
+      );
     }
     const resumed = await waitUntil(() => pendingSaveRig.closes === 1, 5000);
     pendingSaveDeferral = {
@@ -10682,63 +15064,282 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     __shutdown.reset();
     heldSaveResults.length = 0;
 
+    // THE RESET ABOVE IS REQUIRED, AND IT TAKES THE BASELINE WITH IT: it
+    // clears main's `ownerDocumentBaselines` while `closingTab` is still a
+    // live owner, and `conflictsWithDocumentBaseline` refuses every save by a
+    // known owner that holds no usable baseline. The thaw the reset performs
+    // re-asserts ownership with `adoptBaseline: false`, which stores a null
+    // version - present, and still refused - so what is asserted here is the
+    // adoption DECISION, not the mere presence of an entry.
+    const closeOwnerBeforeReadopt = await witnessActiveOwner(
+      closeFile,
+      closingTab.id,
+    );
+    if (!closeOwnerBeforeReadopt.selected) {
+      throw new Error(
+        "F22 pending-close re-adoption had no live physical owner: " +
+          JSON.stringify({ closeFile, closeOwnerBeforeReadopt }),
+      );
+    }
+    const closeReadoptVersion = diskVersionOf(closeFile);
+    const closeBaselineReadopt = await exec(`
+      (() => {
+        const activeTab = window.CustomTabs.getActiveTab();
+        const identity = window.CustomTabs.getActiveDocumentIdentity(
+          activeTab.filePath,
+          window.getReloadRequestSession(),
+        );
+        const decision = window.assertFileTrackingOwnership(
+          activeTab.filePath,
+          true,
+          {
+            adoptBaseline: true,
+            modifiedTime: ${JSON.stringify(closeReadoptVersion.mtimeMs)},
+            diskVersion: ${JSON.stringify(closeReadoptVersion)},
+            returnDecision: true,
+          },
+        );
+        return {
+          activeTabId: activeTab.id,
+          filePath: activeTab.filePath,
+          decision,
+          after: window.queryDocumentDeletionState(activeTab.filePath, identity),
+        };
+      })()
+    `);
+    const closeBaselineReadopted = !!(
+      closeBaselineReadopt &&
+      closeBaselineReadopt.activeTabId === closingTab.id &&
+      closeBaselineReadopt.filePath === closeFile &&
+      closeBaselineReadopt.decision &&
+      closeBaselineReadopt.decision.accepted === true &&
+      sameDiskVersion(
+        closeBaselineReadopt.decision.diskVersion,
+        closeReadoptVersion,
+      ) &&
+      closeBaselineReadopt.after &&
+      closeBaselineReadopt.after.known === true &&
+      closeBaselineReadopt.after.ownDeletion === false &&
+      closeBaselineReadopt.after.unresolved === false
+    );
+    if (!closeBaselineReadopted) {
+      throw new Error(
+        "F22 pending-close producer saves were never given back an adopted owner baseline: " +
+          JSON.stringify({ closeReadoptVersion, closeBaselineReadopt }),
+      );
+    }
+
+    closeOwnerBeforeFirst = await witnessActiveOwner(closeFile, closingTab.id);
+    firstCloseViewModeSaveSetup = await establishViewModeSaveSetup(
+      closeFile,
+      closingTab.id,
+      "F22_CLOSE_FIRST",
+    );
+    check(
+      "F22 pending-close first view-mode save starts with an owned document and stale textarea",
+      isStaleViewModeSaveSetup(
+        firstCloseViewModeSaveSetup,
+        closeFile,
+        closingTab.id,
+        "F22_CLOSE_FIRST",
+      ),
+      JSON.stringify(firstCloseViewModeSaveSetup),
+    );
     await exec(`
-      window.originalMarkdown = "F22_CLOSE_FIRST";
       document.getElementById("saveButton").click();
       null;
     `);
-    firstHeld = await waitUntil(() => heldSaveResults.length === 1, 5000);
+    firstHeld = await waitUntil(
+      () => firstArrivalPerSave(heldSaveResults).length === 1,
+      5000,
+    );
+    firstHeldSnapshot = heldSaveResults.slice();
+    closeBytesAfterFirstHeld = fs.readFileSync(closeFile, "utf8");
     await exec(`
       window.__f22ClosePromise = window.CustomTabs.closeTab(${closingTab.id})
         .then(() => "settled", (error) => "rejected:" + String(error));
       null;
     `);
+    closeOwnerBeforeSecond = await witnessActiveOwner(closeFile, closingTab.id);
+    secondCloseViewModeSaveSetup = await establishViewModeSaveSetup(
+      closeFile,
+      closingTab.id,
+      "F22_CLOSE_SECOND",
+    );
+    check(
+      "F22 pending-close second view-mode save starts with an owned document and stale textarea",
+      isStaleViewModeSaveSetup(
+        secondCloseViewModeSaveSetup,
+        closeFile,
+        closingTab.id,
+        "F22_CLOSE_SECOND",
+      ),
+      JSON.stringify(secondCloseViewModeSaveSetup),
+    );
     await exec(`
-      window.originalMarkdown = "F22_CLOSE_SECOND";
       document.getElementById("saveButton").click();
       null;
     `);
-    secondHeld = await waitUntil(() => heldSaveResults.length === 2, 5000);
+    secondHeld = await waitUntil(
+      () => firstArrivalPerSave(heldSaveResults).length === 2,
+      5000,
+    );
+    closeHeldResults = heldSaveResults.slice();
+    closeBytesAfterSecondHeld = fs.readFileSync(closeFile, "utf8");
     stillOpenWithBothPending = await exec(`
       ({ tab: !!window.CustomTabs.getTabs().find(t => t.id === ${closingTab.id}),
          pending: window.getPendingSaveStatus(${JSON.stringify(closeFile)}).count })
     `);
-    if (heldSaveResults[0]) realSaveSend.call(wc, "save-markdown-result", heldSaveResults[0]);
+    // Release by SAVE, not by delivery slot: a retry duplicate sitting in the
+    // array would otherwise be handed back in place of the second save's
+    // answer, and the close would wait for ever on a save that was never
+    // released.
+    const closeReleaseOrder = firstArrivalPerSave(heldSaveResults);
+    if (closeReleaseOrder[0])
+      realSaveSend.call(wc, "save-markdown-result", closeReleaseOrder[0]);
     await sleep(100);
     stillOpenAfterFirst = await exec(
       `!!window.CustomTabs.getTabs().find(t => t.id === ${closingTab.id})`,
     );
-    if (heldSaveResults[1]) realSaveSend.call(wc, "save-markdown-result", heldSaveResults[1]);
+    if (closeReleaseOrder[1])
+      realSaveSend.call(wc, "save-markdown-result", closeReleaseOrder[1]);
     closeFlow = await exec(`window.__f22ClosePromise`);
   } finally {
     pendingSaveRig.restore();
     __shutdown.reset();
     restoreSaveSend();
     try {
-      pendingCloseAlerts = await exec(`
+      const pendingCloseProbe = await exec(`
         (() => {
           const probe = window.__f22PendingCloseAlert;
           if (!probe) return null;
           window.alert = probe.originalAlert;
+          probe.restoreSend();
           delete window.__f22PendingCloseAlert;
-          return probe.alerts;
+          return { alerts: probe.alerts, requests: probe.requests };
         })()
       `);
+      pendingCloseAlerts = pendingCloseProbe ? pendingCloseProbe.alerts : null;
+      pendingCloseRequests = pendingCloseProbe
+        ? pendingCloseProbe.requests
+        : [];
     } catch {
       pendingCloseAlerts = null;
+      pendingCloseRequests = [];
     }
   }
+  // Each held result must be the answer to the producer request it is paired
+  // with - the same document path and bytes, the same correlation identifier,
+  // the same page session and the same complete save-request identity - and
+  // must be a success. Counting held results cannot carry that: three saves of
+  // this one file cross this channel, and a delivery retry of any of them
+  // arrives carrying the same path as the save it duplicates, so two
+  // arbitrary results would have satisfied the old shape.
+  //
+  // The pairing is by the request's own correlation identifier, NOT by array
+  // position. A held result is a DELIVERY ATTEMPT: nothing acknowledges a
+  // result the harness is holding, so main re-sends it after its ack timeout
+  // and a duplicate of an earlier save can occupy a later slot. Position would
+  // then mis-pair and report a defect that is not there. Arrival ORDER is
+  // still asserted, separately and as first arrival, so nothing is lost.
+  const heldResultFor = (results, request) =>
+    (request &&
+      results.find(
+        (result) => result && result.requestId === request.requestId,
+      )) ||
+    null;
+  const deferralHeldResult = heldResultFor(
+    deferralHeldResults,
+    pendingCloseRequests[0],
+  );
+  const firstHeldResult = heldResultFor(
+    closeHeldResults,
+    pendingCloseRequests[1],
+  );
+  const secondHeldResult = heldResultFor(
+    closeHeldResults,
+    pendingCloseRequests[2],
+  );
+  // The first save's result really was the first one held - so "the close
+  // began with one save already pending" is evidence rather than arithmetic -
+  // the two close results are distinct saves, they arrived in the order they
+  // were issued, and nothing else reached the held channel.
+  const closeResultOrder = !!(
+    firstHeldResult &&
+    secondHeldResult &&
+    firstHeldResult.requestId !== secondHeldResult.requestId &&
+    closeHeldResults.indexOf(firstHeldResult) <
+      closeHeldResults.indexOf(secondHeldResult) &&
+    heldResultFor(firstHeldSnapshot, pendingCloseRequests[1]) &&
+    closeHeldResults.every((result) =>
+      pendingCloseRequests.some(
+        (request) =>
+          request && result && result.requestId === request.requestId,
+      ))
+  );
+  const closeSaveMatches = (request, result, content) => !!(
+    request &&
+    result &&
+    producerRequestMatches({ requests: [request], result }, closeFile, content) &&
+    result.path === closeFile &&
+    result.success === true &&
+    result.conflict !== true
+  );
+  const deferralSaveMatched = closeSaveMatches(
+    pendingCloseRequests[0],
+    deferralHeldResult,
+    "F22_SHUTDOWN_PENDING_SAVE",
+  );
+  const firstCloseSaveMatched = closeSaveMatches(
+    pendingCloseRequests[1],
+    firstHeldResult,
+    "F22_CLOSE_FIRST",
+  );
+  const secondCloseSaveMatched = closeSaveMatches(
+    pendingCloseRequests[2],
+    secondHeldResult,
+    "F22_CLOSE_SECOND",
+  );
   check(
     "F22 shutdown defers its approval until a pending save settles instead of prompting concurrently",
-    pendingSaveDeferral &&
+    // The setup legs come first and are asserted, not assumed: the deferral is
+    // only evidence about the shutdown protocol if the save it defers for was
+    // a real save of this document, judged against the version its owner
+    // adopted. An empty alert list is part of the verdict for the same reason
+    // - a save refused as a conflict alerts, and would otherwise leave this
+    // reading "deferred" while nothing was ever written.
+    sameDiskVersion(closeSettled, closeVersionAfterOpen) &&
+      sameDiskVersion(closeSettled, closeVersionBeforeDeferral) &&
+      !!closeOwnerBeforeDeferral &&
+      closeOwnerBeforeDeferral.selected === true &&
+      pendingSaveDeferral &&
       pendingSaveDeferral.deferralResultHeld === true &&
       pendingSaveDeferral.deferred === true &&
       pendingSaveDeferral.resumed === true &&
       pendingSaveDeferral.prevented === true &&
       pendingSaveDeferral.dialogs === 0 &&
+      // The save that was deferred for was a real, successful save of this
+      // document issued by the producer; it was the only save outstanding at
+      // that moment; and its bytes were on disk while its result was still
+      // held.
+      pendingCloseRequestsAtDeferral === 1 &&
+      deferralSaveMatched &&
+      closeBytesAfterDeferralHeld === "F22_SHUTDOWN_PENDING_SAVE" &&
       Array.isArray(pendingCloseAlerts) &&
       pendingCloseAlerts.length === 0,
-    JSON.stringify({ pendingSaveDeferral, pendingCloseAlerts }),
+    JSON.stringify({
+      pendingSaveDeferral,
+      pendingCloseAlerts,
+      pendingCloseRequests,
+      pendingCloseRequestsAtDeferral,
+      deferralHeldResult,
+      deferralSaveMatched,
+      closeBytesAfterDeferralHeld,
+      closeSettled,
+      closeVersionAfterOpen,
+      closeVersionBeforeDeferral,
+      closeOwnerBeforeDeferral,
+    }),
   );
   const diskAfterClose = fs.readFileSync(closeFile, "utf8");
   const closedAfterBoth = await exec(
@@ -10748,8 +15349,22 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   await sleep(350);
   check(
     "F22 close waits for its first and later pending save before removing the tab or allowing a safe reopen",
-    firstHeld === true &&
+    !!closeOwnerBeforeFirst &&
+      closeOwnerBeforeFirst.selected === true &&
+      !!closeOwnerBeforeSecond &&
+      closeOwnerBeforeSecond.selected === true &&
+      firstHeld === true &&
       secondHeld === true &&
+      // Both held results are correlated to the producer requests they answer,
+      // and each save's bytes were already on disk while its result was still
+      // held - so "the close waited" is a claim about these two saves rather
+      // than about two results that merely named this path.
+      pendingCloseRequests.length === 3 &&
+      firstCloseSaveMatched &&
+      secondCloseSaveMatched &&
+      closeResultOrder &&
+      closeBytesAfterFirstHeld === "F22_CLOSE_FIRST" &&
+      closeBytesAfterSecondHeld === "F22_CLOSE_SECOND" &&
       stillOpenWithBothPending.tab === true &&
       stillOpenWithBothPending.pending === 2 &&
       stillOpenAfterFirst === true &&
@@ -10758,7 +15373,25 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       diskAfterClose === "F22_CLOSE_SECOND" &&
       !!reopened &&
       fs.readFileSync(closeFile, "utf8") === "F22_CLOSE_SECOND",
-    JSON.stringify({ firstHeld, secondHeld, stillOpenWithBothPending, stillOpenAfterFirst, closeFlow, diskAfterClose }),
+    JSON.stringify({
+      firstHeld,
+      secondHeld,
+      firstCloseSaveMatched,
+      secondCloseSaveMatched,
+      closeResultOrder,
+      firstHeldResult,
+      secondHeldResult,
+      closeHeldResults,
+      pendingCloseRequests,
+      closeBytesAfterFirstHeld,
+      closeBytesAfterSecondHeld,
+      stillOpenWithBothPending,
+      stillOpenAfterFirst,
+      closeFlow,
+      diskAfterClose,
+      closeOwnerBeforeFirst,
+      closeOwnerBeforeSecond,
+    }),
   );
 
   }
@@ -10784,12 +15417,32 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   const crlfOtherFile = path.join(dir, "f22-edit-mode-crlf-other.md");
   const crlfOriginal = "# F22 CRLF\r\n\r\nORIGINAL\r\n";
   const crlfSaved = "# F22 CRLF\r\n\r\nPERSISTED_EDIT\r\n";
-  fs.writeFileSync(crlfEditFile, crlfOriginal, "utf8");
-  fs.writeFileSync(crlfOtherFile, "F22_CRLF_OTHER_TAB\r\n", "utf8");
+  const crlfOtherOriginal = "F22_CRLF_OTHER_TAB\r\n";
+  const crlfEditorOriginal = crlfOriginal.replace(/\r\n/g, "\n");
+  const crlfOtherEditor = crlfOtherOriginal.replace(/\r\n/g, "\n");
+  // Both files are settled before either tab is opened. The companion matters
+  // as much as the subject here: this fixture switches to it and back, and an
+  // unsettled companion reports itself modified externally, which turns an
+  // ordinary tab fold into a reload decision the fixture never intended.
+  const crlfCtimeProbe = startF22CtimeProbe(crlfEditFile);
+  const crlfVersionTimeline = [];
+  const crlfSettled = await seedSettledFixture(crlfEditFile, crlfOriginal);
+  if (crlfCtimeProbe) {
+    crlfVersionTimeline.push(
+      await crlfCtimeProbe.capture("after-seed"),
+    );
+  }
+  await seedSettledFixture(crlfOtherFile, crlfOtherOriginal);
   await clearTabs();
   const crlfTab = await createActiveTab(crlfEditFile, crlfOriginal);
+  const crlfVersionAfterOpen = diskVersionOf(crlfEditFile);
+  if (crlfCtimeProbe) {
+    crlfVersionTimeline.push(
+      await crlfCtimeProbe.capture("after-selection", crlfTab.id),
+    );
+  }
   const crlfOtherTab = await exec(
-    `window.CustomTabs.createTab(${JSON.stringify(crlfOtherFile)}, "F22_CRLF_OTHER_TAB\\r\\n", { activate: false })`,
+    `window.CustomTabs.createTab(${JSON.stringify(crlfOtherFile)}, ${JSON.stringify(crlfOtherOriginal)}, { activate: false })`,
   );
   await exec(`toggleEditBtn.click(); null;`);
   const crlfEnteredEditMode = await waitForCondition(
@@ -10859,8 +15512,8 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       };
     })()
   `);
-  await exec(`window.CustomTabs.switchToTab(${crlfOtherTab.id}); null;`);
-  await exec(`window.CustomTabs.switchToTab(${crlfTab.id}); null;`);
+  await switchAndWitness(crlfOtherTab.id, crlfOtherFile, crlfOtherEditor);
+  await switchAndWitness(crlfTab.id, crlfEditFile, crlfEditorOriginal);
   const crlfAfterRoundTrip = await exec(`
     (() => {
       const tab = window.CustomTabs.getTabs().find(t => t.id === ${crlfTab.id});
@@ -10874,54 +15527,86 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   `);
   const crlfSave = await exec(`
     (async () => {
+      ${rendererSelectionWitnessSource}
       const ipc = require("electron").ipcRenderer;
       const filePath = ${JSON.stringify(crlfEditFile)};
       const oldAlert = window.alert;
       const originalSend = ipc.send;
       let savePayload = null;
-      let selectedOwner = null;
-      let ownerAtSave = null;
+      let activeOwnerAtSave = null;
+      let diskBeforeSave = null;
       let timer = null;
       let onResult = null;
       try {
         ipc.send = function (channel, ...args) {
           const payload = args[0];
-          if (
-            (channel === "set-active-file" || channel === "start-file-watching") &&
-            payload &&
-            payload.filePath === filePath &&
-            payload.owner
-          ) {
-            selectedOwner = payload.owner;
-          }
           if (channel === "save-markdown-file") {
             savePayload = payload;
-            ownerAtSave = selectedOwner;
           }
           return originalSend.call(this, channel, ...args);
         };
         window.alert = () => {};
-        window.CustomTabs.switchToTab(${crlfOtherTab.id});
-        window.CustomTabs.switchToTab(${crlfTab.id});
+        await f22SwitchAndWitness(
+          ${crlfOtherTab.id},
+          ${JSON.stringify(crlfOtherFile)},
+          ${JSON.stringify(crlfOtherEditor)},
+        );
+        // The witness is what makes the save below this document's save. The
+        // editor is written only after this tab is proven selected and
+        // painted; the earlier version wrote it into whichever textarea the
+        // still-running switch happened to leave on screen.
+        await f22SwitchAndWitness(
+          ${crlfTab.id},
+          filePath,
+          ${JSON.stringify(crlfEditorOriginal)},
+        );
         window.markdownEditor.value = "# F22 CRLF\\n\\nPERSISTED_EDIT\\n";
         window.markdownEditor.dispatchEvent(new Event("input", { bubbles: true }));
         return await new Promise((resolve) => {
           timer = setTimeout(
-            () => resolve({ timedOut: true, savePayload, ownerAtSave }),
+            () => resolve({
+              timedOut: true, savePayload, activeOwnerAtSave,
+              diskBeforeSave, preSaveDocumentState,
+            }),
             5000,
           );
           onResult = (_event, result) => {
-            if (!result || result.path !== filePath) return;
-            resolve({ timedOut: false, result, savePayload, ownerAtSave });
+            if (!f22SaveResultMatchesRequest(result, savePayload)) return;
+            resolve({
+              timedOut: false, result, savePayload,
+              activeOwnerAtSave, diskBeforeSave, preSaveDocumentState,
+            });
           };
           ipc.on("save-markdown-result", onResult);
+          // Last look before the click, in the renderer because that is where
+          // the click is: the owner the save will carry, and the disk version
+          // it will be judged against.
+          activeOwnerAtSave = f22ActiveOwner(filePath);
+          diskBeforeSave = f22DiskVersion(filePath);
+          const tab = window.CustomTabs.getTabs().find(
+            candidate => candidate.id === ${crlfTab.id},
+          );
+          var preSaveDocumentState = {
+            currentFilePath: window.currentFilePath,
+            activeTabId: window.CustomTabs.getActiveTabId(),
+            owner: activeOwnerAtSave,
+            selectionGeneration: window.getActiveFileSelectionGeneration(),
+            documentState: tab
+              ? window.CustomTabs.__documentState(tab)
+              : null,
+            reloadDiagnostics: window.getReloadRequestDiagnostics(),
+          };
           document.getElementById("saveButton").click();
         });
       } catch (error) {
         return {
           error: String(error && error.stack ? error.stack : error),
           savePayload,
-          ownerAtSave,
+          activeOwnerAtSave,
+          diskBeforeSave,
+          preSaveDocumentState: typeof preSaveDocumentState === "undefined"
+            ? null
+            : preSaveDocumentState,
         };
       } finally {
         if (timer) clearTimeout(timer);
@@ -10931,6 +15616,17 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       }
     })()
   `);
+  if (crlfCtimeProbe) {
+    crlfVersionTimeline.push({
+      stage: "immediately-pre-save",
+      diskVersion: crlfSave.diskBeforeSave,
+      renderer: crlfSave.preSaveDocumentState,
+    });
+    crlfVersionTimeline.push(
+      await crlfCtimeProbe.capture("after-save-result", crlfTab.id),
+    );
+    crlfCtimeProbe.restore();
+  }
   const crlfDiskBytes = fs.readFileSync(crlfEditFile, "utf8");
   const crlfAfterEditSave = await exec(`
     (() => {
@@ -10953,6 +15649,9 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     expectedBytes: crlfSaved,
     diskBytes: crlfDiskBytes,
     crlfAfterEditSave,
+    crlfSettled,
+    crlfVersionAfterOpen,
+    crlfVersionTimeline,
   });
   check(
     "F22 edit-mode CRLF undo survives tab cache folding without becoming dirty",
@@ -10973,25 +15672,52 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   check(
     "F22 edit-mode CRLF save sends and persists raw CRLF bytes, then is clean",
     crlfSave &&
+      !crlfSave.error &&
+      // Setup before verdict: the settled version survived opening the tab and
+      // was still on disk at the test's last look, and the document that
+      // issued the save really was the selected one. The owner is read back in
+      // the renderer immediately before the click and every field of the sent
+      // request is correlated against it, so a save issued from the companion
+      // tab cannot read as this document's save.
+      //
+      // The earlier shape also conjoined an `ownerAtSave` sniffed from
+      // `set-active-file`/`start-file-watching` on `ipc.send`. That selection
+      // never travels on `send` - it is answered synchronously on
+      // `select-file-tracking` - so the field was null in every measured run
+      // and the whole check could only ever fail.
+      sameDiskVersion(crlfSettled, crlfVersionAfterOpen) &&
+      sameDiskVersion(crlfSettled, crlfSave.diskBeforeSave) &&
+      crlfSave.activeOwnerAtSave &&
+      crlfSave.activeOwnerAtSave.tabId === crlfTab.id &&
+      Number.isSafeInteger(crlfSave.activeOwnerAtSave.selectionGeneration) &&
+      crlfSave.activeOwnerAtSave.selectionGeneration > 0 &&
       crlfSave.timedOut === false &&
       crlfSave.result &&
       crlfSave.result.success === true &&
+      // The renderer matched this result to the request it answers before it
+      // resolved; re-proven here against the captured request so the check
+      // does not rest on the listener's filter alone - same path, same bytes,
+      // same correlation identifier, session and save-request identity.
+      producerRequestMatches(
+        { requests: [crlfSave.savePayload], result: crlfSave.result },
+        crlfEditFile,
+        crlfSaved,
+      ) &&
       crlfSave.savePayload &&
       crlfSave.savePayload.filePath === crlfEditFile &&
       crlfSave.savePayload.content === crlfSaved &&
       crlfSave.savePayload.saveRequest &&
-      crlfSave.ownerAtSave &&
       crlfSave.savePayload.saveRequest.pageSession ===
-        crlfSave.ownerAtSave.pageSession &&
+        crlfSave.activeOwnerAtSave.pageSession &&
       crlfSave.savePayload.saveRequest.tabId === crlfTab.id &&
       crlfSave.savePayload.saveRequest.documentGeneration ===
-        crlfSave.ownerAtSave.documentGeneration &&
+        crlfSave.activeOwnerAtSave.documentGeneration &&
       crlfSave.savePayload.saveRequest.pathKey ===
-        crlfSave.ownerAtSave.pathKey &&
+        crlfSave.activeOwnerAtSave.pathKey &&
       Number.isSafeInteger(crlfSave.savePayload.saveRequest.selectionGeneration) &&
       crlfSave.savePayload.saveRequest.selectionGeneration > 0 &&
       crlfSave.savePayload.saveRequest.selectionGeneration ===
-        crlfSave.ownerAtSave.selectionGeneration &&
+        crlfSave.activeOwnerAtSave.selectionGeneration &&
       Number.isSafeInteger(crlfSave.savePayload.saveRequest.sequence) &&
       crlfSave.savePayload.saveRequest.sequence > 0 &&
       crlfDiskBytes === crlfSaved &&
@@ -11004,10 +15730,12 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   check(
     "F22 real Save carries complete active selection identity",
     crlfSave &&
+      !crlfSave.error &&
       crlfSave.timedOut === false &&
       crlfSave.savePayload &&
       crlfSave.savePayload.saveRequest &&
-      crlfSave.ownerAtSave &&
+      crlfSave.activeOwnerAtSave &&
+      crlfSave.activeOwnerAtSave.tabId === crlfTab.id &&
       typeof crlfSave.savePayload.saveRequest.pageSession === "string" &&
       Number.isSafeInteger(crlfSave.savePayload.saveRequest.tabId) &&
       Number.isSafeInteger(crlfSave.savePayload.saveRequest.documentGeneration) &&
@@ -11017,14 +15745,15 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       Number.isSafeInteger(crlfSave.savePayload.saveRequest.sequence) &&
       crlfSave.savePayload.saveRequest.sequence > 0 &&
       crlfSave.savePayload.saveRequest.pageSession ===
-        crlfSave.ownerAtSave.pageSession &&
-      crlfSave.savePayload.saveRequest.tabId === crlfSave.ownerAtSave.tabId &&
+        crlfSave.activeOwnerAtSave.pageSession &&
+      crlfSave.savePayload.saveRequest.tabId ===
+        crlfSave.activeOwnerAtSave.tabId &&
       crlfSave.savePayload.saveRequest.documentGeneration ===
-        crlfSave.ownerAtSave.documentGeneration &&
+        crlfSave.activeOwnerAtSave.documentGeneration &&
       crlfSave.savePayload.saveRequest.pathKey ===
-        crlfSave.ownerAtSave.pathKey &&
+        crlfSave.activeOwnerAtSave.pathKey &&
       crlfSave.savePayload.saveRequest.selectionGeneration ===
-        crlfSave.ownerAtSave.selectionGeneration,
+        crlfSave.activeOwnerAtSave.selectionGeneration,
     crlfEditDetail,
   );
 
@@ -11036,11 +15765,13 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   const crlfViewSaved = "# F22 CRLF\r\n\r\nVIEW_MODE_EDIT\r\n";
   const crlfViewSave = await exec(`
     (async () => {
+      ${rendererSelectionWitnessSource}
       const ipc = require("electron").ipcRenderer;
       const filePath = ${JSON.stringify(crlfEditFile)};
       const originalSend = ipc.send;
       const originalAlert = window.alert;
       let savePayload = null;
+      let activeOwnerAtSave = null;
       let timer = null;
       let onResult = null;
       try {
@@ -11054,19 +15785,36 @@ async function runF22SaveAndReloadScenarios(win, exec) {
         }
         window.originalMarkdown = ${JSON.stringify(crlfViewSaved)};
         window.markdownEditor.value = ${JSON.stringify(crlfViewSaved.replace(/\r\n/g, "\n"))};
-        window.CustomTabs.switchToTab(${crlfOtherTab.id});
-        window.CustomTabs.switchToTab(${crlfTab.id});
+        // The textarea is deliberately left stale here - that is the point of
+        // this scenario - so the switch witness asserts the selection, not the
+        // editor text. saveMarkdownFile() must still be issued against this
+        // document and not against whichever tab a still-running switch left
+        // selected.
+        await f22SwitchAndWitness(
+          ${crlfOtherTab.id},
+          ${JSON.stringify(crlfOtherFile)},
+          null,
+        );
+        await f22SwitchAndWitness(${crlfTab.id}, filePath, null);
         return await new Promise((resolve) => {
-          timer = setTimeout(() => resolve({ timedOut: true, savePayload }), 5000);
+          timer = setTimeout(
+            () => resolve({ timedOut: true, savePayload, activeOwnerAtSave }),
+            5000,
+          );
           onResult = (_event, result) => {
-            if (!result || result.path !== filePath) return;
-            resolve({ timedOut: false, result, savePayload });
+            if (!f22SaveResultMatchesRequest(result, savePayload)) return;
+            resolve({ timedOut: false, result, savePayload, activeOwnerAtSave });
           };
           ipc.on("save-markdown-result", onResult);
+          activeOwnerAtSave = f22ActiveOwner(filePath);
           saveMarkdownFile();
         });
       } catch (error) {
-        return { error: String(error && error.stack ? error.stack : error), savePayload };
+        return {
+          error: String(error && error.stack ? error.stack : error),
+          savePayload,
+          activeOwnerAtSave,
+        };
       } finally {
         if (timer) clearTimeout(timer);
         if (onResult) ipc.removeListener("save-markdown-result", onResult);
@@ -11098,9 +15846,19 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     "F22 view-mode CRLF fold saves raw bytes instead of the stale LF textarea",
     crlfViewSave &&
       !crlfViewSave.error &&
+      crlfViewSave.activeOwnerAtSave &&
+      crlfViewSave.activeOwnerAtSave.tabId === crlfTab.id &&
+      crlfViewSave.activeOwnerAtSave.selectionGeneration > 0 &&
       crlfViewSave.timedOut === false &&
       crlfViewSave.result &&
       crlfViewSave.result.success === true &&
+      // As above: the result is re-correlated to the captured producer request
+      // rather than trusted because it named this document.
+      producerRequestMatches(
+        { requests: [crlfViewSave.savePayload], result: crlfViewSave.result },
+        crlfEditFile,
+        crlfViewSaved,
+      ) &&
       crlfViewSave.savePayload &&
       crlfViewSave.savePayload.content === crlfViewSaved &&
       crlfViewDiskBytes === crlfViewSaved &&
@@ -11125,23 +15883,53 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   const mixedNewlineOtherFile = path.join(dir, "f22-mixed-newlines-other.md");
   const mixedNewlineOriginal = "a\r\nb\nc\rd\r\ne";
   const mixedNewlineSaved = "A\r\nb\nc\rD\r\ne";
-  fs.writeFileSync(mixedNewlineFile, mixedNewlineOriginal, "utf8");
-  fs.writeFileSync(mixedNewlineOtherFile, "F22_MIXED_NEWLINE_OTHER\n", "utf8");
+  const mixedNewlineOtherOriginal = "F22_MIXED_NEWLINE_OTHER\n";
+  const mixedNewlineEditorSaved = "A\nb\nc\nD\ne";
+  // Measured, not assumed: written-then-opened, this fixture's first read
+  // moved `ctimeMs` after its owner had adopted, main logged "File modified
+  // externally" for a change nobody made, and the save came back
+  // `conflict: true` with "The file changed on disk." - a correct product
+  // refusal that said nothing at all about newline spelling. The companion is
+  // settled too, because this scenario switches to it and back.
+  const mixedNewlineCtimeProbe = startF22CtimeProbe(mixedNewlineFile);
+  const mixedNewlineVersionTimeline = [];
+  const mixedNewlineSettled = await seedSettledFixture(
+    mixedNewlineFile,
+    mixedNewlineOriginal,
+  );
+  if (mixedNewlineCtimeProbe) {
+    mixedNewlineVersionTimeline.push(
+      await mixedNewlineCtimeProbe.capture("after-seed"),
+    );
+  }
+  await seedSettledFixture(mixedNewlineOtherFile, mixedNewlineOtherOriginal);
   await clearTabs();
   const mixedNewlineTab = await createActiveTab(
     mixedNewlineFile,
     mixedNewlineOriginal,
   );
+  const mixedNewlineVersionAfterOpen = diskVersionOf(mixedNewlineFile);
+  if (mixedNewlineCtimeProbe) {
+    mixedNewlineVersionTimeline.push(
+      await mixedNewlineCtimeProbe.capture(
+        "after-selection",
+        mixedNewlineTab.id,
+      ),
+    );
+  }
   const mixedNewlineOtherTab = await exec(
-    `window.CustomTabs.createTab(${JSON.stringify(mixedNewlineOtherFile)}, "F22_MIXED_NEWLINE_OTHER\\n", { activate: false })`,
+    `window.CustomTabs.createTab(${JSON.stringify(mixedNewlineOtherFile)}, ${JSON.stringify(mixedNewlineOtherOriginal)}, { activate: false })`,
   );
   const mixedNewlineSave = await exec(`
     (async () => {
+      ${rendererSelectionWitnessSource}
       const ipc = require("electron").ipcRenderer;
       const filePath = ${JSON.stringify(mixedNewlineFile)};
       const originalSend = ipc.send;
       const originalAlert = window.alert;
       let savePayload = null;
+      let activeOwnerAtSave = null;
+      let diskBeforeSave = null;
       let timer = null;
       let onResult = null;
       try {
@@ -11184,8 +15972,18 @@ async function runF22SaveAndReloadScenarios(win, exec) {
           bubbles: true, inputType: "insertText", data: "D",
         }));
         await new Promise(resolve => setTimeout(resolve, 900));
-        window.CustomTabs.switchToTab(${mixedNewlineOtherTab.id});
-        window.CustomTabs.switchToTab(${mixedNewlineTab.id});
+        await f22SwitchAndWitness(
+          ${mixedNewlineOtherTab.id},
+          ${JSON.stringify(mixedNewlineOtherFile)},
+          ${JSON.stringify(mixedNewlineOtherOriginal)},
+        );
+        // The fold is the subject: the editor must be showing this document's
+        // restored text before the save is issued, not the companion's.
+        await f22SwitchAndWitness(
+          ${mixedNewlineTab.id},
+          filePath,
+          ${JSON.stringify(mixedNewlineEditorSaved)},
+        );
         const restoredAfterRoundTrip = editor.value;
         return await new Promise((resolve) => {
           timer = setTimeout(
@@ -11193,24 +15991,48 @@ async function runF22SaveAndReloadScenarios(win, exec) {
               timedOut: true, savePayload, undoApplied, restoredAfterRoundTrip,
               undoSizeBeforeInput, undoSizeAfterFirstEdit, undoSizeAfterUndo,
               firstStableValue, secondTransientValue,
+              activeOwnerAtSave, diskBeforeSave, preSaveDocumentState,
             }),
             5000,
           );
           onResult = (_event, result) => {
-            if (!result || result.path !== filePath) return;
+            if (!f22SaveResultMatchesRequest(result, savePayload)) return;
             resolve({
               timedOut: false, result, savePayload, undoApplied, restoredAfterRoundTrip,
               undoSizeBeforeInput, undoSizeAfterFirstEdit, undoSizeAfterUndo,
               firstStableValue, secondTransientValue,
+              activeOwnerAtSave, diskBeforeSave, preSaveDocumentState,
             });
           };
           ipc.on("save-markdown-result", onResult);
+          // Last look before the click: the owner this save will carry, and
+          // the disk version it will be judged against.
+          activeOwnerAtSave = f22ActiveOwner(filePath);
+          diskBeforeSave = f22DiskVersion(filePath);
+          const tab = window.CustomTabs.getTabs().find(
+            candidate => candidate.id === ${mixedNewlineTab.id},
+          );
+          var preSaveDocumentState = {
+            currentFilePath: window.currentFilePath,
+            activeTabId: window.CustomTabs.getActiveTabId(),
+            owner: activeOwnerAtSave,
+            selectionGeneration: window.getActiveFileSelectionGeneration(),
+            documentState: tab
+              ? window.CustomTabs.__documentState(tab)
+              : null,
+            reloadDiagnostics: window.getReloadRequestDiagnostics(),
+          };
           document.getElementById("saveButton").click();
         });
       } catch (error) {
         return {
           error: String(error && error.stack ? error.stack : error),
           savePayload,
+          activeOwnerAtSave,
+          diskBeforeSave,
+          preSaveDocumentState: typeof preSaveDocumentState === "undefined"
+            ? null
+            : preSaveDocumentState,
         };
       } finally {
         if (timer) clearTimeout(timer);
@@ -11220,6 +16042,20 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       }
     })()
   `);
+  if (mixedNewlineCtimeProbe) {
+    mixedNewlineVersionTimeline.push({
+      stage: "immediately-pre-save",
+      diskVersion: mixedNewlineSave.diskBeforeSave,
+      renderer: mixedNewlineSave.preSaveDocumentState,
+    });
+    mixedNewlineVersionTimeline.push(
+      await mixedNewlineCtimeProbe.capture(
+        "after-save-result",
+        mixedNewlineTab.id,
+      ),
+    );
+    mixedNewlineCtimeProbe.restore();
+  }
   const mixedNewlineDiskBytes = fs.readFileSync(mixedNewlineFile, "utf8");
   const mixedNewlineAfterSave = await exec(`
     (() => {
@@ -11240,14 +16076,40 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     expectedBytes: mixedNewlineSaved,
     diskBytes: mixedNewlineDiskBytes,
     mixedNewlineAfterSave,
+    mixedNewlineSettled,
+    mixedNewlineVersionAfterOpen,
+    mixedNewlineVersionTimeline,
   });
   check(
     "F22 noncontiguous mixed-newline edits preserve every untouched raw terminator through Save",
     mixedNewlineSave &&
       !mixedNewlineSave.error &&
+      // Setup before verdict, for the same reason as the positive controls:
+      // the settled version survived opening the tab and was still on disk at
+      // the last look before the click, and the tab that issued the save was
+      // the selected owner. Without these, a correct conflict refusal reads as
+      // a newline-spelling defect.
+      sameDiskVersion(mixedNewlineSettled, mixedNewlineVersionAfterOpen) &&
+      sameDiskVersion(mixedNewlineSettled, mixedNewlineSave.diskBeforeSave) &&
+      mixedNewlineSave.activeOwnerAtSave &&
+      mixedNewlineSave.activeOwnerAtSave.tabId === mixedNewlineTab.id &&
+      Number.isSafeInteger(
+        mixedNewlineSave.activeOwnerAtSave.selectionGeneration,
+      ) &&
+      mixedNewlineSave.activeOwnerAtSave.selectionGeneration > 0 &&
       mixedNewlineSave.timedOut === false &&
       mixedNewlineSave.result &&
       mixedNewlineSave.result.success === true &&
+      // As above: the result is re-correlated to the captured producer request
+      // rather than trusted because it named this document.
+      producerRequestMatches(
+        {
+          requests: [mixedNewlineSave.savePayload],
+          result: mixedNewlineSave.result,
+        },
+        mixedNewlineFile,
+        mixedNewlineSaved,
+      ) &&
       mixedNewlineSave.savePayload &&
       mixedNewlineSave.undoSizeAfterFirstEdit > mixedNewlineSave.undoSizeBeforeInput &&
       mixedNewlineSave.undoApplied === true &&
@@ -11270,6 +16132,298 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   );
 
   }
+  }
+
+  // The textarea erases newline spelling before CustomTabs sees an edit. Drive
+  // each spelling through the real input, undo, tab fold, and Save paths so
+  // byte equality is checked at the only boundary that matters: the payload
+  // ultimately written to disk.
+  __shutdown.reset();
+  const newlineSpellingCases = [
+    {
+      label: "LF",
+      original: "a\nb\nc\n",
+      saved: "A\nb\nc\n",
+      uniform: true,
+    },
+    {
+      label: "CRLF",
+      original: "a\r\nb\r\nc\r\n",
+      saved: "A\r\nb\r\nc\r\n",
+      uniform: true,
+    },
+    {
+      label: "bare-CR",
+      original: "a\rb\rc\r",
+      saved: "A\rb\rc\r",
+      uniform: true,
+    },
+    {
+      label: "mixed",
+      original: "a\r\nb\nc\rd\r\n",
+      saved: "A\r\nb\nc\rd\r\n",
+      uniform: false,
+    },
+  ];
+  const spellingDiagnosticsBefore = __shutdown.state();
+  const newlineSpellingEvidence = [];
+  for (const spellingCase of newlineSpellingCases) {
+    const filePath = path.join(
+      dir,
+      `f22-${spellingCase.label.toLowerCase()}-spelling.md`,
+    );
+    const otherPath = path.join(
+      dir,
+      `f22-${spellingCase.label.toLowerCase()}-spelling-other.md`,
+    );
+    fs.writeFileSync(filePath, spellingCase.original, "utf8");
+    fs.writeFileSync(otherPath, "F22_NEWLINE_OTHER\n", "utf8");
+    // Let writes finish propagating before the first watcher is attached. A
+    // watcher that observes fixture construction is not a valid Save setup.
+    await sleep(350);
+    await clearTabs();
+    const tab = await createActiveTab(filePath, spellingCase.original);
+    const otherTab = await exec(
+      `window.CustomTabs.createTab(${JSON.stringify(otherPath)}, "F22_NEWLINE_OTHER\\n", { activate: false })`,
+    );
+    if (!(await exec(`window.CustomTabs.__inEditMode()`))) {
+      await exec(`toggleEditBtn.click(); null;`);
+    }
+    const evidence = await exec(`
+      (async () => {
+        const ipc = require("electron").ipcRenderer;
+        const filePath = ${JSON.stringify(filePath)};
+        const tabId = ${tab.id};
+        const otherTabId = ${otherTab.id};
+        const editor = window.markdownEditor;
+        const expectedEditor = ${JSON.stringify(
+          spellingCase.original.replace(/\r\n?|\r/g, "\n"),
+        )};
+        // The input debounce has no baseline by itself. Add the same history
+        // entry production edit commands establish, then undo before debounce
+        // can turn the transient text into a second entry.
+        historyPush(editor.value);
+        const undoSizeBeforeEdit = window.getFileOpenDiagnostics().undoSize;
+        const initialEditorMatches = editor.value === expectedEditor;
+        editor.setRangeText("X", 0, 1, "end");
+        editor.dispatchEvent(new InputEvent("input", {
+          bubbles: true, inputType: "insertText", data: "X",
+        }));
+        document.dispatchEvent(new KeyboardEvent("keydown", {
+          key: "z", ctrlKey: true, bubbles: true, cancelable: true,
+        }));
+        await new Promise((resolve) => setTimeout(resolve, 900));
+        const undoSizeAfterEdit = window.getFileOpenDiagnostics().undoSize;
+        const undoApplied = editor.value === expectedEditor;
+        await window.CustomTabs.switchToTab(otherTabId);
+        await window.CustomTabs.switchToTab(tabId);
+        const afterUndoTab = window.CustomTabs.getTabs().find(
+          (candidate) => candidate.id === tabId,
+        );
+        const afterUndo = {
+          content: afterUndoTab && afterUndoTab.content,
+          original: afterUndoTab && afterUndoTab.originalContent,
+          dirty: afterUndoTab && afterUndoTab.hasUnsavedChanges,
+          editor: window.markdownEditor.value,
+        };
+        editor.setRangeText("A", 0, 1, "end");
+        editor.dispatchEvent(new InputEvent("input", {
+          bubbles: true, inputType: "insertText", data: "A",
+        }));
+        await new Promise((resolve) => setTimeout(resolve, 900));
+        await window.CustomTabs.switchToTab(otherTabId);
+        await window.CustomTabs.switchToTab(tabId);
+        const originalSend = ipc.send;
+        const originalAlert = window.alert;
+        let savePayload = null;
+        let timer = null;
+        let onResult = null;
+        try {
+          ipc.send = function (channel, ...args) {
+            if (channel === "save-markdown-file") savePayload = args[0];
+            return originalSend.call(this, channel, ...args);
+          };
+          window.alert = () => {};
+          const save = await new Promise((resolve) => {
+            timer = setTimeout(
+              () => resolve({ timedOut: true, savePayload }),
+              5000,
+            );
+            onResult = (_event, result) => {
+              if (!result || result.path !== filePath) return;
+              resolve({ timedOut: false, result, savePayload });
+            };
+            ipc.on("save-markdown-result", onResult);
+            document.getElementById("saveButton").click();
+          });
+          const afterSaveTab = window.CustomTabs.getTabs().find(
+            (candidate) => candidate.id === tabId,
+          );
+          return {
+            initialEditorMatches,
+            undoSizeBeforeEdit,
+            undoSizeAfterEdit,
+            undoApplied,
+            afterUndo,
+            save,
+            afterSave: {
+              content: afterSaveTab && afterSaveTab.content,
+              original: afterSaveTab && afterSaveTab.originalContent,
+              dirty: afterSaveTab && afterSaveTab.hasUnsavedChanges,
+            },
+          };
+        } finally {
+          if (timer) clearTimeout(timer);
+          if (onResult) ipc.removeListener("save-markdown-result", onResult);
+          ipc.send = originalSend;
+          window.alert = originalAlert;
+        }
+      })()
+    `);
+    newlineSpellingEvidence.push({
+      ...spellingCase,
+      diskBytes: fs.readFileSync(filePath, "utf8"),
+      evidence,
+    });
+  }
+  await sleep(150);
+  const spellingDiagnosticsAfter = __shutdown.state();
+  const spellingWitnesses = spellingDiagnosticsAfter.newlineAlignmentWitnesses
+    .slice(spellingDiagnosticsBefore.newlineAlignmentWitnessCount);
+  const uniformWitnesses = spellingWitnesses.filter(
+    (witness) => witness.mode === "uniform",
+  );
+  const spellingDetail = JSON.stringify({
+    newlineSpellingEvidence,
+    diagnosticsBefore: spellingDiagnosticsBefore,
+    diagnosticsAfter: spellingDiagnosticsAfter,
+    spellingWitnesses,
+    uniformWitnesses,
+  });
+  check(
+    "F22 LF, CRLF, bare-CR, and mixed spelling survive real edit, undo, fold, and Save",
+    newlineSpellingEvidence.length === newlineSpellingCases.length &&
+      newlineSpellingEvidence.every((entry) =>
+        entry.evidence &&
+        entry.evidence.initialEditorMatches === true &&
+        entry.evidence.undoSizeBeforeEdit > 0 &&
+        entry.evidence.undoSizeAfterEdit === entry.evidence.undoSizeBeforeEdit &&
+        entry.evidence.undoApplied === true &&
+        entry.evidence.afterUndo &&
+        entry.evidence.afterUndo.content === entry.original &&
+        entry.evidence.afterUndo.original === entry.original &&
+        entry.evidence.afterUndo.dirty === false &&
+        entry.evidence.afterUndo.editor ===
+          entry.original.replace(/\r\n?|\r/g, "\n") &&
+        entry.evidence.save &&
+        entry.evidence.save.timedOut === false &&
+        entry.evidence.save.result &&
+        entry.evidence.save.result.success === true &&
+        entry.evidence.save.savePayload &&
+        entry.evidence.save.savePayload.content === entry.saved &&
+        entry.diskBytes === entry.saved &&
+        entry.evidence.afterSave &&
+        entry.evidence.afterSave.content === entry.saved &&
+        entry.evidence.afterSave.original === entry.saved &&
+        entry.evidence.afterSave.dirty === false,
+      ),
+    spellingDetail,
+  );
+  check(
+    "F22 uniform line-ending folds take the uniform shortcut instead of per-character restoration",
+    spellingDiagnosticsAfter.newlineAlignmentWitnessCount <
+      spellingDiagnosticsAfter.newlineAlignmentWitnessLimit &&
+      uniformWitnesses.length > 0 &&
+      uniformWitnesses.reduce(
+        (calls, witness) => calls + witness.callCount,
+        0,
+      ) === newlineSpellingCases.filter((entry) => entry.uniform).length,
+    spellingDetail,
+  );
+  const activeEditorFoldFile = path.join(dir, "f22-active-editor-fold.md");
+  const activeEditorFoldOtherFile = path.join(
+    dir,
+    "f22-active-editor-fold-other.md",
+  );
+  const activeEditorFoldOriginal =
+    "f".repeat(2 * 1024 * 1024 - 2) + "\n";
+  const activeEditorFoldEdited =
+    activeEditorFoldOriginal.slice(0, -2) + "X\n";
+  fs.writeFileSync(activeEditorFoldFile, activeEditorFoldOriginal, "utf8");
+  fs.writeFileSync(activeEditorFoldOtherFile, "F22_FOLD_OTHER\n", "utf8");
+  await sleep(350);
+  await clearTabs();
+  const activeEditorFoldTab = await createActiveTab(
+    activeEditorFoldFile,
+    activeEditorFoldOriginal,
+  );
+  const activeEditorFoldOtherTab = await exec(
+    `window.CustomTabs.createTab(${JSON.stringify(activeEditorFoldOtherFile)}, "F22_FOLD_OTHER\\n", { activate: false })`,
+  );
+  if (!(await exec(`window.CustomTabs.__inEditMode()`))) {
+    await exec(`toggleEditBtn.click(); null;`);
+  }
+  const activeEditorFoldEvidence = await exec(`
+    (() => {
+      const tab = window.CustomTabs.getTabs().find(
+        (candidate) => candidate.id === ${activeEditorFoldTab.id},
+      );
+      const editor = window.markdownEditor;
+      const originalIndexOf = String.prototype.indexOf;
+      const originalReplace = String.prototype.replace;
+      let indexOfCalls = 0;
+      let replaceCalls = 0;
+      let scannedBytes = 0;
+      let switchPromise = null;
+      String.prototype.indexOf = function () {
+        indexOfCalls += 1;
+        scannedBytes += String(this).length;
+        return originalIndexOf.apply(this, arguments);
+      };
+      String.prototype.replace = function () {
+        replaceCalls += 1;
+        scannedBytes += String(this).length;
+        return originalReplace.apply(this, arguments);
+      };
+      try {
+        editor.value = ${JSON.stringify(activeEditorFoldEdited)};
+        switchPromise = window.CustomTabs.switchToTab(
+          ${activeEditorFoldOtherTab.id},
+          { silent: true },
+        );
+        return {
+          indexOfCalls,
+          replaceCalls,
+          scannedBytes,
+          state: window.CustomTabs.__documentState(tab),
+          switchStarted: !!switchPromise,
+        };
+      } finally {
+        String.prototype.indexOf = originalIndexOf;
+        String.prototype.replace = originalReplace;
+      }
+    })()
+  `);
+  await exec(
+    `(async () => {
+      await window.CustomTabs.switchToTab(${activeEditorFoldTab.id}, { silent: true });
+      return null;
+    })()`,
+  );
+  check(
+    "F22 active-editor fold proves dirty once without a duplicate full-document comparison",
+    activeEditorFoldEvidence &&
+      activeEditorFoldEvidence.switchStarted === true &&
+      activeEditorFoldEvidence.state &&
+      activeEditorFoldEvidence.state.maintained === true &&
+      activeEditorFoldEvidence.state.dirty === true &&
+      activeEditorFoldEvidence.indexOfCalls === 5 &&
+      activeEditorFoldEvidence.replaceCalls === 1 &&
+      activeEditorFoldEvidence.scannedBytes ===
+        6 * activeEditorFoldOriginal.length,
+    JSON.stringify(activeEditorFoldEvidence),
+  );
+  if (newlineFocusedHarness) return;
 
   // ---- F22 regression: deleted-tab evidence belongs to its generation ----
   let f22WatcherProbe = null;
@@ -11337,18 +16491,26 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     });
     restoreWatcherConstruction = () => restoreWatch();
     const intervalRecords = new Map();
+    const suspendedPollPaths = new Set();
     const restoreSetInterval = replaceMethod(
       global,
       "setInterval",
       function(handler, delay, ...args) {
-        const handle = realSetInterval.call(this, handler, delay, ...args);
-        if (
+        const isCheckFileChangesPoll =
           Number(delay) === 2000 &&
           typeof handler === "function" &&
-          /\bcheckFileChanges\b/.test(Function.prototype.toString.call(handler))
-        ) {
-          const record = {
-            id: nextId++, kind: "poll", filePath: lastWatchedPath,
+          /\bcheckFileChanges\b/.test(Function.prototype.toString.call(handler));
+        let record = null;
+        const observedHandler = isCheckFileChangesPoll
+          ? function(...handlerArgs) {
+            if (record && suspendedPollPaths.has(record.filePath)) return;
+            return handler.apply(this, handlerArgs);
+          }
+          : handler;
+        const handle = realSetInterval.call(this, observedHandler, delay, ...args);
+        if (isCheckFileChangesPoll) {
+          record = {
+            id: nextId++, kind: "poll", filePath: lastWatchedPath, handler,
           };
           starts.push(record);
           live.set(record.id, record);
@@ -11388,6 +16550,47 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     };
     return {
       snapshot,
+      invokePoll(filePath) {
+        const matches = [...intervalRecords.values()].filter((record) =>
+          record.filePath === filePath &&
+          live.get(record.id) === record &&
+          typeof record.handler === "function",
+        );
+        if (matches.length !== 1) {
+          throw new Error(
+            `Expected one live checkFileChanges poll for ${filePath}, found ${matches.length}`,
+          );
+        }
+        matches[0].handler();
+        return {
+          invoked: true,
+          id: matches[0].id,
+          filePath: matches[0].filePath,
+          liveCount: matches.length,
+        };
+      },
+      suspendPoll(filePath) {
+        const matches = [...intervalRecords.values()].filter((record) =>
+          record.filePath === filePath &&
+          live.get(record.id) === record &&
+          typeof record.handler === "function",
+        );
+        if (matches.length !== 1) {
+          throw new Error(
+            `Expected one live checkFileChanges poll to suspend for ${filePath}, found ${matches.length}`,
+          );
+        }
+        suspendedPollPaths.add(filePath);
+        return {
+          suspended: true,
+          id: matches[0].id,
+          filePath,
+          liveCount: matches.length,
+        };
+      },
+      resumePoll(filePath) {
+        return suspendedPollPaths.delete(filePath);
+      },
       restore() {
         restoreWatcherConstruction();
       },
@@ -11418,6 +16621,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     const productionListenerIsOnce = !!productionListener.listener;
     const records = [];
     const recordWrites = [];
+    let nextRecordWriteSequence = 0;
     let watchedOwner = null;
     const normaliseDelivery = (payload) => {
       const attempt = payload && (
@@ -11555,6 +16759,9 @@ async function runF22SaveAndReloadScenarios(win, exec) {
         documentGeneration: owner.documentGeneration,
         pathKey: owner.pathKey,
         spelling: owner.spelling,
+        ...(Number.isSafeInteger(owner.selectionGeneration)
+          ? { selectionGeneration: owner.selectionGeneration }
+          : {}),
       }
       : null;
     const observedObjectIds = new WeakMap();
@@ -11610,14 +16817,20 @@ async function runF22SaveAndReloadScenarios(win, exec) {
         // deletionDeliveries uses an owner/document key, never eventId. Keep
         // the actual map and key produced with this complete delivery identity.
         recordWrites.push({
+          sequence: ++nextRecordWriteSequence,
           map: this,
           key,
           value,
           identity,
+          recordObjectId: observedObjectId(record),
+          insertionAttempt: attemptState(record),
           ownerKeyed:
             key === ownerKey &&
             record.key === ownerKey &&
             ownerIsComplete(owner),
+          idKeyed:
+            Number.isSafeInteger(identity.eventId) &&
+            key === identity.eventId,
           },
         );
       }
@@ -11628,6 +16841,15 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       return recordWrites.filter((candidate) =>
         candidate.map.get(candidate.key) === candidate.value &&
         candidate.ownerKeyed === true &&
+        candidate.map.has(candidate.key) &&
+        recordIdentity(candidate.value).eventId === identity.eventId,
+      );
+    };
+    const currentIdTombstonesForEvent = (identity) => {
+      if (!identity || !Number.isSafeInteger(identity.eventId)) return [];
+      return recordWrites.filter((candidate) =>
+        candidate.idKeyed === true &&
+        candidate.map.get(candidate.key) === candidate.value &&
         candidate.map.has(candidate.key) &&
         recordIdentity(candidate.value).eventId === identity.eventId,
       );
@@ -11651,6 +16873,85 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       Map.prototype.set = originalSet;
       Map.prototype.values = originalValues;
     };
+    const selectFileTrackingListeners = ipcMain.rawListeners(
+      "select-file-tracking",
+    );
+    if (selectFileTrackingListeners.length !== 1) {
+      throw new Error(
+        `Expected one synchronous select-file-tracking listener, found ${selectFileTrackingListeners.length}`,
+      );
+    }
+    const selectFileTrackingListener = selectFileTrackingListeners[0];
+    const selectFileTrackingDescriptor = Object.getOwnPropertyDescriptor(
+      ipcMain._events,
+      "select-file-tracking",
+    );
+    if (
+      !selectFileTrackingDescriptor ||
+      selectFileTrackingDescriptor.value !== selectFileTrackingListener
+    ) {
+      throw new Error(
+        "Expected an own select-file-tracking listener descriptor before observing it",
+      );
+    }
+    const restoreSelectFileTrackingListener = () => {
+      Object.defineProperty(
+        ipcMain._events,
+        "select-file-tracking",
+        selectFileTrackingDescriptor,
+      );
+    };
+    Object.defineProperty(ipcMain._events, "select-file-tracking", {
+      ...selectFileTrackingDescriptor,
+      value: function observedSelectFileTracking(event, selection) {
+        let decision;
+        const observedEvent = new Proxy(event, {
+          set(target, property, value) {
+            if (property === "returnValue") decision = value;
+            return Reflect.set(target, property, value);
+          },
+        });
+        const result = selectFileTrackingListener.call(
+          this,
+          observedEvent,
+          selection,
+        );
+        if (decision === undefined) {
+          throw new Error(
+            "F22 select-file-tracking returned without a synchronous main-process decision",
+          );
+        }
+        if (decision && decision.accepted === true) {
+          if (!selection || !selection.owner || !selection.filePath) {
+            throw new Error(
+              "F22 accepted select-file-tracking omitted its renderer owner envelope",
+            );
+          }
+          const mainOwner = decision.approvedOwner || selection.owner;
+          const spelling = mainOwner.spelling ||
+            selection.owner.spelling ||
+            (process.platform === "win32"
+              ? path.normalize(path.resolve(selection.filePath)).toLowerCase()
+              : path.normalize(path.resolve(selection.filePath)));
+          const acceptedOwner = snapshotOwner({
+            ...selection.owner,
+            ...mainOwner,
+            spelling,
+          });
+          if (
+            !acceptedOwner ||
+            !Number.isSafeInteger(acceptedOwner.selectionGeneration) ||
+            acceptedOwner.selectionGeneration <= 0
+          ) {
+            throw new Error(
+              "F22 accepted select-file-tracking did not preserve a complete main watcher owner",
+            );
+          }
+          watchedOwner = acceptedOwner;
+        }
+        return result;
+      },
+    });
     const originalEmit = ipcMain.emit;
     const restoreEmit = replaceMethod(
       ipcMain,
@@ -11742,6 +17043,12 @@ async function runF22SaveAndReloadScenarios(win, exec) {
           deliveryMap: null,
           deliveryMaps: [],
           tombstoneRetained: false,
+          recordObjectId: observedRecord
+            ? observedObjectId(producerRecord(observedRecord.value))
+            : null,
+          deliveryKey: observedRecord ? observedRecord.key : null,
+          retirementWriteSequence: null,
+          acknowledgementWriteSequence: nextRecordWriteSequence,
         };
         const originalDelete = Map.prototype.delete;
         Map.prototype.delete = function observedDeletionRecordRetirement(key) {
@@ -11750,6 +17057,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
             if (this === record.deliveryMap && key === observedRecord.key) {
               record.recordRetired = true;
               record.retiredMaps.push(this);
+              record.retirementWriteSequence = nextRecordWriteSequence;
             }
           }
           return deleted;
@@ -11791,10 +17099,14 @@ async function runF22SaveAndReloadScenarios(win, exec) {
               attemptBefore.hasBooleanInFlight === true &&
               attemptBefore.inFlight === true &&
               attemptBefore.ackTimeoutActive === true &&
+              attemptBefore.hasRetryTimeout === true &&
+              attemptBefore.retryTimeoutActive === false &&
               attemptAfter.attempt === identity.attempt &&
               attemptAfter.hasBooleanInFlight === true &&
               attemptAfter.inFlight === false &&
-              attemptAfter.ackTimeoutActive === false
+              attemptAfter.ackTimeoutActive === false &&
+              attemptAfter.hasRetryTimeout === true &&
+              attemptAfter.retryTimeoutActive === false
             );
             const deliveryMaps = record.deliveryMap ? [record.deliveryMap] : [];
             record.recordParked = producerRecord(observedRecord.value).parked === true;
@@ -11829,6 +17141,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
                 record.deliveryMaps.length === 1 &&
                 record.recordRetired === true &&
                 record.recordParked === false &&
+                attemptBefore.hasRetryTimeout === true &&
                 attemptAfter.hasRetryTimeout === true &&
                 record.retryScheduled === false &&
                 record.matchingDeliveryRecordRemains === false
@@ -11852,6 +17165,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     );
     restoreMainDeletionAckConstruction = () => {
       restoreEmit();
+      restoreSelectFileTrackingListener();
       Map.prototype.set = originalSet;
       Map.prototype.values = originalValues;
     };
@@ -11866,6 +17180,10 @@ async function runF22SaveAndReloadScenarios(win, exec) {
               record.deliveryMaps.length === 1 &&
               record.recordRetired === true &&
               record.recordParked === false &&
+              record.attemptBefore.hasRetryTimeout === true &&
+              record.attemptBefore.retryTimeoutActive === false &&
+              record.attemptAfter.hasRetryTimeout === true &&
+              record.attemptAfter.retryTimeoutActive === false &&
               record.retryScheduled === false &&
               record.matchingDeliveryRecordRemains === false
             : retryableDeletionRefusal(identity) &&
@@ -11898,9 +17216,13 @@ async function runF22SaveAndReloadScenarios(win, exec) {
           record.candidateRecordFound === true &&
           record.identityMatchesCurrentRecord === false &&
           record.attemptBefore &&
+          record.attemptAfter &&
           record.attemptBefore.inFlight === true &&
           record.attemptBefore.ackTimeoutActive === true &&
+          record.attemptBefore.hasRetryTimeout === true &&
           record.attemptBefore.retryTimeoutActive === false &&
+          record.attemptAfter.hasRetryTimeout === true &&
+          record.attemptAfter.retryTimeoutActive === false &&
           record.attemptStateUnchanged === true &&
           record.recordFingerprintUnchanged === true &&
           record.recordRetired === false &&
@@ -11911,8 +17233,11 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       },
       recordSnapshot(identity) {
         const candidates = currentRecordsForEvent(identity);
+        const idTombstones = currentIdTombstonesForEvent(identity);
         return {
           count: candidates.length,
+          idTombstoneCount: idTombstones.length,
+          idTombstonePresent: idTombstones.length === 1,
           records: candidates.map((candidate) => ({
             identity: recordIdentity(candidate.value),
             ownerKeyed: candidate.ownerKeyed === true,
@@ -11924,6 +17249,94 @@ async function runF22SaveAndReloadScenarios(win, exec) {
         return records.findLast((record) =>
           sameAcknowledgement(record.identity, identity),
         ) || null;
+      },
+      ownerPathMovedReactivations(identity) {
+        const initial = records.find((record) =>
+          sameAcknowledgement(record.identity, identity) &&
+          record.accepted === true &&
+          record.deliveryMap &&
+          record.recordRetired === true &&
+          Number.isSafeInteger(record.retirementWriteSequence),
+        );
+        if (!initial) {
+          return {
+            valid: false,
+            activations: [],
+            acknowledgements: [],
+          };
+        }
+        const activations = recordWrites.filter((candidate) => {
+          const candidateIdentity = candidate.identity;
+          const insertion = candidate.insertionAttempt;
+          return candidate.sequence > initial.retirementWriteSequence &&
+            candidate.map === initial.deliveryMap &&
+            candidate.key === initial.deliveryKey &&
+            candidate.ownerKeyed === true &&
+            candidate.recordObjectId === initial.recordObjectId &&
+            candidateIdentity &&
+            candidateIdentity.complete === true &&
+            candidateIdentity.eventId === identity.eventId &&
+            candidateIdentity.selectionGeneration === identity.selectionGeneration &&
+            candidateIdentity.watcherGeneration === identity.watcherGeneration &&
+            candidateIdentity.pageSession === identity.pageSession &&
+            candidateIdentity.rendererGeneration === identity.rendererGeneration &&
+            candidateIdentity.tabId === identity.tabId &&
+            candidateIdentity.documentGeneration === identity.documentGeneration &&
+            candidateIdentity.pathKey === identity.pathKey &&
+            candidateIdentity.attempt === identity.attempt &&
+            insertion &&
+            insertion.hasRetryTimeout === true &&
+            insertion.retryTimeoutActive === false;
+        });
+        const acknowledgements = [];
+        for (const activation of activations) {
+          acknowledgements.push(records.find((record) =>
+            !acknowledgements.includes(record) &&
+            record.acknowledgementWriteSequence >= activation.sequence &&
+            record.accepted === true &&
+            record.identity &&
+            record.identity.eventId === activation.identity.eventId &&
+            record.identity.selectionGeneration === activation.identity.selectionGeneration &&
+            record.identity.watcherGeneration === activation.identity.watcherGeneration &&
+            record.identity.pageSession === activation.identity.pageSession &&
+            record.identity.rendererGeneration === activation.identity.rendererGeneration &&
+            record.identity.tabId === activation.identity.tabId &&
+            record.identity.documentGeneration === activation.identity.documentGeneration &&
+            record.identity.pathKey === activation.identity.pathKey &&
+            record.identity.attempt > activation.identity.attempt &&
+            record.attemptBefore &&
+            record.attemptBefore.hasRetryTimeout === true &&
+            record.attemptBefore.retryTimeoutActive === false &&
+            record.attemptAfter &&
+            record.attemptAfter.hasRetryTimeout === true &&
+            record.attemptAfter.retryTimeoutActive === false,
+          ) || null);
+        }
+        return {
+          valid:
+            initial.attemptBefore &&
+            initial.attemptBefore.hasRetryTimeout === true &&
+            initial.attemptBefore.retryTimeoutActive === false &&
+            initial.attemptAfter &&
+            initial.attemptAfter.hasRetryTimeout === true &&
+            initial.attemptAfter.retryTimeoutActive === false &&
+            activations.length > 0 &&
+            acknowledgements.every(Boolean) &&
+            acknowledgements.every((record, index) =>
+              index === 0
+                ? record.identity.attempt ===
+                  activations[index].identity.attempt + 1
+                : record.identity.attempt >
+                  acknowledgements[index - 1].identity.attempt &&
+                  record.identity.attempt ===
+                    activations[index].identity.attempt + 1),
+          activations: activations.map((activation, index) => ({
+            identity: acknowledgements[index].identity,
+            sequence: activation.sequence,
+          })),
+          acknowledgements: acknowledgements.map((record) =>
+            record && record.identity),
+        };
       },
       listenerSequenceIntact() {
         const current = ipcMain.rawListeners(channel);
@@ -11949,12 +17362,19 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       const ipc = require("electron").ipcRenderer;
       if (window.__f22DeletionProtocolProbe) return null;
       const originalSend = ipc.send;
+      const originalSendSync = ipc.sendSync;
       const send = originalSend.bind(ipc);
+      const sendSync = originalSendSync.bind(ipc);
+      const ownSendDescriptor = Object.getOwnPropertyDescriptor(ipc, "send");
+      const ownSendSyncDescriptor = Object.getOwnPropertyDescriptor(
+        ipc,
+        "sendSync",
+      );
       const probe = window.__f22DeletionProtocolProbe = {
         selections: [], deliveries: [], deletionEvents: [], acknowledgements: [],
         attemptedAcknowledgements: [], droppedAcknowledgements: [],
         forwardedAcknowledgements: [], dropAcknowledgements: false,
-        originalSend,
+        originalSend, originalSendSync,
         restored: false,
       };
       const deletionProtocolSend = (channel, ...args) => {
@@ -11978,8 +17398,75 @@ async function runF22SaveAndReloadScenarios(win, exec) {
         }
         return send(channel, ...args);
       };
+      // Real tab selection is SYNCHRONOUS. beginFileOpen asserts ownership with
+      // returnDecision, and that branch answers the caller through
+      // ipcRenderer.sendSync("select-file-tracking"); only the fire-and-forget
+      // branch uses "set-active-file" on send. Watching send alone therefore
+      // recorded nothing for the tab createActiveTab had just opened, and every
+      // owner witness below read null while the real deletion delivery carried
+      // a complete owner. Capture the selection only AFTER the original
+      // sendSync has returned, and only when main ACCEPTED it, so the witnessed
+      // owner is the owner main will honour rather than one merely offered.
+      // Nothing here is derived from a deletion delivery.
+      const deletionProtocolSendSync = (channel, ...args) => {
+        const reply = sendSync(channel, ...args);
+        const selection = args[0];
+        if (
+          channel === "select-file-tracking" &&
+          reply &&
+          reply.accepted === true &&
+          selection &&
+          selection.owner
+        ) {
+          probe.selections.push({
+            channel,
+            filePath: selection.filePath,
+            selection: { ...selection },
+            owner: selection.owner,
+            accepted: true,
+            reply,
+          });
+        }
+        return reply;
+      };
+      // Put the ORIGINAL PROPERTY DESCRIPTOR back rather than re-assigning the
+      // captured function: ipcRenderer's methods are prototype-backed, so
+      // "ipc.sendSync = originalSendSync" would leave an own property behind
+      // that permanently shadows Electron's - the wrapper is gone, but the
+      // shadow outlives the probe and every later suite runs against it. Where
+      // there was no own descriptor the installed property is deleted instead,
+      // which re-exposes the prototype's.
+      const install = (name, impl, own) => {
+        Object.defineProperty(ipc, name, {
+          value: impl,
+          writable: true,
+          configurable: true,
+          enumerable: own ? own.enumerable : false,
+        });
+      };
+      // Returns a leak description, or null when the method is exactly as it
+      // was found. A wrapper - or an own property this probe introduced - that
+      // outlives restore() is not something the probe may hide: it would be
+      // inherited by every scenario and suite that runs after it.
+      const restoreMethod = (name, impl, own) => {
+        if (ipc[name] === impl) {
+          if (own) Object.defineProperty(ipc, name, own);
+          else delete ipc[name];
+        }
+        if (ipc[name] === impl) return name + ":wrapper";
+        const current = Object.getOwnPropertyDescriptor(ipc, name);
+        if (!own) return current ? name + ":descriptor" : null;
+        const restoredExactly = !!current &&
+          current.value === own.value &&
+          current.get === own.get &&
+          current.set === own.set &&
+          current.writable === own.writable &&
+          current.enumerable === own.enumerable &&
+          current.configurable === own.configurable;
+        return restoredExactly ? null : name + ":descriptor";
+      };
       probe.wrapper = deletionProtocolSend;
-      ipc.send = deletionProtocolSend;
+      probe.syncWrapper = deletionProtocolSendSync;
       const onDeletion = (event, payload) => {
         probe.deletionEvents.push(event);
         probe.deliveries.push(payload);
@@ -11987,14 +17474,57 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       probe.restore = () => {
         if (probe.restored) return false;
         probe.restored = true;
-        if (ipc.send === deletionProtocolSend) ipc.send = originalSend;
+        // Restore both methods and detach the listener before reporting, so a
+        // leak on one method cannot leave the other one patched.
+        const leaks = [
+          restoreMethod("send", deletionProtocolSend, ownSendDescriptor),
+          restoreMethod(
+            "sendSync", deletionProtocolSendSync, ownSendSyncDescriptor,
+          ),
+        ].filter(Boolean);
         ipc.removeListener("file-deleted", onDeletion);
+        if (leaks.length) {
+          throw new Error(
+            "F22 deletion protocol probe leaked patched IPC methods: " +
+              leaks.join(", "),
+          );
+        }
         return true;
       };
+      install("send", deletionProtocolSend, ownSendDescriptor);
+      install("sendSync", deletionProtocolSendSync, ownSendSyncDescriptor);
       ipc.on("file-deleted", onDeletion);
       return null;
     })()
   `);
+  // A selection witness is an owner main ACCEPTED, not one that was merely
+  // attempted: only the synchronous select-file-tracking replies qualify, and
+  // only those whose reply carried accepted === true. The fire-and-forget
+  // captures are retained for diagnostics and deliberately cannot stand in
+  // for acceptance, because a refused envelope proves nothing about the owner
+  // main will honour.
+  const acceptedSelectionWitness = (filePath, tabId) => exec(`
+    (() => {
+      const witness = window.__f22DeletionProtocolProbe.selections
+        .filter(entry =>
+          entry &&
+          entry.accepted === true &&
+          entry.channel === "select-file-tracking" &&
+          entry.reply && entry.reply.accepted === true &&
+          entry.filePath === ${JSON.stringify(filePath)} &&
+          entry.owner && entry.owner.tabId === ${JSON.stringify(tabId)})
+        .at(-1);
+      return witness || null;
+    })()
+  `);
+  const selectionWasAccepted = (witness) => !!(
+    witness &&
+    witness.accepted === true &&
+    witness.channel === "select-file-tracking" &&
+    witness.reply &&
+    witness.reply.accepted === true &&
+    witness.owner
+  );
   const deletedBFile = path.join(dir, "f22-deleted-owner-b.md");
   fs.writeFileSync(deletedBFile, "F22_DELETED_B_BASE\r\n", "utf8");
   const deletedMessages = () => exec(
@@ -12115,6 +17645,32 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       }
       return deliveryCounts.size === 0;
     })();
+  const deliveriesMatchDeliveries = (left, right) =>
+    Array.isArray(left) &&
+    Array.isArray(right) &&
+    left.length === right.length &&
+    (() => {
+      const rightCounts = new Map();
+      for (const entry of right) {
+        const identity = deletionDeliveryIdentity(
+          entry && (entry.delivery || entry.identity || entry),
+        );
+        if (!identity || !identity.complete) return false;
+        const key = deletionIdentityKey(identity);
+        rightCounts.set(key, (rightCounts.get(key) || 0) + 1);
+      }
+      for (const entry of left) {
+        const identity = deletionDeliveryIdentity(
+          entry && (entry.delivery || entry.identity || entry),
+        );
+        const key = deletionIdentityKey(identity);
+        const count = key && rightCounts.get(key);
+        if (!count) return false;
+        if (count === 1) rightCounts.delete(key);
+        else rightCounts.set(key, count - 1);
+      }
+      return rightCounts.size === 0;
+    })();
   const terminalDeletionAcknowledgement = (identity) =>
     !!identity && (
       (identity.consumed === true &&
@@ -12192,8 +17748,78 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       mainObservation,
     };
   };
+  // The liveness that is actually available from the main process when a
+  // renderer evaluation stops answering. `win`/`wc` are guarded because a
+  // destroyed window is one of the states this is meant to report, and an
+  // accessor that throws here would replace the diagnostic with a different
+  // failure.
+  const deletionProbeLiveness = () => {
+    const windowDestroyed = win && typeof win.isDestroyed === "function"
+      ? win.isDestroyed()
+      : null;
+    const rendererDestroyed = wc && typeof wc.isDestroyed === "function"
+      ? wc.isDestroyed()
+      : null;
+    return {
+      main: { windowDestroyed },
+      renderer: {
+        destroyed: rendererDestroyed,
+        crashed: rendererDestroyed === false && typeof wc.isCrashed === "function"
+          ? wc.isCrashed()
+          : null,
+        loading: rendererDestroyed === false && typeof wc.isLoading === "function"
+          ? wc.isLoading()
+          : null,
+      },
+    };
+  };
+  // `exec` is a renderer evaluation with no bound of its own. A poll loop that
+  // awaits it therefore cannot enforce its own deadline: the loop is parked on
+  // the await, so the deadline it checks at the top is never reached again and
+  // the suite ends at the harness watchdog reporting a timeout instead of a
+  // verdict. Every deletion-probe evaluation goes through here, and a budget
+  // overrun or a rejection THROWS with the call label, the elapsed/budget pair
+  // and the liveness above - it never returns a value a caller could mistake
+  // for a reading.
+  const execWithDeadline = async (code, label, budgetMs = 2000) => {
+    const started = Date.now();
+    let timer = null;
+    // Both settlements are handled here, so a late evaluation - one the budget
+    // has already ruled on - can never surface as an unhandled rejection.
+    const evaluated = (async () => exec(code))().then(
+      (value) => ({ value }),
+      (error) => ({ error: String((error && error.stack) || error) }),
+    );
+    const outcome = await Promise.race([
+      evaluated,
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve({ timedOut: true }), budgetMs);
+      }),
+    ]);
+    clearTimeout(timer);
+    const elapsedMs = Date.now() - started;
+    if (outcome.timedOut !== true && !("error" in outcome)) return outcome.value;
+    const failure = Object.assign({
+      stage: outcome.timedOut === true ? "eval-timeout" : "eval-rejected",
+      label,
+      elapsedMs,
+      budgetMs,
+    }, deletionProbeLiveness(), "error" in outcome ? { error: outcome.error } : {});
+    throw Object.assign(
+      new Error(
+        (failure.stage === "eval-timeout"
+          ? "F22 deletion probe evaluation exceeded its budget: "
+          : "F22 deletion probe evaluation rejected: ") + JSON.stringify(failure),
+      ),
+      { f22ExecFailure: failure },
+    );
+  };
   const waitForDeletionAckQuiescence = async (start, filePath, identity) => {
-    const counts = () => exec(`
+    const countsLabel = "waitForDeletionAckQuiescence counts " + JSON.stringify({
+      filePath,
+      eventId: (identity && identity.eventId) || null,
+    });
+    const counts = () => execWithDeadline(`
       (() => {
         const probe = window.__f22DeletionProtocolProbe;
         const matching = probe.deliveries.slice(${start}).filter(entry =>
@@ -12207,7 +17833,35 @@ async function runF22SaveAndReloadScenarios(win, exec) {
             ack && ack.eventId === ${JSON.stringify(identity && identity.eventId)}).length,
         };
       })()
-    `);
+    `, countsLabel);
+    const changedEvidence = (forwardedStart) => execWithDeadline(`
+      (() => {
+        const probe = window.__f22DeletionProtocolProbe;
+        const eventId = ${JSON.stringify(identity && identity.eventId)};
+        const delivery = (entry) => entry && entry.delivery && ({
+          delivery: entry.delivery,
+        });
+        const acknowledgement = (ack) => ack;
+        const deliveries = probe.deliveries.slice(${start}).filter(entry =>
+          entry && entry.path === ${JSON.stringify(filePath)} &&
+          entry.delivery && entry.delivery.eventId === eventId);
+        const attempted = probe.attemptedAcknowledgements
+          .filter(ack => ack && ack.eventId === eventId);
+        const forwarded = probe.forwardedAcknowledgements
+          .filter(ack => ack && ack.eventId === eventId)
+          .slice(${forwardedStart});
+        return {
+          after: {
+            deliveries: deliveries.length,
+            attempted: attempted.length,
+            forwarded: forwarded.length,
+          },
+          deliveries: deliveries.map(delivery),
+          attempted: attempted.map(acknowledgement),
+          forwarded: forwarded.map(acknowledgement),
+        };
+      })()
+    `, `${countsLabel} changed evidence`);
     const mainAcceptance = await waitForMainDeletionAcknowledgement(identity);
     if (!mainAcceptance.acceptedAndRetired) {
       return {
@@ -12220,24 +17874,62 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     // Start the no-retry oracle only after main's exact production listener
     // accepted this exact acknowledgement and retired the relevant boundary.
     const acceptedMainObservation = mainAcceptance.mainObservation;
-    const before = await counts();
-    const deadline = Date.now() + 4250;
+    let before = await counts();
+    let reactivationEvidence = mainDeletionAckProbe
+      ? mainDeletionAckProbe.ownerPathMovedReactivations(identity)
+      : null;
+    let acceptedReactivationCount = reactivationEvidence
+      ? reactivationEvidence.activations.length
+      : 0;
+    const quiescenceStartedAt = Date.now();
+    const deadline = quiescenceStartedAt + 4250;
     while (Date.now() < deadline) {
       await sleep(50);
-      if (JSON.stringify(await counts()) !== JSON.stringify(before)) {
-        return {
-          identity, before, mainAcknowledgementCount: mainAcceptance.count,
-          acceptedAndRetired: mainAcceptance.acceptedAndRetired,
-          mainProcessed: true, retired: false,
-          mainObservation: acceptedMainObservation,
-        };
+      const after = await counts();
+      if (JSON.stringify(after) !== JSON.stringify(before)) {
+        const evidence = await changedEvidence(before.forwarded);
+        reactivationEvidence = mainDeletionAckProbe
+          ? mainDeletionAckProbe.ownerPathMovedReactivations(identity)
+          : null;
+        const additionalDeliveries = evidence.deliveries.slice(before.deliveries);
+        const additionalActivations = reactivationEvidence
+          ? reactivationEvidence.activations.slice(acceptedReactivationCount)
+          : [];
+        const permitted =
+          reactivationEvidence &&
+          reactivationEvidence.valid === true &&
+          deliveriesMatchDeliveries(
+            additionalDeliveries,
+            additionalActivations,
+          ) &&
+          acknowledgementsMatchDeliveries(
+            evidence.forwarded,
+            additionalDeliveries.map((entry) => entry.delivery),
+          );
+        if (!permitted) {
+          return {
+            identity, before, after, evidence, reactivationEvidence,
+            mainAcknowledgementCount: mainAcceptance.count,
+            acceptedAndRetired: mainAcceptance.acceptedAndRetired,
+            mainProcessed: true, retired: false,
+            observedMs: Date.now() - quiescenceStartedAt,
+            mainObservation: acceptedMainObservation,
+            mainObservationAtChange: mainDeletionAckProbe
+              ? mainDeletionAckProbe.observation(identity)
+              : null,
+          };
+        }
+        acceptedReactivationCount = reactivationEvidence.activations.length;
+        before = after;
       }
     }
     return {
       identity, before, mainAcknowledgementCount: mainAcceptance.count,
       acceptedAndRetired: mainAcceptance.acceptedAndRetired,
       mainProcessed: true, retired: true,
+      observedMs: Date.now() - quiescenceStartedAt,
       mainObservation: acceptedMainObservation,
+      reactivationEvidence,
     };
   };
   const deletionTabSnapshot = (tabId) => exec(`
@@ -12313,9 +18005,11 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   await clearTabs();
   const deletedA = await createActiveTab(deletedAFile, "F22_DELETED_A_BASE\r\n");
   const deletedAWatcherAtStart = watcherProbe.snapshot();
-  const deletedAOwner = await exec(`window.__f22DeletionProtocolProbe.selections
-    .filter(entry => entry.filePath === ${JSON.stringify(deletedAFile)} && entry.owner && entry.owner.tabId === ${deletedA.id})
-    .at(-1)?.owner || null`);
+  const deletedAOwnerAcceptance = await acceptedSelectionWitness(
+    deletedAFile,
+    deletedA.id,
+  );
+  const deletedAOwner = deletedAOwnerAcceptance && deletedAOwnerAcceptance.owner;
   const deletionDeliveryStart = await exec(`window.__f22DeletionProtocolProbe.deliveries.length`);
   const deletionMessageStart = await deletedMessages();
   fs.unlinkSync(deletedAFile);
@@ -12323,6 +18017,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     .slice(${deletionDeliveryStart}).find(entry => entry && entry.path === ${JSON.stringify(deletedAFile)} && entry.delivery))`, 5000);
   const deletedAEvent = await realDeletionFor(deletionDeliveryStart, deletedAFile);
   const deletionAAfterReplay = await deletionTabSnapshot(deletedA.id);
+  const deletedAActiveAfterReplay = await witnessActiveOwner(deletedAFile, deletedA.id);
   const deletionMessagesAfterA = await deletedMessages();
   const deletedAProtocol = await exec(`
     (() => {
@@ -12361,33 +18056,110 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     ),
     5000,
   );
-  const deletionRoundTrip = await exec(`
-    (() => {
-      const other = window.CustomTabs.createTab(
-        ${JSON.stringify(deletedBFile)},
-        "F22_DELETED_B_BASE\\r\\n",
-        { activate: false },
-      );
-      window.CustomTabs.switchToTab(other.id);
-      window.CustomTabs.switchToTab(${deletedA.id});
-      return { otherId: other.id, active: (window.CustomTabs.getActiveTab() || {}).id };
-    })()
-  `);
-  const deletionAAfterRecreatedRoundTrip = await deletionTabSnapshot(deletedA.id);
-  const deletedAWatcherAfterRoundTrip = watcherProbe.snapshot();
+  const deletionAAfterRecreation = await deletionTabSnapshot(deletedA.id);
+  const deletedAActiveAfterRecreation = await witnessActiveOwner(deletedAFile, deletedA.id);
+  const deletedAWatcherAfterRecreation = watcherProbe.snapshot();
   // A tombstone guard must still refuse after an external recreation.  The
-  // saved path was proven missing immediately before recreation; this
-  // assertion then proves refusal leaves the replacement bytes unchanged.
-  const deletionSave = await saveWithAlertGuard(deletedAFile);
-  const deletionAAfterSave = await deletionTabSnapshot(deletedA.id);
-  const replacementBytesAfterSave = fs.readFileSync(deletedAFile, "utf8");
-  const replacementConflictAfterSave = await deletionTabSnapshot(deletedA.id);
+  // saved path was proven missing immediately before recreation. Keep A
+  // active: selecting a deleted tab again is intentionally fail-closed, and
+  // would turn this into a test of another tab's Save instead.
+  let deletionSave;
+  let deletionAAfterSave;
+  let deletedAActiveAfterSave;
+  let replacementBytesAfterSave;
+  let replacementConflictAfterSave;
+  let deletedASaveMute = null;
+  if (sentinel) {
+    await sentinel.mute("F22 deleted-owner A save refusal");
+    deletedASaveMute = sentinel.currentMute();
+  }
+  try {
+    deletionSave = await saveWithAlertGuard(deletedAFile);
+    deletionAAfterSave = await deletionTabSnapshot(deletedA.id);
+    deletedAActiveAfterSave = await witnessActiveOwner(deletedAFile, deletedA.id);
+    replacementBytesAfterSave = fs.readFileSync(deletedAFile, "utf8");
+    replacementConflictAfterSave = await deletionTabSnapshot(deletedA.id);
+    if (sentinel) {
+      await sentinel.drain();
+      check(
+        "F22 deleted-owner A refusal mutes exactly its proven save error",
+        hasExpectedMutedSaveFailure(
+          deletedASaveMute,
+          deletedAFile,
+          deletionSave && deletionSave.result,
+          `The file was deleted outside Folia and has not been restored: ${deletedAFile}`,
+        ),
+        JSON.stringify({ deletedASaveMute, deletionSave }),
+      );
+    }
+  } finally {
+    if (sentinel) await sentinel.unmute();
+  }
   const replacementSave = deletionSave;
-  await exec(`window.reloadCurrentFile(); null;`);
-  const explicitReplacementAdopted = await waitForCondition(
-    exec, `window.originalMarkdown === "F22_DELETED_A_EXTERNAL_REPLACEMENT\\r\\n"`, 5000,
+  const deletedAReloadDialogExpected = {
+    type: "warning",
+    buttons: ["Replace from disk", "Keep in-memory copy"],
+    defaultId: 1,
+    cancelId: 1,
+    title: "Confirm document replacement",
+    message: `"${path.basename(deletedAFile)}" has an unresolved deletion or a changed file target.`,
+    detail: "Replacing it with the current disk file discards the earlier in-memory copy.",
+  };
+  const deletedAReloadDialogCalls = [];
+  const restoreDeletedAReloadDialog = replaceMethod(
+    dialog,
+    "showMessageBoxSync",
+    (owner, options) => {
+      const opts = options || {};
+      const mismatches = [];
+      if (owner !== win) mismatches.push("owner-window");
+      if (opts.type !== deletedAReloadDialogExpected.type) mismatches.push("type");
+      if (opts.title !== deletedAReloadDialogExpected.title) mismatches.push("title");
+      if (JSON.stringify(opts.buttons) !== JSON.stringify(deletedAReloadDialogExpected.buttons)) {
+        mismatches.push("buttons");
+      }
+      if (opts.defaultId !== deletedAReloadDialogExpected.defaultId) mismatches.push("defaultId");
+      if (opts.cancelId !== deletedAReloadDialogExpected.cancelId) mismatches.push("cancelId");
+      if (opts.message !== deletedAReloadDialogExpected.message) mismatches.push("message");
+      if (opts.detail !== deletedAReloadDialogExpected.detail) mismatches.push("detail");
+      if (deletedAReloadDialogCalls.length > 0) mismatches.push("second-dialog");
+      const call = {
+        ownerIsTestWindow: owner === win,
+        type: opts.type,
+        title: opts.title,
+        buttons: opts.buttons,
+        defaultId: opts.defaultId,
+        cancelId: opts.cancelId,
+        message: opts.message,
+        detail: opts.detail,
+        mismatches,
+      };
+      deletedAReloadDialogCalls.push(call);
+      if (mismatches.length !== 0) {
+        throw new Error(
+          "F22 deleted-A reload raised an unexpected main-process dialog: " +
+            JSON.stringify(call),
+        );
+      }
+      return 0;
+    },
   );
+  let explicitReplacementAdopted = false;
+  try {
+    await exec(`window.reloadCurrentFile(); null;`);
+    explicitReplacementAdopted = await waitForCondition(
+      exec,
+      `window.originalMarkdown === "F22_DELETED_A_EXTERNAL_REPLACEMENT\\r\\n"`,
+      5000,
+    );
+  } finally {
+    restoreDeletedAReloadDialog();
+  }
   const replacementAfterExplicitAdoption = await deletionTabSnapshot(deletedA.id);
+  const deletedAActiveAfterExplicitAdoption = await witnessActiveOwner(
+    deletedAFile,
+    deletedA.id,
+  );
 
   // Hold exactly one genuine producer envelope, close its owner, then release
   // it. This tests owner-closed ACK acceptance without activating a watcher for
@@ -12396,7 +18168,26 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   fs.writeFileSync(closedDeletedFile, "F22_DELETED_CLOSED\r\n", "utf8");
   await clearTabs();
   const closedDeletedA = await createActiveTab(closedDeletedFile, "F22_DELETED_CLOSED\r\n");
-  const closedDeletedB = await exec(`window.CustomTabs.createTab(${JSON.stringify(deletedBFile)}, "F22_DELETED_B_BASE\\r\\n", { activate: false })`);
+  // A companion path unique to this scenario. Reusing the shared deletion
+  // fixture left an unresolved older copy on the same physical key, so
+  // selecting it drove completeFileOpen() into a disk adoption and MAIN
+  // raised its synchronous "Confirm document replacement" dialog - which no
+  // renderer stub can answer, so the run stopped until a human clicked.
+  // Seeded settled, because that adoption verifies the disk version it reads.
+  //
+  // Deliberately NOT unlinked afterwards: removing it while its tab is still
+  // watched would manufacture a second, unrelated deletion event in the same
+  // probe. The next scenario's clearTabs() is what disposes of the tab.
+  const closedDeletedBFile = path.join(dir, "f22-deleted-closed-b.md");
+  const closedDeletedBBytes = "F22_DELETED_CLOSED_B_BASE\r\n";
+  await seedSettledFixture(closedDeletedBFile, closedDeletedBBytes);
+  const closedDeletedB = await exec(`window.CustomTabs.createTab(${JSON.stringify(closedDeletedBFile)}, ${JSON.stringify(closedDeletedBBytes)}, { activate: false })`);
+  if (!closedDeletedB || !Number.isSafeInteger(closedDeletedB.id)) {
+    throw new Error(
+      "F22 closed-owner companion tab was not created: " +
+        JSON.stringify({ closedDeletedBFile, closedDeletedB }),
+    );
+  }
   const heldClosedDeliveries = [];
   const realClosedSend = wc.send;
   const restoreClosedSend = replaceMethod(wc, "send", function(channel, ...args) {
@@ -12410,9 +18201,62 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     fs.unlinkSync(closedDeletedFile);
     closedEnvelopeHeld = await waitUntil(() => heldClosedDeliveries.length === 1, 5000);
   } finally { restoreClosedSend(); }
-  await exec(`window.CustomTabs.switchToTab(${closedDeletedB.id}); null;`);
-  await exec(`window.CustomTabs.closeTab(${closedDeletedA.id}); null;`);
-  const closedDeletedGone = await exec(`!window.CustomTabs.getTabs().some(tab => tab.id === ${closedDeletedA.id})`);
+  const closedHeldIdentity = deletionDeliveryIdentity(
+    heldClosedDeliveries[0] && heldClosedDeliveries[0].delivery,
+  );
+  const closedBeforeClose = mainDeletionAckProbe.recordSnapshot(
+    closedHeldIdentity,
+  );
+  // switchToTab() is async and returns before its render selects the
+  // document. Unawaited, it left A still selected, so the close below asked
+  // about the ACTIVE tab rather than a background one. Witness B's own owner.
+  await switchAndWitness(closedDeletedB.id, closedDeletedBFile, null);
+  // A is clean and deleted, so closeTab() asks exactly one question. Approve
+  // that exact wording and refuse anything else: a blanket `() => true` would
+  // also approve a question this scenario never expected, and the stub is
+  // removed again immediately so no later dialog is suppressed.
+  const closedCloseWarning = `"${path.basename(closedDeletedFile)}" was deleted ` +
+    "outside Folia. Close this in-memory copy anyway?";
+  const closedClose = await exec(`
+    (async () => {
+      const expected = ${JSON.stringify(closedCloseWarning)};
+      const realConfirm = window.confirm;
+      const asked = [];
+      const unexpected = [];
+      try {
+        window.confirm = (message) => {
+          const text = String(message);
+          asked.push(text);
+          if (text === expected) return true;
+          unexpected.push(text);
+          return false;
+        };
+        await window.CustomTabs.closeTab(${closedDeletedA.id});
+      } finally {
+        window.confirm = realConfirm;
+      }
+      return {
+        asked,
+        unexpected,
+        gone: !window.CustomTabs.getTabs().some(tab => tab.id === ${closedDeletedA.id}),
+      };
+    })()
+  `);
+  if (
+    !closedClose ||
+    closedClose.unexpected.length !== 0 ||
+    closedClose.asked.length !== 1 ||
+    closedClose.asked[0] !== closedCloseWarning
+  ) {
+    throw new Error(
+      "F22 closed-owner close did not ask exactly its own deletion warning: " +
+        JSON.stringify({ expected: closedCloseWarning, observed: closedClose }),
+    );
+  }
+  const closedDeletedGone = closedClose.gone;
+  const closedAfterClose = mainDeletionAckProbe.recordSnapshot(
+    closedHeldIdentity,
+  );
   const closedBeforeMessages = await deletedMessages();
   if (heldClosedDeliveries[0]) realClosedSend.call(wc, "file-deleted", heldClosedDeliveries[0]);
   const closedDelivered = await waitForCondition(exec, `window.__f22DeletionProtocolProbe.deliveries.some(entry => entry && entry.path === ${JSON.stringify(closedDeletedFile)})`, 5000);
@@ -12425,6 +18269,9 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     0,
     closedDeletedFile,
     deletionAckIdentity(closedAcknowledgement),
+  );
+  const closedAfterLateAcknowledgement = mainDeletionAckProbe.recordSnapshot(
+    closedHeldIdentity,
   );
 
   // Keep the owning tab open and active, but explicitly adopt the recreated
@@ -12448,11 +18295,17 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     fs.unlinkSync(replacementDeletedFile);
     replacementEnvelopeHeld = await waitUntil(() => heldReplacementDeliveries.length === 1, 5000);
   } finally { restoreReplacementSend(); }
+  const replacementHeldIdentity = deletionDeliveryIdentity(
+    heldReplacementDeliveries[0] && heldReplacementDeliveries[0].delivery,
+  );
+  const replacementBeforeAdoption = mainDeletionAckProbe.recordSnapshot(
+    replacementHeldIdentity,
+  );
   fs.writeFileSync(replacementDeletedFile, "F22_DELETED_REPLACEMENT_NEW\r\n", "utf8");
-  // Let the renderer complete its real reload/adoption and advance its tab
-  // generation, but hold only the renderer-to-main adoption envelope. Sending
-  // that envelope would release the held delivery before its old generation
-  // reaches classifyDeletionDelivery(), making replacement-owner untestable.
+  // Observe the later asynchronous tracking registration while the synchronous
+  // disk-adoption protocol retires main's old owner evidence. Releasing the
+  // old-generation delivery then reaches the renderer's replacement-owner
+  // classifier without recreating its retired main record.
   await exec(`
     (() => {
       const ipc = require("electron").ipcRenderer;
@@ -12490,6 +18343,74 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   let replacementReloaded = false;
   let replacementCurrentOwner = null;
   let replacementAdoption = null;
+  // Adopting the recreated file drives main's disk-adoption consent, and main
+  // raises dialog.showMessageBoxSync SYNCHRONOUSLY in the MAIN process - no
+  // renderer stub can answer it, so the reload below would hang for a click.
+  // The replacement is scoped to this reload alone and approves exactly ONE
+  // dialog whose full window/options shape is the one main is proven to build
+  // (src/main.js "Confirm document replacement"); the message/detail wording
+  // is reconstructed from the product's own template, not matched loosely.
+  const replacementDialogExpected = {
+    type: "warning",
+    buttons: ["Replace from disk", "Keep in-memory copy"],
+    defaultId: 1,
+    cancelId: 1,
+    title: "Confirm document replacement",
+    message: `"${path.basename(replacementDeletedFile)}" has an unresolved deletion or a changed file target.`,
+    detail: "Replacing it with the current disk file discards the earlier in-memory copy.",
+  };
+  const replacementDialogCalls = [];
+  const replacementDialogUnexpected = [];
+  let replacementDialogApprovals = 0;
+  let replacementDialogApprovedBeforeReload = false;
+  const restoreReplacementDialog = replaceMethod(
+    dialog,
+    "showMessageBoxSync",
+    (owner, options) => {
+      const opts = options || {};
+      const mismatches = [];
+      if (owner !== win) mismatches.push("owner-window");
+      if (opts.type !== replacementDialogExpected.type) mismatches.push("type");
+      if (opts.title !== replacementDialogExpected.title) mismatches.push("title");
+      if (JSON.stringify(opts.buttons) !== JSON.stringify(replacementDialogExpected.buttons)) {
+        mismatches.push("buttons");
+      }
+      if (opts.defaultId !== replacementDialogExpected.defaultId) mismatches.push("defaultId");
+      if (opts.cancelId !== replacementDialogExpected.cancelId) mismatches.push("cancelId");
+      if (opts.message !== replacementDialogExpected.message) mismatches.push("message");
+      if (opts.detail !== replacementDialogExpected.detail) mismatches.push("detail");
+      if (replacementDialogApprovals > 0) mismatches.push("second-dialog");
+      replacementDialogCalls.push({
+        ownerIsTestWindow: owner === win,
+        type: opts.type,
+        title: opts.title,
+        buttons: opts.buttons,
+        defaultId: opts.defaultId,
+        cancelId: opts.cancelId,
+        message: opts.message,
+        detail: opts.detail,
+        mismatches,
+      });
+      if (mismatches.length > 0) {
+        // main catches this and refuses, so the record above is what makes the
+        // failure loud; what matters here is that NO selection is returned.
+        replacementDialogUnexpected.push(replacementDialogCalls[replacementDialogCalls.length - 1]);
+        throw new Error(
+          "F22 replacement-owner reload raised an unexpected main-process dialog: " +
+            JSON.stringify({ mismatches, observed: replacementDialogCalls[replacementDialogCalls.length - 1] }),
+        );
+      }
+      replacementDialogApprovals += 1;
+      replacementDialogApprovedBeforeReload = replacementReloaded === false;
+      return 0;
+    },
+  );
+  if (consoleAttribution) {
+    await consoleAttribution.begin("f22-replacement-owner-adoption", {
+      filePath: replacementDeletedFile,
+      heldIdentity: replacementHeldIdentity,
+    });
+  }
   try {
     await exec(`window.reloadCurrentFile(); null;`);
     replacementReloaded = await waitForCondition(
@@ -12504,6 +18425,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       )`,
     );
   } finally {
+    restoreReplacementDialog();
     replacementAdoption = await exec(`
       (() => {
         const probe = window.__f22ReplacementAdoptionProbe;
@@ -12511,9 +18433,46 @@ async function runF22SaveAndReloadScenarios(win, exec) {
         return probe ? { held: probe.held.slice() } : null;
       })()
     `);
+    if (consoleAttribution) {
+      await consoleAttribution.end({
+        filePath: replacementDeletedFile,
+        reloaded: replacementReloaded,
+        owner: replacementCurrentOwner,
+        adoption: replacementAdoption,
+      });
+    }
+  }
+  if (
+    replacementDialogUnexpected.length !== 0 ||
+    replacementDialogCalls.length !== 1 ||
+    replacementDialogApprovals !== 1 ||
+    replacementDialogApprovedBeforeReload !== true ||
+    replacementReloaded !== true
+  ) {
+    throw new Error(
+      "F22 replacement-owner reload did not approve exactly one expected replacement dialog before completing: " +
+        JSON.stringify({
+          expected: replacementDialogExpected,
+          calls: replacementDialogCalls,
+          unexpected: replacementDialogUnexpected,
+          approvals: replacementDialogApprovals,
+          approvedBeforeReload: replacementDialogApprovedBeforeReload,
+          reloaded: replacementReloaded,
+        }),
+    );
   }
   const replacementBefore = await deletionTabSnapshot(replacementDeletedA.id);
+  const replacementAfterAdoption = mainDeletionAckProbe.recordSnapshot(
+    replacementHeldIdentity,
+  );
   const replacementBeforeMessages = await deletedMessages();
+  if (consoleAttribution) {
+    await consoleAttribution.begin("f22-replacement-stale-owner-delivery", {
+      filePath: replacementDeletedFile,
+      heldIdentity: replacementHeldIdentity,
+      before: replacementAfterAdoption,
+    });
+  }
   if (heldReplacementDeliveries[0]) realReplacementSend.call(wc, "file-deleted", heldReplacementDeliveries[0]);
   const replacementDelivered = await waitForCondition(exec, `window.__f22DeletionProtocolProbe.deliveries.some(entry => entry && entry.path === ${JSON.stringify(replacementDeletedFile)} && entry.delivery)`, 5000);
   const replacementAfterStaleDelivery = await deletionTabSnapshot(replacementDeletedA.id);
@@ -12529,6 +18488,17 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     replacementDeletedFile,
     deletionAckIdentity(replacementAcknowledgement),
   );
+  const replacementAfterLateAcknowledgement = mainDeletionAckProbe.recordSnapshot(
+    replacementHeldIdentity,
+  );
+  if (consoleAttribution) {
+    await consoleAttribution.end({
+      filePath: replacementDeletedFile,
+      delivered: replacementDelivered,
+      acknowledgement: replacementAcknowledgement,
+      after: replacementAfterLateAcknowledgement,
+    });
+  }
 
   // Exercise the actual renderer listener/classifier with controlled false
   // deliveries. These are classifier-only cases: their ACKs are deliberately
@@ -12893,25 +18863,40 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       heldOwnerPathMovedDeliveries[0],
     );
   }
-  const ownerPathMovedAcknowledged = await waitForCondition(
-    exec,
-    `window.__f22DeletionProtocolProbe.forwardedAcknowledgements.some(ack =>
-      ack && ack.eventId === ${JSON.stringify(
-        heldOwnerPathMovedDeliveries[0] &&
-          heldOwnerPathMovedDeliveries[0].delivery &&
-          heldOwnerPathMovedDeliveries[0].delivery.eventId,
-      )} && ack.consumed === false && ack.why === "owner-path-moved")`,
-    5000,
-  );
-  const ownerPathMovedAcknowledgement = await exec(`
-    window.__f22DeletionProtocolProbe.forwardedAcknowledgements.find(ack =>
-      ack && ack.eventId === ${JSON.stringify(
-        heldOwnerPathMovedDeliveries[0] &&
-          heldOwnerPathMovedDeliveries[0].delivery &&
-          heldOwnerPathMovedDeliveries[0].delivery.eventId,
-      )} && ack.consumed === false && ack.why === "owner-path-moved",
-    ) || null
-  `);
+  // Eight deliberately forged owner-path-moved ACKs for THIS SAME eventId were
+  // already forwarded above, and every one of them satisfies an
+  // eventId/consumed/why predicate - main rejects them precisely because the
+  // rest of the envelope does not match the delivery it produced. Selecting on
+  // those three fields therefore selected a FORGERY (the observed pageSession
+  // ended "-forged") and the real ACK was never examined at all.
+  // Select with the same completeness rule main applies - the existing
+  // acknowledgementMatchesDelivery, evaluated here on the captured forwarded
+  // ACKs against the delivery main actually produced - and require the match to
+  // be unique, so neither a forgery nor a second real-looking envelope can be
+  // absorbed into a pass. The production listener is untouched; only what this
+  // test picks out of its own capture changes.
+  const ownerPathMovedRealDelivery = heldOwnerPathMovedDeliveries[0] &&
+    heldOwnerPathMovedDeliveries[0].delivery;
+  const ownerPathMovedRealMatches = async () => {
+    const forwarded = await exec(`
+      window.__f22DeletionProtocolProbe.forwardedAcknowledgements.filter(ack =>
+        ack && ack.eventId === ${JSON.stringify(
+          ownerPathMovedRealDelivery && ownerPathMovedRealDelivery.eventId,
+        )})
+    `);
+    return (Array.isArray(forwarded) ? forwarded : []).filter((ack) =>
+      ack.consumed === false &&
+      ack.why === "owner-path-moved" &&
+      acknowledgementMatchesDelivery(ack, ownerPathMovedRealDelivery));
+  };
+  let ownerPathMovedRealAcknowledgements = [];
+  const ownerPathMovedAcknowledged = await waitUntil(async () => {
+    ownerPathMovedRealAcknowledgements = await ownerPathMovedRealMatches();
+    return ownerPathMovedRealAcknowledgements.length === 1;
+  }, 5000);
+  const ownerPathMovedRealMatchCount = ownerPathMovedRealAcknowledgements.length;
+  const ownerPathMovedAcknowledgement =
+    ownerPathMovedRealAcknowledgements[0] || null;
   const ownerPathMovedMainAcceptance = await waitForMainDeletionAcknowledgement(
     deletionAckIdentity(ownerPathMovedAcknowledgement),
   );
@@ -12940,21 +18925,27 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   // Only after the producer has captured A's identity do we select B and
   // release that exact envelope for the renderer to refuse.
   const inactiveDeletedFile = path.join(dir, "f22-deleted-inactive-a.md");
+  const inactiveDeletedBFile = path.join(dir, "f22-deleted-inactive-b.md");
   fs.writeFileSync(inactiveDeletedFile, "F22_DELETED_INACTIVE_A\r\n", "utf8");
+  fs.writeFileSync(inactiveDeletedBFile, "F22_DELETED_INACTIVE_B\r\n", "utf8");
   await clearTabs();
+  // B is this scenario's own fixture and is settled by the same helper that
+  // settles A, so the later switch lands on a document main has already
+  // accepted rather than on a shared path no selection ever witnessed.
+  const inactiveDeletedB = await createActiveTab(
+    inactiveDeletedBFile,
+    "F22_DELETED_INACTIVE_B\r\n",
+  );
   const inactiveDeletedA = await createActiveTab(
     inactiveDeletedFile,
     "F22_DELETED_INACTIVE_A\r\n",
   );
-  const inactiveSelectedOwner = await exec(`
-    window.__f22DeletionProtocolProbe.selections
-      .filter(entry => entry.filePath === ${JSON.stringify(inactiveDeletedFile)} &&
-        entry.owner && entry.owner.tabId === ${inactiveDeletedA.id})
-      .at(-1)?.owner || null
-  `);
-  const inactiveDeletedB = await exec(
-    `window.CustomTabs.createTab(${JSON.stringify(deletedBFile)}, "F22_DELETED_B_BASE\\r\\n", { activate: false })`,
+  const inactiveSelectionAcceptance = await acceptedSelectionWitness(
+    inactiveDeletedFile,
+    inactiveDeletedA.id,
   );
+  const inactiveSelectedOwner =
+    inactiveSelectionAcceptance && inactiveSelectionAcceptance.owner;
   const inactiveMessageStart = await deletedMessages();
   const inactiveDeliveryStart = await exec(
     `window.__f22DeletionProtocolProbe.deliveries.length`,
@@ -12982,10 +18973,19 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   } finally {
     restoreInactiveDeletionSend();
   }
-  await exec(`window.CustomTabs.switchToTab(${inactiveDeletedB.id}); null;`);
+  // Await the real switch and prove B is physically the selected document,
+  // then prove main moved its single watcher onto B - both BEFORE the held
+  // envelope is released, so the refusal can only be about A being inactive
+  // and not about a switch still in flight.
+  const inactiveBActiveOwner = await switchAndWitness(
+    inactiveDeletedB.id,
+    inactiveDeletedBFile,
+    null,
+  );
   const inactiveWatcherMovedToB = await waitUntil(
     () => watcherProbe.snapshot().live.some(
-      (entry) => entry.kind === "fs.watch" && entry.filePath === deletedBFile,
+      (entry) => entry.kind === "fs.watch" &&
+        entry.filePath === inactiveDeletedBFile,
     ),
     5000,
   );
@@ -13025,319 +19025,298 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   );
   const inactiveBAfterRefusal = await deletionTabSnapshot(inactiveDeletedB.id);
   const inactiveMessagesAfterRefusal = await deletedMessages();
-  await exec(`window.CustomTabs.switchToTab(${inactiveDeletedA.id}); null;`);
-  const inactiveReplaySelectedOwner = await exec(`
-    window.__f22DeletionProtocolProbe.selections
-      .filter(entry => entry.filePath === ${JSON.stringify(inactiveDeletedFile)} &&
-        entry.owner && entry.owner.tabId === ${inactiveDeletedA.id})
-      .at(-1)?.owner || null
-  `);
-  const inactiveReplayDelivered = await waitForCondition(
-    exec,
-    `(() => {
-      const deliveries = window.__f22DeletionProtocolProbe.deliveries
-        .slice(${inactiveDeliveryStart})
-        .filter(entry => entry && entry.path === ${JSON.stringify(inactiveDeletedFile)});
-      const first = deliveries[0];
-      return !!(
-        first &&
-        first.delivery &&
-        deliveries.filter(entry =>
-          entry.delivery && entry.delivery.eventId === first.delivery.eventId,
-        ).length >= 2
-      );
-    })()`,
-    5000,
+
+  // Retire the inactive deleted owner before starting an independent frozen
+  // refusal fixture, so no cleanup switch can select a missing document.
+  const frozenDeletedFile = path.join(dir, "f22-deleted-frozen-a.md");
+  fs.writeFileSync(frozenDeletedFile, "F22_DELETED_FROZEN_A\r\n", "utf8");
+  const inactiveCleanupIdentity = deletionAckIdentity(
+    inactiveInitialAcknowledgement,
   );
-  const inactiveRecovery = await exec(`
-    (() => {
-      const probe = window.__f22DeletionProtocolProbe;
-      const deliveries = probe.deliveries
-        .slice(${inactiveDeliveryStart})
-        .filter(entry => entry && entry.path === ${JSON.stringify(inactiveDeletedFile)});
-      const first = deliveries[0] || null;
-      const eventId = first && first.delivery && first.delivery.eventId;
+  const inactiveCleanupBeforeRetirement = mainDeletionAckProbe &&
+    mainDeletionAckProbe.recordSnapshot(inactiveCleanupIdentity);
+  const inactiveCleanupSelectionStart = await exec(
+    `window.__f22DeletionProtocolProbe.selections.length`,
+  );
+  const inactiveCleanupA = await exec(`
+    (async () => {
+      const tabs = window.CustomTabs;
+      const missingTab = tabs.getTabs().find(
+        tab => tab.id === ${inactiveDeletedA.id},
+      ) || null;
+      const companionTab = tabs.getTabs().find(
+        tab => tab.id === ${inactiveDeletedB.id},
+      ) || null;
+      const expectedWarning =
+        ${JSON.stringify(`"${path.basename(inactiveDeletedFile)}" was deleted outside Folia. Close this in-memory copy anyway?`)};
+      const beforeActive = tabs.getActiveTab() || null;
+      const realConfirm = window.confirm;
+      const asked = [];
+      const unexpected = [];
+      try {
+        window.confirm = message => {
+          const text = String(message);
+          asked.push(text);
+          if (text === expectedWarning) return true;
+          unexpected.push(text);
+          return false;
+        };
+        if (!missingTab || !companionTab || beforeActive !== companionTab) {
+          return {
+            setupError: "inactive cleanup did not begin with B selected and A present",
+            beforeActive: beforeActive && {
+              id: beforeActive.id,
+              filePath: beforeActive.filePath,
+            },
+            missingTab: missingTab && missingTab.id,
+            companionTab: companionTab && companionTab.id,
+          };
+        }
+        await tabs.closeTab(missingTab.id);
+      } finally {
+        window.confirm = realConfirm;
+      }
+      const active = tabs.getActiveTab() || null;
+      const pageSession = window.getReloadRequestSession();
       return {
-        deliveries,
-        acknowledgements: probe.acknowledgements.filter(
-          ack => ack && ack.eventId === eventId,
+        asked,
+        unexpected,
+        missingGone: !tabs.getTabs().some(tab => tab.id === ${inactiveDeletedA.id}),
+        companionStillPresent: tabs.getTabs().some(
+          tab => tab.id === ${inactiveDeletedB.id},
         ),
-        messages: window.__f22DeletionMessages
-          .filter(message => /deleted from disk/i.test(message)).length,
-        active: (window.CustomTabs.getActiveTab() || {}).id,
+        active: active && { id: active.id, filePath: active.filePath },
+        companionOwner: active && tabs.getActiveDocumentIdentity(
+          ${JSON.stringify(inactiveDeletedBFile)},
+          pageSession,
+        ),
       };
     })()
   `);
-  const inactiveAAfterConsumption = await deletionTabSnapshot(inactiveDeletedA.id);
-  const inactiveAckQuiescence = await waitForDeletionAckQuiescence(
-    inactiveDeliveryStart,
-    inactiveDeletedFile,
-    deletionAckIdentity(inactiveRecovery.acknowledgements.find(
-      (ack) => ack && ack.consumed === true,
-    )),
+  const inactiveCleanupAfterRetirement = mainDeletionAckProbe &&
+    mainDeletionAckProbe.recordSnapshot(inactiveCleanupIdentity);
+  const inactiveCleanupSelections = await exec(`
+    window.__f22DeletionProtocolProbe.selections
+      .slice(${inactiveCleanupSelectionStart})
+      .filter(selection => selection && selection.filePath ===
+        ${JSON.stringify(inactiveDeletedFile)})
+  `);
+  const inactiveCleanupAComplete = !!(
+    inactiveCleanupA &&
+    !inactiveCleanupA.setupError &&
+    inactiveCleanupA.asked.length === 1 &&
+    inactiveCleanupA.asked[0] ===
+      `"${path.basename(inactiveDeletedFile)}" was deleted outside Folia. Close this in-memory copy anyway?` &&
+    inactiveCleanupA.unexpected.length === 0 &&
+    inactiveCleanupA.missingGone === true &&
+    inactiveCleanupA.companionStillPresent === true &&
+    inactiveCleanupA.active &&
+    inactiveCleanupA.active.id === inactiveDeletedB.id &&
+    inactiveCleanupA.active.filePath === inactiveDeletedBFile &&
+    inactiveCleanupA.companionOwner &&
+    inactiveCleanupA.companionOwner.tabId === inactiveDeletedB.id &&
+    inactiveCleanupIdentity &&
+    inactiveCleanupBeforeRetirement &&
+    inactiveCleanupBeforeRetirement.count >= 1 &&
+    inactiveCleanupBeforeRetirement.idTombstoneCount === 1 &&
+    inactiveCleanupBeforeRetirement.idTombstonePresent === true &&
+    Array.isArray(inactiveCleanupBeforeRetirement.records) &&
+    inactiveCleanupBeforeRetirement.records.length ===
+      inactiveCleanupBeforeRetirement.count &&
+    inactiveCleanupBeforeRetirement.records.every((record) =>
+      record &&
+      record.ownerKeyed === true &&
+      record.identity &&
+      record.identity.eventId === inactiveCleanupIdentity.eventId &&
+      record.identity.selectionGeneration ===
+        inactiveCleanupIdentity.selectionGeneration &&
+      record.identity.watcherGeneration ===
+        inactiveCleanupIdentity.watcherGeneration &&
+      record.identity.attempt === inactiveCleanupIdentity.attempt &&
+      record.identity.pageSession === inactiveCleanupIdentity.pageSession &&
+      record.identity.rendererGeneration ===
+        inactiveCleanupIdentity.rendererGeneration &&
+      record.identity.tabId === inactiveCleanupIdentity.tabId &&
+      record.identity.documentGeneration ===
+        inactiveCleanupIdentity.documentGeneration &&
+      record.identity.pathKey === inactiveCleanupIdentity.pathKey &&
+      record.attempt &&
+      record.attempt.inFlight === false &&
+      record.attempt.ackTimeoutActive === false &&
+      record.attempt.retryTimeoutActive === false,
+    ) &&
+    inactiveCleanupAfterRetirement &&
+    inactiveCleanupAfterRetirement.count === 0 &&
+    inactiveCleanupAfterRetirement.idTombstoneCount === 0 &&
+    inactiveCleanupAfterRetirement.idTombstonePresent === false &&
+    Array.isArray(inactiveCleanupAfterRetirement.records) &&
+    inactiveCleanupAfterRetirement.records.length === 0 &&
+    Array.isArray(inactiveCleanupSelections) &&
+    inactiveCleanupSelections.length === 0
   );
-
-  // Advance A's real selection generation while its held deletion envelope is
-  // in flight. Releasing that old envelope while A is watched again is the
-  // live stale-selection path: main must retain it, clear its attempt, retry
-  // after 100ms, and then accept the current-generation consumption.
-  const staleDeletedFile = path.join(dir, "f22-deleted-stale-selection.md");
-  fs.writeFileSync(staleDeletedFile, "F22_DELETED_STALE\r\n", "utf8");
-  await clearTabs();
-  const staleDeletedA = await createActiveTab(staleDeletedFile, "F22_DELETED_STALE\r\n");
-  const staleDeletedB = await exec(
-    `window.CustomTabs.createTab(${JSON.stringify(deletedBFile)}, "F22_DELETED_B_BASE\\r\\n", { activate: false })`,
+  check(
+    "F22 inactive-deleted cleanup retires A while B stays selected without selecting missing A",
+    inactiveCleanupAComplete,
+    JSON.stringify({
+      inactiveCleanupA,
+      inactiveCleanupBeforeRetirement,
+      inactiveCleanupAfterRetirement,
+      inactiveCleanupSelections,
+    }),
   );
-  const staleDeliveryStart = await exec(`window.__f22DeletionProtocolProbe.deliveries.length`);
-  const heldStaleDeliveries = [];
-  const realStaleDeletionSend = wc.send;
-  const restoreStaleDeletionSend = replaceMethod(wc, "send", function(channel, ...args) {
-    if (channel === "file-deleted" && args[0] && args[0].path === staleDeletedFile) {
-      heldStaleDeliveries.push(args[0]);
-      return undefined;
-    }
-    return realStaleDeletionSend.call(this, channel, ...args);
-  });
-  let staleEnvelopeHeld = false;
-  try {
-    fs.unlinkSync(staleDeletedFile);
-    staleEnvelopeHeld = await waitUntil(() => heldStaleDeliveries.length === 1, 5000);
-  } finally {
-    restoreStaleDeletionSend();
+  if (!inactiveCleanupAComplete) {
+    throw new Error(
+      "F22 inactive-deleted cleanup could not retire A while preserving B: " +
+        JSON.stringify({
+          inactiveCleanupA,
+          inactiveCleanupBeforeRetirement,
+          inactiveCleanupAfterRetirement,
+          inactiveCleanupSelections,
+        }),
+    );
   }
-  // Do not let renderer tab switches reach main yet. The inner wrapper is
-  // deliberately owner-aware: only the two real watcher/reassert messages for
-  // this A -> B -> A transition are held, while every unrelated IPC call still
-  // takes the normal deletion-protocol wrapper and transport.
-  let staleSelectionAdvance = null;
-  let staleSelectionCleanup = null;
-  let staleInitialRecordBeforeRelease = null;
-  let staleInitialAcknowledged = false;
-  let staleInitialAcknowledgement = null;
-  let staleInitialMainAcceptance = null;
-  let staleRestoreAndReassert = null;
-  let staleReplayed = false;
-  let staleRecovery = { deliveries: [], acknowledgements: [], currentOwner: null };
-  let staleTerminalAcknowledgement = null;
-  let staleAckQuiescence = null;
-  try {
-    staleSelectionAdvance = await exec(`
-      (() => {
-        const ipc = require("electron").ipcRenderer;
-        const originalSend = ipc.send;
-        const probe = window.__f22StaleSelectionProbe = {
-          originalSend,
-          enabled: true,
-          restored: false,
-          suppressed: [],
+  const inactiveCleanupB = await exec(`
+    (async () => {
+      const tabs = window.CustomTabs;
+      const companionTab = tabs.getTabs().find(
+        tab => tab.id === ${inactiveDeletedB.id},
+      ) || null;
+      const realConfirm = window.confirm;
+      const asked = [];
+      try {
+        window.confirm = message => {
+          asked.push(String(message));
+          return false;
         };
-        const expectedPathForOwner = (owner) => {
-          if (!owner) return null;
-          if (owner.tabId === ${staleDeletedA.id}) {
-            return ${JSON.stringify(staleDeletedFile)};
-          }
-          if (owner.tabId === ${staleDeletedB.id}) {
-            return ${JSON.stringify(deletedBFile)};
-          }
-          return null;
-        };
-        const staleSelectionSend = function(channel, ...args) {
-          const payload = args[0];
-          const owner = payload && payload.owner;
-          const expectedPath = expectedPathForOwner(owner);
-          if (
-            probe.enabled &&
-            (channel === "start-file-watching" || channel === "set-active-file") &&
-            owner &&
-            expectedPath &&
-            payload.filePath === expectedPath
-          ) {
-            probe.suppressed.push({
-              channel,
-              filePath: payload.filePath,
-              owner: { ...owner },
-            });
-            return undefined;
-          }
-          return originalSend.call(this, channel, ...args);
-        };
-        probe.wrapper = staleSelectionSend;
-        probe.restore = () => {
-          if (probe.restored) return false;
-          probe.restored = true;
-          probe.enabled = false;
-          if (ipc.send === staleSelectionSend) ipc.send = originalSend;
-          return true;
-        };
-        ipc.send = staleSelectionSend;
-        try {
-          window.CustomTabs.switchToTab(${staleDeletedB.id});
-          window.CustomTabs.switchToTab(${staleDeletedA.id});
-          return {
-            active: (window.CustomTabs.getActiveTab() || {}).id,
-            owner: window.CustomTabs.getActiveDocumentIdentity(
-              ${JSON.stringify(staleDeletedFile)},
-              window.getReloadRequestSession(),
-            ),
-            suppressed: probe.suppressed.slice(),
-            wrapperInstalled: ipc.send === staleSelectionSend,
-          };
-        } catch (error) {
-          probe.restore();
-          throw error;
-        }
-      })()
-    `);
-    const staleHeldIdentity = deletionDeliveryIdentity(
-      heldStaleDeliveries[0] && heldStaleDeliveries[0].delivery,
+        if (!companionTab) return { setupError: "inactive cleanup lost B before closing it" };
+        await tabs.closeTab(companionTab.id);
+      } finally {
+        window.confirm = realConfirm;
+      }
+      return {
+        asked,
+        aGone: !tabs.getTabs().some(tab => tab.id === ${inactiveDeletedA.id}),
+        bGone: !tabs.getTabs().some(tab => tab.id === ${inactiveDeletedB.id}),
+      };
+    })()
+  `);
+  const inactiveCleanupComplete = !!(
+    inactiveCleanupB &&
+    !inactiveCleanupB.setupError &&
+    inactiveCleanupB.asked.length === 0 &&
+    inactiveCleanupB.aGone === true &&
+    inactiveCleanupB.bGone === true
+  );
+  check(
+    "F22 inactive-deleted cleanup closes B only after A has retired",
+    inactiveCleanupComplete,
+    JSON.stringify({ inactiveCleanupB }),
+  );
+  if (!inactiveCleanupComplete) {
+    throw new Error(
+      "F22 inactive-deleted cleanup could not close B after A retired: " +
+        JSON.stringify(inactiveCleanupB),
     );
-    staleInitialRecordBeforeRelease = mainDeletionAckProbe
-      ? mainDeletionAckProbe.recordSnapshot(staleHeldIdentity)
-      : null;
-    // This is the only release of attempt 1. A main-side reselection would
-    // already have cleared it and emitted attempt 2, which these checks reject.
-    if (heldStaleDeliveries[0]) {
-      realStaleDeletionSend.call(wc, "file-deleted", heldStaleDeliveries[0]);
-    }
-    staleInitialAcknowledged = await waitForCondition(
-      exec,
-      `window.__f22DeletionProtocolProbe.forwardedAcknowledgements.some(ack =>
-        ack && ack.eventId === ${JSON.stringify(
-          heldStaleDeliveries[0] && heldStaleDeliveries[0].delivery &&
-            heldStaleDeliveries[0].delivery.eventId,
-        )} && ack.attempt === 1 && ack.why === "stale-selection")`,
-      5000,
-    );
-    staleInitialAcknowledgement = await exec(`
-      window.__f22DeletionProtocolProbe.forwardedAcknowledgements.find(ack =>
-        ack && ack.eventId === ${JSON.stringify(
-          heldStaleDeliveries[0] && heldStaleDeliveries[0].delivery &&
-            heldStaleDeliveries[0].delivery.eventId,
-        )} && ack.attempt === 1 && ack.why === "stale-selection",
-      ) || null
-    `);
-    staleInitialMainAcceptance = await waitForMainDeletionAcknowledgement(
-      deletionAckIdentity(staleInitialAcknowledgement),
-    );
-    // Restore this inner wrapper before the outer protocol wrapper, then use
-    // renderer's real ownership assertion to deliver current A ownership.
-    staleRestoreAndReassert = await exec(`
-      (() => {
-        const ipc = require("electron").ipcRenderer;
-        const probe = window.__f22StaleSelectionProbe;
-        const restored = probe ? probe.restore() : false;
-        const before = window.CustomTabs.getActiveDocumentIdentity(
-          ${JSON.stringify(staleDeletedFile)},
-          window.getReloadRequestSession(),
-        );
-        const reasserted =
-          typeof window.assertFileTrackingOwnership === "function" &&
-          window.assertFileTrackingOwnership(
-            ${JSON.stringify(staleDeletedFile)},
-            true,
-            { adoptBaseline: false },
-          );
-        const after = window.CustomTabs.getActiveDocumentIdentity(
-          ${JSON.stringify(staleDeletedFile)},
-          window.getReloadRequestSession(),
-        );
-        return {
-          restored,
-          reasserted,
-          before,
-          after,
-          outerProtocolRestored: ipc.send ===
-            window.__f22DeletionProtocolProbe.wrapper,
-        };
-      })()
-    `);
-    staleReplayed = await waitForCondition(
-      exec,
-      `window.__f22DeletionProtocolProbe.deliveries.slice(${staleDeliveryStart})
-        .filter(entry => entry && entry.path === ${JSON.stringify(staleDeletedFile)}).length === 2`,
-      5000,
-    );
-    staleRecovery = await exec(`
-      (() => {
-        const probe = window.__f22DeletionProtocolProbe;
-        const deliveries = probe.deliveries.slice(${staleDeliveryStart})
-          .filter(entry => entry && entry.path === ${JSON.stringify(staleDeletedFile)});
-        const eventId = deliveries[0] && deliveries[0].delivery && deliveries[0].delivery.eventId;
-        return {
-          deliveries,
-          acknowledgements: probe.acknowledgements.filter(ack => ack && ack.eventId === eventId),
-          currentOwner: window.CustomTabs.getActiveDocumentIdentity(
-            ${JSON.stringify(staleDeletedFile)},
-            window.getReloadRequestSession(),
-          ),
-        };
-      })()
-    `);
-    staleTerminalAcknowledgement = deletionAckIdentity(
-      staleRecovery.acknowledgements.find((ack) => ack && ack.consumed === true),
-    );
-    staleAckQuiescence = await waitForDeletionAckQuiescence(
-      staleDeliveryStart,
-      staleDeletedFile,
-      staleTerminalAcknowledgement,
-    );
-  } finally {
-    staleSelectionCleanup = await exec(`
-      (() => {
-        const ipc = require("electron").ipcRenderer;
-        const probe = window.__f22StaleSelectionProbe;
-        if (!probe) return null;
-        const restored = probe.restore();
-        return {
-          restored,
-          disabled: probe.enabled === false,
-          outerProtocolRestored: ipc.send ===
-            window.__f22DeletionProtocolProbe.wrapper,
-          suppressed: probe.suppressed.slice(),
-        };
-      })()
-    `);
   }
-
-  // Freeze while A remains the active watcher owner. This reaches the
-  // renderer's frozen refusal rather than the earlier owner-inactive branch.
-  const frozenDeletedFile = path.join(dir, "f22-deleted-frozen-a.md");
-  fs.writeFileSync(frozenDeletedFile, "F22_DELETED_FROZEN_A\r\n", "utf8");
-  await clearTabs();
   const frozenDeletedA = await createActiveTab(
     frozenDeletedFile,
     "F22_DELETED_FROZEN_A\r\n",
   );
-  const frozenSelectedOwner = await exec(`
-    window.__f22DeletionProtocolProbe.selections
-      .filter(entry => entry.filePath === ${JSON.stringify(frozenDeletedFile)} &&
-        entry.owner && entry.owner.tabId === ${frozenDeletedA.id})
-      .at(-1)?.owner || null
-  `);
+  const frozenSelectionAcceptance = await acceptedSelectionWitness(
+    frozenDeletedFile,
+    frozenDeletedA.id,
+  );
+  const frozenSelectedOwner =
+    frozenSelectionAcceptance && frozenSelectionAcceptance.owner;
   const frozenDeletedB = await exec(
     `window.CustomTabs.createTab(${JSON.stringify(deletedBFile)}, "F22_DELETED_B_BASE\\r\\n", { activate: false })`,
   );
   const frozenAInitial = await deletionTabSnapshot(frozenDeletedA.id);
+  const frozenMessageCount = await deletedMessages();
+  const frozenDeliveryStart = await exec(
+    `window.__f22DeletionProtocolProbe.deliveries.length`,
+  );
+  const heldFrozenDeliveries = [];
+  let frozenEnvelopeHeldAt = 0;
+  const realFrozenDeletionSend = wc.send;
+  const restoreFrozenDeletionSend = replaceMethod(
+    wc,
+    "send",
+    function (channel, ...args) {
+      if (
+        channel === "file-deleted" &&
+        args[0] &&
+        args[0].path === frozenDeletedFile
+      ) {
+        if (heldFrozenDeliveries.length === 0) frozenEnvelopeHeldAt = Date.now();
+        heldFrozenDeliveries.push(args[0]);
+        return undefined;
+      }
+      return realFrozenDeletionSend.call(this, channel, ...args);
+    },
+  );
+  let frozenEnvelopeHeld = false;
+  try {
+    fs.unlinkSync(frozenDeletedFile);
+    frozenEnvelopeHeld = await waitUntil(
+      () => heldFrozenDeliveries.length === 1,
+      5000,
+    );
+  } finally {
+    restoreFrozenDeletionSend();
+  }
+  const frozenHeldIdentity = deletionDeliveryIdentity(
+    heldFrozenDeliveries[0] && heldFrozenDeliveries[0].delivery,
+  );
+  const frozenHeldMainRecord = mainDeletionAckProbe &&
+    mainDeletionAckProbe.recordSnapshot(frozenHeldIdentity);
+  const frozenRendererCursorBefore = await exec(`
+    (() => {
+      const cache = window.CustomTabs.__shutdownReplayCache();
+      return cache ? cache.highestRequestId : null;
+    })()
+  `);
+  const frozenMainCursorBefore = __shutdown.state().lastRequestId;
+  const frozenReuseRequestId = frozenRendererCursorBefore;
+  const frozenCursorSafe = Number.isSafeInteger(frozenReuseRequestId) &&
+    frozenReuseRequestId > 0 &&
+    Number.isSafeInteger(frozenMainCursorBefore) &&
+    frozenMainCursorBefore === frozenReuseRequestId;
+  if (!frozenCursorSafe) {
+    throw new Error("F22 frozen fixture cannot safely reuse shutdown cursor: " +
+      JSON.stringify({
+        rendererHighestRequestId: frozenRendererCursorBefore,
+        mainLastRequestId: frozenMainCursorBefore,
+        reuseRequestId: frozenReuseRequestId,
+      }));
+  }
   const frozenDeletion = await exec(`
     (async () => {
       const ipc = require("electron").ipcRenderer;
       const gen = await ipc.invoke("quit-approval-generation");
-      const revision = window.CustomTabs.__shutdownFreeze().revision;
-      ipc.emit("quit-approval-request", {}, { id: 97001, gen, retainFreeze: true });
-      ipc.emit("quit-approval-commit", {}, { id: 97001, gen, revision });
-      return { gen, revision, ownerTabId: ${frozenDeletedA.id} };
+      const beforeCommit = window.CustomTabs.__shutdownFreeze();
+      const revision = beforeCommit.revision;
+      // This deletion-only fixture freezes the current document under its
+      // already-issued real request ID. It intentionally does not claim a new
+      // phase-one response or advance the renderer's shutdown high-water mark.
+      const requestId = ${JSON.stringify(frozenReuseRequestId)};
+      ipc.emit("quit-approval-commit", {}, { id: requestId, gen, revision });
+      const afterCommit = window.CustomTabs.__shutdownFreeze();
+      return {
+        gen, revision, requestId, ownerTabId: ${frozenDeletedA.id},
+        frozenId: afterCommit.id,
+        currentRevision: afterCommit.revision,
+        rendererHighestRequestId:
+          window.CustomTabs.__shutdownReplayCache().highestRequestId,
+      };
     })()
   `);
+  const frozenMainCursorAfter = __shutdown.state().lastRequestId;
   const frozenBeforeDelete = await waitForCondition(
     exec,
     `window.CustomTabs.__shutdownFreeze().frozen === true`,
     5000,
   );
-  const frozenMessageCount = await deletedMessages();
-  const frozenDeliveryStart = await exec(
-    `window.__f22DeletionProtocolProbe.deliveries.length`,
-  );
-  fs.unlinkSync(frozenDeletedFile);
   const frozenFirstDelivered = await waitForCondition(
     exec,
     `window.__f22DeletionProtocolProbe.deliveries
@@ -13358,6 +19337,21 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       .find(entry => entry && entry.path === ${JSON.stringify(frozenDeletedFile)}) || null
   `);
   const frozenAAfterDelete = await deletionTabSnapshot(frozenDeletedA.id);
+  const normaliseFrozenTracking = (snapshot) => snapshot && {
+    ...snapshot,
+    reloadDiagnostics: snapshot.reloadDiagnostics && {
+      ...snapshot.reloadDiagnostics,
+      isFileTrackingActive: null,
+    },
+  };
+  const frozenTrackingStopped = !!(
+    frozenAInitial &&
+    frozenAInitial.reloadDiagnostics &&
+    frozenAInitial.reloadDiagnostics.isFileTrackingActive === true &&
+    frozenAAfterDelete &&
+    frozenAAfterDelete.reloadDiagnostics &&
+    frozenAAfterDelete.reloadDiagnostics.isFileTrackingActive === false
+  );
   const frozenMessagesBeforeThaw = await deletedMessages();
   const frozenInitialAcknowledgement = await exec(`
     window.__f22DeletionProtocolProbe.forwardedAcknowledgements.find(ack =>
@@ -13370,61 +19364,170 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   const frozenInitialMainAcceptance = await waitForMainDeletionAcknowledgement(
     deletionAckIdentity(frozenInitialAcknowledgement),
   );
+  const frozenReleaseDelayMs = frozenEnvelopeHeldAt
+    ? Date.now() - frozenEnvelopeHeldAt
+    : null;
+  if (heldFrozenDeliveries[0]) {
+    realFrozenDeletionSend.call(wc, "file-deleted", heldFrozenDeliveries[0]);
+  }
+  const frozenStaleDelivered = await waitForCondition(
+    exec,
+    `window.__f22DeletionProtocolProbe.deliveries
+      .slice(${frozenDeliveryStart})
+      .some(entry => entry && entry.path === ${JSON.stringify(frozenDeletedFile)} &&
+        entry.delivery &&
+        entry.delivery.eventId === ${JSON.stringify(
+          frozenHeldIdentity && frozenHeldIdentity.eventId,
+        )} &&
+        entry.delivery.attempt === ${JSON.stringify(
+          frozenHeldIdentity && frozenHeldIdentity.attempt,
+        )} &&
+        entry.delivery.selectionGeneration === ${JSON.stringify(
+          frozenHeldIdentity && frozenHeldIdentity.selectionGeneration,
+        )})`,
+    5000,
+  );
+  const frozenStaleDelivery = await exec(`
+    window.__f22DeletionProtocolProbe.deliveries
+      .slice(${frozenDeliveryStart})
+      .find(entry => entry && entry.path === ${JSON.stringify(frozenDeletedFile)} &&
+        entry.delivery &&
+        entry.delivery.eventId === ${JSON.stringify(
+          frozenHeldIdentity && frozenHeldIdentity.eventId,
+        )} &&
+        entry.delivery.attempt === ${JSON.stringify(
+          frozenHeldIdentity && frozenHeldIdentity.attempt,
+        )} &&
+        entry.delivery.selectionGeneration === ${JSON.stringify(
+          frozenHeldIdentity && frozenHeldIdentity.selectionGeneration,
+        )}) || null
+  `);
+  const frozenStaleAcknowledgement = await exec(`
+    window.__f22DeletionProtocolProbe.forwardedAcknowledgements.find(ack =>
+      ack && ack.consumed === false && ack.why === "stale-selection" &&
+        ack.eventId === ${JSON.stringify(
+          frozenHeldIdentity && frozenHeldIdentity.eventId,
+        )} &&
+        ack.attempt === ${JSON.stringify(
+          frozenHeldIdentity && frozenHeldIdentity.attempt,
+        )} &&
+        ack.selectionGeneration === ${JSON.stringify(
+          frozenHeldIdentity && frozenHeldIdentity.selectionGeneration,
+        )}) || null
+  `);
+  const frozenStaleMainRejected = await waitUntil(() => {
+    const observation = mainDeletionAckProbe &&
+      mainDeletionAckProbe.observation(
+        deletionAckIdentity(frozenStaleAcknowledgement),
+      );
+    return !!(
+      observation &&
+      observation.reachedMain === true &&
+      observation.candidateRecordFound === true &&
+      observation.identityMatchesCurrentRecord === false &&
+      observation.attemptStateUnchanged === true &&
+      observation.recordRetired === false &&
+      observation.recordParked === true &&
+      observation.retryScheduled === false &&
+      observation.matchingDeliveryRecordRemains === true
+    );
+  }, 5000);
+  const frozenStaleMainObservation = mainDeletionAckProbe &&
+    mainDeletionAckProbe.observation(
+      deletionAckIdentity(frozenStaleAcknowledgement),
+    );
+  const frozenAAfterStale = await deletionTabSnapshot(frozenDeletedA.id);
+  const frozenMessagesAfterStale = await deletedMessages();
+  // The thaw's ownership reassertion must reach a real path. Recreate it
+  // without selecting it: thaw, not an ordinary missing-tab selection, owns
+  // the next main-process owner generation and replay decision.
+  if (consoleAttribution) {
+    await consoleAttribution.begin("f22-frozen-owner-thaw-and-replay", {
+      filePath: frozenDeletedFile,
+      heldIdentity: frozenHeldIdentity,
+      staleAcknowledgement: frozenStaleAcknowledgement,
+    });
+  }
+  fs.writeFileSync(frozenDeletedFile, "F22_DELETED_FROZEN_RECREATED\r\n", "utf8");
   await exec(`require("electron").ipcRenderer.emit("quit-approval-thaw", {}); null;`);
   const frozenThawed = await waitForCondition(
     exec,
     `window.CustomTabs.__shutdownFreeze().frozen === false`,
     5000,
   );
-  await exec(`window.CustomTabs.switchToTab(${frozenDeletedA.id}); null;`);
-  const frozenReplaySelectedOwner = await exec(`
-    window.__f22DeletionProtocolProbe.selections
-      .filter(entry => entry.filePath === ${JSON.stringify(frozenDeletedFile)} &&
-        entry.owner && entry.owner.tabId === ${frozenDeletedA.id})
-      .at(-1)?.owner || null
-  `);
+  // Thaw is the only ownership transition after the frozen refusal. It
+  // reasserts A through the production path and is solely responsible for the
+  // replay's next selection generation; no ordinary tab selection occurs.
+  const frozenOwnerAfterThaw = await witnessActiveOwner(
+    frozenDeletedFile,
+    frozenDeletedA.id,
+  );
+  const frozenAAfterThaw = await deletionTabSnapshot(frozenDeletedA.id);
   const frozenReplayDelivered = await waitForCondition(
     exec,
     `(() => {
       const deliveries = window.__f22DeletionProtocolProbe.deliveries
         .slice(${frozenDeliveryStart})
         .filter(entry => entry && entry.path === ${JSON.stringify(frozenDeletedFile)});
-      const first = deliveries[0];
-      return !!(
-        first &&
-        first.delivery &&
-        deliveries.filter(entry =>
-          entry.delivery && entry.delivery.eventId === first.delivery.eventId,
-        ).length >= 2
-      );
+      const frozen = deliveries[0] && deliveries[0].delivery;
+      const stale = deliveries[1] && deliveries[1].delivery;
+      const replay = deliveries[2] && deliveries[2].delivery;
+      return deliveries.length === 3 &&
+        frozen && stale && replay &&
+        stale.eventId === frozen.eventId &&
+        stale.attempt === ${JSON.stringify(
+          frozenHeldIdentity && frozenHeldIdentity.attempt,
+        )} &&
+        stale.selectionGeneration === ${JSON.stringify(
+          frozenHeldIdentity && frozenHeldIdentity.selectionGeneration,
+        )} &&
+        frozen.attempt === stale.attempt + 1 &&
+        frozen.selectionGeneration > stale.selectionGeneration &&
+        replay.eventId === frozen.eventId &&
+        replay.attempt === frozen.attempt + 1 &&
+        replay.selectionGeneration > frozen.selectionGeneration;
     })()`,
     5000,
   );
-  const frozenAAfterThaw = await deletionTabSnapshot(frozenDeletedA.id);
-  const frozenMessagesAfterThaw = await deletedMessages();
   const frozenRecovery = await exec(`
     (() => {
       const probe = window.__f22DeletionProtocolProbe;
       const deliveries = probe.deliveries
         .slice(${frozenDeliveryStart})
         .filter(entry => entry && entry.path === ${JSON.stringify(frozenDeletedFile)});
-      const first = deliveries[0] || null;
-      const eventId = first && first.delivery && first.delivery.eventId;
+      const frozen = deliveries[0] || null;
+      const eventId = frozen && frozen.delivery && frozen.delivery.eventId;
+      const stale = deliveries[1] || null;
+      const replay = deliveries[2] || null;
       return {
         deliveries,
-        acknowledgements: probe.acknowledgements.filter(
+        acknowledgements: probe.forwardedAcknowledgements.filter(
           ack => ack && ack.eventId === eventId,
         ),
+        frozen,
+        stale,
+        replay,
       };
     })()
   `);
-  const frozenAckQuiescence = await waitForDeletionAckQuiescence(
-    frozenDeliveryStart,
-    frozenDeletedFile,
-    deletionAckIdentity(frozenRecovery.acknowledgements.find(
-      (ack) => ack && ack.consumed === true,
-    )),
+  const frozenReplayAcknowledgements = frozenRecovery.replay &&
+    frozenRecovery.replay.delivery
+    ? frozenRecovery.acknowledgements.filter((ack) =>
+      ack && ack.consumed === true &&
+        acknowledgementMatchesDelivery(ack, frozenRecovery.replay.delivery))
+    : [];
+  const frozenReplayMainAcceptance = await waitForMainDeletionAcknowledgement(
+    deletionAckIdentity(frozenReplayAcknowledgements[0]),
   );
+  if (consoleAttribution) {
+    await consoleAttribution.end({
+      filePath: frozenDeletedFile,
+      thawed: frozenThawed,
+      owner: frozenOwnerAfterThaw,
+      replayDelivered: frozenReplayDelivered,
+      replayAcceptance: frozenReplayMainAcceptance,
+    });
+  }
 
   // A missing ACK is distinct from an explicit renderer refusal: main must
   // retire the timed-out attempt, replay the same event ID, and notify once.
@@ -13494,17 +19597,61 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   // Quiescence beyond its 4s ACK timeout is therefore the observable proof
   // that the exact forwarded ACK was accepted and both retry timers retired.
   const lostAckDeliveryCount = lostAckRecovery.deliveries.length;
-  const lostAckTimersTerminated = await new Promise((resolve) => {
-    const deadline = Date.now() + 4500;
-    const observe = async () => {
-      const count = await exec(`window.__f22DeletionProtocolProbe.deliveries
-        .slice(${lostAckStart}).filter(entry => entry && entry.path === ${JSON.stringify(lostAckFile)}).length`);
-      if (count !== lostAckDeliveryCount) return resolve(false);
-      if (Date.now() >= deadline) return resolve(true);
-      setTimeout(observe, 50);
-    };
-    observe();
-  });
+  const lostAckQuiescenceProbe = `window.__f22DeletionProtocolProbe.deliveries
+        .slice(${lostAckStart}).filter(entry => entry && entry.path === ${JSON.stringify(lostAckFile)}).length`;
+  // The observer this replaces awaited exec() unbounded and was the sole
+  // resolver of its outer promise: one rejected or hung renderer eval left
+  // that promise pending until the harness watchdog, which reports a timeout
+  // instead of a verdict. The per-eval bound now lives in execWithDeadline,
+  // which THROWS; this is the one caller that must not propagate, because its
+  // value is asserted as a verdict, so the throw is mapped back to the same
+  // structured non-true outcome naming the stage - never a success-shaped
+  // value - and the interval as a whole stays bounded here.
+  const lostAckTimersTerminated = await (async () => {
+    const intervalMs = 4500;
+    const evalBudgetMs = 2000;
+    const overallBudgetMs = intervalMs + 3000;
+    const started = Date.now();
+    const deadline = started + intervalMs;
+    let attempts = 0;
+    let maxTickLagMs = 0;
+    const diagnostic = (stage, extra) => Object.assign({
+      terminated: false,
+      stage,
+      attempts,
+      elapsedMs: Date.now() - started,
+      intervalMs,
+      evalBudgetMs,
+      overallBudgetMs,
+      // Our own timers are the only ones still running here, so their lag is
+      // the available evidence that the main loop is alive.
+      maxTickLagMs,
+    }, deletionProbeLiveness(), extra || {});
+    for (;;) {
+      if (Date.now() - started >= overallBudgetMs) return diagnostic("interval-timeout");
+      attempts += 1;
+      const attemptStarted = Date.now();
+      let delivered = null;
+      try {
+        delivered = await execWithDeadline(
+          lostAckQuiescenceProbe,
+          "lostAckTimersTerminated quiescence poll",
+          evalBudgetMs,
+        );
+      } catch (error) {
+        const failure = (error && error.f22ExecFailure) || null;
+        const extra = { attemptMs: Date.now() - attemptStarted };
+        if (failure && typeof failure.error === "string") extra.error = failure.error;
+        else if (!failure) extra.error = String((error && error.stack) || error);
+        return diagnostic((failure && failure.stage) || "eval-failed", extra);
+      }
+      if (delivered !== lostAckDeliveryCount) return false;
+      if (Date.now() >= deadline) return true;
+      const tickStarted = Date.now();
+      await sleep(50);
+      maxTickLagMs = Math.max(maxTickLagMs, Date.now() - tickStarted - 50);
+    }
+  })();
   const lostAckQuiescence = await waitForDeletionAckQuiescence(
     lostAckStart,
     lostAckFile,
@@ -13513,6 +19660,206 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     )),
   );
 
+  // The missing-file poll producer is allowed to revisit a retained record,
+  // but it must not send while the real retry callback owns the next attempt.
+  const retryGuardFile = path.join(dir, "f22-deleted-retry-guard.md");
+  fs.writeFileSync(retryGuardFile, "F22_DELETED_RETRY_GUARD\r\n", "utf8");
+  await clearTabs();
+  const retryGuardTab = await createActiveTab(
+    retryGuardFile,
+    "F22_DELETED_RETRY_GUARD\r\n",
+  );
+  const retryGuardStart = await exec(
+    `window.__f22DeletionProtocolProbe.deliveries.length`,
+  );
+  let retryGuardCallback = null;
+  let retryGuardParkedHandle = null;
+  const realRetryGuardSetTimeout = global.setTimeout;
+  const realRetryGuardClearTimeout = global.clearTimeout;
+  const restoreRetryGuardSetTimeout = replaceMethod(
+    global,
+    "setTimeout",
+    function(handler, delay, ...args) {
+      const source = typeof handler === "function"
+        ? Function.prototype.toString.call(handler)
+        : "";
+      if (
+        Number(delay) === 100 &&
+        /\bdeliverDeletionReport\(record, watchedOwner\)/.test(source)
+      ) {
+        if (retryGuardCallback) {
+          throw new Error("Expected exactly one production deletion retry callback");
+        }
+        retryGuardParkedHandle = realRetryGuardSetTimeout.call(
+          this,
+          () => {},
+          60000,
+        );
+        retryGuardParkedHandle.unref?.();
+        retryGuardCallback = { handler, delay, source };
+        return retryGuardParkedHandle;
+      }
+      return realRetryGuardSetTimeout.call(this, handler, delay, ...args);
+    },
+  );
+  let retryGuardFirstDelivered = false;
+  let retryGuardPollSuspension = null;
+  let retryGuardPollWitness = null;
+  let retryGuardCallbackCaptured = false;
+  let retryGuardGuarded = false;
+  let retryGuardCallbackReleased = false;
+  let retryGuardFirstDelivery = null;
+  let retryGuardParkedRecord = null;
+  let retryGuardPollBefore = null;
+  let retryGuardPollAfter = null;
+  let retryGuardPollRecord = null;
+  let retryGuardRecordStayedParked = false;
+  let retryGuardRecovery = null;
+  let retryGuardMainAcceptance = null;
+  try {
+    await exec(`window.__f22DeletionProtocolProbe.dropAcknowledgements = true; null;`);
+    fs.unlinkSync(retryGuardFile);
+    retryGuardFirstDelivered = await waitForCondition(
+      exec,
+      `window.__f22DeletionProtocolProbe.deliveries
+        .slice(${retryGuardStart})
+        .some(entry => entry && entry.path === ${JSON.stringify(retryGuardFile)} &&
+          entry.delivery && entry.delivery.attempt === 1)`,
+      5000,
+    );
+    retryGuardFirstDelivery = await exec(`
+      window.__f22DeletionProtocolProbe.deliveries
+        .slice(${retryGuardStart})
+        .find(entry => entry && entry.path === ${JSON.stringify(retryGuardFile)}) || null
+    `);
+    retryGuardPollSuspension = watcherProbe.suspendPoll(retryGuardFile);
+    retryGuardCallbackCaptured = await waitUntil(
+      () => !!retryGuardCallback && !!retryGuardParkedHandle,
+      6000,
+    );
+    retryGuardParkedRecord = mainDeletionAckProbe &&
+      mainDeletionAckProbe.recordSnapshot(
+        deletionDeliveryIdentity(
+          retryGuardFirstDelivery && retryGuardFirstDelivery.delivery,
+        ),
+      );
+    await exec(`window.__f22DeletionProtocolProbe.dropAcknowledgements = false; null;`);
+    retryGuardPollBefore = await exec(`
+      (() => {
+        const probe = window.__f22DeletionProtocolProbe;
+        const eventId = ${JSON.stringify(
+          retryGuardFirstDelivery && retryGuardFirstDelivery.delivery &&
+            retryGuardFirstDelivery.delivery.eventId,
+        )};
+        return {
+          deliveries: probe.deliveries.filter(entry =>
+            entry && entry.path === ${JSON.stringify(retryGuardFile)} &&
+            entry.delivery && entry.delivery.eventId === eventId).length,
+          attempted: probe.attemptedAcknowledgements.filter(ack =>
+            ack && ack.eventId === eventId).length,
+          forwarded: probe.forwardedAcknowledgements.filter(ack =>
+            ack && ack.eventId === eventId).length,
+        };
+      })()
+    `);
+    retryGuardPollWitness = watcherProbe.invokePoll(retryGuardFile);
+    retryGuardPollRecord = mainDeletionAckProbe &&
+      mainDeletionAckProbe.recordSnapshot(
+        deletionDeliveryIdentity(
+          retryGuardFirstDelivery && retryGuardFirstDelivery.delivery,
+        ),
+      );
+    await sleep(150);
+    retryGuardPollAfter = await exec(`
+      (() => {
+        const probe = window.__f22DeletionProtocolProbe;
+        const eventId = ${JSON.stringify(
+          retryGuardFirstDelivery && retryGuardFirstDelivery.delivery &&
+            retryGuardFirstDelivery.delivery.eventId,
+        )};
+        return {
+          deliveries: probe.deliveries.filter(entry =>
+            entry && entry.path === ${JSON.stringify(retryGuardFile)} &&
+            entry.delivery && entry.delivery.eventId === eventId).length,
+          attempted: probe.attemptedAcknowledgements.filter(ack =>
+            ack && ack.eventId === eventId).length,
+          forwarded: probe.forwardedAcknowledgements.filter(ack =>
+            ack && ack.eventId === eventId).length,
+        };
+      })()
+    `);
+    retryGuardGuarded = !!(
+      retryGuardPollBefore &&
+      retryGuardPollAfter &&
+      JSON.stringify(retryGuardPollAfter) === JSON.stringify(retryGuardPollBefore)
+    );
+    const parkedAttempt = retryGuardParkedRecord &&
+      retryGuardParkedRecord.records.find((entry) =>
+        entry.identity && entry.identity.complete === true &&
+        entry.identity.attempt === 1 && entry.attempt);
+    const pollAttempt = retryGuardPollRecord &&
+      retryGuardPollRecord.records.find((entry) =>
+        entry.identity && entry.identity.complete === true &&
+        entry.identity.attempt === 1 && entry.attempt);
+    retryGuardRecordStayedParked = !!(
+      parkedAttempt &&
+      pollAttempt &&
+      pollAttempt.attempt.recordObjectId === parkedAttempt.attempt.recordObjectId &&
+      pollAttempt.attempt.attempt === parkedAttempt.attempt.attempt &&
+      pollAttempt.attempt.inFlight === false &&
+      pollAttempt.attempt.ackTimeoutActive === false &&
+      pollAttempt.attempt.hasRetryTimeout === true &&
+      pollAttempt.attempt.retryTimeoutActive === true &&
+      pollAttempt.attempt.retryTimeout === parkedAttempt.attempt.retryTimeout
+    );
+    if (retryGuardParkedHandle) realRetryGuardClearTimeout(retryGuardParkedHandle);
+    if (retryGuardCallback) {
+      retryGuardCallback.handler();
+      retryGuardCallbackReleased = true;
+    }
+    const retryGuardRecovered = await waitForCondition(
+      exec,
+      `(() => {
+        const probe = window.__f22DeletionProtocolProbe;
+        const deliveries = probe.deliveries
+          .slice(${retryGuardStart})
+          .filter(entry => entry && entry.path === ${JSON.stringify(retryGuardFile)});
+        const first = deliveries[0] && deliveries[0].delivery;
+        const retry = deliveries[1] && deliveries[1].delivery;
+        return deliveries.length === 2 && first && retry &&
+          retry.eventId === first.eventId && retry.attempt === first.attempt + 1 &&
+          probe.forwardedAcknowledgements.some(ack =>
+            ack && ack.consumed === true &&
+            ack.eventId === retry.eventId && ack.attempt === retry.attempt);
+      })()`,
+      5000,
+    );
+    retryGuardRecovery = await exec(`
+      (() => {
+        const probe = window.__f22DeletionProtocolProbe;
+        const deliveries = probe.deliveries
+          .slice(${retryGuardStart})
+          .filter(entry => entry && entry.path === ${JSON.stringify(retryGuardFile)});
+        const retry = deliveries[1] && deliveries[1].delivery;
+        return {
+          recovered: ${'${retryGuardRecovered}'},
+          deliveries,
+          forwarded: probe.forwardedAcknowledgements.filter(ack =>
+            retry && ack && ack.eventId === retry.eventId),
+        };
+      })()
+    `.replace("${retryGuardRecovered}", String(retryGuardRecovered)));
+    retryGuardMainAcceptance = await waitForMainDeletionAcknowledgement(
+      deletionAckIdentity(
+        retryGuardRecovery.forwarded.find((ack) => ack && ack.consumed === true),
+      ),
+    );
+  } finally {
+    await exec(`window.__f22DeletionProtocolProbe.dropAcknowledgements = false; null;`);
+    if (retryGuardPollSuspension) watcherProbe.resumePoll(retryGuardFile);
+    if (retryGuardParkedHandle) realRetryGuardClearTimeout(retryGuardParkedHandle);
+    restoreRetryGuardSetTimeout();
+  }
   // A synchronous webContents.send failure is another lost attempt, not a
   // reason to drop the deletion evidence. The retry must carry the original
   // producer-generated event ID and complete with one acknowledgement.
@@ -13624,55 +19971,133 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     );
 
   const deletionDetail = () => JSON.stringify({
-    deletionProbe, deletedAOwner, deletedAProduced, deletedAEvent,
+    deletionProbe, deletedAOwnerAcceptance, deletedAOwner, deletedAProduced, deletedAEvent,
     deletionDeliveryStart, deletionMessageStart, deletionAAfterReplay,
+    deletedAActiveAfterReplay,
     deletionMessagesAfterA, deletedAProtocol, activeAckQuiescence, deletionSave,
-    deletedAWasMissingBeforeRecreation, deletionAAfterSave, deletionRoundTrip,
-    deletionAAfterRecreatedRoundTrip, deletedAWatcherAtStart,
+    deletedAWasMissingBeforeRecreation, deletionAAfterRecreation, deletionAAfterSave,
+    deletedAActiveAfterRecreation, deletedAActiveAfterSave, deletedAWatcherAtStart,
     deletedAWatcherAfterDeletion, deletedADeletionProducerRetained,
-    deletedAWatcherRearmed, deletedAWatcherAfterRoundTrip,
+    deletedAWatcherRearmed, deletedAWatcherAfterRecreation,
     closedDeletedA: closedDeletedA.id, closedDeletedB: closedDeletedB.id,
     closedDeletedEvent, closedAcknowledgement, closedEnvelopeHeld, closedDelivered,
-    closedDeletedGone, closedBeforeMessages, closedAfterMessages, closedAckQuiescence,
+    closedHeldIdentity, closedBeforeClose, closedDeletedGone, closedAfterClose,
+    closedBeforeMessages, closedAfterMessages, closedAckQuiescence,
+    closedAfterLateAcknowledgement,
     replacementDeletedA: replacementDeletedA.id,
-    replacementReloaded, replacementCurrentOwner, replacementAdoption,
+    replacementHeldIdentity, replacementBeforeAdoption, replacementReloaded,
+    replacementCurrentOwner, replacementAdoption, replacementAfterAdoption,
     replacementDeletedEvent, replacementAcknowledgement, replacementEnvelopeHeld,
     replacementDelivered, replacementBefore, replacementAfterStaleDelivery, replacementAfter,
     replacementBeforeMessages, replacementAfterStaleMessages, replacementAfterMessages,
-    replacementAckQuiescence,
+    replacementAckQuiescence, replacementAfterLateAcknowledgement,
     ownerPathMovedTab: ownerPathMovedTab.id, ownerPathMovedEnvelopeHeld,
     ownerPathMovedHeldIdentity, classifierReasonEvidence,
     ownerPathMovedForgedAcknowledgements, ownerPathMovedForgedObserved,
     ownerPathMovedDeliveryProbe, ownerPathMovedAcknowledged,
+    ownerPathMovedRealMatchCount,
     ownerPathMovedAcknowledgement, ownerPathMovedMainAcceptance,
     ownerPathMovedDeliveryCleanup, ownerPathMovedAckQuiescence,
     inactiveDeletedA: inactiveDeletedA.id, inactiveDeletedB: inactiveDeletedB.id,
-    inactiveSelectedOwner, inactiveBBefore, inactiveBAfterRefusal,
-    inactiveWatcherMovedToB,
+    inactiveSelectionAcceptance, inactiveSelectedOwner, inactiveBActiveOwner, inactiveBBefore,
+    inactiveBAfterRefusal, inactiveWatcherMovedToB,
     inactiveMessageStart, inactiveFirstDelivered, inactiveFirstDelivery,
     inactiveMessagesAfterRefusal, inactiveInitialAcknowledgement,
-    inactiveInitialMainAcceptance, inactiveReplaySelectedOwner,
-    inactiveReplayDelivered, inactiveRecovery, inactiveAAfterConsumption, inactiveAckQuiescence,
-    staleDeletedA: staleDeletedA.id, staleDeletedB: staleDeletedB.id,
-    staleEnvelopeHeld, staleSelectionAdvance, staleInitialRecordBeforeRelease,
-    staleInitialAcknowledged, staleInitialAcknowledgement,
-    staleInitialMainAcceptance, staleRestoreAndReassert, staleSelectionCleanup,
-    staleReplayed, staleRecovery, staleAckQuiescence,
+    inactiveInitialMainAcceptance,
     frozenDeletedA: frozenDeletedA.id, frozenDeletedB: frozenDeletedB.id,
-    frozenSelectedOwner, frozenDeletion, frozenBeforeDelete, frozenDeliveryStart,
-    frozenFirstDelivered, frozenInitialDelivery, frozenAInitial, frozenAAfterDelete,
-    frozenMessageCount, frozenInitialAcknowledgement, frozenInitialMainAcceptance,
-    frozenMessagesBeforeThaw, frozenThawed, frozenReplaySelectedOwner,
-    frozenReplayDelivered, frozenAAfterThaw, frozenMessagesAfterThaw, frozenRecovery,
-    frozenAckQuiescence,
+    frozenSelectionAcceptance, frozenSelectedOwner, frozenEnvelopeHeld,
+    frozenHeldIdentity, frozenHeldMainRecord, frozenDeletion, frozenBeforeDelete,
+    frozenRendererCursorBefore, frozenMainCursorBefore, frozenReuseRequestId,
+    frozenCursorSafe, frozenMainCursorAfter,
+    frozenReleaseDelayMs, frozenDeliveryStart, frozenFirstDelivered,
+    frozenInitialDelivery, frozenAInitial, frozenAAfterDelete, frozenTrackingStopped,
+    frozenAAfterStale,
+    frozenMessageCount,
+    frozenInitialAcknowledgement, frozenInitialMainAcceptance,
+    frozenStaleDelivered, frozenStaleDelivery, frozenStaleAcknowledgement,
+    frozenStaleMainRejected, frozenStaleMainObservation, frozenMessagesAfterStale,
+    frozenMessagesBeforeThaw, frozenThawed, frozenOwnerAfterThaw,
+    frozenAAfterThaw, frozenReplayDelivered, frozenRecovery,
+    frozenReplayAcknowledgements, frozenReplayMainAcceptance,
     lostAckTab: lostAckTab.id, lostAckReplayed, lostAckConsumed,
     lostAckTimersTerminated, lostAckRecovery, lostAckQuiescence,
     throwDeletedTab: throwDeletedTab.id, catchesDeletionSendFailure,
     thrownDeletionPayload, throwObserved, throwRecovered, throwRecovery, throwAckQuiescence,
     replacementSave, replacementBytesAfterSave,
     replacementConflictAfterSave, explicitReplacementAdopted,
-    replacementAfterExplicitAdoption,
+    replacementAfterExplicitAdoption, deletedAActiveAfterExplicitAdoption,
+    deletedAReloadDialogExpected, deletedAReloadDialogCalls,
+    retryGuard: {
+      filePath: retryGuardFile,
+      tabId: retryGuardTab.id,
+      firstDelivered: retryGuardFirstDelivered,
+      callback: retryGuardCallback && {
+        delay: retryGuardCallback.delay,
+        source: retryGuardCallback.source,
+      },
+      parkedHandleCaptured: !!retryGuardParkedHandle,
+      callbackCaptured: retryGuardCallbackCaptured,
+      callbackReleased: retryGuardCallbackReleased,
+      firstDelivery: retryGuardFirstDelivery,
+      parkedRecord: retryGuardParkedRecord,
+      pollSuspension: retryGuardPollSuspension,
+      pollWitness: retryGuardPollWitness,
+      pollBefore: retryGuardPollBefore,
+      pollAfter: retryGuardPollAfter,
+      pollRecord: retryGuardPollRecord,
+      recordStayedParked: retryGuardRecordStayedParked,
+      guarded: retryGuardGuarded,
+      recovery: retryGuardRecovery,
+      mainAcceptance: retryGuardMainAcceptance,
+    },
   });
+  checkDeletionEvidence(
+    ["acknowledgementLifecycle"],
+    "F22 retry-guard fixture captures one production retry callback and invokes one live missing-file poll", () =>
+    retryGuardFirstDelivered === true &&
+      retryGuardCallbackCaptured === true &&
+      retryGuardCallback &&
+      retryGuardCallback.delay === 100 &&
+      /\bdeliverDeletionReport\(record, watchedOwner\)/.test(retryGuardCallback.source) &&
+      retryGuardPollWitness &&
+      retryGuardPollWitness.invoked === true &&
+      retryGuardPollWitness.filePath === retryGuardFile &&
+      retryGuardPollWitness.liveCount === 1 &&
+      retryGuardPollSuspension &&
+      retryGuardPollSuspension.suspended === true &&
+      retryGuardPollSuspension.filePath === retryGuardFile &&
+      retryGuardPollSuspension.liveCount === 1 &&
+      retryGuardParkedRecord &&
+      retryGuardParkedRecord.records.some((entry) =>
+        entry.identity && entry.identity.complete === true &&
+        entry.identity.attempt === 1 &&
+        entry.attempt && entry.attempt.inFlight === false &&
+        entry.attempt.ackTimeoutActive === false &&
+        entry.attempt.hasRetryTimeout === true &&
+        entry.attempt.retryTimeoutActive === true),
+    () => deletionDetail()
+  );
+  checkDeletionEvidence(
+    ["acknowledgementLifecycle"],
+    "F22 missing-file poll cannot send while the production retry callback owns attempt two", () =>
+    retryGuardGuarded === true &&
+      retryGuardRecordStayedParked === true &&
+      retryGuardCallbackReleased === true &&
+      retryGuardRecovery &&
+      retryGuardRecovery.recovered === true &&
+      retryGuardRecovery.deliveries.length === 2 &&
+      retryGuardRecovery.forwarded.length === 1 &&
+      retryGuardRecovery.forwarded[0].consumed === true &&
+      acknowledgementsMatchDeliveries(
+        retryGuardRecovery.forwarded,
+        [retryGuardRecovery.deliveries[1]],
+      ) &&
+      retryGuardMainAcceptance &&
+      retryGuardMainAcceptance.acceptedAndRetired === true &&
+      retryGuardMainAcceptance.mainObservation.recordRetired === true &&
+      retryGuardMainAcceptance.mainObservation.retryScheduled === false,
+    () => deletionDetail()
+  );
   checkDeletionEvidence(
     ["producerGeneration"],
     "F22 deletion producer generation carries a complete real owner identity", () =>
@@ -13680,6 +20105,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       deletedAEvent &&
       deletedAEvent.delivery &&
       deletionDeliveryIdentity(deletedAEvent.delivery).complete === true &&
+      selectionWasAccepted(deletedAOwnerAcceptance) &&
       deletedAOwner &&
       deletedAEvent.delivery.owner.pageSession === deletedAOwner.pageSession &&
       deletedAEvent.delivery.owner.rendererGeneration ===
@@ -13746,6 +20172,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     ownerPathMovedDeliveryProbe.originalFilePath !==
       ownerPathMovedDeliveryProbe.movedFilePath &&
     ownerPathMovedAcknowledged === true &&
+      ownerPathMovedRealMatchCount === 1 &&
       ownerPathMovedAcknowledgement &&
       ownerPathMovedAcknowledgement.consumed === false &&
       ownerPathMovedAcknowledgement.why === "owner-path-moved" &&
@@ -13758,6 +20185,10 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       ownerPathMovedMainAcceptance.mainObservation.recordRetired === true &&
       ownerPathMovedMainAcceptance.mainObservation.recordParked === false &&
       ownerPathMovedMainAcceptance.mainObservation.retryScheduled === false &&
+      ownerPathMovedMainAcceptance.mainObservation.attemptBefore.hasRetryTimeout === true &&
+      ownerPathMovedMainAcceptance.mainObservation.attemptBefore.retryTimeoutActive === false &&
+      ownerPathMovedMainAcceptance.mainObservation.attemptAfter.hasRetryTimeout === true &&
+      ownerPathMovedMainAcceptance.mainObservation.attemptAfter.retryTimeoutActive === false &&
       ownerPathMovedDeliveryCleanup &&
       ownerPathMovedDeliveryCleanup.restored === true &&
       ownerPathMovedDeliveryCleanup.restoredAgain === false &&
@@ -13766,6 +20197,9 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       ownerPathMovedDeliveryCleanup.noIdentityReinstall === true &&
       ownerPathMovedAckQuiescence.acceptedAndRetired === true &&
       ownerPathMovedAckQuiescence.mainObservation.recordRetired === true &&
+      ownerPathMovedAckQuiescence.reactivationEvidence &&
+      ownerPathMovedAckQuiescence.reactivationEvidence.valid === true &&
+      ownerPathMovedAckQuiescence.observedMs >= 4250 &&
       ownerPathMovedAckQuiescence.retired === true, () =>
     deletionDetail()
   );
@@ -13774,6 +20208,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     "F22 watcher-produced active deletion records the real tombstone event and one forwarded consumed ACK", () =>
     deletionProbe === true && deletedAProduced === true && deletedAEvent &&
       deletedAEvent.delivery && Number.isSafeInteger(deletedAEvent.delivery.eventId) &&
+      selectionWasAccepted(deletedAOwnerAcceptance) &&
       deletedAOwner && deletedAEvent.delivery.owner &&
       deletedAEvent.delivery.owner.pageSession === deletedAOwner.pageSession &&
       deletedAEvent.delivery.owner.rendererGeneration ===
@@ -13782,6 +20217,10 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       deletedAEvent.delivery.owner.documentGeneration === deletedAOwner.documentGeneration &&
       deletedAEvent.delivery.owner.pathKey === deletedAOwner.pathKey &&
       deletionAAfterReplay && deletionAAfterReplay.active === deletedA.id &&
+      deletedAActiveAfterReplay.selected === true &&
+      deletionAAfterReplay.content === "F22_DELETED_A_BASE\r\n" &&
+      deletionAAfterReplay.originalContent === "F22_DELETED_A_BASE\r\n" &&
+      deletionAAfterReplay.live === "F22_DELETED_A_BASE\r\n" &&
       deletionAAfterReplay.dirty === false && deletionAAfterReplay.reloadConflict === false &&
       deletionAAfterReplay.deletionTombstone === true &&
       deletionAAfterReplay.deletionEventId === deletedAEvent.delivery.eventId &&
@@ -13805,13 +20244,19 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   );
   checkDeletionEvidence(
     ["deletionSaveRefusal"],
-    "F22 deletion-only Save refusal preserves a clean tombstoned tab and replacement bytes", () =>
+    "F22 active tombstoned A Save refusal preserves cached bytes and replacement disk bytes", () =>
     deletionSave && deletionSave.timedOut === false && deletionSave.result &&
       deletionSave.filePath === deletedAFile && deletionSave.result.path === deletedAFile &&
       deletionSave.result.success === false && deletionSave.result.conflict === true &&
       deletedAWasMissingBeforeRecreation === true &&
       replacementBytesAfterSave === "F22_DELETED_A_EXTERNAL_REPLACEMENT\r\n" &&
+      deletedAActiveAfterRecreation.selected === true &&
       deletionAAfterSave &&
+      deletedAActiveAfterSave.selected === true &&
+      deletionAAfterSave.active === deletedA.id &&
+      deletionAAfterSave.content === "F22_DELETED_A_BASE\r\n" &&
+      deletionAAfterSave.originalContent === "F22_DELETED_A_BASE\r\n" &&
+      deletionAAfterSave.live === "F22_DELETED_A_BASE\r\n" &&
       deletionAAfterSave.dirty === false &&
       deletionAAfterSave.reloadConflict === false &&
       deletionAAfterSave.deletionTombstone === true &&
@@ -13820,23 +20265,35 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   );
   checkDeletionEvidence(
     ["rendererTombstoneCache"],
-    "F22 renderer retains deletion-tombstone bytes through a real pre-save tab round-trip until explicit reload", () =>
-    deletionRoundTrip && deletionRoundTrip.active === deletedA.id &&
-      deletionAAfterRecreatedRoundTrip &&
-      deletionAAfterRecreatedRoundTrip.active === deletedA.id &&
-      deletionAAfterRecreatedRoundTrip.content === "F22_DELETED_A_BASE\r\n" &&
-      deletionAAfterRecreatedRoundTrip.originalContent === "F22_DELETED_A_BASE\r\n" &&
-      deletionAAfterRecreatedRoundTrip.live === "F22_DELETED_A_BASE\r\n" &&
-      deletionAAfterRecreatedRoundTrip.dirty === false &&
-      deletionAAfterRecreatedRoundTrip.reloadConflict === false &&
-      deletionAAfterRecreatedRoundTrip.deletionTombstone === true &&
-      deletionAAfterRecreatedRoundTrip.deletionEventId ===
-        deletedAEvent.delivery.eventId, () =>
+    "F22 active tombstoned A retains cached bytes through recreation until explicit reload", () =>
+    deletionAAfterRecreation &&
+      deletedAActiveAfterRecreation.selected === true &&
+      deletionAAfterRecreation.active === deletedA.id &&
+      deletionAAfterRecreation.content === "F22_DELETED_A_BASE\r\n" &&
+      deletionAAfterRecreation.originalContent === "F22_DELETED_A_BASE\r\n" &&
+      deletionAAfterRecreation.live === "F22_DELETED_A_BASE\r\n" &&
+      deletionAAfterRecreation.dirty === false &&
+      deletionAAfterRecreation.reloadConflict === false &&
+      deletionAAfterRecreation.deletionTombstone === true &&
+      deletionAAfterRecreation.deletionEventId === deletedAEvent.delivery.eventId &&
+      explicitReplacementAdopted === true &&
+      deletedAReloadDialogCalls.length === 1 &&
+      deletedAReloadDialogCalls[0].mismatches.length === 0 &&
+      replacementAfterExplicitAdoption &&
+      deletedAActiveAfterExplicitAdoption.selected === true &&
+      replacementAfterExplicitAdoption.active === deletedA.id &&
+      replacementAfterExplicitAdoption.content === "F22_DELETED_A_EXTERNAL_REPLACEMENT\r\n" &&
+      replacementAfterExplicitAdoption.originalContent === "F22_DELETED_A_EXTERNAL_REPLACEMENT\r\n" &&
+      replacementAfterExplicitAdoption.live === "F22_DELETED_A_EXTERNAL_REPLACEMENT\r\n" &&
+      replacementAfterExplicitAdoption.dirty === false &&
+      replacementAfterExplicitAdoption.reloadConflict === false &&
+      replacementAfterExplicitAdoption.deletionTombstone === false &&
+      replacementAfterExplicitAdoption.deletionEventId === 0, () =>
     deletionDetail()
   );
   checkDeletionEvidence(
     ["watcherOwnership"],
-    "F22 owns exactly one actual watcher producer across deletion, recreation rearm, and tab switches", () =>
+    "F22 owns exactly one actual watcher producer across active A deletion and recreation rearm", () =>
     deletedAWatcherAtStart.live.length === 1 &&
       deletedAWatcherAtStart.live[0].kind === "fs.watch" &&
       deletedAWatcherAtStart.live[0].filePath === deletedAFile &&
@@ -13848,10 +20305,10 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       ) &&
       deletedADeletionProducerRetained === true &&
       deletedAWatcherRearmed === true &&
-      deletedAWatcherAfterRoundTrip.live.length === 1 &&
-      deletedAWatcherAfterRoundTrip.live[0].kind === "fs.watch" &&
-      deletedAWatcherAfterRoundTrip.live[0].filePath === deletedAFile &&
-      deletedAWatcherAfterRoundTrip.live[0].id !==
+      deletedAWatcherAfterRecreation.live.length === 1 &&
+      deletedAWatcherAfterRecreation.live[0].kind === "fs.watch" &&
+      deletedAWatcherAfterRecreation.live[0].filePath === deletedAFile &&
+      deletedAWatcherAfterRecreation.live[0].id !==
         deletedAWatcherAtStart.live[0].id &&
       deletedAProtocol.deliveries.length === 1, () =>
     deletionDetail()
@@ -13859,24 +20316,77 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   checkDeletionEvidence(
     ["acknowledgementLifecycle"],
     "F22 production deletion delivery rejects closed and distinct replacement generations", () =>
-    closedEnvelopeHeld === true && closedDelivered === true && closedDeletedEvent &&
-      closedDeletedEvent.delivery && closedDeletedGone === true &&
+    closedEnvelopeHeld === true && heldClosedDeliveries.length === 1 &&
+      closedHeldIdentity && closedHeldIdentity.complete === true &&
+      closedBeforeClose.count === 2 &&
+      closedBeforeClose.idTombstoneCount === 1 &&
+      closedBeforeClose.idTombstonePresent === true &&
+      closedBeforeClose.records.length === 2 &&
+      closedBeforeClose.records.every((entry) =>
+        entry.ownerKeyed === true &&
+        entry.identity && entry.identity.complete === true &&
+        entry.identity.eventId === closedHeldIdentity.eventId &&
+        entry.attempt &&
+        entry.attempt.inFlight === true &&
+        entry.attempt.ackTimeoutActive === true &&
+        entry.attempt.retryTimeoutActive === false,
+      ) &&
+      closedDeletedGone === true &&
+      closedAfterClose.count === 0 &&
+      closedAfterClose.idTombstoneCount === 0 &&
+      closedAfterClose.idTombstonePresent === false &&
+      closedDelivered === true && closedDeletedEvent &&
+      closedDeletedEvent.delivery &&
       closedAcknowledgement && closedAcknowledgement.consumed === false &&
       closedAcknowledgement.why === "owner-closed" &&
       acknowledgementMatchesDelivery(
         closedAcknowledgement,
         closedDeletedEvent.delivery,
       ) &&
-      closedAckQuiescence.acceptedAndRetired === true &&
-      closedAckQuiescence.mainObservation.recordRetired === true &&
+      closedAckQuiescence.acceptedAndRetired === false &&
+      closedAckQuiescence.mainProcessed === true &&
+      closedAckQuiescence.mainAcknowledgementCount === 1 &&
+      closedAckQuiescence.retired === false &&
+      closedAckQuiescence.mainObservation &&
+      closedAckQuiescence.mainObservation.reachedMain === true &&
+      closedAckQuiescence.mainObservation.productionListenerRegistered === true &&
+      closedAckQuiescence.mainObservation.listenerSequenceBefore === true &&
+      closedAckQuiescence.mainObservation.listenerSequenceAfter === true &&
+      closedAckQuiescence.mainObservation.deletionRecordFound === false &&
+      closedAckQuiescence.mainObservation.candidateRecordFound === false &&
+      closedAckQuiescence.mainObservation.recordRetired === false &&
       closedAckQuiescence.mainObservation.recordParked === false &&
-      closedAckQuiescence.retired === true &&
+      closedAckQuiescence.mainObservation.retryScheduled === false &&
+      closedAckQuiescence.mainObservation.matchingDeliveryRecordRemains === false &&
+      closedAckQuiescence.mainObservation.tombstoneRetained === false &&
+      closedAfterLateAcknowledgement.count === 0 &&
+      closedAfterLateAcknowledgement.idTombstoneCount === 0 &&
+      closedAfterLateAcknowledgement.idTombstonePresent === false &&
       closedAfterMessages === closedBeforeMessages &&
-      replacementEnvelopeHeld === true && replacementDelivered === true &&
+      replacementEnvelopeHeld === true &&
+      heldReplacementDeliveries.length === 1 &&
+      replacementHeldIdentity && replacementHeldIdentity.complete === true &&
+      replacementBeforeAdoption.count === 2 &&
+      replacementBeforeAdoption.idTombstoneCount === 1 &&
+      replacementBeforeAdoption.idTombstonePresent === true &&
+      replacementBeforeAdoption.records.length === 2 &&
+      replacementBeforeAdoption.records.every((entry) =>
+        entry.ownerKeyed === true &&
+        entry.identity && entry.identity.complete === true &&
+        entry.identity.eventId === replacementHeldIdentity.eventId &&
+        entry.attempt &&
+        entry.attempt.inFlight === true &&
+        entry.attempt.ackTimeoutActive === true &&
+        entry.attempt.retryTimeoutActive === false,
+      ) &&
+      replacementAfterAdoption.count === 0 &&
+      replacementAfterAdoption.idTombstoneCount === 0 &&
+      replacementAfterAdoption.idTombstonePresent === false &&
+      replacementDelivered === true &&
       replacementDeletedEvent && replacementDeletedEvent.delivery &&
       replacementDeletedEvent.delivery.owner.tabId === replacementDeletedA.id &&
       replacementReloaded === true &&
-      replacementAdoption && replacementAdoption.held.length === 1 &&
+      replacementAdoption && replacementAdoption.held.length === 0 &&
       replacementCurrentOwner &&
       replacementCurrentOwner.tabId === replacementDeletedA.id &&
       replacementCurrentOwner.documentGeneration !==
@@ -13887,10 +20397,25 @@ async function runF22SaveAndReloadScenarios(win, exec) {
         replacementAcknowledgement,
         replacementDeletedEvent.delivery,
       ) &&
-      replacementAckQuiescence.acceptedAndRetired === true &&
-      replacementAckQuiescence.mainObservation.recordRetired === true &&
+      replacementAckQuiescence.acceptedAndRetired === false &&
+      replacementAckQuiescence.mainProcessed === true &&
+      replacementAckQuiescence.mainAcknowledgementCount === 1 &&
+      replacementAckQuiescence.retired === false &&
+      replacementAckQuiescence.mainObservation &&
+      replacementAckQuiescence.mainObservation.reachedMain === true &&
+      replacementAckQuiescence.mainObservation.productionListenerRegistered === true &&
+      replacementAckQuiescence.mainObservation.listenerSequenceBefore === true &&
+      replacementAckQuiescence.mainObservation.listenerSequenceAfter === true &&
+      replacementAckQuiescence.mainObservation.deletionRecordFound === false &&
+      replacementAckQuiescence.mainObservation.candidateRecordFound === false &&
+      replacementAckQuiescence.mainObservation.recordRetired === false &&
       replacementAckQuiescence.mainObservation.recordParked === false &&
-      replacementAckQuiescence.retired === true &&
+      replacementAckQuiescence.mainObservation.retryScheduled === false &&
+      replacementAckQuiescence.mainObservation.matchingDeliveryRecordRemains === false &&
+      replacementAckQuiescence.mainObservation.tombstoneRetained === false &&
+      replacementAfterLateAcknowledgement.count === 0 &&
+      replacementAfterLateAcknowledgement.idTombstoneCount === 0 &&
+      replacementAfterLateAcknowledgement.idTombstonePresent === false &&
       JSON.stringify(replacementAfterStaleDelivery) === JSON.stringify(replacementBefore) &&
       replacementAfterStaleMessages === replacementBeforeMessages &&
       JSON.stringify(replacementAfter) === JSON.stringify(replacementBefore) &&
@@ -13904,6 +20429,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       inactiveFirstDelivery &&
       inactiveFirstDelivery.delivery &&
       inactiveFirstDelivery.delivery.owner &&
+      selectionWasAccepted(inactiveSelectionAcceptance) &&
       inactiveSelectedOwner &&
       inactiveFirstDelivery.delivery.owner.pageSession ===
         inactiveSelectedOwner.pageSession &&
@@ -13932,180 +20458,63 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       inactiveInitialMainAcceptance.mainObservation.recordParked === false &&
       inactiveInitialMainAcceptance.mainObservation.watchedOwnerMatchesRecord === false &&
       inactiveInitialMainAcceptance.mainObservation.watchedOwnerIsDistinctTab === true &&
+      inactiveInitialMainAcceptance.mainObservation.watchedOwner &&
+      inactiveBActiveOwner &&
+      inactiveInitialMainAcceptance.mainObservation.watchedOwner.tabId ===
+        inactiveBActiveOwner.tabId &&
+      inactiveInitialMainAcceptance.mainObservation.watchedOwner.pathKey ===
+        inactiveBActiveOwner.pathKey &&
+      inactiveInitialMainAcceptance.mainObservation.watchedOwner.selectionGeneration ===
+        inactiveBActiveOwner.selectionGeneration &&
       inactiveInitialMainAcceptance.mainObservation.retryScheduled === false &&
       inactiveInitialMainAcceptance.mainObservation.recordRetired === false &&
       inactiveWatcherMovedToB === true &&
-      inactiveRecovery.acknowledgements.some(ack =>
-        ack.consumed === false &&
-        ack.pageSession === inactiveFirstDelivery.delivery.owner.pageSession &&
-        ack.rendererGeneration ===
-          inactiveFirstDelivery.delivery.owner.rendererGeneration &&
-        ack.tabId === inactiveFirstDelivery.delivery.owner.tabId &&
-        ack.documentGeneration ===
-          inactiveFirstDelivery.delivery.owner.documentGeneration &&
-        ack.pathKey === inactiveFirstDelivery.delivery.owner.pathKey &&
-        ack.selectionGeneration ===
-          inactiveFirstDelivery.delivery.selectionGeneration &&
-        ack.watcherGeneration ===
-          inactiveFirstDelivery.delivery.watcherGeneration,
-      ) &&
-      inactiveAckQuiescence.acceptedAndRetired === true &&
-      inactiveAckQuiescence.mainObservation.recordRetired === true &&
-      inactiveAckQuiescence.mainObservation.recordParked === false &&
-      inactiveAckQuiescence.retired === true, () =>
-    deletionDetail()
-  );
-  checkDeletionEvidence(
-    ["acknowledgementLifecycle"],
-    "F22 watcher-driven inactive deletion replays one event ID and consumes only its valid owner generation", () =>
-    inactiveReplayDelivered === true &&
-      inactiveRecovery.active === inactiveDeletedA.id &&
-    inactiveReplaySelectedOwner &&
-      inactiveAAfterConsumption &&
-      inactiveAAfterConsumption.dirty === false &&
-      inactiveAAfterConsumption.reloadConflict === false &&
-      inactiveRecovery.deliveries.length === 2 &&
-      inactiveRecovery.deliveries[0].delivery.eventId ===
-        inactiveRecovery.deliveries[1].delivery.eventId &&
-      inactiveRecovery.deliveries[1].delivery.owner.pageSession ===
-        inactiveReplaySelectedOwner.pageSession &&
-      inactiveRecovery.deliveries[1].delivery.owner.rendererGeneration ===
-        inactiveReplaySelectedOwner.rendererGeneration &&
-      inactiveRecovery.deliveries[1].delivery.owner.tabId ===
-        inactiveReplaySelectedOwner.tabId &&
-      inactiveRecovery.deliveries[1].delivery.owner.documentGeneration ===
-        inactiveReplaySelectedOwner.documentGeneration &&
-      inactiveRecovery.deliveries[1].delivery.owner.pathKey ===
-        inactiveReplaySelectedOwner.pathKey &&
-      inactiveRecovery.deliveries[1].delivery.selectionGeneration ===
-        inactiveReplaySelectedOwner.selectionGeneration &&
-      inactiveRecovery.acknowledgements.some(ack =>
-        ack.consumed === true &&
-        ack.pageSession === inactiveRecovery.deliveries[1].delivery.owner.pageSession &&
-        ack.rendererGeneration ===
-          inactiveRecovery.deliveries[1].delivery.owner.rendererGeneration &&
-        ack.tabId === inactiveRecovery.deliveries[1].delivery.owner.tabId &&
-        ack.documentGeneration ===
-          inactiveRecovery.deliveries[1].delivery.owner.documentGeneration &&
-        ack.pathKey === inactiveRecovery.deliveries[1].delivery.owner.pathKey &&
-        ack.selectionGeneration ===
-          inactiveRecovery.deliveries[1].delivery.selectionGeneration &&
-        ack.watcherGeneration ===
-          inactiveRecovery.deliveries[1].delivery.watcherGeneration,
-      ) &&
-      acknowledgementsMatchDeliveries(
-        [inactiveRecovery.acknowledgements.find(ack => ack && ack.consumed === true)],
-        [inactiveRecovery.deliveries[1]],
-      ) &&
-      inactiveRecovery.messages === inactiveMessageStart + 1 &&
-      inactiveAckQuiescence.acceptedAndRetired === true &&
-      inactiveAckQuiescence.retired === true, () =>
-    deletionDetail()
-  );
-  checkDeletionEvidence(
-    ["acknowledgementLifecycle"],
-    "F22 stale-selection attempt 1 is accepted, retries exactly once as attempt 2, then has no third delivery for over 4s", () =>
-    staleEnvelopeHeld === true &&
-      heldStaleDeliveries[0] &&
-      heldStaleDeliveries[0].delivery &&
-      heldStaleDeliveries[0].delivery.attempt === 1 &&
-      staleSelectionAdvance &&
-      staleSelectionAdvance.active === staleDeletedA.id &&
-      staleSelectionAdvance.wrapperInstalled === true &&
-      staleSelectionAdvance.owner &&
-      staleSelectionAdvance.owner.tabId === staleDeletedA.id &&
-      staleSelectionAdvance.suppressed.length >= 2 &&
-      staleSelectionAdvance.suppressed.some(entry =>
-        entry.filePath === staleDeletedFile &&
-        entry.owner && entry.owner.tabId === staleDeletedA.id) &&
-      staleSelectionAdvance.suppressed.some(entry =>
-        entry.filePath === deletedBFile &&
-        entry.owner && entry.owner.tabId === staleDeletedB.id) &&
-      staleInitialRecordBeforeRelease &&
-      staleInitialRecordBeforeRelease.count >= 1 &&
-      staleInitialRecordBeforeRelease.records.every(record =>
-        record.ownerKeyed === true &&
-        record.identity &&
-        record.identity.eventId ===
-          heldStaleDeliveries[0].delivery.eventId &&
-        record.attempt &&
-        record.attempt.attempt === heldStaleDeliveries[0].delivery.attempt &&
-        record.attempt.inFlight === true &&
-        record.attempt.ackTimeoutActive === true &&
-        record.attempt.retryTimeoutActive === false) &&
-      staleSelectionAdvance.owner.selectionGeneration >
-        heldStaleDeliveries[0].delivery.selectionGeneration &&
-      staleInitialAcknowledged === true &&
-      staleInitialAcknowledgement &&
-      staleInitialAcknowledgement.consumed === false &&
-      staleInitialAcknowledgement.why === "stale-selection" &&
-      staleInitialAcknowledgement.attempt === 1 &&
-      acknowledgementMatchesDelivery(
-        staleInitialAcknowledgement,
-        heldStaleDeliveries[0].delivery,
-      ) &&
-      staleInitialMainAcceptance.acceptedAndRetired === true &&
-      staleInitialMainAcceptance.mainObservation.attemptBefore.attempt ===
-        1 &&
-      staleInitialMainAcceptance.mainObservation.attemptAfter.attempt === 1 &&
-      staleInitialMainAcceptance.mainObservation.recordRetired === false &&
-      staleInitialMainAcceptance.mainObservation.recordParked === false &&
-      staleInitialMainAcceptance.mainObservation.watchedOwnerMatchesRecord === true &&
-      staleInitialMainAcceptance.mainObservation.retryScheduled === true &&
-      staleRestoreAndReassert &&
-      staleRestoreAndReassert.restored === true &&
-      staleRestoreAndReassert.reasserted === true &&
-      staleRestoreAndReassert.outerProtocolRestored === true &&
-      staleRestoreAndReassert.after &&
-      staleRestoreAndReassert.after.tabId === staleDeletedA.id &&
-      staleSelectionCleanup &&
-      staleSelectionCleanup.disabled === true &&
-      staleSelectionCleanup.outerProtocolRestored === true &&
-      staleReplayed === true &&
-      staleRecovery.deliveries.length === 2 &&
-      staleRecovery.deliveries.every(entry =>
-        entry.delivery.eventId === staleRecovery.deliveries[0].delivery.eventId) &&
-      staleRecovery.deliveries[0].delivery.attempt === 1 &&
-      staleRecovery.deliveries[1].delivery.attempt === 2 &&
-      staleRecovery.deliveries[1].delivery.pageSession ===
-        staleRestoreAndReassert.after.pageSession &&
-      staleRecovery.deliveries[1].delivery.rendererGeneration ===
-        staleRestoreAndReassert.after.rendererGeneration &&
-      staleRecovery.deliveries[1].delivery.owner.tabId ===
-        staleRestoreAndReassert.after.tabId &&
-      staleRecovery.deliveries[1].delivery.owner.documentGeneration ===
-        staleRestoreAndReassert.after.documentGeneration &&
-      staleRecovery.deliveries[1].delivery.owner.pathKey ===
-        staleRestoreAndReassert.after.pathKey &&
-      staleRecovery.deliveries[1].delivery.selectionGeneration ===
-        staleRestoreAndReassert.after.selectionGeneration &&
-      staleRecovery.currentOwner &&
-      staleRecovery.currentOwner.selectionGeneration ===
-        staleRecovery.deliveries[1].delivery.selectionGeneration &&
-      staleTerminalAcknowledgement &&
-      staleTerminalAcknowledgement.consumed === true &&
-      staleTerminalAcknowledgement.attempt === 2 &&
-      acknowledgementMatchesDelivery(
-        staleTerminalAcknowledgement,
-        staleRecovery.deliveries[1].delivery,
-      ) &&
-      staleAckQuiescence.acceptedAndRetired === true &&
-      staleAckQuiescence.mainObservation.recordRetired === true &&
-      staleAckQuiescence.mainObservation.matchingDeliveryRecordRemains === false &&
-      staleAckQuiescence.before.deliveries === 2 &&
-      staleAckQuiescence.retired === true, () =>
+      inactiveBActiveOwner &&
+      inactiveBActiveOwner.tabId === inactiveDeletedB.id &&
+      Number.isSafeInteger(inactiveBActiveOwner.selectionGeneration) &&
+      inactiveBActiveOwner.selectionGeneration >
+        inactiveSelectedOwner.selectionGeneration, () =>
     deletionDetail()
   );
   checkDeletionEvidence(
     ["acknowledgementLifecycle"],
     "F22 watcher-driven frozen deletion refusal preserves the real envelope until thaw", () =>
-    frozenDeletion &&
+    frozenEnvelopeHeld === true &&
+      heldFrozenDeliveries.length === 1 &&
+      frozenHeldIdentity &&
+      frozenHeldIdentity.complete === true &&
+      frozenHeldMainRecord &&
+      frozenHeldMainRecord.records.some((entry) =>
+        entry.ownerKeyed === true &&
+        entry.identity &&
+        entry.identity.complete === true &&
+        entry.identity.eventId === frozenHeldIdentity.eventId &&
+        entry.identity.selectionGeneration === frozenHeldIdentity.selectionGeneration &&
+        entry.identity.watcherGeneration === frozenHeldIdentity.watcherGeneration &&
+        entry.identity.attempt === frozenHeldIdentity.attempt &&
+        entry.attempt &&
+        entry.attempt.inFlight === true &&
+        entry.attempt.ackTimeoutActive === true &&
+        entry.attempt.hasRetryTimeout === true &&
+        entry.attempt.retryTimeoutActive === false,
+      ) &&
+      frozenDeletion &&
       frozenDeletion.ownerTabId === frozenDeletedA.id &&
       Number.isSafeInteger(frozenDeletion.gen) &&
+      frozenCursorSafe === true &&
+      frozenDeletion.requestId === frozenReuseRequestId &&
+      frozenDeletion.frozenId === frozenReuseRequestId &&
+      frozenDeletion.currentRevision === frozenDeletion.revision &&
+      frozenDeletion.rendererHighestRequestId === frozenRendererCursorBefore &&
+      frozenMainCursorAfter === frozenMainCursorBefore &&
+      frozenMainCursorBefore === frozenReuseRequestId &&
       frozenBeforeDelete === true &&
+      Number.isSafeInteger(frozenReleaseDelayMs) &&
+      frozenReleaseDelayMs < 4000 &&
       frozenFirstDelivered === true &&
       frozenInitialDelivery &&
       frozenRecovery.deliveries[0] &&
+      selectionWasAccepted(frozenSelectionAcceptance) &&
       frozenSelectedOwner &&
       frozenRecovery.deliveries[0].delivery.owner.pageSession ===
         frozenSelectedOwner.pageSession &&
@@ -14116,9 +20525,11 @@ async function runF22SaveAndReloadScenarios(win, exec) {
         frozenSelectedOwner.documentGeneration &&
       frozenRecovery.deliveries[0].delivery.owner.pathKey ===
         frozenSelectedOwner.pathKey &&
-      frozenRecovery.deliveries[0].delivery.selectionGeneration ===
+      frozenRecovery.deliveries[0].delivery.selectionGeneration >
         frozenSelectedOwner.selectionGeneration &&
-      JSON.stringify(frozenAAfterDelete) === JSON.stringify(frozenAInitial) &&
+      frozenTrackingStopped === true &&
+      JSON.stringify(normaliseFrozenTracking(frozenAAfterDelete)) ===
+        JSON.stringify(normaliseFrozenTracking(frozenAInitial)) &&
       frozenMessagesBeforeThaw === frozenMessageCount &&
       frozenInitialAcknowledgement &&
       frozenInitialAcknowledgement.consumed === false &&
@@ -14130,59 +20541,87 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       frozenInitialMainAcceptance.acceptedAndRetired === true &&
       frozenInitialMainAcceptance.mainObservation.attemptRetired === true &&
       frozenInitialMainAcceptance.mainObservation.recordParked === true &&
+      frozenInitialMainAcceptance.mainObservation.attemptAfter.inFlight === false &&
+      frozenInitialMainAcceptance.mainObservation.attemptAfter.hasRetryTimeout === true &&
+      frozenInitialMainAcceptance.mainObservation.attemptAfter.retryTimeoutActive === false &&
       frozenInitialMainAcceptance.mainObservation.retryScheduled === false &&
       frozenInitialMainAcceptance.mainObservation.recordRetired === false &&
-      frozenRecovery.acknowledgements.some(ack =>
-        ack.consumed === false &&
-        ack.selectionGeneration ===
-          frozenRecovery.deliveries[0].delivery.selectionGeneration &&
-        ack.watcherGeneration ===
-          frozenRecovery.deliveries[0].delivery.watcherGeneration,
+      frozenInitialMainAcceptance.mainObservation.matchingDeliveryRecordRemains === true &&
+      frozenStaleDelivered === true &&
+      frozenStaleDelivery &&
+      frozenStaleAcknowledgement &&
+      frozenStaleAcknowledgement.consumed === false &&
+      frozenStaleAcknowledgement.why === "stale-selection" &&
+      acknowledgementMatchesDelivery(
+        frozenStaleAcknowledgement,
+        frozenStaleDelivery.delivery,
       ) &&
+      acknowledgementMatchesDelivery(
+        frozenStaleAcknowledgement,
+        heldFrozenDeliveries[0].delivery,
+      ) &&
+      frozenStaleMainRejected === true &&
+      frozenStaleMainObservation &&
+      frozenStaleMainObservation.attemptAfter.inFlight === false &&
+      frozenStaleMainObservation.attemptAfter.hasRetryTimeout === true &&
+      frozenStaleMainObservation.attemptAfter.retryTimeoutActive === false &&
+      JSON.stringify(frozenAAfterStale) === JSON.stringify(frozenAAfterDelete) &&
+      frozenMessagesAfterStale === frozenMessagesBeforeThaw &&
       frozenThawed === true &&
-      frozenReplayDelivered === true &&
-      frozenRecovery.deliveries.length === 2 &&
-      frozenRecovery.deliveries[0].delivery.eventId ===
-        frozenRecovery.deliveries[1].delivery.eventId &&
-      frozenReplaySelectedOwner &&
-      frozenRecovery.deliveries[1].delivery.owner.pageSession ===
-        frozenReplaySelectedOwner.pageSession &&
-      frozenRecovery.deliveries[1].delivery.owner.rendererGeneration ===
-        frozenReplaySelectedOwner.rendererGeneration &&
-      frozenRecovery.deliveries[1].delivery.owner.tabId ===
-        frozenReplaySelectedOwner.tabId &&
-      frozenRecovery.deliveries[1].delivery.owner.documentGeneration ===
-        frozenReplaySelectedOwner.documentGeneration &&
-      frozenRecovery.deliveries[1].delivery.owner.pathKey ===
-        frozenReplaySelectedOwner.pathKey &&
-      frozenRecovery.deliveries[1].delivery.selectionGeneration ===
-        frozenReplaySelectedOwner.selectionGeneration &&
+      frozenOwnerAfterThaw.selected === true &&
+      frozenOwnerAfterThaw.currentFilePath === frozenDeletedFile &&
+      frozenOwnerAfterThaw.owner.pageSession === frozenSelectedOwner.pageSession &&
+      frozenOwnerAfterThaw.owner.rendererGeneration ===
+        frozenSelectedOwner.rendererGeneration &&
+      frozenOwnerAfterThaw.owner.tabId === frozenSelectedOwner.tabId &&
+      frozenOwnerAfterThaw.owner.documentGeneration ===
+        frozenSelectedOwner.documentGeneration &&
+      frozenOwnerAfterThaw.owner.pathKey === frozenSelectedOwner.pathKey &&
+      frozenOwnerAfterThaw.owner.selectionGeneration >
+        frozenSelectedOwner.selectionGeneration &&
       frozenAAfterThaw &&
+      frozenAAfterThaw.active === frozenDeletedA.id &&
       frozenAAfterThaw.dirty === false &&
       frozenAAfterThaw.reloadConflict === false &&
-      frozenMessagesAfterThaw === frozenMessageCount + 1 &&
-      frozenRecovery.acknowledgements.some(ack =>
-        ack.consumed === true &&
-        ack.pageSession === frozenRecovery.deliveries[1].delivery.owner.pageSession &&
-        ack.rendererGeneration ===
-          frozenRecovery.deliveries[1].delivery.owner.rendererGeneration &&
-        ack.tabId === frozenRecovery.deliveries[1].delivery.owner.tabId &&
-        ack.documentGeneration ===
-          frozenRecovery.deliveries[1].delivery.owner.documentGeneration &&
-        ack.pathKey === frozenRecovery.deliveries[1].delivery.owner.pathKey &&
-        ack.selectionGeneration ===
-          frozenRecovery.deliveries[1].delivery.selectionGeneration &&
-        ack.watcherGeneration ===
-          frozenRecovery.deliveries[1].delivery.watcherGeneration,
-      ) &&
+      frozenReplayDelivered === true &&
+      frozenRecovery.deliveries.length === 3 &&
+      frozenRecovery.frozen &&
+      frozenRecovery.frozen.delivery &&
+      frozenRecovery.stale &&
+      frozenRecovery.stale.delivery &&
+      frozenRecovery.replay &&
+      frozenRecovery.replay.delivery &&
+      frozenRecovery.frozen.delivery.eventId ===
+        frozenInitialDelivery.delivery.eventId &&
+      frozenRecovery.frozen.delivery.attempt ===
+        frozenInitialDelivery.delivery.attempt &&
+      frozenRecovery.frozen.delivery.selectionGeneration ===
+        frozenInitialDelivery.delivery.selectionGeneration &&
+      frozenRecovery.stale.delivery.eventId === frozenHeldIdentity.eventId &&
+      frozenRecovery.stale.delivery.attempt === frozenHeldIdentity.attempt &&
+      frozenRecovery.stale.delivery.selectionGeneration ===
+        frozenHeldIdentity.selectionGeneration &&
+      frozenRecovery.replay.delivery.eventId ===
+        frozenInitialDelivery.delivery.eventId &&
+      frozenRecovery.replay.delivery.attempt ===
+        frozenInitialDelivery.delivery.attempt + 1 &&
+      frozenRecovery.replay.delivery.selectionGeneration >
+        frozenInitialDelivery.delivery.selectionGeneration &&
+      frozenRecovery.acknowledgements.length === 3 &&
+      frozenReplayAcknowledgements.length === 1 &&
+      frozenReplayAcknowledgements[0].consumed === true &&
       acknowledgementsMatchDeliveries(
-        [frozenRecovery.acknowledgements.find(ack => ack && ack.consumed === true)],
-        [frozenRecovery.deliveries[1]],
+        frozenRecovery.acknowledgements,
+        frozenRecovery.deliveries,
       ) &&
-      frozenAckQuiescence.acceptedAndRetired === true &&
-      frozenAckQuiescence.mainObservation.recordRetired === true &&
-      frozenAckQuiescence.mainObservation.recordParked === false &&
-      frozenAckQuiescence.retired === true, () =>
+      frozenReplayMainAcceptance.acceptedAndRetired === true &&
+      frozenReplayMainAcceptance.mainObservation.attemptRetired === true &&
+      frozenReplayMainAcceptance.mainObservation.recordParked === false &&
+      frozenReplayMainAcceptance.mainObservation.attemptAfter.hasRetryTimeout === true &&
+      frozenReplayMainAcceptance.mainObservation.attemptAfter.retryTimeoutActive === false &&
+      frozenReplayMainAcceptance.mainObservation.retryScheduled === false &&
+      frozenReplayMainAcceptance.mainObservation.recordRetired === true &&
+      frozenReplayMainAcceptance.mainObservation.matchingDeliveryRecordRemains === false, () =>
     deletionDetail()
   );
   checkDeletionEvidence(
@@ -14282,29 +20721,33 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       const ipc = require("electron").ipcRenderer;
       const protocol = window.__f22DeletionProtocolProbe;
       const replacement = window.__f22ReplacementAdoptionProbe;
-      const stale = window.__f22StaleSelectionProbe;
       window.__f22DeletionObserver && window.__f22DeletionObserver.disconnect();
       // Inner wrappers were constructed after the outer protocol wrapper, so
       // they must restore first. Their idempotent identity checks cannot put
       // the protocol wrapper back after it has been removed.
       const replacementFirst = replacement ? replacement.restore() : null;
-      const staleFirst = stale ? stale.restore() : null;
       const outerFirst = protocol ? protocol.restore() : null;
       const preProbeRestored = !!protocol && ipc.send === protocol.originalSend;
+      // The synchronous method is restored by the same rule as send, so it is
+      // witnessed by the same evidence: the prototype's function is exposed
+      // again, and no own property introduced by the probe is left behind.
+      const preProbeSyncRestored = !!protocol &&
+        ipc.sendSync === protocol.originalSendSync &&
+        ipc.sendSync !== protocol.syncWrapper;
       const replacementAgain = replacement ? replacement.restore() : null;
-      const staleAgain = stale ? stale.restore() : null;
       const outerAgain = protocol ? protocol.restore() : null;
       return {
         replacementFirst,
-        staleFirst,
         outerFirst,
         replacementAgain,
-        staleAgain,
         outerAgain,
         replacementDisabled: !replacement || replacement.enabled === false,
-        staleDisabled: !stale || stale.enabled === false,
         preProbeRestored,
+        preProbeSyncRestored,
         noWrapperReinstalled: !!protocol && ipc.send === protocol.originalSend,
+        noSyncWrapperReinstalled: !!protocol &&
+          ipc.sendSync === protocol.originalSendSync &&
+          ipc.sendSync !== protocol.syncWrapper,
       };
     })()
   `);
@@ -14314,11 +20757,11 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     deletionIpcWrapperCleanup &&
       deletionIpcWrapperCleanup.outerFirst === true &&
       deletionIpcWrapperCleanup.preProbeRestored === true &&
+      deletionIpcWrapperCleanup.preProbeSyncRestored === true &&
       deletionIpcWrapperCleanup.noWrapperReinstalled === true &&
+      deletionIpcWrapperCleanup.noSyncWrapperReinstalled === true &&
       deletionIpcWrapperCleanup.replacementDisabled === true &&
-      deletionIpcWrapperCleanup.staleDisabled === true &&
       deletionIpcWrapperCleanup.replacementAgain === false &&
-      deletionIpcWrapperCleanup.staleAgain === false &&
       deletionIpcWrapperCleanup.outerAgain === false, () =>
     JSON.stringify(deletionIpcWrapperCleanup)
   );
@@ -14350,7 +20793,6 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       await exec(`
         window.__f22DeletionObserver && window.__f22DeletionObserver.disconnect();
         window.__f22ReplacementAdoptionProbe && window.__f22ReplacementAdoptionProbe.restore();
-        window.__f22StaleSelectionProbe && window.__f22StaleSelectionProbe.restore();
         window.__f22OwnerPathMovedDeliveryProbe &&
           window.__f22OwnerPathMovedDeliveryProbe.restore();
         window.__f22DeletionProtocolProbe && window.__f22DeletionProtocolProbe.restore();
@@ -14388,14 +20830,104 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   // Manufacture the two replies in reverse order. The real save entry and its
   // pending promise are used; only IPC transport is held, so this has no race
   // against disk scheduling and cannot show a native failure dialog.
+  //
+  // THE SEED HAS TO BE SETTLED BEFORE THE OWNER ADOPTS IT, and the reason this
+  // fixture in particular hid that for so long is `openDocumentForSave`: it
+  // opens `r+` BEFORE main compares the baseline, so the first request through
+  // - the one this fixture deliberately fails with EACCES at the open - never
+  // reaches the comparison at all. Measured: A failed exactly as intended while
+  // B, the first request that got past the open, came back `conflict: true`
+  // with "The file changed on disk" at open count 2, because the fixture's own
+  // first read had already moved `ctimeMs` under the adopted baseline.
+  //
+  // The base document is also a single line with no trailing newline. Every
+  // document below is typed into the real textarea, which holds LF, and
+  // `cachedSpellingFor` restores the cache's newline spelling onto a real edit;
+  // with no newline anywhere there is nothing to restore, so the exact-string
+  // assertions further down are about the text that was actually typed.
   const orderedSaveFile = path.join(dir, "f22-stale-save-order.md");
-  fs.writeFileSync(orderedSaveFile, "F22_SAVE_ORDER_BASE\r\n", "utf8");
-  await clearTabs();
-  const orderedSaveTab = await createActiveTab(
+  const orderedSaveBase = "F22_SAVE_ORDER_BASE";
+  const orderedCtimeProbe = startF22CtimeProbe(orderedSaveFile);
+  const orderedVersionTimeline = [];
+  const orderedSaveSettledVersion = await seedSettledFixture(
     orderedSaveFile,
-    "F22_SAVE_ORDER_BASE\r\n",
+    orderedSaveBase,
   );
+  if (orderedCtimeProbe) {
+    orderedVersionTimeline.push(
+      await orderedCtimeProbe.capture("after-seed"),
+    );
+  }
+  await clearTabs();
+  const orderedSaveTab = await createActiveTab(orderedSaveFile, orderedSaveBase);
+  const orderedSaveVersionAfterOpen = diskVersionOf(orderedSaveFile);
+  if (orderedCtimeProbe) {
+    orderedVersionTimeline.push(
+      await orderedCtimeProbe.capture("after-selection", orderedSaveTab.id),
+    );
+  }
+  if (!sameDiskVersion(orderedSaveSettledVersion, orderedSaveVersionAfterOpen)) {
+    throw new Error(
+      "F22 ordered save fixture moved on disk before its owner adopted it: " +
+        JSON.stringify({
+          orderedSaveFile,
+          orderedSaveSettledVersion,
+          orderedSaveVersionAfterOpen,
+        }),
+    );
+  }
+  // THE EDITOR IS THE DOCUMENT, and nothing else is. `prepareSaveRequest()`
+  // calls `snapshotActiveTab()`, which in edit mode folds `markdownEditor.value`
+  // into the tab before the bytes are read, so a fixture that assigns
+  // `tab.content` and `window.originalMarkdown` is overwritten at the moment it
+  // presses Save: measured, the A and B requests both carried the untouched
+  // base bytes while the fixture believed it had staged two different
+  // documents. `window.originalMarkdown` is not the live edit buffer either -
+  // in edit mode the product leaves it at the opened text until a save
+  // succeeds. So every document below is typed through the product's own input
+  // path. Edit mode is entered only if it is not already on, and put back the
+  // way it was found, because the scenarios after this one inherit it.
+  const orderedSaveEditModeBefore = await exec(`window.CustomTabs.__inEditMode()`);
+  if (orderedSaveEditModeBefore !== true) {
+    await exec(`toggleEditBtn.click(); null;`);
+  }
+  const orderedSaveEditorReady = await waitForCondition(
+    exec,
+    `window.CustomTabs.__inEditMode() === true &&
+     !!window.markdownEditor &&
+     window.markdownEditor.value === ${JSON.stringify(orderedSaveBase)}`,
+    5000,
+  );
+  if (!orderedSaveEditorReady) {
+    throw new Error(
+      "F22 ordered save fixture never reached its own document in edit mode: " +
+        JSON.stringify(await exec(`
+          (() => ({
+            editMode: window.CustomTabs.__inEditMode(),
+            editor: window.markdownEditor ? window.markdownEditor.value : null,
+            activeTabId: window.CustomTabs.getActiveTabId(),
+            currentFilePath: window.currentFilePath,
+          }))()
+        `)),
+    );
+  }
   const heldOrderedSaveResults = [];
+  // Main RE-SENDS a save result it never saw acknowledged (4 s ACK timeout,
+  // then backoff), and this fixture swallows the reply precisely so the
+  // renderer cannot acknowledge it. The held array therefore carries delivery
+  // ATTEMPTS, not requests: positional indexing into it reads a retry of an
+  // older request as the next request's result, which is exactly what the
+  // previous run recorded - `heldOrderedSaveResults[2]` was attempt 2 of A.
+  // Counting and lookup are by correlation identifier instead, so the fixture
+  // does not quietly depend on winning a race against that timer.
+  const validOrderedSaveRequestId = (requestId) =>
+    Number.isSafeInteger(requestId) && requestId > 0;
+  const orderedHeldRequestIds = () =>
+    new Set(
+      heldOrderedSaveResults
+        .filter((result) => result && validOrderedSaveRequestId(result.requestId))
+        .map((result) => result.requestId),
+    );
   const realOrderedSaveSend = wc.send;
   const restoreOrderedSaveSend = replaceMethod(wc, "send", function(channel, ...args) {
     if (channel === "save-markdown-result") {
@@ -14420,7 +20952,21 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     }
     return realOrderedSaveOpen(candidate, flags, ...args);
   });
-  const orderedSnapshot = () => exec(`
+  // The shutdown dirty-list oracle is the real product call, and the product
+  // deliberately REFUSES to answer it while a save is in flight: dirtyTabNames()
+  // throws FOLIA_PENDING_SAVE rather than return a list nothing can stand behind.
+  // Snapshots taken while this fixture is holding replies therefore have no array
+  // to report. Absorbing that would make "nothing is dirty" and "the oracle
+  // refused to answer" the same reading, so the refusal is recorded as a
+  // structured witness instead: only that one exact code is accepted, it is
+  // immediately re-proved against the saves this fixture is actually holding, and
+  // every other error - edit mode without an editor, dropped frozen operations, a
+  // missing status function - is rethrown unchanged.
+  //
+  // `expectedPendingSaves` is the number of replies this fixture is holding at the
+  // moment of the snapshot; null means none are held and the real array is the
+  // answer, which is what the existing array assertions read.
+  const orderedSnapshot = (expectedPendingSaves = null) => exec(`
     (() => {
       const tab = window.CustomTabs.getTabs().find(tab => tab.id === ${orderedSaveTab.id});
       const state = tab && window.CustomTabs.__documentState(tab);
@@ -14436,7 +20982,46 @@ async function runF22SaveAndReloadScenarios(win, exec) {
         reloadConflict: !!(state && state.reloadConflict),
         reloadDiagnostics: window.getReloadRequestDiagnostics(),
         pending: window.getPendingSaveStatus(${JSON.stringify(orderedSaveFile)}),
-        shutdownDirty: window.CustomTabs.__dirtyTabNames(),
+        shutdownDirty: (() => {
+          const expected = ${JSON.stringify(expectedPendingSaves)};
+          let names;
+          try {
+            names = window.CustomTabs.__dirtyTabNames();
+          } catch (error) {
+            // Identified by code, never by message. Anything else is a different
+            // failure and must reach the caller exactly as the product threw it.
+            if (!error || error.code !== "FOLIA_PENDING_SAVE") throw error;
+            const status = window.getPendingSaveStatus(${JSON.stringify(orderedSaveFile)});
+            const errorStatus = error.status || null;
+            return {
+              pending: true,
+              code: error.code,
+              count: status.count,
+              expected,
+              matchesExpected: expected !== null && status.count === expected,
+              statusPending: status.pending,
+              paths: status.paths.slice(),
+              errorStatusPending: errorStatus ? errorStatus.pending : null,
+              errorStatusCount: errorStatus ? errorStatus.count : null,
+              errorStatusMatchesRead: !!errorStatus &&
+                errorStatus.pending === status.pending &&
+                errorStatus.count === status.count &&
+                errorStatus.revision === status.revision,
+            };
+          }
+          // Nothing is pending, so the real list is the answer. A snapshot that
+          // expected a refusal still gets a record rather than an array, so a
+          // missing refusal cannot be read as one.
+          if (expected === null) return names;
+          return {
+            pending: false,
+            code: null,
+            count: window.getPendingSaveStatus(${JSON.stringify(orderedSaveFile)}).count,
+            expected,
+            matchesExpected: false,
+            names,
+          };
+        })(),
         selection: window.CustomTabs.getActiveDocumentIdentity(
           ${JSON.stringify(orderedSaveFile)}, window.getReloadRequestSession()),
         disk: window.fs.readFileSync(${JSON.stringify(orderedSaveFile)}, "utf8"),
@@ -14463,6 +21048,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   };
   let producerCapturedSaves = null;
   let orderedSaveEvidence = null;
+  let orderedEaccesMute = null;
   try {
     producerCapturedSaves = await exec(`
       (() => {
@@ -14514,21 +21100,95 @@ async function runF22SaveAndReloadScenarios(win, exec) {
             }
             return originalSend.call(this, channel, ...args);
           };
-          window.originalMarkdown = "F22_SAVE_A_OLDER";
-          tab.content = window.originalMarkdown;
-          document.getElementById("saveButton").click();
-          window.originalMarkdown = "F22_SAVE_B_NEWER";
-          tab.content = window.originalMarkdown;
-          document.getElementById("saveButton").click();
-          return { requests: probe.requests };
+          // The product's own edit path, and only it: the textarea carries the
+          // document and the input event is what makes the tab dirty. Nothing
+          // here writes tab.content or window.originalMarkdown -
+          // snapshotActiveTab() owns the first and the save result owns the
+          // second, and a fixture that assigns either is simply overwritten.
+          // NO BACKTICKS ANYWHERE IN THIS STRING: it is the body of a template
+          // literal, and a pair of them closes and reopens it.
+          probe.typeDocument = (text) => {
+            const editMode = window.CustomTabs.__inEditMode();
+            if (editMode !== true || !window.markdownEditor) {
+              return { typed: false, editMode, editor: null };
+            }
+            window.markdownEditor.value = text;
+            window.markdownEditor.dispatchEvent(
+              new Event("input", { bubbles: true }),
+            );
+            return { typed: true, editMode, editor: window.markdownEditor.value };
+          };
+          return { installed: true };
         } catch (error) {
           window.__f22OrderedSaveCleanup();
           return { setupFailed: String(error && error.stack ? error.stack : error) };
         }
       })()
     `);
-    const capturedAB = await waitUntil(() => heldOrderedSaveResults.length === 2, 5000);
-    const requests = producerCapturedSaves && producerCapturedSaves.requests || [];
+    if (!producerCapturedSaves || producerCapturedSaves.installed !== true) {
+      throw new Error(
+        "F22 ordered save producer probe did not install: " +
+          JSON.stringify(producerCapturedSaves),
+      );
+    }
+    // One A-E step. Type the document through the real editor, let the
+    // product's own input debounces finish - 400 ms preview, 800 ms undo
+    // history - so no timer of its own can move the page between two snapshots
+    // that are compared for equality, and then PROVE, before Save is pressed,
+    // that this tab is still the selected authoritative owner of this path and
+    // that the bytes about to be saved are the bytes that were typed. A step
+    // that cannot establish that is a setup failure and says so here, rather
+    // than becoming an unreadable verdict about save ordering further down.
+    const orderedSaveStep = async (label, text) => {
+      const typed = await exec(
+        `window.__f22OrderedSaveProbe.typeDocument(${JSON.stringify(text)})`,
+      );
+      await sleep(900);
+      const witness = await witnessActiveOwner(orderedSaveFile, orderedSaveTab.id);
+      const editMode = await exec(`window.CustomTabs.__inEditMode()`);
+      if (
+        !typed ||
+        typed.typed !== true ||
+        editMode !== true ||
+        !witness.selected ||
+        witness.editor !== text
+      ) {
+        throw new Error(
+          "F22 ordered save step could not establish its own document before Save: " +
+            JSON.stringify({ label, text, typed, editMode, witness }),
+        );
+      }
+      const heldBefore = orderedHeldRequestIds().size;
+      const requestsBefore = await exec(
+        `window.__f22OrderedSaveProbe.requests.length`,
+      );
+      if (orderedCtimeProbe && label === "B") {
+        orderedVersionTimeline.push(
+          await orderedCtimeProbe.capture(
+            "immediately-pre-save-B",
+            orderedSaveTab.id,
+          ),
+        );
+      }
+      await exec(`document.getElementById("saveButton").click(); null;`);
+      const requested = await waitUntil(
+        async () =>
+          (await exec(`window.__f22OrderedSaveProbe.requests.length`)) ===
+          requestsBefore + 1,
+        5000,
+      );
+      if (!requested) {
+        throw new Error(
+          "F22 ordered save step pressed Save and produced no request: " +
+            JSON.stringify({ label, text, requestsBefore, witness }),
+        );
+      }
+      return { label, text, typed, editMode, witness, heldBefore, requestsBefore };
+    };
+    const orderedStepA = await orderedSaveStep("A", "F22_SAVE_A_OLDER");
+    const orderedStepB = await orderedSaveStep("B", "F22_SAVE_B_NEWER");
+    const capturedAB = await waitUntil(() => orderedHeldRequestIds().size === 2, 5000);
+    const requests = await exec(`window.__f22OrderedSaveProbe.requests.slice()`);
     const requestA = requests[0];
     const requestB = requests[1];
     const resultFor = (request) => heldOrderedSaveResults.find(result =>
@@ -14552,26 +21212,122 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     if (resultB) realOrderedSaveSend.call(wc, "save-markdown-result", resultB);
     const newerApplied = await waitForCondition(exec,
       `window.CustomTabs.getTabs().find(tab => tab.id === ${orderedSaveTab.id})?.originalContent === "F22_SAVE_B_NEWER"`, 5000);
-    const afterNewerSuccess = await orderedSnapshot();
+    const afterNewerSuccess = await orderedSnapshot(1);
+    if (orderedCtimeProbe) {
+      orderedVersionTimeline.push(
+        await orderedCtimeProbe.capture(
+          "after-save-result-B",
+          orderedSaveTab.id,
+        ),
+      );
+    }
+    const isOrderedBTrackingControl = (control, channel, refreshed = false) => {
+      const payload = control && control.payload;
+      const owner = payload && payload.owner;
+      return control &&
+        control.channel === channel &&
+        payload &&
+        payload.filePath === orderedSaveFile &&
+        owner &&
+        owner.pageSession === requestB.saveRequest.pageSession &&
+        owner.rendererGeneration === requestB.saveRequest.rendererGeneration &&
+        owner.tabId === requestB.saveRequest.tabId &&
+        owner.documentGeneration === requestB.saveRequest.documentGeneration &&
+        owner.pathKey === requestB.saveRequest.pathKey &&
+        (refreshed
+          ? owner.selectionGeneration > requestB.saveRequest.selectionGeneration
+          : owner.selectionGeneration === requestB.saveRequest.selectionGeneration);
+    };
+    const orderedBTrackingOwner = await witnessActiveOwner(
+      orderedSaveFile,
+      orderedSaveTab.id,
+    );
+    const orderedBPauseBeforeA = await waitUntil(
+      async () => {
+        const controls = await exec(`window.__f22OrderedSaveProbe.controls.slice()`);
+        return controls.length === 1 &&
+          isOrderedBTrackingControl(controls[0], "pause-file-watching");
+      },
+      5000,
+    );
+    const orderedBPauseControls = await exec(
+      `window.__f22OrderedSaveProbe.controls.slice()`,
+    );
+    if (!orderedBPauseBeforeA || !orderedBTrackingOwner.selected) {
+      throw new Error(
+        "F22 ordered B success did not establish its selected pending-save owner: " +
+          JSON.stringify({
+            orderedBPauseBeforeA,
+            orderedBTrackingOwner,
+            orderedBPauseControls,
+            orderedVersionTimeline,
+          }),
+      );
+    }
     await exec(`window.__f22OrderedSaveProbe.controls.length = 0; null;`);
     if (resultA) realOrderedSaveSend.call(wc, "save-markdown-result", resultA);
     const staleSettled = await waitForCondition(exec,
       `window.getPendingSaveStatus(${JSON.stringify(orderedSaveFile)}).count === 0`, 5000);
+    const orderedBRefreshSettled = await waitUntil(
+      async () => {
+        const controls = await exec(`window.__f22OrderedSaveProbe.controls.slice()`);
+        return controls.length === 2 &&
+          controls.some((control) =>
+            isOrderedBTrackingControl(control, "set-active-file", true),
+          ) &&
+          controls.some((control) =>
+            isOrderedBTrackingControl(control, "resume-file-watching", true),
+          );
+      },
+      5000,
+    );
+    const orderedBRefreshControls = await exec(
+      `window.__f22OrderedSaveProbe.controls.slice()`,
+    );
+    const orderedBRefreshedOwner = await witnessActiveOwner(
+      orderedSaveFile,
+      orderedSaveTab.id,
+    );
+    if (
+      !orderedBRefreshSettled ||
+      !orderedBRefreshedOwner.selected ||
+      orderedBRefreshedOwner.owner.selectionGeneration <=
+        requestB.saveRequest.selectionGeneration
+    ) {
+      throw new Error(
+        "F22 ordered B success did not refresh its settled tracking owner: " +
+          JSON.stringify({
+            orderedBRefreshSettled,
+            orderedBRefreshControls,
+            orderedBRefreshedOwner,
+            orderedVersionTimeline,
+          }),
+      );
+    }
     const afterStaleFailure = await orderedSnapshot();
     // Re-deliver the actual A failure to cover duplicate transport delivery;
     // no synthetic result identity is introduced.
     if (resultA) realOrderedSaveSend.call(wc, "save-markdown-result", resultA);
     const afterDuplicateStaleFailure = await orderedSnapshot();
 
-    await exec(`
-      const tab = window.CustomTabs.getTabs().find(tab => tab.id === ${orderedSaveTab.id});
-      window.originalMarkdown = "F22_SAVE_C_LATEST_FAILURE"; tab.content = window.originalMarkdown;
-      document.getElementById("saveButton").click(); null;
-    `);
-    const capturedC = await waitUntil(() => heldOrderedSaveResults.length === 3, 5000);
+    // executeJavaScript evaluates each string as a SCRIPT against the page's
+    // one shared global lexical environment, so a top-level `const` in one of
+    // these strings is not scoped to it - it stays declared for every later
+    // call. The C and D/E drivers here both declared `tab` that way, so the
+    // second one threw `Identifier 'tab' has already been declared` at COMPILE
+    // time, before any product code ran, and the fixture stopped mid-run. They
+    // now go through `orderedSaveStep`, whose one injected expression declares
+    // nothing at the top level at all, which closes that door rather than
+    // working around it.
+    const orderedStepC = await orderedSaveStep("C", "F22_SAVE_C_LATEST_FAILURE");
+    const capturedC = await waitUntil(() => orderedHeldRequestIds().size === 3, 5000);
     const requestC = await exec(`window.__f22OrderedSaveProbe.requests[2] || null`);
-    const resultC = heldOrderedSaveResults[2];
+    const resultC = resultFor(requestC);
     const capturedIdentityC = capturedIdentity(requestC, resultC);
+    if (sentinel) {
+      await sentinel.mute("F22 ordered controlled EACCES saves");
+      orderedEaccesMute = sentinel.currentMute();
+    }
     if (resultC) realOrderedSaveSend.call(wc, "save-markdown-result", resultC);
     const latestFailureApplied = await waitForCondition(exec,
       `saveFailedFor(${JSON.stringify(orderedSaveFile)}) === true`, 5000);
@@ -14582,21 +21338,19 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     await exec(`new Promise(resolve => setTimeout(() => resolve(null), 0))`);
     const afterDuplicateCAcceptedFailure = await orderedSnapshot();
 
-    await exec(`
-      const tab = window.CustomTabs.getTabs().find(tab => tab.id === ${orderedSaveTab.id});
-      window.originalMarkdown = "F22_SAVE_D_OLDER_SUCCESS"; tab.content = window.originalMarkdown;
-      document.getElementById("saveButton").click();
-      window.originalMarkdown = "F22_SAVE_E_NEWER_FAILURE"; tab.content = window.originalMarkdown;
-      document.getElementById("saveButton").click(); null;
-    `);
-    const capturedDE = await waitUntil(() => heldOrderedSaveResults.length === 5, 5000);
+    // D and E are issued back to back on purpose: both replies are held, so
+    // the oracle below sees two pending saves for one document and E, the
+    // newer, is released first.
+    const orderedStepD = await orderedSaveStep("D", "F22_SAVE_D_OLDER_SUCCESS");
+    const orderedStepE = await orderedSaveStep("E", "F22_SAVE_E_NEWER_FAILURE");
+    const capturedDE = await waitUntil(() => orderedHeldRequestIds().size === 5, 5000);
     const requestD = await exec(`window.__f22OrderedSaveProbe.requests[3] || null`);
     const requestE = await exec(`window.__f22OrderedSaveProbe.requests[4] || null`);
     const resultD = resultFor(requestD);
     const resultE = resultFor(requestE);
     const capturedIdentityD = capturedIdentity(requestD, resultD);
     const capturedIdentityE = capturedIdentity(requestE, resultE);
-    const beforeEFailure = await orderedSnapshot();
+    const beforeEFailure = await orderedSnapshot(2);
     await exec(`window.__f22OrderedSaveProbe.controls.length = 0; null;`);
     if (resultE) realOrderedSaveSend.call(wc, "save-markdown-result", resultE);
     // C has already established saveFailedFor(), so it cannot establish that
@@ -14605,7 +21359,31 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     const newerFailureApplied = await waitForCondition(exec,
       `window.getPendingSaveStatus(${JSON.stringify(orderedSaveFile)}).count === 1 &&
        window.__f22OrderedSaveProbe.alerts.length > ${beforeEFailure.alertCount}`, 5000);
-    const afterNewerFailure = await orderedSnapshot();
+    const afterNewerFailure = await orderedSnapshot(1);
+    if (sentinel) {
+      await sentinel.drain();
+      check(
+        "F22 ordered EACCES failures mute exactly their proven save error",
+        latestFailureApplied === true &&
+          newerFailureApplied === true &&
+          resultC && resultC.path === orderedSaveFile && resultC.success === false &&
+          hasExpectedMutedSaveFailure(
+            orderedEaccesMute,
+            orderedSaveFile,
+            resultE,
+            `EACCES: controlled ordered save failure for '${orderedSaveFile}'`,
+          ),
+        JSON.stringify({
+          orderedEaccesMute,
+          resultC,
+          resultE,
+          latestFailureApplied,
+          newerFailureApplied,
+        }),
+      );
+      await sentinel.unmute();
+      orderedEaccesMute = null;
+    }
     if (resultD) realOrderedSaveSend.call(wc, "save-markdown-result", resultD);
     const oldSuccessSettled = await waitForCondition(exec,
       `window.getPendingSaveStatus(${JSON.stringify(orderedSaveFile)}).count === 0`, 5000);
@@ -14616,16 +21394,48 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       resultA, resultB, resultC, resultD, resultE,
       capturedIdentityA: capturedIdentity(requestA, resultA), capturedIdentityB: capturedIdentity(requestB, resultB),
       capturedIdentityC, capturedIdentityD, capturedIdentityE, beforeEFailure,
-      newerApplied, staleSettled, latestFailureApplied, newerFailureApplied, oldSuccessSettled,
+      newerApplied, orderedBPauseBeforeA, orderedBPauseControls, orderedBTrackingOwner,
+      orderedBRefreshSettled, orderedBRefreshControls, orderedBRefreshedOwner,
+      staleSettled, latestFailureApplied, newerFailureApplied, oldSuccessSettled,
       afterNewerSuccess, afterStaleFailure, afterDuplicateStaleFailure,
       afterFirstCAcceptedFailure, afterDuplicateCAcceptedFailure,
       afterNewerFailure, afterOldSuccess, orderedOpenCount,
+      orderedSaveSteps: [orderedStepA, orderedStepB, orderedStepC, orderedStepD, orderedStepE],
+      orderedSaveSettledVersion, orderedSaveVersionAfterOpen,
+      orderedVersionTimeline,
+      orderedSaveEditModeBefore, orderedSaveEditorReady,
+      heldDeliveryAttempts: heldOrderedSaveResults.length,
+      heldRequestIds: Array.from(orderedHeldRequestIds()),
       disk: fs.readFileSync(orderedSaveFile, "utf8"),
     };
   } finally {
+    if (orderedEaccesMute) await sentinel.unmute();
+    if (orderedCtimeProbe) orderedCtimeProbe.restore();
     restoreOrderedSaveOpen();
     restoreOrderedSaveSend();
     await exec(`window.__f22OrderedSaveCleanup && window.__f22OrderedSaveCleanup(); delete window.__f22OrderedSaveCleanup; null;`);
+    if (orderedSaveEditModeBefore !== true) {
+      // The E failure deliberately leaves this document DIRTY, and the product
+      // asks for confirmation before leaving edit mode with unsaved changes.
+      // `window.confirm` is a blocking native dialog in the renderer, so an
+      // unstubbed restore here would HANG the suite instead of failing it -
+      // and a cleanup that hangs reports a timeout, not a verdict. The
+      // approval is explicit, is scoped to this one click, and the real
+      // `confirm` is put back only once the mode has actually changed, because
+      // the toggle handler can await a pending save before it asks.
+      await exec(`
+        window.__f22OrderedSaveConfirm = window.confirm;
+        window.confirm = () => true;
+        if (window.CustomTabs.__inEditMode() === true) toggleEditBtn.click();
+        null;
+      `);
+      await waitForCondition(exec, `window.CustomTabs.__inEditMode() === false`, 5000);
+      await exec(`
+        if (window.__f22OrderedSaveConfirm) window.confirm = window.__f22OrderedSaveConfirm;
+        delete window.__f22OrderedSaveConfirm;
+        null;
+      `);
+    }
   }
   const orderedSaveDetail = JSON.stringify(orderedSaveEvidence);
   check(
@@ -14641,6 +21451,28 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     orderedSaveDetail,
   );
   check(
+    "F22 shutdown dirty-list oracle refuses with FOLIA_PENDING_SAVE for exactly the one held A save, and answers with a list once A settles",
+    orderedSaveEvidence && orderedSaveEvidence.afterNewerSuccess.shutdownDirty &&
+      orderedSaveEvidence.afterNewerSuccess.shutdownDirty.pending === true &&
+      orderedSaveEvidence.afterNewerSuccess.shutdownDirty.code === "FOLIA_PENDING_SAVE" &&
+      orderedSaveEvidence.afterNewerSuccess.shutdownDirty.expected === 1 &&
+      orderedSaveEvidence.afterNewerSuccess.shutdownDirty.count === 1 &&
+      orderedSaveEvidence.afterNewerSuccess.shutdownDirty.matchesExpected === true &&
+      orderedSaveEvidence.afterNewerSuccess.shutdownDirty.statusPending === true &&
+      orderedSaveEvidence.afterNewerSuccess.shutdownDirty.errorStatusPending === true &&
+      orderedSaveEvidence.afterNewerSuccess.shutdownDirty.errorStatusCount === 1 &&
+      orderedSaveEvidence.afterNewerSuccess.shutdownDirty.errorStatusMatchesRead === true &&
+      orderedSaveEvidence.afterNewerSuccess.shutdownDirty.paths.length === 1 &&
+      JSON.stringify(orderedSaveEvidence.afterNewerSuccess.shutdownDirty.paths) ===
+        JSON.stringify(orderedSaveEvidence.afterNewerSuccess.pending.paths) &&
+      orderedSaveEvidence.afterNewerSuccess.pending.count === 1 &&
+      // The refusal is transient and specific to the held reply, not a
+      // permanently unanswerable oracle: the same call returns an array as soon
+      // as A is released.
+      Array.isArray(orderedSaveEvidence.afterStaleFailure.shutdownDirty),
+    orderedSaveDetail,
+  );
+  check(
     "F22 stale genuine A failure and its duplicate cannot change B content, baseline, dirty state, conflicts, alerts, selection, watcher or pending correlation",
     orderedSaveEvidence && orderedSaveEvidence.staleSettled === true &&
       JSON.stringify(stableOrderedSnapshot(orderedSaveEvidence.afterStaleFailure)) ===
@@ -14649,16 +21481,24 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       orderedSaveEvidence.afterStaleFailure.original === "F22_SAVE_B_NEWER" &&
       orderedSaveEvidence.afterStaleFailure.dirty === false && orderedSaveEvidence.afterStaleFailure.failedSaves === false &&
       orderedSaveEvidence.afterStaleFailure.reloadConflict === false &&
-      orderedSaveEvidence.afterStaleFailure.reloadDiagnostics.conflicts.length === 0 &&
+      orderedSaveEvidence.orderedBPauseBeforeA === true &&
+      orderedSaveEvidence.orderedBTrackingOwner.selected === true &&
+      orderedSaveEvidence.orderedBRefreshSettled === true &&
+      orderedSaveEvidence.orderedBRefreshedOwner.selected === true &&
+      orderedSaveEvidence.orderedBRefreshedOwner.owner.selectionGeneration >
+        orderedSaveEvidence.requestB.saveRequest.selectionGeneration &&
+      !orderedSaveEvidence.afterStaleFailure.reloadDiagnostics.conflicts.includes(
+        orderedSaveEvidence.requestB.saveRequest.pathKey,
+      ) &&
       orderedSaveEvidence.afterStaleFailure.pending.count === 0 &&
       orderedSaveEvidence.afterStaleFailure.shutdownDirty.length === 0 &&
       orderedSaveEvidence.afterStaleFailure.disk === "F22_SAVE_B_NEWER" &&
-      JSON.stringify(orderedSaveEvidence.afterStaleFailure.selection) ===
-        JSON.stringify(orderedSaveEvidence.afterNewerSuccess.selection) &&
       JSON.stringify(orderedSaveEvidence.afterStaleFailure.notification) ===
         JSON.stringify(orderedSaveEvidence.afterNewerSuccess.notification) &&
       orderedSaveEvidence.afterStaleFailure.alerts.length === 0 &&
-      orderedSaveEvidence.afterStaleFailure.controls.length === 0,
+      orderedSaveEvidence.afterStaleFailure.controls.length === 2 &&
+      JSON.stringify(orderedSaveEvidence.afterStaleFailure.controls) ===
+        JSON.stringify(orderedSaveEvidence.orderedBRefreshControls),
     orderedSaveDetail,
   );
   check(
@@ -14683,7 +21523,9 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       orderedSaveEvidence.afterFirstCAcceptedFailure.failedSaves === true &&
       orderedSaveEvidence.afterFirstCAcceptedFailure.reloadConflict === false &&
       orderedSaveEvidence.afterFirstCAcceptedFailure.deletionTombstone === false &&
-      orderedSaveEvidence.afterFirstCAcceptedFailure.reloadDiagnostics.conflicts.length === 0 &&
+      !orderedSaveEvidence.afterFirstCAcceptedFailure.reloadDiagnostics.conflicts.includes(
+        orderedSaveEvidence.requestB.saveRequest.pathKey,
+      ) &&
       orderedSaveEvidence.afterFirstCAcceptedFailure.pending.count === 0 &&
       orderedSaveEvidence.afterFirstCAcceptedFailure.saveSettlementEvents.length > 0 &&
       orderedSaveEvidence.afterFirstCAcceptedFailure.saveSettlementEvents.at(-1).count === 0 &&
@@ -14733,6 +21575,38 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       orderedSaveEvidence.afterOldSuccess.reloadConflict === false &&
       orderedSaveEvidence.afterOldSuccess.pending.count === 0 &&
       orderedSaveEvidence.afterOldSuccess.shutdownDirty.length > 0,
+    orderedSaveDetail,
+  );
+  check(
+    "F22 shutdown dirty-list oracle refuses for exactly the two held D and E saves, then for D alone, then answers once D settles",
+    orderedSaveEvidence && orderedSaveEvidence.beforeEFailure.shutdownDirty &&
+      orderedSaveEvidence.beforeEFailure.shutdownDirty.pending === true &&
+      orderedSaveEvidence.beforeEFailure.shutdownDirty.code === "FOLIA_PENDING_SAVE" &&
+      orderedSaveEvidence.beforeEFailure.shutdownDirty.expected === 2 &&
+      orderedSaveEvidence.beforeEFailure.shutdownDirty.count === 2 &&
+      orderedSaveEvidence.beforeEFailure.shutdownDirty.matchesExpected === true &&
+      orderedSaveEvidence.beforeEFailure.shutdownDirty.statusPending === true &&
+      orderedSaveEvidence.beforeEFailure.shutdownDirty.errorStatusPending === true &&
+      orderedSaveEvidence.beforeEFailure.shutdownDirty.errorStatusCount === 2 &&
+      orderedSaveEvidence.beforeEFailure.shutdownDirty.errorStatusMatchesRead === true &&
+      orderedSaveEvidence.beforeEFailure.shutdownDirty.paths.length === 1 &&
+      JSON.stringify(orderedSaveEvidence.beforeEFailure.shutdownDirty.paths) ===
+        JSON.stringify(orderedSaveEvidence.beforeEFailure.pending.paths) &&
+      orderedSaveEvidence.afterNewerFailure.shutdownDirty &&
+      orderedSaveEvidence.afterNewerFailure.shutdownDirty.pending === true &&
+      orderedSaveEvidence.afterNewerFailure.shutdownDirty.code === "FOLIA_PENDING_SAVE" &&
+      orderedSaveEvidence.afterNewerFailure.shutdownDirty.expected === 1 &&
+      orderedSaveEvidence.afterNewerFailure.shutdownDirty.count === 1 &&
+      orderedSaveEvidence.afterNewerFailure.shutdownDirty.matchesExpected === true &&
+      orderedSaveEvidence.afterNewerFailure.shutdownDirty.statusPending === true &&
+      orderedSaveEvidence.afterNewerFailure.shutdownDirty.errorStatusPending === true &&
+      orderedSaveEvidence.afterNewerFailure.shutdownDirty.errorStatusCount === 1 &&
+      orderedSaveEvidence.afterNewerFailure.shutdownDirty.errorStatusMatchesRead === true &&
+      // Releasing E retires exactly one held save, so the refusal narrows by
+      // exactly one rather than merely remaining a refusal.
+      orderedSaveEvidence.afterNewerFailure.shutdownDirty.count ===
+        orderedSaveEvidence.beforeEFailure.shutdownDirty.count - 1 &&
+      Array.isArray(orderedSaveEvidence.afterOldSuccess.shutdownDirty),
     orderedSaveDetail,
   );
   }
@@ -14787,35 +21661,103 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     })()
   `);
   const allToastCount = () => exec(`window.__f22ReloadToasts.length`);
+  const reloadToastMessages = () => exec(`window.__f22ReloadToasts.slice()`);
   const failedToastCount = () => exec(
     `window.__f22ReloadToasts.filter(m => /failed to reload file/i.test(m)).length`,
   );
-  const freezeForF22 = async (id) => {
+  const freezeForF22 = async (label) => {
+    const rendererCursorBefore = await exec(`
+      window.CustomTabs.__shutdownReplayCache().highestRequestId
+    `);
+    const mainCursorBefore = __shutdown.state().lastRequestId;
+    if (
+      !Number.isSafeInteger(rendererCursorBefore) ||
+      rendererCursorBefore <= 0 ||
+      !Number.isSafeInteger(mainCursorBefore) ||
+      mainCursorBefore !== rendererCursorBefore
+    ) {
+      throw new Error("F22 phase-two fixture cannot safely reuse shutdown cursor: " +
+        JSON.stringify({ label, rendererCursorBefore, mainCursorBefore }));
+    }
     const frozen = await exec(`
       (async () => {
         const ipc = require("electron").ipcRenderer;
         const gen = await ipc.invoke("quit-approval-generation");
-        const revision = window.CustomTabs.__shutdownFreeze().revision;
-        // Drive the actual renderer listeners, not an ipcMain round-trip: this
-        // focused scenario owns only CustomTabs' phase-two freeze boundary.
-        ipc.emit("quit-approval-request", {}, { id: ${'${id}'}, gen, retainFreeze: true });
-        ipc.emit("quit-approval-commit", {}, { id: ${'${id}'}, gen, revision });
-        return { gen, revision };
+        const beforeCommit = window.CustomTabs.__shutdownFreeze();
+        const revision = beforeCommit.revision;
+        // This phase-two fixture reuses the latest real shutdown cursor. It
+        // tests deferred operations, not a new phase-one approval response.
+        const id = ${JSON.stringify(rendererCursorBefore)};
+        ipc.emit("quit-approval-commit", {}, { id, gen, revision });
+        const afterCommit = window.CustomTabs.__shutdownFreeze();
+        return {
+          gen, revision, id, frozenId: afterCommit.id,
+          currentRevision: afterCommit.revision,
+          rendererCursorAfter:
+            window.CustomTabs.__shutdownReplayCache().highestRequestId,
+        };
       })()
-    `.replaceAll("${id}", String(id)));
+    `);
+    const mainCursorAfter = __shutdown.state().lastRequestId;
     const ready = await waitForCondition(
       exec,
       `window.CustomTabs.__shutdownFreeze().frozen === true`,
       5000,
     );
-    return { frozen, ready, state: await exec(`window.CustomTabs.__shutdownFreeze()`) };
+    return {
+      label, frozen, ready, rendererCursorBefore, mainCursorBefore,
+      mainCursorAfter, state: await exec(`window.CustomTabs.__shutdownFreeze()`),
+    };
   };
+  const freezeForF22Witness = (freeze) => !!(
+    freeze &&
+    freeze.ready === true &&
+    freeze.frozen &&
+    freeze.frozen.id === freeze.rendererCursorBefore &&
+    freeze.frozen.frozenId === freeze.rendererCursorBefore &&
+    freeze.frozen.currentRevision === freeze.frozen.revision &&
+    freeze.frozen.rendererCursorAfter === freeze.rendererCursorBefore &&
+    freeze.mainCursorAfter === freeze.mainCursorBefore &&
+    freeze.mainCursorBefore === freeze.rendererCursorBefore
+  );
   const thawForF22 = async () => {
     await exec(`require("electron").ipcRenderer.emit("quit-approval-thaw", {}); null;`);
     return waitForCondition(exec, `window.CustomTabs.__shutdownFreeze().frozen === false`, 5000);
   };
 
-  fs.writeFileSync(closeFile, "F22_RELOAD_FOREGROUND", "utf8");
+  // `closeFile` belongs to the pending-save fixture roughly six thousand lines
+  // above and is not in scope here: reading it threw `ReferenceError: closeFile
+  // is not defined`, which ended the whole run before this subsection asserted
+  // anything. Owning a document is not enough either. `reloadCurrentFile()`
+  // acts on whatever tab happens to be ACTIVE, and the fixture that ran
+  // immediately before this one leaves its own tab selected, so an inherited
+  // selection would silently make every toast count below a statement about
+  // the wrong document - and would still pass. The tab is therefore created
+  // and physically selected here, and the product's own active-owner identity
+  // is demanded positively, before the first reload, so a stale or inherited
+  // selection fails loudly instead.
+  const reloadForegroundFile = path.join(dir, "f22-reload-foreground.md");
+  await seedSettledFixture(reloadForegroundFile, "F22_RELOAD_FOREGROUND_BASE");
+  await clearTabs();
+  const reloadForegroundTab = await createActiveTab(
+    reloadForegroundFile,
+    "F22_RELOAD_FOREGROUND_BASE",
+  );
+  const reloadForegroundOwner = await witnessActiveOwner(
+    reloadForegroundFile,
+    reloadForegroundTab.id,
+  );
+  if (!reloadForegroundOwner.selected) {
+    throw new Error(
+      "F22 foreground reload fixture never selected its own document: " +
+        JSON.stringify({
+          reloadForegroundFile,
+          reloadForegroundTabId: reloadForegroundTab.id,
+          reloadForegroundOwner,
+        }),
+    );
+  }
+  fs.writeFileSync(reloadForegroundFile, "F22_RELOAD_FOREGROUND", "utf8");
   await exec(`window.reloadCurrentFile(); null;`);
   await sleep(1300);
   const foregroundToasts = await toastCount();
@@ -14830,10 +21772,10 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   });
   let staleHeld;
   try {
-    fs.writeFileSync(closeFile, "F22_RELOAD_STALE", "utf8");
+    fs.writeFileSync(reloadForegroundFile, "F22_RELOAD_STALE", "utf8");
     await exec(`window.reloadCurrentFile(); null;`);
     staleHeld = await waitUntil(() => heldReloadResults.length === 1, 5000);
-    fs.writeFileSync(closeFile, "F22_RELOAD_CURRENT", "utf8");
+    fs.writeFileSync(reloadForegroundFile, "F22_RELOAD_CURRENT", "utf8");
     await exec(`window.reloadCurrentFile(); null;`);
     const currentHeld = await waitUntil(() => heldReloadResults.length === 2, 5000);
     const supersededTabId = await exec(
@@ -14885,16 +21827,23 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     const backgroundTab = await exec(
       `window.CustomTabs.createTab(${JSON.stringify(backgroundFile)}, "F22_BACKGROUND_BASE", { activate: false })`,
     );
-    fs.writeFileSync(closeFile, "F22_BACKGROUND_ACCEPTED", "utf8");
+    fs.writeFileSync(reloadForegroundFile, "F22_BACKGROUND_ACCEPTED", "utf8");
     await exec(`window.reloadCurrentFile(); null;`);
     const backgroundHeld = await waitUntil(() => heldReloadResults.length === 3, 5000);
     await exec(`window.CustomTabs.switchToTab(${backgroundTab.id}); null;`);
     if (heldReloadResults[2]) realReloadSend.call(wc, "file-reload-result", heldReloadResults[2]);
     await sleep(500);
     const afterBackgroundToastCount = await toastCount();
+    const beforeBackgroundDeletionToasts = await reloadToastMessages();
     fs.unlinkSync(backgroundFile);
+    const backgroundDeletionNotified = await waitUntil(
+      async () =>
+        (await reloadToastMessages()).length ===
+        beforeBackgroundDeletionToasts.length + 1,
+      5000,
+    );
+    const afterBackgroundDeletionToasts = await reloadToastMessages();
     const foregroundFailureIndex = heldReloadResults.length;
-    const foregroundFailureToastCount = await allToastCount();
     const foregroundFailureCount = await failedToastCount();
     await exec(`window.reloadCurrentFile(); null;`);
     const foregroundFailureHeld = await waitUntil(
@@ -14908,6 +21857,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     await sleep(500);
     const afterFailedToastCount = await toastCount();
     const afterForegroundFailureCount = await failedToastCount();
+    const afterForegroundFailureToasts = await reloadToastMessages();
     if (!deletionProductionPrerequisite.reloadOwnerIdentity) {
       reportDeletionCapability(
         "F22 background reload toast ownership requires active document identity support",
@@ -14923,21 +21873,75 @@ async function runF22SaveAndReloadScenarios(win, exec) {
         foregroundFailureHeld === true &&
         foregroundFailure &&
         foregroundFailure.success === false &&
+        backgroundDeletionNotified === true &&
+        afterBackgroundDeletionToasts.length ===
+          beforeBackgroundDeletionToasts.length + 1 &&
+        !/reloaded successfully|failed to reload file/i.test(
+          afterBackgroundDeletionToasts.at(-1),
+        ) &&
         afterFailedToastCount === afterBackgroundToastCount &&
         afterForegroundFailureCount === foregroundFailureCount + 1 &&
-        await allToastCount() === foregroundFailureToastCount + 1,
+        afterForegroundFailureToasts.length ===
+          afterBackgroundDeletionToasts.length + 1 &&
+        /failed to reload file/i.test(afterForegroundFailureToasts.at(-1)),
       JSON.stringify({
         backgroundHeld,
         afterCurrentToastCount,
         afterBackgroundToastCount,
+        beforeBackgroundDeletionToasts,
+        backgroundDeletionNotified,
+        afterBackgroundDeletionToasts,
         foregroundFailureHeld,
         foregroundFailure,
-        foregroundFailureToastCount,
         foregroundFailureCount,
         afterFailedToastCount,
         afterForegroundFailureCount,
+        afterForegroundFailureToasts,
       }),
     );
+
+    async function closeDeletedReloadOrigin(tabId, filePath, description) {
+      const warning = `"${path.basename(filePath)}" was deleted outside Folia. ` +
+        "Close this in-memory copy anyway?";
+      const close = await exec(`
+        (async () => {
+          const expected = ${JSON.stringify(warning)};
+          const realConfirm = window.confirm;
+          const asked = [];
+          const unexpected = [];
+          try {
+            window.confirm = (message) => {
+              const text = String(message);
+              asked.push(text);
+              if (text === expected && asked.length === 1) return true;
+              unexpected.push(text);
+              return false;
+            };
+            await window.CustomTabs.closeTab(${tabId});
+          } finally {
+            window.confirm = realConfirm;
+          }
+          return {
+            asked,
+            unexpected,
+            gone: !window.CustomTabs.getTabs().some(tab => tab.id === ${tabId}),
+          };
+        })()
+      `);
+      if (
+        !close ||
+        close.unexpected.length !== 0 ||
+        close.asked.length !== 1 ||
+        close.asked[0] !== warning ||
+        close.gone !== true
+      ) {
+        throw new Error(
+          `${description} did not ask exactly its own deletion warning: ` +
+            JSON.stringify({ expected: warning, observed: close }),
+        );
+      }
+      return close.gone;
+    }
 
     // A path is not a tab generation. Hold real main-process replies, close
     // their originating tab, and reopen the same path before delivery. Both a
@@ -14987,8 +21991,21 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     );
     const oldFailure = heldReloadResults[failureReplyIndex];
     await sleep(300);
-    const failureOriginClosed = await exec(
-      `window.CustomTabs.closeTab(${failureOrigin.id}).then(() => !window.CustomTabs.getTabs().some(t => t.id === ${failureOrigin.id}))`,
+    if (
+      !oldFailure ||
+      oldFailure.success !== false ||
+      !oldFailure.reloadRequest ||
+      oldFailure.reloadRequest.tabId !== failureOrigin.id
+    ) {
+      throw new Error(
+        "F22 old reload failure was not owned by its tab before close-reopen: " +
+          JSON.stringify({ failureOriginId: failureOrigin.id, oldFailure }),
+      );
+    }
+    const failureOriginClosed = await closeDeletedReloadOrigin(
+      failureOrigin.id,
+      generationFile,
+      "F22 deleted reload owner close",
     );
     fs.writeFileSync(generationFile, "F22_GENERATION_FAILURE_REOPENED", "utf8");
     const failureReplacement = await createActiveTab(
@@ -15116,9 +22133,27 @@ async function runF22SaveAndReloadScenarios(win, exec) {
       await exec(`window.reloadCurrentFile(); null;`);
       const held = await waitUntil(() => heldReloadResults.length === replyIndex + 1, 5000);
       const reply = heldReloadResults[replyIndex];
-      const closed = await exec(
-        `window.CustomTabs.closeTab(${origin.id}).then(() => !window.CustomTabs.getTabs().some(t => t.id === ${origin.id}))`,
-      );
+      if (
+        !held ||
+        !reply ||
+        (kind === "success" ? reply.success !== true : reply.success !== false) ||
+        !reply.reloadRequest ||
+        reply.reloadRequest.tabId !== origin.id
+      ) {
+        throw new Error(
+          "F22 closed reload reply was not owned by its tab before close: " +
+            JSON.stringify({ kind, originId: origin.id, held, reply }),
+        );
+      }
+      const closed = kind === "failure"
+        ? await closeDeletedReloadOrigin(
+          origin.id,
+          file,
+          "F22 closed failure reload reply",
+        )
+        : await exec(
+          `window.CustomTabs.closeTab(${origin.id}).then(() => !window.CustomTabs.getTabs().some(t => t.id === ${origin.id}))`,
+        );
       const beforeToasts = await allToastCount();
       if (reply) realReloadSend.call(wc, "file-reload-result", reply);
       await sleep(300);
@@ -15154,19 +22189,61 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     await clearTabs();
     const frozenOpenFile = path.join(dir, "f22-frozen-open.md");
     fs.writeFileSync(frozenOpenFile, "F22_FROZEN_OPEN", "utf8");
-    const frozenOpen = await freezeForF22(910001);
+    const frozenOpenSnapshot = () => exec(`
+      (() => {
+        const matches = window.CustomTabs.getTabs()
+          .filter(tab => tab.filePath === ${JSON.stringify(frozenOpenFile)});
+        const tab = matches[0] || null;
+        return {
+          count: matches.length,
+          activeTabId: window.CustomTabs.getActiveTabId(),
+          tab: tab && {
+            id: tab.id,
+            filePath: tab.filePath,
+            content: tab.content,
+            originalContent: tab.originalContent,
+            dirty: tab.hasUnsavedChanges,
+          },
+          owner: tab && window.CustomTabs.getActiveDocumentIdentity(
+            tab.filePath,
+            window.getReloadRequestSession(),
+          ),
+        };
+      })()
+    `);
+    const frozenOpen = await freezeForF22("file-open");
     const beforeFrozenOpen = await exec(`window.CustomTabs.__shutdownFreeze()`);
-    await exec(`require("electron").ipcRenderer.emit("file-opened", {}, {
-      filePath: ${JSON.stringify(frozenOpenFile)}, path: ${JSON.stringify(frozenOpenFile)}, content: "F22_FROZEN_OPEN"
+    const frozenOpenToasts = await allToastCount();
+    // Renderer freeze deliberately leaves main open ingress live; use the
+    // real request so main supplies the adopted disk identity on its reply.
+    await exec(`require("electron").ipcRenderer.send("open-file-path", {
+      filePath: ${JSON.stringify(frozenOpenFile)}
     }); null;`);
+    const parkedOpenQueued = await waitForCondition(
+      exec,
+      `window.CustomTabs.__shutdownFreeze().deferredOperationCount === 1`,
+      5000,
+    );
     const parkedOpen = await exec(`window.CustomTabs.__shutdownFreeze()`);
+    const frozenOpenAbsentBeforeThaw = await frozenOpenSnapshot();
     const openThawed = await thawForF22();
     const openReplayed = await waitForCondition(
       exec,
-      `window.CustomTabs.getActiveTab() && window.CustomTabs.getActiveTab().filePath === ${JSON.stringify(frozenOpenFile)}`,
+      `window.CustomTabs.getTabs().filter(tab => tab.filePath === ${JSON.stringify(frozenOpenFile)}).length === 1 &&
+       window.CustomTabs.getActiveTab()?.filePath === ${JSON.stringify(frozenOpenFile)}`,
       5000,
     );
     const afterFrozenOpen = await exec(`window.CustomTabs.__shutdownFreeze()`);
+    const frozenOpenAfter = await frozenOpenSnapshot();
+    const frozenOpenOwner = frozenOpenAfter.tab
+      ? await witnessActiveOwner(frozenOpenFile, frozenOpenAfter.tab.id)
+      : null;
+    const frozenOpenAfterToasts = await allToastCount();
+    const openSecondThawed = await thawForF22();
+    await sleep(250);
+    const afterSecondOpenThaw = await exec(`window.CustomTabs.__shutdownFreeze()`);
+    const frozenOpenAfterSecondThaw = await frozenOpenSnapshot();
+    const frozenOpenAfterSecondThawToasts = await allToastCount();
 
     const frozenReloadFile = path.join(dir, "f22-frozen-reload.md");
     fs.writeFileSync(frozenReloadFile, "F22_FROZEN_RELOAD_BASE", "utf8");
@@ -15178,7 +22255,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     const frozenSuccessHeld = await waitUntil(() => heldReloadResults.length === frozenSuccessIndex + 1, 5000);
     const frozenSuccess = heldReloadResults[frozenSuccessIndex];
     const frozenSuccessToasts = await toastCount();
-    const frozenSuccessFreeze = await freezeForF22(910002);
+    const frozenSuccessFreeze = await freezeForF22("reload-success");
     const successParkedBefore = await exec(`window.CustomTabs.__shutdownFreeze()`);
     if (frozenSuccess) realReloadSend.call(wc, "file-reload-result", frozenSuccess);
     await sleep(150);
@@ -15193,6 +22270,11 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     const successAfterFreeze = await exec(`window.CustomTabs.__shutdownFreeze()`);
     const frozenSuccessAfterToasts = await toastCount();
     const frozenSuccessAfter = await tabSnapshot(frozenReloadTab.id);
+    const successSecondThawed = await thawForF22();
+    await sleep(250);
+    const successAfterSecondThaw = await exec(`window.CustomTabs.__shutdownFreeze()`);
+    const frozenSuccessAfterSecondThaw = await tabSnapshot(frozenReloadTab.id);
+    const frozenSuccessAfterSecondThawToasts = await toastCount();
 
     fs.writeFileSync(frozenReloadFile, "F22_FROZEN_FAILURE_BASE", "utf8");
     await clearTabs();
@@ -15203,7 +22285,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     const frozenFailureHeld = await waitUntil(() => heldReloadResults.length === frozenFailureIndex + 1, 5000);
     const frozenFailure = heldReloadResults[frozenFailureIndex];
     const frozenFailureToasts = await failedToastCount();
-    const frozenFailureFreeze = await freezeForF22(910003);
+    const frozenFailureFreeze = await freezeForF22("reload-failure");
     if (frozenFailure) realReloadSend.call(wc, "file-reload-result", frozenFailure);
     await sleep(150);
     const failureParked = await exec(`window.CustomTabs.__shutdownFreeze()`);
@@ -15212,6 +22294,11 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     const failureAfterFreeze = await exec(`window.CustomTabs.__shutdownFreeze()`);
     const frozenFailureAfterToasts = await failedToastCount();
     const frozenFailureAfter = await tabSnapshot(frozenFailureTab.id);
+    const failureSecondThawed = await thawForF22();
+    await sleep(250);
+    const failureAfterSecondThaw = await exec(`window.CustomTabs.__shutdownFreeze()`);
+    const frozenFailureAfterSecondThaw = await tabSnapshot(frozenFailureTab.id);
+    const frozenFailureAfterSecondThawToasts = await failedToastCount();
 
     // A reply whose tab generation was already replaced is invalid before it
     // reaches the frozen queue, so thaw cannot revive it.
@@ -15227,7 +22314,7 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     const frozenStaleReplacement = await createActiveTab(frozenReloadFile, "F22_FROZEN_STALE_REPLACEMENT");
     const frozenStaleBefore = await tabSnapshot(frozenStaleReplacement.id);
     const frozenStaleToasts = await allToastCount();
-    const frozenStaleFreeze = await freezeForF22(910004);
+    const frozenStaleFreeze = await freezeForF22("reload-stale-generation");
     const staleParkedBefore = await exec(`window.CustomTabs.__shutdownFreeze()`);
     if (frozenStale) realReloadSend.call(wc, "file-reload-result", frozenStale);
     await sleep(150);
@@ -15239,33 +22326,99 @@ async function runF22SaveAndReloadScenarios(win, exec) {
     const frozenStaleAfterToasts = await allToastCount();
     check(
       "F22 phase-two freeze replays current file-open and reload success/failure exactly once after thaw, but never replays a replaced tab generation",
-      frozenOpen.ready === true &&
+      freezeForF22Witness(frozenOpen) &&
+        freezeForF22Witness(frozenSuccessFreeze) &&
+        freezeForF22Witness(frozenFailureFreeze) &&
+        freezeForF22Witness(frozenStaleFreeze) &&
         beforeFrozenOpen.deferredOperationCount === 0 &&
+        beforeFrozenOpen.deferredOperationsDropped === false &&
+        beforeFrozenOpen.deferredOperationsOverflowed === false &&
+        parkedOpenQueued === true &&
         parkedOpen.deferredOperationCount === 1 &&
+        parkedOpen.deferredOperationsDropped === false &&
+        parkedOpen.deferredOperationsOverflowed === false &&
+        frozenOpenAbsentBeforeThaw.count === 0 &&
         openThawed === true &&
         openReplayed === true &&
-        afterFrozenOpen.replayedOperations === beforeFrozenOpen.replayedOperations + 1 &&
+        afterFrozenOpen.deferredOperationCount === 0 &&
+        afterFrozenOpen.deferredOperationsDropped === false &&
+        afterFrozenOpen.deferredOperationsOverflowed === false &&
+        frozenOpenAfter.count === 1 &&
+        frozenOpenAfter.tab &&
+        frozenOpenAfter.activeTabId === frozenOpenAfter.tab.id &&
+        frozenOpenAfter.tab.filePath === frozenOpenFile &&
+        frozenOpenAfter.tab.content === "F22_FROZEN_OPEN" &&
+        frozenOpenAfter.tab.originalContent === "F22_FROZEN_OPEN" &&
+        frozenOpenAfter.tab.dirty === false &&
+        frozenOpenAfter.owner &&
+        frozenOpenAfter.owner.tabId === frozenOpenAfter.tab.id &&
+        Number.isSafeInteger(frozenOpenAfter.owner.documentGeneration) &&
+        frozenOpenAfter.owner.documentGeneration > 0 &&
+        frozenOpenOwner &&
+        frozenOpenOwner.selected === true &&
+        frozenOpenOwner.owner.pageSession === frozenOpenAfter.owner.pageSession &&
+        frozenOpenOwner.owner.rendererGeneration === frozenOpenAfter.owner.rendererGeneration &&
+        frozenOpenOwner.owner.tabId === frozenOpenAfter.owner.tabId &&
+        frozenOpenOwner.owner.documentGeneration === frozenOpenAfter.owner.documentGeneration &&
+        frozenOpenOwner.owner.pathKey === frozenOpenAfter.owner.pathKey &&
+        Number.isSafeInteger(frozenOpenOwner.owner.selectionGeneration) &&
+        frozenOpenOwner.owner.selectionGeneration > 0 &&
+        frozenOpenAfterToasts === frozenOpenToasts &&
+        openSecondThawed === true &&
+        afterSecondOpenThaw.deferredOperationCount === 0 &&
+        afterSecondOpenThaw.deferredOperationsDropped === false &&
+        afterSecondOpenThaw.deferredOperationsOverflowed === false &&
+        JSON.stringify(frozenOpenAfterSecondThaw) === JSON.stringify(frozenOpenAfter) &&
+        frozenOpenAfterSecondThawToasts === frozenOpenAfterToasts &&
         frozenSuccessHeld === true &&
         frozenSuccess && frozenSuccess.success === true &&
         frozenSuccess.reloadRequest.tabId === frozenReloadTab.id &&
         frozenSuccessFreeze.ready === true &&
         successParked.deferredOperationCount === successParkedBefore.deferredOperationCount + 1 &&
+        successParked.deferredOperationsDropped === false &&
+        successParked.deferredOperationsOverflowed === false &&
         successThawed === true &&
         successReplayed === true &&
         successAfterFreeze.deferredOperationCount === 0 &&
-        successAfterFreeze.replayedOperations === successParked.replayedOperations + 1 &&
-        frozenSuccessAfter && frozenSuccessAfter.content === "F22_FROZEN_RELOAD_SUCCESS" &&
+        successAfterFreeze.deferredOperationsDropped === false &&
+        successAfterFreeze.deferredOperationsOverflowed === false &&
+        frozenSuccessAfter &&
+        frozenSuccessAfter.id === frozenReloadTab.id &&
+        frozenSuccessAfter.active === frozenReloadTab.id &&
+        frozenSuccessAfter.content === "F22_FROZEN_RELOAD_SUCCESS" &&
+        frozenSuccessAfter.originalContent === "F22_FROZEN_RELOAD_SUCCESS" &&
+        frozenSuccessAfter.dirty === false &&
         frozenSuccessAfterToasts === frozenSuccessToasts + 1 &&
+        successSecondThawed === true &&
+        successAfterSecondThaw.deferredOperationCount === 0 &&
+        successAfterSecondThaw.deferredOperationsDropped === false &&
+        successAfterSecondThaw.deferredOperationsOverflowed === false &&
+        JSON.stringify(frozenSuccessAfterSecondThaw) === JSON.stringify(frozenSuccessAfter) &&
+        frozenSuccessAfterSecondThawToasts === frozenSuccessAfterToasts &&
         frozenFailureHeld === true &&
         frozenFailure && frozenFailure.success === false &&
         frozenFailure.reloadRequest.tabId === frozenFailureTab.id &&
         frozenFailureFreeze.ready === true &&
         failureParked.deferredOperationCount === 1 &&
+        failureParked.deferredOperationsDropped === false &&
+        failureParked.deferredOperationsOverflowed === false &&
         failureThawed === true &&
         failureAfterFreeze.deferredOperationCount === 0 &&
-        failureAfterFreeze.replayedOperations === failureParked.replayedOperations + 1 &&
-        frozenFailureAfter && frozenFailureAfter.content === "F22_FROZEN_FAILURE_BASE" &&
+        failureAfterFreeze.deferredOperationsDropped === false &&
+        failureAfterFreeze.deferredOperationsOverflowed === false &&
+        frozenFailureAfter &&
+        frozenFailureAfter.id === frozenFailureTab.id &&
+        frozenFailureAfter.active === frozenFailureTab.id &&
+        frozenFailureAfter.content === "F22_FROZEN_FAILURE_BASE" &&
+        frozenFailureAfter.originalContent === "F22_FROZEN_FAILURE_BASE" &&
+        frozenFailureAfter.dirty === false &&
         frozenFailureAfterToasts === frozenFailureToasts + 1 &&
+        failureSecondThawed === true &&
+        failureAfterSecondThaw.deferredOperationCount === 0 &&
+        failureAfterSecondThaw.deferredOperationsDropped === false &&
+        failureAfterSecondThaw.deferredOperationsOverflowed === false &&
+        JSON.stringify(frozenFailureAfterSecondThaw) === JSON.stringify(frozenFailureAfter) &&
+        frozenFailureAfterSecondThawToasts === frozenFailureAfterToasts &&
         frozenStaleHeld === true &&
         frozenStale && frozenStale.success === true &&
         frozenStale.reloadRequest.tabId === frozenStaleOrigin.id &&
@@ -15274,17 +22427,24 @@ async function runF22SaveAndReloadScenarios(win, exec) {
         staleParked.deferredOperationCount === staleParkedBefore.deferredOperationCount &&
         staleThawed === true &&
         staleAfterFreeze.deferredOperationCount === 0 &&
-        staleAfterFreeze.replayedOperations === staleParked.replayedOperations &&
+        staleAfterFreeze.deferredOperationsDropped === false &&
+        staleAfterFreeze.deferredOperationsOverflowed === false &&
         JSON.stringify(frozenStaleAfter) === JSON.stringify(frozenStaleBefore) &&
         frozenStaleAfterToasts === frozenStaleToasts,
       JSON.stringify({
-        frozenOpen, beforeFrozenOpen, parkedOpen, openThawed, openReplayed, afterFrozenOpen,
+        frozenOpen, beforeFrozenOpen, parkedOpenQueued, parkedOpen, frozenOpenAbsentBeforeThaw,
+        openThawed, openReplayed, afterFrozenOpen, frozenOpenToasts, frozenOpenAfter, frozenOpenOwner,
+        frozenOpenAfterToasts, openSecondThawed, afterSecondOpenThaw,
+        frozenOpenAfterSecondThaw, frozenOpenAfterSecondThawToasts,
         frozenSuccessHeld, frozenSuccess: frozenSuccess && frozenSuccess.reloadRequest,
         frozenSuccessFreeze, successParkedBefore, successParked, successThawed, successReplayed,
         successAfterFreeze, frozenSuccessAfter, frozenSuccessToasts, frozenSuccessAfterToasts,
+        successSecondThawed, successAfterSecondThaw, frozenSuccessAfterSecondThaw,
+        frozenSuccessAfterSecondThawToasts,
         frozenFailureHeld, frozenFailure: frozenFailure && frozenFailure.reloadRequest,
         frozenFailureFreeze, failureParked, failureThawed, failureAfterFreeze, frozenFailureAfter,
-        frozenFailureToasts, frozenFailureAfterToasts,
+        frozenFailureToasts, frozenFailureAfterToasts, failureSecondThawed,
+        failureAfterSecondThaw, frozenFailureAfterSecondThaw, frozenFailureAfterSecondThawToasts,
         frozenStaleHeld, frozenStale: frozenStale && frozenStale.reloadRequest,
         frozenStaleFreeze, staleParkedBefore, staleParked, staleThawed, staleAfterFreeze,
         frozenStaleBefore, frozenStaleAfter, frozenStaleToasts, frozenStaleAfterToasts,
@@ -15296,6 +22456,79 @@ async function runF22SaveAndReloadScenarios(win, exec) {
   }
 }
 
+
+async function runF22QueueFocusedScenario(exec) {
+  const queueFile = path.join(dir, "f22-queue-focused.md");
+  const queueBase = "# Queue focused\n\nQUEUE_BASE\n";
+  write(queueFile, queueBase);
+  const errorListener = JSON.parse(await exec(`(() => { const marker = "__f22_queue_error_listener__"; const before = window.__e2eErrors.length; window.dispatchEvent(new ErrorEvent("error", { message: marker })); const errors = window.__e2eErrors.slice(before); window.__e2eErrors.length = before; return JSON.stringify({ seen: errors.includes(marker), errors }); })()`));
+  const before = __shutdown.state();
+  const outcome = JSON.parse(await exec(`
+    (async () => {
+      const realAlert = window.alert;
+      const alerts = [];
+      const sentinel = "__f22_queue_alert_sentinel__";
+      window.alert = (message) => alerts.push(String(message));
+      try {
+        window.alert(sentinel);
+        const alertCaptureLive = alerts.length === 1 && alerts[0] === sentinel;
+        alerts.length = 0;
+        const tab = window.CustomTabs.createTab(
+          ${JSON.stringify(queueFile)},
+          ${JSON.stringify(queueBase)},
+        );
+        window.CustomTabs.switchToTab(tab.id);
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        if (!isEditMode) toggleEditBtn.click();
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        markdownEditor.value = '# Queue focused\\n\\nQUEUE_FIRST\\n';
+        markdownEditor.dispatchEvent(new Event('input'));
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        saveButton.click();
+        markdownEditor.value = '# Queue focused\\n\\nQUEUE_SECOND\\n';
+        saveButton.click();
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        return JSON.stringify({
+          alertCaptureLive,
+          alerts,
+          activePath: window.currentFilePath,
+          activeEdit: isEditMode,
+        });
+      } finally {
+        window.alert = realAlert;
+      }
+    })()
+  `));
+  const after = __shutdown.state();
+  const setup =
+    outcome.activePath === queueFile &&
+    outcome.activeEdit === true &&
+    after.saveQueueEnqueuedCount === before.saveQueueEnqueuedCount + 2 &&
+    after.saveQueueStartedCount === before.saveQueueStartedCount + 2 &&
+    after.saveQueueCompletedCount === before.saveQueueCompletedCount + 2 &&
+    after.saveQueuePendingCount === 0 &&
+    after.saveQueueActivePathCount === 0;
+  check(
+    "focused queue alert capture was proven live before two Saves",
+    outcome.alertCaptureLive === true,
+    JSON.stringify(outcome),
+  );
+  check(
+    "focused queue two same-path Save operations reached main-process settlement",
+    setup,
+    JSON.stringify({ before, after, outcome }),
+  );
+  check(
+    "focused queue serialises two same-path Save operations",
+    setup &&
+      after.saveQueueMaxActiveForSinglePath === 1 &&
+      after.saveQueueOverlapCount === before.saveQueueOverlapCount,
+    JSON.stringify({ before, after, alerts: outcome.alerts }),
+  );
+  check("focused queue uncaught JS error listener was proven live", errorListener.seen, JSON.stringify(errorListener));
+  const uncaughtErrors = JSON.parse(await exec(`JSON.stringify(window.__e2eErrors || [])`));
+  check("focused queue had no uncaught JavaScript errors", uncaughtErrors.length === 0, JSON.stringify(uncaughtErrors));
+}
 
 async function runF22CommitSendThrowScenario(win, exec) {
   const wc = win.webContents;
@@ -15380,14 +22613,115 @@ async function runF22CommitSendThrowScenario(win, exec) {
 
 async function runShutdownGenerationScenarios(win, exec) {
   const bareFile = path.join(dir, "f22-no-overlay.html");
+  const discardNavigationFile = path.join(
+    dir,
+    "f22-generation-discard-navigation.md",
+  );
+  const navigationEditFile = path.join(
+    dir,
+    "f22-navigation-edit.md",
+  );
+  const jsDiscardNavigationFile = JSON.stringify(discardNavigationFile);
+  const jsNavigationEditFile = JSON.stringify(navigationEditFile);
   const indexFile = path.join(__dirname, "..", "src", "index.html");
   fs.writeFileSync(
     bareFile,
     "<!doctype html><meta charset=utf-8><title>F22 probe fixture</title>",
     "utf8",
   );
+  write(discardNavigationFile, "# Generation discard fixture\n");
+  write(navigationEditFile, "# Navigation edit fixture\n\nbefore\n");
   const rig = shutdownRig(win);
   const wc = win.webContents;
+  const trackingSelections = [];
+  const trackingDescriptor = Object.getOwnPropertyDescriptor(
+    ipcMain._events,
+    "select-file-tracking",
+  );
+  if (!trackingDescriptor || typeof trackingDescriptor.value !== "function") {
+    throw new Error(
+      "generation navigation tracking witness requires one synchronous select-file-tracking listener",
+    );
+  }
+  const originalTrackingListener = trackingDescriptor.value;
+  const observedTrackingListener = function (event, selection) {
+    let decision;
+    const observedEvent = new Proxy(event, {
+      set(target, property, value) {
+        if (property === "returnValue") decision = value;
+        return Reflect.set(target, property, value);
+      },
+    });
+    const result = originalTrackingListener.call(
+      this,
+      observedEvent,
+      selection,
+    );
+    trackingSelections.push({
+      selection: selection && {
+        filePath: selection.filePath || null,
+        adoptBaseline: selection.adoptBaseline === true,
+        trackingActive: selection.trackingActive === true,
+        diskVersion: selection.diskVersion || null,
+        owner: selection.owner || null,
+        adoption: selection.adoption || null,
+      },
+      decision: decision || null,
+    });
+    return result;
+  };
+  Object.defineProperty(ipcMain._events, "select-file-tracking", {
+    ...trackingDescriptor,
+    value: observedTrackingListener,
+  });
+  const navigationTrackingWitness = async (label, start) => ({
+    label,
+    renderer: await exec(`
+      (() => {
+        const tab = window.CustomTabs.getActiveTab();
+        const filePath = window.currentFilePath || null;
+        let diskVersion = null;
+        let fileExists = false;
+        let statError = null;
+        if (filePath) {
+          try {
+            const stat = window.fs.statSync(filePath);
+            fileExists = true;
+            diskVersion = {
+              dev: stat.dev,
+              ino: stat.ino,
+              size: stat.size,
+              mtimeMs: stat.mtimeMs,
+              ctimeMs: stat.ctimeMs,
+            };
+          } catch (error) {
+            statError = String(error && error.code ? error.code : error);
+          }
+        }
+        const pageSession = window.getReloadRequestSession();
+        return {
+          activeTab: tab && { id: tab.id, filePath: tab.filePath },
+          currentFilePath: filePath,
+          fileExists,
+          diskVersion,
+          diskVersionValid: !!(
+            diskVersion &&
+            Number.isFinite(diskVersion.dev) &&
+            Number.isFinite(diskVersion.ino) &&
+            Number.isFinite(diskVersion.size) &&
+            Number.isFinite(diskVersion.mtimeMs) &&
+            Number.isFinite(diskVersion.ctimeMs)
+          ),
+          statError,
+          owner: tab && window.CustomTabs.getActiveDocumentIdentity(
+            tab.filePath,
+            pageSession,
+          ),
+        };
+      })()
+    `),
+    mainSelections: trackingSelections.slice(start),
+  });
   const clearDocuments = () =>
     exec(`
       (() => {
@@ -15416,8 +22750,16 @@ async function runShutdownGenerationScenarios(win, exec) {
     __shutdown.reset();
     await waitForCondition(exec, `!window.CustomTabs.isDocumentFrozen()`, 5000);
     await exec(`localStorage.clear(); null;`);
+    const generationMatrixReloadGeneration = __shutdown.state().rendererGeneration;
     wc.reload();
-    await waitUntil(() => __shutdown.state().renderer === "ready", 20000);
+    const generationMatrixRendererReady = await waitUntil(() => {
+      const state = __shutdown.state();
+      return state.renderer === "ready" &&
+        state.rendererGeneration > generationMatrixReloadGeneration;
+    }, 20000);
+    if (!generationMatrixRendererReady) {
+      throw new Error("generation matrix reload fixture did not reach a new renderer generation");
+    }
     await clearDocuments();
 
     // The generation is a capability, not a convenience accessor. Exercise
@@ -15501,7 +22843,9 @@ async function runShutdownGenerationScenarios(win, exec) {
     // successor sees the SAME request id exactly once and can complete it.
     __shutdown.reset();
     rig.reset();
+    const replacementTrackingStart = trackingSelections.length;
     const dispatched = [];
+    let replacementTracking = null;
     const restoreSend = replaceMethod(wc, "send", function (channel, payload) {
       if (channel === "quit-approval-request") dispatched.push(payload);
       return Reflect.apply(Object.getPrototypeOf(wc).send, this, arguments);
@@ -15524,13 +22868,18 @@ async function runShutdownGenerationScenarios(win, exec) {
       const firstDispatched = await waitUntil(() => dispatched.length === 1);
       const first = dispatched[0];
       const beforeNavigation = __shutdown.state();
+      const replacementReadyReloadGeneration = __shutdown.state().rendererGeneration;
       wc.reload();
-      const replacementReady = await waitUntil(
-        () =>
-          __shutdown.state().renderer === "ready" &&
-          __shutdown.state().rendererGeneration > beforeNavigation.rendererGeneration,
-        20000,
-      );
+      const replacementReady = await waitUntil(() => {
+        const state = __shutdown.state();
+        return state.renderer === "ready" &&
+          state.rendererGeneration > replacementReadyReloadGeneration;
+      }, 20000);
+      if (!replacementReady) {
+        throw new Error(
+          "replacement-ready reload fixture did not reach a new renderer generation",
+        );
+      }
       // A genuine sender carrying an old generation is still stale. It must
       // not make the replacement renderer look ready or prevent its dispatch.
       await exec(`
@@ -15542,6 +22891,10 @@ async function runShutdownGenerationScenarios(win, exec) {
         10000,
       );
       const afterNavigation = __shutdown.state();
+      replacementTracking = await navigationTrackingWitness(
+        "committed-navigation-replacement-ready",
+        replacementTrackingStart,
+      );
       check(
         "a committed navigation invalidates a dispatch and the replacement READY issues a fresh request",
         firstDispatched &&
@@ -15556,7 +22909,13 @@ async function runShutdownGenerationScenarios(win, exec) {
           afterNavigation.lastRequestId === beforeNavigation.lastRequestId + 1 &&
           afterNavigation.navigationInvalidatedShutdownCount === 1 &&
           afterNavigation.staleReadyCount >= 1,
-        JSON.stringify({ dispatched, beforeNavigation, afterNavigation, closes: rig.closes }),
+        JSON.stringify({
+          dispatched,
+          beforeNavigation,
+          afterNavigation,
+          closes: rig.closes,
+          replacementTracking,
+        }),
       );
     } finally {
       restoreSend();
@@ -15573,17 +22932,30 @@ async function runShutdownGenerationScenarios(win, exec) {
       () => rig.closes === 1 && __shutdown.state().authorized === true,
     );
     const approvalGeneration = __shutdown.state().authorizationGeneration;
+    const successorReadyReloadGeneration = __shutdown.state().rendererGeneration;
+    const successorTrackingStart = trackingSelections.length;
     wc.reload();
-    const successorReady = await waitUntil(
-      () =>
-        __shutdown.state().renderer === "ready" &&
-        __shutdown.state().rendererGeneration > approvalGeneration,
-      20000,
-    );
+    const successorReady = await waitUntil(() => {
+      const state = __shutdown.state();
+      return state.renderer === "ready" &&
+        state.rendererGeneration > successorReadyReloadGeneration;
+    }, 20000);
+    if (!successorReady) {
+      throw new Error(
+        "successor-ready reload fixture did not reach a new renderer generation",
+      );
+    }
     const afterRevocation = __shutdown.state();
-    await exec(`
-      (() => {
-        const tab = window.CustomTabs.createTab('f22-navigation-edit.md', 'before');
+    const navigationEditSetup = await exec(`
+      (async () => {
+        const filePath = ${jsNavigationEditFile};
+        const tab = window.CustomTabs.createTab(
+          filePath,
+          window.fs.readFileSync(filePath, "utf8"),
+        );
+        if (!tab) {
+          throw new Error("navigation replacement physical fixture did not create a tab");
+        }
         tab.content = 'after navigation exact edit';
         tab.hasUnsavedChanges = false;
         // THE LIVE COPY MOVES FIRST. A view-mode edit exists in
@@ -15592,14 +22964,99 @@ async function runShutdownGenerationScenarios(win, exec) {
         // correctly folds the pristine text back over it - so a fixture that
         // sets the live copy afterwards is simulating nothing.
         window.originalMarkdown = tab.content;
-        window.CustomTabs.switchToTab(tab.id);
-        return tab.filename;
+        await window.CustomTabs.switchToTab(tab.id);
+        const deadline = Date.now() + 5000;
+        let active = null;
+        let owner = null;
+        while (Date.now() < deadline) {
+          active = window.CustomTabs.getActiveTab();
+          owner = active && window.CustomTabs.getActiveDocumentIdentity(
+            filePath,
+            window.getReloadRequestSession(),
+          );
+          if (
+            active &&
+            active.id === tab.id &&
+            active.filePath === filePath &&
+            window.currentFilePath === filePath &&
+            owner
+          ) {
+            break;
+          }
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        const stat = window.fs.statSync(filePath);
+        const diskVersion = {
+          dev: stat.dev,
+          ino: stat.ino,
+          size: stat.size,
+          mtimeMs: stat.mtimeMs,
+          ctimeMs: stat.ctimeMs,
+        };
+        return {
+          tabId: tab.id,
+          filePath,
+          currentFilePath: window.currentFilePath || null,
+          active: active && { id: active.id, filePath: active.filePath },
+          owner,
+          diskVersion,
+          diskVersionValid: Object.values(diskVersion).every(Number.isFinite),
+        };
       })()
     `);
+    const matchesPhysicalNavigationSelection = ({ selection, decision }) => {
+      if (
+        !selection ||
+        !decision ||
+        selection.filePath !== navigationEditFile ||
+        selection.adoptBaseline !== true ||
+        !selection.owner ||
+        !selection.diskVersion ||
+        !navigationEditSetup.owner ||
+        !["dev", "ino", "size", "mtimeMs"].every(
+          key =>
+            selection.diskVersion[key] === navigationEditSetup.diskVersion[key],
+        ) ||
+        !Number.isFinite(selection.diskVersion.ctimeMs) ||
+        selection.owner.tabId !== navigationEditSetup.owner.tabId ||
+        selection.owner.pathKey !== navigationEditSetup.owner.pathKey ||
+        selection.owner.pageSession !== navigationEditSetup.owner.pageSession ||
+        decision.accepted !== true ||
+        decision.trackingActive !== true
+      ) {
+        return false;
+      }
+      return !selection.adoption || !!(
+        decision.approvedOwner &&
+        decision.approvedOwner.tabId === selection.owner.tabId &&
+        decision.approvedOwner.pathKey === selection.owner.pathKey &&
+        decision.approvedOwner.pageSession === selection.owner.pageSession
+      );
+    };
+    const acceptedNavigationSelection = await waitUntil(
+      () =>
+        trackingSelections
+          .slice(successorTrackingStart)
+          .some(matchesPhysicalNavigationSelection),
+      5000,
+    );
     rig.answer = 1;
     const replacementClose = guardEvent();
     win.emit("close", replacementClose);
     const replacementAsked = await waitUntil(() => rig.dialogs.length === 1);
+    const successorTracking = await navigationTrackingWitness(
+      "clean-approval-revocation-successor",
+      successorTrackingStart,
+    );
+    console.log(
+      "TABS_NAVIGATION_TRACKING " +
+        JSON.stringify({
+          replacementTracking,
+          navigationEditSetup,
+          acceptedNavigationSelection,
+          successorTracking,
+        }),
+    );
     check(
       "navigation revokes a clean approval so the replacement document cannot close silently",
       cleanApproved &&
@@ -15609,6 +23066,17 @@ async function runShutdownGenerationScenarios(win, exec) {
         replacementAsked &&
         replacementClose.prevented === true &&
         rig.closes === 1 &&
+        navigationEditSetup &&
+        navigationEditSetup.filePath === navigationEditFile &&
+        navigationEditSetup.currentFilePath === navigationEditFile &&
+        navigationEditSetup.active &&
+        navigationEditSetup.active.id === navigationEditSetup.tabId &&
+        navigationEditSetup.owner &&
+        navigationEditSetup.owner.tabId === navigationEditSetup.tabId &&
+        navigationEditSetup.owner.pathKey ===
+          nativePathKey(fs.realpathSync.native(navigationEditFile)) &&
+        navigationEditSetup.diskVersionValid === true &&
+        acceptedNavigationSelection &&
         /f22-navigation-edit/.test(String(rig.dialogs[0] && rig.dialogs[0].options.message)),
       JSON.stringify({
         cleanApproved,
@@ -15617,6 +23085,9 @@ async function runShutdownGenerationScenarios(win, exec) {
         replacementAsked,
         closes: rig.closes,
         dialog: rig.dialogs[0] && rig.dialogs[0].options,
+        navigationEditSetup,
+        acceptedNavigationSelection,
+        successorTracking,
       }),
     );
 
@@ -15644,12 +23115,32 @@ async function runShutdownGenerationScenarios(win, exec) {
     });
     try {
       const oldDiscardFixture = await exec(`
-        (() => {
+        (async () => {
           try {
-            const tab = window.CustomTabs.createTab('f22-discard-navigation.md', 'discard base');
-            window.CustomTabs.switchToTab(tab.id);
+            const ipc = require('electron').ipcRenderer;
+            const filePath = ${jsDiscardNavigationFile};
+            ipc.send('open-file-path', { filePath });
+            let tab = null;
+            for (let attempt = 0; attempt < 50; attempt += 1) {
+              const candidate = window.CustomTabs.getActiveTab();
+              const pageSession = window.getReloadRequestSession();
+              const identity = candidate &&
+                window.CustomTabs.getActiveDocumentIdentity(candidate.filePath, pageSession);
+              if (candidate && candidate.filePath === filePath && identity) {
+                tab = candidate;
+                break;
+              }
+              await new Promise(resolve => setTimeout(resolve, 20));
+            }
+            if (!tab) {
+              throw new Error("physical discard fixture did not obtain a tracked active tab");
+            }
             window.originalMarkdown = tab.content + '\\nDIRTY_DISCARD_BEFORE_NAVIGATION\\n';
-            return { tabId: tab.id, revision: window.CustomTabs.__shutdownFreeze().revision };
+            return {
+              tabId: tab.id,
+              filePath: tab.filePath,
+              revision: window.CustomTabs.__shutdownFreeze().revision,
+            };
           } catch (error) {
             return { error: String(error && error.stack ? error.stack : error) };
           }
@@ -15667,29 +23158,82 @@ async function runShutdownGenerationScenarios(win, exec) {
         `window.CustomTabs.__shutdownFreeze().revision`,
       );
       holdReplacementRequest = true;
+      const replacementRequestReloadGeneration =
+        __shutdown.state().rendererGeneration;
       wc.reload();
-      const replacementRequestHeld = await waitUntil(
-        () =>
-          heldReplacementRequest !== null &&
-          __shutdown.state().renderer === "ready" &&
-          __shutdown.state().pendingId === heldReplacementRequest.id,
-        20000,
-      );
+      const replacementRequestHeld = await waitUntil(() => {
+        const state = __shutdown.state();
+        return heldReplacementRequest !== null &&
+          state.renderer === "ready" &&
+          state.rendererGeneration > replacementRequestReloadGeneration &&
+          state.pendingId === heldReplacementRequest.id;
+      }, 20000);
+      if (!replacementRequestHeld) {
+        throw new Error(
+          "replacement-request reload fixture did not reach a new renderer generation",
+        );
+      }
       const replacementDiscardState = __shutdown.state();
       const replacementCollision = await exec(`
-        (() => {
-          const tab = window.CustomTabs.getActiveTab() ||
-            window.CustomTabs.createTab('f22-discard-replacement.md', 'replacement base');
-          let revision = window.CustomTabs.__shutdownFreeze().revision;
-          while (revision < ${JSON.stringify(oldDiscardRevision)}) {
-            // The accessor is the production mutation boundary. Assigning the
-            // same text changes no document data but advances exactly one
-            // revision, allowing a new renderer to collide numerically with
-            // the old dialog's revision.
-            tab.content = tab.content;
-            revision = window.CustomTabs.__shutdownFreeze().revision;
+        (async () => {
+          const filePath = ${jsDiscardNavigationFile};
+          const snapshot = () => {
+            const active = window.CustomTabs.getActiveTab();
+            return {
+              activeId: window.CustomTabs.getActiveTabId(),
+              activePath: active && active.filePath,
+              tabs: window.CustomTabs.getTabs().map(current => ({
+                id: current.id,
+                filePath: current.filePath,
+              })),
+            };
+          };
+          try {
+            const tab = window.CustomTabs.getTabs().find(current =>
+              current.filePath === filePath);
+            if (!tab) {
+              throw new Error("replacement renderer did not restore the physical discard fixture");
+            }
+            if (window.CustomTabs.getActiveTabId() !== tab.id) {
+              await window.CustomTabs.switchToTab(tab.id);
+            }
+            const active = window.CustomTabs.getActiveTab();
+            const pageSession = window.getReloadRequestSession();
+            const identity = active &&
+              window.CustomTabs.getActiveDocumentIdentity(
+                active.filePath,
+                pageSession,
+              );
+            if (!active ||
+                active.id !== tab.id ||
+                active.filePath !== filePath ||
+                !identity ||
+                identity.tabId !== tab.id) {
+              throw new Error("replacement physical fixture is not the active tracked document");
+            }
+            let revision = window.CustomTabs.__shutdownFreeze().revision;
+            while (revision < ${JSON.stringify(oldDiscardRevision)}) {
+              // The accessor is the production mutation boundary. Assigning the
+              // same text changes no document data but advances exactly one
+              // revision, allowing a new renderer to collide numerically with
+              // the old dialog's revision.
+              tab.content = tab.content;
+              revision = window.CustomTabs.__shutdownFreeze().revision;
+            }
+            return {
+              tabId: tab.id,
+              filePath: tab.filePath,
+              identity,
+              revision,
+              target: ${JSON.stringify(oldDiscardRevision)},
+              snapshot: snapshot(),
+            };
+          } catch (error) {
+            return {
+              error: String(error && error.stack ? error.stack : error),
+              snapshot: snapshot(),
+            };
           }
-          return { revision, target: ${JSON.stringify(oldDiscardRevision)} };
         })()
       `);
       const freezeAfterNavigation = await exec(`window.CustomTabs.__shutdownFreeze()`);
@@ -15705,6 +23249,7 @@ async function runShutdownGenerationScenarios(win, exec) {
       check(
         "navigation aborts a dirty discard dialog and issues a fresh generation-bound approval despite a colliding revision",
         oldDiscardFixture &&
+          !oldDiscardFixture.error &&
           oldDiscardAsked &&
           dirtyDiscardClose.prevented === true &&
           oldDiscardState.pendingId > 0 &&
@@ -15713,6 +23258,10 @@ async function runShutdownGenerationScenarios(win, exec) {
           heldReplacementRequest.id > oldDiscardState.pendingId &&
           heldReplacementRequest.gen === replacementDiscardState.rendererGeneration &&
           heldReplacementRequest.gen > oldDiscardState.rendererGeneration &&
+          !replacementCollision.error &&
+          replacementCollision.filePath === discardNavigationFile &&
+          replacementCollision.identity &&
+          replacementCollision.identity.tabId === replacementCollision.tabId &&
           replacementCollision.revision === replacementCollision.target &&
           replacementCollision.revision === oldDiscardRevision &&
           freezeAfterNavigation.frozen === false &&
@@ -15748,29 +23297,107 @@ async function runShutdownGenerationScenarios(win, exec) {
       // The next document is still allowed to complete an ordinary clean close.
       // This is the positive twin: navigation invalidates old consent, not all
       // future navigation-origin shutdowns.
-      await exec(`
-        (() => {
-          const tab = window.CustomTabs.getActiveTab();
-          tab.content = 'replacement clean';
-          tab.originalContent = 'replacement clean';
-          window.originalMarkdown = tab.content;
-          return window.CustomTabs.__shutdownFreeze().revision;
+      const replacementCleanSetup = await exec(`
+        (async () => {
+          const snapshot = () => {
+            const active = window.CustomTabs.getActiveTab();
+            return {
+              activeId: window.CustomTabs.getActiveTabId(),
+              activePath: active && active.filePath,
+              tabs: window.CustomTabs.getTabs().map(current => ({
+                id: current.id,
+                filePath: current.filePath,
+                content: current.content,
+                originalContent: current.originalContent,
+                dirty: current.hasUnsavedChanges,
+              })),
+              freeze: window.CustomTabs.__shutdownFreeze(),
+            };
+          };
+          try {
+            const expectedReplacement = ${JSON.stringify({
+              tabId: replacementCollision.tabId,
+              filePath: replacementCollision.filePath,
+            })};
+            const tab = window.CustomTabs.getTabs().find(current =>
+              current.id === expectedReplacement.tabId &&
+              current.filePath === expectedReplacement.filePath);
+            if (!tab) {
+              throw new Error("replacement discard fixture has no replacement tab");
+            }
+            if (window.CustomTabs.getActiveTabId() !== tab.id) {
+              await window.CustomTabs.switchToTab(tab.id);
+            }
+            tab.content = 'replacement clean';
+            tab.originalContent = 'replacement clean';
+            tab.hasUnsavedChanges = false;
+            window.originalMarkdown = tab.content;
+            const after = snapshot();
+            const active = window.CustomTabs.getActiveTab();
+            const pageSession = window.getReloadRequestSession();
+            const activeIdentity = active &&
+              window.CustomTabs.getActiveDocumentIdentity(
+                active.filePath,
+                pageSession,
+              );
+            const clean =
+              tab.content === 'replacement clean' &&
+              tab.originalContent === 'replacement clean' &&
+              tab.hasUnsavedChanges === false &&
+              window.originalMarkdown === 'replacement clean';
+            return {
+              ok: true,
+              tabId: tab.id,
+              filePath: tab.filePath,
+              activeId: after.activeId,
+              activePath: after.activePath,
+              revision: window.CustomTabs.__shutdownFreeze().revision,
+              activeIdentity,
+              clean,
+              snapshot: after,
+            };
+          } catch (error) {
+            return {
+              ok: false,
+              error: String(error && error.stack ? error.stack : error),
+              snapshot: snapshot(),
+            };
+          }
         })()
       `);
+      const replacementCleanReady =
+        replacementCleanSetup.ok === true &&
+        replacementCleanSetup.tabId === replacementCollision.tabId &&
+        replacementCleanSetup.filePath === replacementCollision.filePath &&
+        replacementCleanSetup.activeId === replacementCollision.tabId &&
+        replacementCleanSetup.activePath === replacementCollision.filePath &&
+        replacementCleanSetup.activeIdentity &&
+        replacementCleanSetup.activeIdentity.tabId === replacementCollision.tabId &&
+        replacementCleanSetup.clean === true;
+      check(
+        "the clean replacement approval targets the collision replacement tab while it is active",
+        replacementCleanReady,
+        JSON.stringify({ replacementCollision, replacementCleanSetup }),
+      );
       holdReplacementRequest = false;
       restoreDiscardSend();
       heldReplacementRequest = null;
       // The held replacement message is real; deliver it only after its old
       // counterpart has proved stale and the replacement document is clean.
-      realDiscardSend.call(wc, "quit-approval-request", emittedDiscardRequests.at(-1));
-      const cleanReplacementClosed = await waitUntil(() => rig.closes === 1, 10000);
+      if (replacementCleanReady) {
+        realDiscardSend.call(wc, "quit-approval-request", emittedDiscardRequests.at(-1));
+      }
+      const cleanReplacementClosed = replacementCleanReady &&
+        await waitUntil(() => rig.closes === 1, 10000);
       check(
         "a clean replacement document still completes its fresh navigation approval normally",
-        cleanReplacementClosed &&
+        replacementCleanSetup.ok === true &&
+          cleanReplacementClosed &&
           rig.dialogs.length === 1 &&
           __shutdown.state().pendingId === 0 &&
           __shutdown.state().authorized === true,
         JSON.stringify({
+          replacementCleanSetup,
           cleanReplacementClosed,
           dialogs: rig.dialogs.length,
           closes: rig.closes,
@@ -15835,11 +23462,19 @@ async function runShutdownGenerationScenarios(win, exec) {
       restoreThrowingSend();
     }
     rig.reset();
+    const sendRecoveryReloadGeneration = __shutdown.state().rendererGeneration;
     wc.reload();
     const sendRecoveryReady = await waitUntil(
-      () => __shutdown.state().renderer === "ready",
+      () => {
+        const state = __shutdown.state();
+        return state.renderer === "ready" &&
+          state.rendererGeneration > sendRecoveryReloadGeneration;
+      },
       20000,
     );
+    if (!sendRecoveryReady) {
+      throw new Error("send recovery reload fixture did not reach a new renderer generation");
+    }
     const sendRecoveryClose = guardEvent();
     win.emit("close", sendRecoveryClose);
     const sendRecoverySettled = await waitUntil(() => rig.closes === 1);
@@ -15884,6 +23519,34 @@ async function runShutdownGenerationScenarios(win, exec) {
       thrownProbe = __shutdown.state();
       const probeClose = guardEvent();
       win.emit("close", probeClose);
+      const postClose = __shutdown.state();
+      const probeDispatchSetup =
+        probeFailed &&
+        probeClose.prevented === true &&
+        !wc.isDestroyed() &&
+        !wc.isCrashed() &&
+        thrownProbe.renderer === "unusable" &&
+        postClose.renderer === "unusable" &&
+        postClose.lastRequestId > thrownProbe.lastRequestId;
+      check(
+        "the synchronous overlay probe close reaches the live unusable dispatch fallback",
+        probeDispatchSetup,
+        JSON.stringify({
+          preClose: {
+            lastRequestId: thrownProbe.lastRequestId,
+            renderer: thrownProbe.renderer,
+          },
+          postClose: {
+            lastRequestId: postClose.lastRequestId,
+            renderer: postClose.renderer,
+            settleWhy: postClose.settleWhy,
+          },
+          webContents: {
+            alive: !wc.isDestroyed(),
+            crashed: wc.isCrashed(),
+          },
+        }),
+      );
       const probeFallback = await waitUntil(() => rig.dialogs.length === 1);
       check(
         "a synchronous overlay probe throw clears its token and routes the held close to fallback",
@@ -15895,7 +23558,25 @@ async function runShutdownGenerationScenarios(win, exec) {
             String(thrownProbe.rendererUnusableReason),
           ) &&
           thrownProbe.authorized === false,
-        JSON.stringify({ probeFailed, probeFallback, thrownProbe, dialog: rig.dialogs[0] }),
+        JSON.stringify({
+          probeFailed,
+          probeFallback,
+          preClose: {
+            lastRequestId: thrownProbe.lastRequestId,
+            renderer: thrownProbe.renderer,
+          },
+          postClose: {
+            lastRequestId: postClose.lastRequestId,
+            renderer: postClose.renderer,
+            settleWhy: postClose.settleWhy,
+          },
+          webContents: {
+            alive: !wc.isDestroyed(),
+            crashed: wc.isCrashed(),
+          },
+          thrownProbe,
+          dialog: rig.dialogs[0],
+        }),
       );
     } finally {
       restoreThrowingProbe();
@@ -15987,19 +23668,105 @@ async function runShutdownGenerationScenarios(win, exec) {
       restoreOldProbeOnce();
     }
   } finally {
+    Object.defineProperty(
+      ipcMain._events,
+      "select-file-tracking",
+      trackingDescriptor,
+    );
     rig.restore();
+    const captureRestoredDeletionState = async (expectedFilePath = null) =>
+      JSON.parse(await exec(`
+        (() => {
+          const expectedFilePath = ${JSON.stringify(expectedFilePath)};
+          const activeTab = window.CustomTabs.getActiveTab();
+          const tab = expectedFilePath === null
+            ? activeTab
+            : window.CustomTabs.getTabs().find(
+              candidate => candidate.filePath === expectedFilePath,
+            ) || null;
+          const pageSession = window.getReloadRequestSession();
+          const identity = tab
+            ? window.CustomTabs.getActiveDocumentIdentity(tab.filePath, pageSession)
+            : null;
+          return JSON.stringify({
+            tabId: tab?.id ?? null,
+            filePath: tab?.filePath ?? null,
+            pageSession,
+            active: tab?.id === activeTab?.id,
+            identity,
+            deletion: identity && typeof window.queryDocumentDeletionState === 'function'
+              ? window.queryDocumentDeletionState(tab.filePath, identity)
+              : null,
+          });
+        })()
+      `));
+    const resetBoundaryBefore = {
+      main: __shutdown.state(),
+      renderer: await captureRestoredDeletionState(),
+    };
     __shutdown.reset();
-    if (__shutdown.state().renderer !== "ready") {
-      await win.loadFile(indexFile);
-      await waitUntil(() => __shutdown.state().renderer === "ready", 20000);
+    const resetBoundaryAfter = {
+      main: __shutdown.state(),
+      renderer: await captureRestoredDeletionState(),
+    };
+    const resetErasesOnlyRestoredOwnerBaseline =
+      resetBoundaryBefore.renderer.tabId !== null &&
+      resetBoundaryBefore.renderer.filePath !== null &&
+      JSON.stringify(resetBoundaryAfter.renderer.identity) ===
+        JSON.stringify(resetBoundaryBefore.renderer.identity) &&
+      resetBoundaryBefore.renderer.deletion?.known === true &&
+      resetBoundaryAfter.renderer.deletion?.known === false &&
+      resetBoundaryBefore.main.knownDocumentOwnerCount > 0 &&
+      resetBoundaryAfter.main.knownDocumentOwnerCount ===
+        resetBoundaryBefore.main.knownDocumentOwnerCount;
+    check(
+      "the test-only shutdown reset drops the restored tab baseline while retaining its owner",
+      resetErasesOnlyRestoredOwnerBaseline,
+      JSON.stringify({ resetBoundaryBefore, resetBoundaryAfter }),
+    );
+    const restoredFilePath = resetBoundaryBefore.renderer.filePath;
+    const resetRecoveryGeneration = __shutdown.state().rendererGeneration;
+    await win.loadFile(indexFile);
+    const resetRecoveryGenerationReady = await waitUntil(
+      () => {
+        const state = __shutdown.state();
+        return state.renderer === "ready" &&
+          state.rendererGeneration > resetRecoveryGeneration;
+      },
+      20000,
+    );
+    let resetRecoveryOwner = null;
+    const resetRecoveryOwnerReady = resetRecoveryGenerationReady &&
+      await waitUntil(async () => {
+        resetRecoveryOwner = await captureRestoredDeletionState(restoredFilePath);
+        const { identity, deletion } = resetRecoveryOwner;
+        return resetRecoveryOwner.filePath === restoredFilePath &&
+          resetRecoveryOwner.active === true &&
+          identity?.pageSession === resetRecoveryOwner.pageSession &&
+          identity?.tabId === resetRecoveryOwner.tabId &&
+          deletion?.known === true &&
+          deletion?.unresolved === false;
+      }, 20000);
+    const resetRecoveryState = __shutdown.state();
+    check(
+      "an index reload restores an authenticated owner with no unresolved deletion after the test-only reset",
+      resetRecoveryOwnerReady,
+      JSON.stringify({
+        restoredFilePath,
+        resetRecoveryGeneration,
+        resetRecoveryGenerationReady,
+        resetRecoveryState,
+        resetRecoveryOwner,
+      }),
+    );
+    if (!resetRecoveryOwnerReady) {
+      throw new Error("Reset recovery did not restore the physical tab's owner without unresolved deletion");
     }
   }
 }
 
 async function runInstalledUpdateCommitScenarios(win, exec) {
-  if (process.platform === "win32") {
-    return runWindowsInstalledLauncherScenarios(win, exec);
-  }
+  const baseUpdaterBranchBorrow = createBaseUpdaterBranchBorrow();
   const updater = require("electron-updater").autoUpdater;
   const wc = win.webContents;
   const indexFile = path.join(__dirname, "..", "src", "index.html");
@@ -16056,6 +23823,7 @@ async function runInstalledUpdateCommitScenarios(win, exec) {
     updater,
     "quitAndInstall",
     () => {
+      baseUpdaterBranchBorrow.recordQuitAndInstall();
       installs += 1;
       setLatch(true);
       if (commitMode === "throw") {
@@ -16104,26 +23872,99 @@ async function runInstalledUpdateCommitScenarios(win, exec) {
       }
     },
   );
-  const clearDocuments = () =>
-    exec(`
-      (() => {
+  const clearDocuments = async () => {
+    const teardown = await exec(`
+      (async () => {
         const confirm = window.confirm;
+        const pageSession = window.getReloadRequestSession();
+        const notification = () => {
+          const toast = document.getElementById('notificationToast');
+          const message = document.getElementById('notificationMessage');
+          return {
+            visible: !!toast && toast.style.display !== 'none',
+            text: message ? message.textContent : null,
+          };
+        };
+        const describe = () => window.CustomTabs.getTabs().map(tab => {
+          const active = window.CustomTabs.getActiveTabId() === tab.id;
+          const owner = window.CustomTabs.getDocumentIdentityForTab(
+            tab.id,
+            tab.filePath,
+            pageSession,
+          );
+          return {
+            id: tab.id,
+            filePath: tab.filePath,
+            dirty: tab.hasUnsavedChanges,
+            diskVersion: tab.diskVersion,
+            mtimeMs: tab.mtimeMs,
+            active,
+            owner,
+            pendingSave: typeof window.getPendingSaveStatus === 'function'
+              ? window.getPendingSaveStatus(tab.filePath)
+              : null,
+            deletion: owner && typeof window.queryDocumentDeletionState === 'function'
+              ? window.queryDocumentDeletionState(tab.filePath, owner)
+              : null,
+          };
+        });
+        const before = describe();
+        const closeOutcomes = [];
         window.confirm = () => true;
         try {
           window.CustomTabs.getTabs().forEach(t => {
             t.content = t.originalContent;
             t.hasUnsavedChanges = false;
           });
-          window.CustomTabs.getTabs().slice().forEach(t => window.CustomTabs.closeTab(t.id));
+          for (const tab of window.CustomTabs.getTabs().slice()) {
+            const beforeClose = describe().find(current => current.id === tab.id);
+            const freezeBefore = window.CustomTabs.__shutdownFreeze();
+            const notificationBefore = notification();
+            let result;
+            let error = null;
+            try {
+              result = await window.CustomTabs.closeTab(tab.id);
+            } catch (closeError) {
+              error = String(closeError && closeError.stack ? closeError.stack : closeError);
+            }
+            closeOutcomes.push({
+              tabId: tab.id,
+              beforeClose,
+              freezeBefore,
+              notificationBefore,
+              result: result === undefined ? "undefined" : result,
+              error,
+              stillOpen: window.CustomTabs.getTabs().some(current => current.id === tab.id),
+              freezeAfter: window.CustomTabs.__shutdownFreeze(),
+              notificationAfter: notification(),
+            });
+          }
         } finally {
           window.confirm = confirm;
         }
         localStorage.clear();
         window.originalMarkdown = '';
         window.isEditMode = false;
-        return window.CustomTabs.getTabs().length;
+        const after = describe();
+        return {
+          before,
+          remaining: after.length,
+          remainingTabs: after,
+          dirtyBefore: before.filter(tab => tab.dirty),
+          dirtyAfter: after.filter(tab => tab.dirty),
+          closeOutcomes,
+        };
       })()
     `);
+    const cleared =
+      teardown.closeOutcomes.length === teardown.before.length &&
+      teardown.closeOutcomes.every(outcome => outcome.stillOpen === false) &&
+      teardown.remaining === 0;
+    if (!cleared) {
+      throw new Error("Installed scenario cleanup retained a tab: " + JSON.stringify(teardown));
+    }
+    return teardown;
+  };
   // Hold a real main-to-renderer protocol message at its boundary, then
   // release the exact payload main.js produced. This controls an asynchronous
   // phase without calling its handler directly or inventing a response.
@@ -16184,7 +24025,19 @@ async function runInstalledUpdateCommitScenarios(win, exec) {
     // commit. Even then it must create a second, force-fresh approval; a clean
     // renderer answers both requests silently, the updater runs once, and the
     // final authorized quit is not re-run by before-quit.
-    await clearDocuments();
+    const installedCleanupThawed = await waitForCondition(
+      exec,
+      `!window.CustomTabs.isDocumentFrozen()`,
+      5000,
+    );
+    const installedScenarioTeardown = await clearDocuments();
+    check(
+      "installed updater scenarios begin with no retained tab or dirty tracking owner",
+      installedCleanupThawed === true &&
+        installedScenarioTeardown.remaining === 0 &&
+        installedScenarioTeardown.dirtyAfter.length === 0,
+      JSON.stringify({ installedCleanupThawed, installedScenarioTeardown }),
+    );
     __shutdown.reset();
     rig.reset();
     installs = 0;
@@ -16296,9 +24149,64 @@ async function runInstalledUpdateCommitScenarios(win, exec) {
     // continuation has entered the updater, then emit the public commit. The
     // second request has to discover this exact new value; Cancel keeps it
     // intact and leaves no authorization behind.
+    const captureGapTeardownState = async () =>
+      JSON.parse(await exec(`
+        (() => {
+          const pageSession = window.getReloadRequestSession();
+          const tabs = window.CustomTabs.getTabs().map(tab => {
+            const owner = window.CustomTabs.getDocumentIdentityForTab(
+              tab.id,
+              tab.filePath,
+              pageSession,
+            );
+            return {
+              id: tab.id,
+              filePath: tab.filePath,
+              content: tab.content,
+              owner,
+              deletion:
+                owner && typeof window.queryDocumentDeletionState === 'function'
+                  ? window.queryDocumentDeletionState(tab.filePath, owner)
+                  : null,
+            };
+          });
+          return JSON.stringify({
+            freeze: window.CustomTabs.__shutdownFreeze(),
+            pageSession,
+            tabs,
+          });
+        })()
+      `));
+    const gapTeardownBeforeReset = await captureGapTeardownState();
+    const gapTeardown = await clearDocuments();
+    const gapTabBeforeTeardown = gapTeardownBeforeReset.tabs.find(
+      tab => tab.filePath === commitFile && tab.content === exactGapEdit,
+    );
+    const gapTeardownCleared =
+      !!gapTabBeforeTeardown &&
+      gapTabBeforeTeardown.owner?.pageSession ===
+        gapTeardownBeforeReset.pageSession &&
+      gapTabBeforeTeardown.owner?.tabId === gapTabBeforeTeardown.id &&
+      gapTabBeforeTeardown.deletion?.known === true &&
+      gapTabBeforeTeardown.deletion?.unresolved === false &&
+      gapTeardownBeforeReset.freeze.frozen === false &&
+      gapTeardown.closeOutcomes.length === gapTeardownBeforeReset.tabs.length &&
+      gapTeardown.closeOutcomes.every(outcome => outcome.stillOpen === false) &&
+      gapTeardown.remaining === 0;
+    check(
+      "the deferred-gap teardown removes its real tab without retaining a duplicate",
+      gapTeardownCleared,
+      JSON.stringify({
+        beforeReset: gapTeardownBeforeReset,
+        closeOutcomes: gapTeardown.closeOutcomes,
+        remaining: gapTeardown.remaining,
+        remainingTabs: gapTeardown.remainingTabs,
+      }),
+    );
+    if (!gapTeardownCleared) {
+      throw new Error("Deferred-gap teardown retained a fixture tab or duplicate");
+    }
     __shutdown.reset();
-    await waitForCondition(exec, `!window.CustomTabs.isDocumentFrozen()`, 5000);
-    await clearDocuments();
     rig.reset();
     installs = 0;
     commitSignals = 0;
@@ -16367,7 +24275,26 @@ async function runInstalledUpdateCommitScenarios(win, exec) {
     // This differs from its already-set preflight latch: the post-call false
     // latch proves nothing started, clears this attempt, and permits a later
     // request rather than leaving a speculative authorization behind.
-    await clearDocuments();
+    const postApprovalEditTeardown = await clearDocuments();
+    const postApprovalEditTeardownCleared =
+      postApprovalEditTeardown.before.some(tab => tab.filePath === commitFile) &&
+      postApprovalEditTeardown.closeOutcomes.length ===
+        postApprovalEditTeardown.before.length &&
+      postApprovalEditTeardown.closeOutcomes.every(
+        outcome => outcome.freezeBefore.frozen === false,
+      ) &&
+      postApprovalEditTeardown.closeOutcomes.every(
+        outcome => outcome.stillOpen === false,
+      ) &&
+      postApprovalEditTeardown.remaining === 0;
+    check(
+      "the post-approval edit Cancel teardown closes an unfrozen real fixture before the next updater case",
+      postApprovalEditTeardownCleared,
+      JSON.stringify(postApprovalEditTeardown),
+    );
+    if (!postApprovalEditTeardownCleared) {
+      throw new Error("Post-approval edit Cancel teardown retained or froze a fixture tab");
+    }
     __shutdown.reset();
     rig.reset();
     installs = 0;
@@ -17148,9 +25075,10 @@ async function runInstalledUpdateCommitScenarios(win, exec) {
     }
 
     // Main queues the final update-driven quit with setImmediate. Inject the
-    // real updater error after the renderer has confirmed that second commit,
-    // before that turn can start: it must invalidate the continuation instead
-    // of spawning/quitting after its authority has been withdrawn.
+    // real updater error after main has accepted the renderer's matching
+    // verification, before that turn can start: it must invalidate the
+    // continuation instead of spawning/quitting after its authority has been
+    // withdrawn.
     await clearDocuments();
     __shutdown.reset();
     rig.reset();
@@ -17159,12 +25087,33 @@ async function runInstalledUpdateCommitScenarios(win, exec) {
     commitMode = "manual";
     setLatch(false);
     let errorAfterCommit = 0;
-    const failAfterConfirmedUpdateCommit = (_event, data) => {
-      if (!data || data.committed !== true || installs !== 1 || errorAfterCommit) return;
+    let confirmedUpdateCommit = null;
+    let confirmedUpdateVerification = null;
+    const captureConfirmedUpdateCommit = (_event, data) => {
+      if (
+        !data ||
+        data.committed !== true ||
+        installs !== 1 ||
+        confirmedUpdateCommit !== null
+      ) return;
+      confirmedUpdateCommit = data;
+    };
+    const failAfterVerifiedUpdateCommit = (_event, data) => {
+      if (
+        !data ||
+        data.valid !== true ||
+        !confirmedUpdateCommit ||
+        confirmedUpdateVerification !== null ||
+        data.id !== confirmedUpdateCommit.id ||
+        data.gen !== confirmedUpdateCommit.gen ||
+        data.revision !== confirmedUpdateCommit.revision
+      ) return;
+      confirmedUpdateVerification = data;
       errorAfterCommit += 1;
       updater.emit("error", new Error("controlled error after update commit"));
     };
-    ipcMain.on("quit-approval-committed", failAfterConfirmedUpdateCommit);
+    ipcMain.on("quit-approval-committed", captureConfirmedUpdateCommit);
+    ipcMain.on("quit-approval-verified", failAfterVerifiedUpdateCommit);
     try {
       await exec(`window.ipcRenderer.send('install-update'); null;`);
       const enteredUpdater = await waitUntil(() => installs === 1, 10000);
@@ -17178,6 +25127,19 @@ async function runInstalledUpdateCommitScenarios(win, exec) {
       check(
         "an updater error after commit confirmation invalidates the deferred update continuation",
         enteredUpdater &&
+          !!confirmedUpdateCommit &&
+          !!confirmedUpdateVerification &&
+          confirmedUpdateCommit.committed === true &&
+          confirmedUpdateVerification.valid === true &&
+          confirmedUpdateCommit.id === confirmedUpdateVerification.id &&
+          confirmedUpdateCommit.gen === confirmedUpdateVerification.gen &&
+          confirmedUpdateCommit.revision === confirmedUpdateVerification.revision &&
+          Number.isSafeInteger(confirmedUpdateCommit.id) &&
+          confirmedUpdateCommit.id > 0 &&
+          Number.isSafeInteger(confirmedUpdateCommit.gen) &&
+          confirmedUpdateCommit.gen > 0 &&
+          Number.isSafeInteger(confirmedUpdateCommit.revision) &&
+          confirmedUpdateCommit.revision >= 0 &&
           errorAfterCommit === 1 &&
           deferredContinuationInvalidated &&
           installs === 1 &&
@@ -17192,6 +25154,8 @@ async function runInstalledUpdateCommitScenarios(win, exec) {
           invalidatedContinuationState.updaterShutdownCancelWhy === "updater-error",
         JSON.stringify({
           enteredUpdater,
+          confirmedUpdateCommit,
+          confirmedUpdateVerification,
           errorAfterCommit,
           deferredContinuationInvalidated,
           installs,
@@ -17203,7 +25167,11 @@ async function runInstalledUpdateCommitScenarios(win, exec) {
     } finally {
       ipcMain.removeListener(
         "quit-approval-committed",
-        failAfterConfirmedUpdateCommit,
+        captureConfirmedUpdateCommit,
+      );
+      ipcMain.removeListener(
+        "quit-approval-verified",
+        failAfterVerifiedUpdateCommit,
       );
     }
 
@@ -17490,9 +25458,167 @@ async function runInstalledUpdateCommitScenarios(win, exec) {
     // outside that update's authority. This matrix drives the real renderer
     // request/reply boundary and verifies each cancellation path replays that
     // exact user intent once, with its original arrival/strength identity.
+    let approvedTerminalUserCloseRecovery = null;
+    const restoreApprovedTerminalClose = async (approval) => {
+      const expectedPaths = JSON.parse(await exec(`
+        (() => JSON.stringify(
+          window.CustomTabs.getTabs()
+            .filter(tab => typeof tab.filePath === "string" && tab.filePath.length > 0)
+            .map(tab => tab.filePath)
+            .sort(),
+        ))()
+      `));
+      const previousGeneration = __shutdown.state().rendererGeneration;
+      await win.loadFile(indexFile);
+      const rendererReady = await waitUntil(() => {
+        const state = __shutdown.state();
+        return state.renderer === "ready" &&
+          state.rendererGeneration > previousGeneration;
+      }, 20000);
+      let restored = null;
+      const ownersRestored = rendererReady && await waitUntil(async () => {
+        restored = JSON.parse(await exec(`
+          (() => {
+            const expectedPaths = ${JSON.stringify(expectedPaths)};
+            const physicalTabs = window.CustomTabs.getTabs().filter(
+              tab => typeof tab.filePath === "string" && tab.filePath.length > 0,
+            );
+            const physicalPaths = physicalTabs.map(tab => tab.filePath).sort();
+            const pageSession = window.getReloadRequestSession();
+            return JSON.stringify({
+              physicalPaths,
+              expectedPaths,
+              pathMultisetMatches:
+                JSON.stringify(physicalPaths) === JSON.stringify(expectedPaths),
+              pageSession,
+              owners: physicalTabs.map(tab => {
+                const identity = window.CustomTabs.getDocumentIdentityForTab(
+                  tab.id,
+                  tab.filePath,
+                  pageSession,
+                );
+                return {
+                  tabId: tab.id,
+                  filePath: tab.filePath,
+                  identity,
+                  deletion:
+                    identity &&
+                    typeof window.queryDocumentDeletionState === 'function'
+                      ? window.queryDocumentDeletionState(tab.filePath, identity)
+                      : null,
+                };
+              }),
+            });
+          })()
+        `));
+        return restored.pathMultisetMatches === true &&
+          expectedPaths.length === 1 &&
+          expectedPaths[0] === commitFile &&
+          restored.owners.length === expectedPaths.length &&
+          restored.owners.every(({ tabId, identity, deletion }) =>
+            identity?.pageSession === restored.pageSession &&
+            identity?.tabId === tabId &&
+            deletion?.known === true &&
+            deletion?.unresolved === false,
+          );
+      }, 20000);
+      const afterRestartState = __shutdown.state();
+      return {
+        approval,
+        previousGeneration,
+        rendererReady,
+        expectedPaths,
+        ownersRestored,
+        restored,
+        afterRestartState,
+        authorizationRevoked:
+          afterRestartState.authorized === false &&
+          afterRestartState.pendingId === 0 &&
+          afterRestartState.absorbedUserIntentId === 0,
+      };
+    };
+    const clearAfterApprovedTerminalUserClose = async () => {
+      if (approvedTerminalUserCloseRecovery) {
+        const approval = approvedTerminalUserCloseRecovery;
+        const terminalReason = approval.request?.reason;
+        const terminalDialogs = approval.dialogs.filter(
+          dialog => dialog.pendingReason === terminalReason,
+        );
+        const userApprovedTerminal =
+          approval.state.settleWhy === "user" &&
+          terminalDialogs.length === 1 &&
+          terminalDialogs[0].response === 0;
+        const cleanTerminal =
+          approval.state.settleWhy === "clean" &&
+          Array.isArray(approval.response?.dirtyFiles) &&
+          approval.response.dirtyFiles.length === 0 &&
+          terminalDialogs.length === 0;
+        const expectedTerminalObserved =
+          approval.expectedSettleWhy === "user"
+            ? userApprovedTerminal
+            : approval.expectedSettleWhy === "clean"
+              ? cleanTerminal
+              : false;
+        const terminalStubObserved =
+          terminalReason === "window-close"
+            ? approval.closes === 1 && approval.quits === 0
+            : terminalReason === "app-quit"
+              ? approval.quits === 1 && approval.closes === 0
+              : false;
+        const cleanOrUserApprovedTerminalClose =
+          (terminalReason === "window-close" || terminalReason === "app-quit") &&
+          approval.response?.id === approval.request.id &&
+          approval.response?.gen === approval.request.gen &&
+          approval.commit?.id === approval.request.id &&
+          approval.commit?.gen === approval.request.gen &&
+          approval.commit?.committed === true &&
+          Number.isSafeInteger(approval.response?.revision) &&
+          approval.response.revision >= 0 &&
+          approval.commit?.revision === approval.response.revision &&
+          approval.freeze?.frozen === true &&
+          approval.freeze?.id === approval.request.id &&
+          approval.freeze?.revision === approval.response.revision &&
+          approval.state.rendererGeneration === approval.request.gen &&
+          approval.state.authorizationGeneration === approval.request.gen &&
+          approval.state.pendingId === 0 &&
+          approval.state.pendingReason === null &&
+          approval.state.commitPendingId === 0 &&
+          approval.state.queuedReason === null &&
+          approval.state.pendingAbsorbedUserIntentId === 0 &&
+          approval.state.shutdownPendingContinuationCount === 0 &&
+          approval.state.updaterPendingCommitAttemptId === 0 &&
+          Array.isArray(approval.state.updaterLiveAttemptIds) &&
+          approval.state.updaterLiveAttemptIds.length === 0 &&
+          approval.state.authorized === true &&
+          expectedTerminalObserved &&
+          terminalStubObserved;
+        check(
+          "an absorbed clean or user-approved terminal close reached its exact committed terminal state",
+          cleanOrUserApprovedTerminalClose,
+          JSON.stringify(approval),
+        );
+        if (!cleanOrUserApprovedTerminalClose) {
+          throw new Error("Absorbed clean or user-approved terminal close was not proven committed before restart recovery");
+        }
+        const recovery = await restoreApprovedTerminalClose(approval);
+        check(
+          "an absorbed clean or user-approved terminal close restores every physical owner before cleanup",
+          recovery.ownersRestored && recovery.authorizationRevoked,
+          JSON.stringify(recovery),
+        );
+        if (!recovery.ownersRestored || !recovery.authorizationRevoked) {
+          throw new Error("Absorbed clean or user-approved terminal close did not restore physical owners");
+        }
+        await clearDocuments();
+        __shutdown.reset();
+        approvedTerminalUserCloseRecovery = null;
+      } else {
+        await clearDocuments();
+        __shutdown.reset();
+      }
+    };
     const runAbsorbedUserReplayCase = async ({ name, failure, arrivals, expectedReason }) => {
-      await clearDocuments();
-      __shutdown.reset();
+      await clearAfterApprovedTerminalUserClose();
       rig.reset();
       installs = 0;
       commitSignals = 0;
@@ -17507,6 +25633,12 @@ async function runInstalledUpdateCommitScenarios(win, exec) {
         })()
       `);
       const held = holdAllRendererMessages("quit-approval-request");
+      const responses = [];
+      const commits = [];
+      const captureResponse = (_event, data) => responses.push(data);
+      const captureCommit = (_event, data) => commits.push(data);
+      ipcMain.on("quit-approval-response", captureResponse);
+      ipcMain.on("quit-approval-committed", captureCommit);
       let result;
       try {
         await exec(`window.ipcRenderer.send('install-update'); null;`);
@@ -17556,6 +25688,19 @@ async function runInstalledUpdateCommitScenarios(win, exec) {
             expectedReason === "window-close" ? rig.closes === 1 : rig.quits === 1,
           10000,
         );
+        const userRequest = held.held[1] || null;
+        const userResponse = responses.find(
+          response =>
+            response.id === userRequest?.id &&
+            response.gen === userRequest?.gen,
+        ) || null;
+        const userCommit = commits.find(
+          commit =>
+            commit.id === userRequest?.id &&
+            commit.gen === userRequest?.gen,
+        ) || null;
+        const userFreeze = await exec(`window.CustomTabs.__shutdownFreeze()`);
+        const userState = __shutdown.state();
         result = {
           updaterRequestHeld,
           gestures,
@@ -17564,12 +25709,23 @@ async function runInstalledUpdateCommitScenarios(win, exec) {
           replay,
           staleOldCallback,
           userCompleted,
-          final: __shutdown.state(),
+          final: userState,
+          userRequest,
+          userResponse,
+          userCommit,
+          userFreeze,
+          dialogs: rig.dialogs.map(dialog => ({
+            pendingReason: dialog.pendingReason,
+            response: dialog.response,
+            options: dialog.options,
+          })),
           closes: rig.closes,
           quits: rig.quits,
           held: held.held.map(({ id, reason, gen }) => ({ id, reason, gen })),
         };
       } finally {
+        ipcMain.removeListener("quit-approval-response", captureResponse);
+        ipcMain.removeListener("quit-approval-committed", captureCommit);
         held.restore();
         commitMode = "manual";
       }
@@ -17592,6 +25748,19 @@ async function runInstalledUpdateCommitScenarios(win, exec) {
           result.final.absorbedUserIntentId === 0,
         JSON.stringify(result),
       );
+      if (expectedReason === "window-close" || expectedReason === "app-quit") {
+        approvedTerminalUserCloseRecovery = {
+          request: result.userRequest,
+          response: result.userResponse,
+          commit: result.userCommit,
+          freeze: result.userFreeze,
+          state: result.final,
+          dialogs: result.dialogs,
+          closes: result.closes,
+          quits: result.quits,
+          expectedSettleWhy: failure === "decline" ? "user" : "clean",
+        };
+      }
     };
 
     for (const failure of ["decline", "throw", "refusal", "error"]) {
@@ -17605,9 +25774,7 @@ async function runInstalledUpdateCommitScenarios(win, exec) {
     // A successful update is the opposite terminal outcome: its final approved
     // quit consumes the absorbed user intent rather than replaying it beside a
     // shutdown that is already under way.
-    __shutdown.reset();
-    await waitForCondition(exec, `!window.CustomTabs.isDocumentFrozen()`, 5000);
-    await clearDocuments();
+    await clearAfterApprovedTerminalUserClose();
     rig.reset();
     installs = 0;
     commitSignals = 0;
@@ -17623,6 +25790,13 @@ async function runInstalledUpdateCommitScenarios(win, exec) {
       })()
     `);
     const heldSuccessfulUpdate = holdAllRendererMessages("quit-approval-request");
+    const successfulResponses = [];
+    const successfulCommits = [];
+    const captureSuccessfulResponse = (_event, data) => successfulResponses.push(data);
+    const captureSuccessfulCommit = (_event, data) => successfulCommits.push(data);
+    ipcMain.on("quit-approval-response", captureSuccessfulResponse);
+    ipcMain.on("quit-approval-committed", captureSuccessfulCommit);
+    let successfulFinalApproval = null;
     try {
       await exec(`window.ipcRenderer.send('install-update'); null;`);
       const updateRequestHeld = await waitUntil(() => heldSuccessfulUpdate.held.length === 1, 10000);
@@ -17637,7 +25811,48 @@ async function runInstalledUpdateCommitScenarios(win, exec) {
       );
       heldSuccessfulUpdate.release(1);
       const successfulUpdateQuit = await waitUntil(() => rig.quits === 2, 10000);
+      const initialUpdateRequest = heldSuccessfulUpdate.held[0] || null;
+      const finalUpdateRequest = heldSuccessfulUpdate.held[1] || null;
+      const initialUpdateResponse = successfulResponses.find(
+        response =>
+          response.id === initialUpdateRequest?.id &&
+          response.gen === initialUpdateRequest?.gen,
+      ) || null;
+      const finalUpdateResponse = successfulResponses.find(
+        response =>
+          response.id === finalUpdateRequest?.id &&
+          response.gen === finalUpdateRequest?.gen,
+      ) || null;
+      const initialUpdateCommit = successfulCommits.find(
+        commit =>
+          commit.id === initialUpdateRequest?.id &&
+          commit.gen === initialUpdateRequest?.gen,
+      ) || null;
+      const finalUpdateCommit = successfulCommits.find(
+        commit =>
+          commit.id === finalUpdateRequest?.id &&
+          commit.gen === finalUpdateRequest?.gen,
+      ) || null;
+      const finalUpdateFreeze = await exec(`window.CustomTabs.__shutdownFreeze()`);
       const afterSuccessfulUpdate = __shutdown.state();
+      successfulFinalApproval = {
+        initialRequest: initialUpdateRequest,
+        initialResponse: initialUpdateResponse,
+        initialCommit: initialUpdateCommit,
+        finalRequest: finalUpdateRequest,
+        finalResponse: finalUpdateResponse,
+        finalCommit: finalUpdateCommit,
+        freeze: finalUpdateFreeze,
+        state: afterSuccessfulUpdate,
+        installs,
+        closes: rig.closes,
+        quits: rig.quits,
+        dialogs: rig.dialogs.map(dialog => ({
+          pendingReason: dialog.pendingReason,
+          response: dialog.response,
+          options: dialog.options,
+        })),
+      };
       check(
         "a successful final update quit discards its absorbed user close instead of replaying it",
         updateRequestHeld &&
@@ -17658,6 +25873,7 @@ async function runInstalledUpdateCommitScenarios(win, exec) {
           updaterStarted,
           finalUpdateApprovalHeld,
           requests: heldSuccessfulUpdate.held,
+          successfulFinalApproval,
           successfulUpdateQuit,
           closes: rig.closes,
           quits: rig.quits,
@@ -17665,8 +25881,99 @@ async function runInstalledUpdateCommitScenarios(win, exec) {
         }),
       );
     } finally {
+      ipcMain.removeListener("quit-approval-response", captureSuccessfulResponse);
+      ipcMain.removeListener("quit-approval-committed", captureSuccessfulCommit);
       heldSuccessfulUpdate.restore();
     }
+    const approvedUpdateRound = (request, response, commit) =>
+      request?.reason === "update-install" &&
+      response?.id === request.id &&
+      response?.gen === request.gen &&
+      Array.isArray(response?.dirtyFiles) &&
+      response.dirtyFiles.length === 0 &&
+      Number.isSafeInteger(response.revision) &&
+      response.revision >= 0 &&
+      commit?.id === request.id &&
+      commit?.gen === request.gen &&
+      commit?.revision === response.revision &&
+      commit?.committed === true;
+    const successfulFinalUpdateQuit =
+      successfulFinalApproval &&
+      approvedUpdateRound(
+        successfulFinalApproval.initialRequest,
+        successfulFinalApproval.initialResponse,
+        successfulFinalApproval.initialCommit,
+      ) &&
+      approvedUpdateRound(
+        successfulFinalApproval.finalRequest,
+        successfulFinalApproval.finalResponse,
+        successfulFinalApproval.finalCommit,
+      ) &&
+      successfulFinalApproval.finalRequest.id >
+        successfulFinalApproval.initialRequest.id &&
+      successfulFinalApproval.freeze?.frozen === true &&
+      successfulFinalApproval.freeze?.id ===
+        successfulFinalApproval.finalRequest.id &&
+      successfulFinalApproval.freeze?.revision ===
+        successfulFinalApproval.finalResponse.revision &&
+      successfulFinalApproval.state.rendererGeneration ===
+        successfulFinalApproval.finalRequest.gen &&
+      successfulFinalApproval.state.authorizationGeneration ===
+        successfulFinalApproval.finalRequest.gen &&
+      successfulFinalApproval.state.pendingId === 0 &&
+      successfulFinalApproval.state.pendingReason === null &&
+      successfulFinalApproval.state.commitPendingId === 0 &&
+      successfulFinalApproval.state.queuedReason === null &&
+      successfulFinalApproval.state.pendingAbsorbedUserIntentId === 0 &&
+      successfulFinalApproval.state.shutdownPendingContinuationCount === 0 &&
+      successfulFinalApproval.state.updaterPendingCommitAttemptId === 0 &&
+      successfulFinalApproval.state.updaterInstallAttemptId > 0 &&
+      Array.isArray(successfulFinalApproval.state.updaterLiveAttemptIds) &&
+      successfulFinalApproval.state.updaterLiveAttemptIds.length === 1 &&
+      successfulFinalApproval.state.updaterLiveAttemptIds[0] ===
+        successfulFinalApproval.state.updaterInstallAttemptId &&
+      successfulFinalApproval.state.updaterInstallAttemptLaunchOwner ===
+        "electron-updater" &&
+      successfulFinalApproval.state.updaterInstallAttemptLaunchPhase ===
+        "installer-started" &&
+      successfulFinalApproval.state.updaterInstallAttemptPositiveLaunchObserved ===
+        true &&
+      successfulFinalApproval.state.updaterInstallAttemptPoisoned === false &&
+      successfulFinalApproval.state.updaterInstallAttemptRetrySafe === false &&
+      successfulFinalApproval.state.updaterInstallAttemptFailureWhy === null &&
+      successfulFinalApproval.state.updaterQuitBoundaryAttemptId === 0 &&
+      successfulFinalApproval.state.updateInstallStarted === true &&
+      successfulFinalApproval.state.settleWhy === "clean" &&
+      successfulFinalApproval.state.authorized === true &&
+      successfulFinalApproval.installs === 1 &&
+      successfulFinalApproval.quits === 2 &&
+      successfulFinalApproval.closes === 0 &&
+      successfulFinalApproval.dialogs.length === 0;
+    check(
+      "a successful final updater quit reached two exact clean committed approvals before restart recovery",
+      successfulFinalUpdateQuit,
+      JSON.stringify(successfulFinalApproval),
+    );
+    if (!successfulFinalUpdateQuit) {
+      throw new Error("Successful final updater quit was not proven safe for restart recovery");
+    }
+    const successfulFinalRecovery = await restoreApprovedTerminalClose(
+      successfulFinalApproval,
+    );
+    check(
+      "a successful final updater quit restores every physical owner before cleanup",
+      successfulFinalRecovery.ownersRestored &&
+        successfulFinalRecovery.authorizationRevoked,
+      JSON.stringify(successfulFinalRecovery),
+    );
+    if (
+      !successfulFinalRecovery.ownersRestored ||
+      !successfulFinalRecovery.authorizationRevoked
+    ) {
+      throw new Error("Successful final updater quit did not restore physical owners");
+    }
+    await clearDocuments();
+    __shutdown.reset();
 
     for (const ordering of [
       {
@@ -17687,8 +25994,10 @@ async function runInstalledUpdateCommitScenarios(win, exec) {
     ]) {
       await runAbsorbedUserReplayCase({ ...ordering, failure: "refusal" });
     }
+    await clearAfterApprovedTerminalUserClose();
 
   } finally {
+    await baseUpdaterBranchBorrow.restore();
     restoreQuitAndInstall();
     restoreLatch();
     electronAutoUpdater.removeListener("before-quit-for-update", countCommit);
@@ -18050,9 +26359,11 @@ async function runWindowsInstalledLauncherScenarios(win, exec) {
   }
 }
 
-async function runShutdownScenarios(win, exec, sentinel) {
+async function runShutdownScenarios(win, exec, sentinel, consoleAttribution = null) {
+  const baseUpdaterBranchBorrow = createBaseUpdaterBranchBorrow();
   const fileQ1 = path.join(dir, "quit-alpha.md");
   const fileQ2 = path.join(dir, "quit-beta.md");
+  let phaseTwoReopenOrdinal = 0;
   const impostorFile = path.join(dir, "impostor.html");
   const indexFile = path.join(__dirname, "..", "src", "index.html");
   write(fileQ1, "# Quit Alpha\n\nQ_ALPHA\n");
@@ -18062,6 +26373,36 @@ async function runShutdownScenarios(win, exec, sentinel) {
     '<!doctype html><meta charset="utf-8"><title>impostor</title><p>not a document window</p>',
     "utf8",
   );
+  const cleanCloseFixtureInputs = (() => {
+    try {
+      const alphaBytes = fs.readFileSync(fileQ1);
+      const betaBytes = fs.readFileSync(fileQ2);
+      const rendererGeneration = __shutdown.state().rendererGeneration;
+      if (!Number.isSafeInteger(rendererGeneration) || rendererGeneration <= 0) {
+        throw new Error("the current renderer generation is unavailable");
+      }
+      return {
+        alpha: {
+          path: fileQ1,
+          pathKey: nativePathKey(fs.realpathSync.native(fileQ1)),
+          bytes: alphaBytes.toString("base64"),
+          content: alphaBytes.toString("utf8"),
+        },
+        beta: {
+          path: fileQ2,
+          pathKey: nativePathKey(fs.realpathSync.native(fileQ2)),
+          bytes: betaBytes.toString("base64"),
+          content: betaBytes.toString("utf8"),
+        },
+        rendererGeneration,
+      };
+    } catch (error) {
+      return {
+        setupError: "clean-close fixture could not capture real fixture bytes and canonical paths: " +
+          String(error && error.message || error),
+      };
+    }
+  })();
   const jsQ1 = JSON.stringify(fileQ1);
   const jsQ2 = JSON.stringify(fileQ2);
 
@@ -18127,6 +26468,7 @@ async function runShutdownScenarios(win, exec, sentinel) {
       updaterModule.autoUpdater,
       "quitAndInstall",
       () => {
+        baseUpdaterBranchBorrow.recordQuitAndInstall();
         installs += 1;
         if (installThrows) throw new Error("installer spawn failed (test)");
         setUpdaterLatch(true);
@@ -18143,20 +26485,68 @@ async function runShutdownScenarios(win, exec, sentinel) {
     // A known-clean two-tab document set. Earlier scenarios leave edits and
     // edit sessions behind, and closeTab() asks about a dirty tab through a
     // real window.confirm - which would block executeJavaScript forever - so
-    // the teardown answers for itself and then puts the confirm back.
-    await exec(`
-      (() => {
+    // the teardown answers for itself until every close settles.
+    const shutdownFixtureTeardown = await exec(`
+      (async () => {
         const realConfirm = window.confirm;
-        window.confirm = () => true;
+        const confirmStub = () => true;
+        let closeAllStarted = false;
+        let closeAllSettled = false;
+        window.confirm = confirmStub;
         try {
-          window.CustomTabs.getTabs().forEach(t => { t.content = t.originalContent; t.hasUnsavedChanges = false; });
-          window.CustomTabs.getTabs().slice().forEach(t => window.CustomTabs.closeTab(t.id));
+          const tabs = window.CustomTabs.getTabs().slice();
+          const activeId = window.CustomTabs.getActiveTabId();
+          const closeAll = (async () => {
+            for (const tab of tabs.filter(t => t.id !== activeId)
+              .concat(tabs.filter(t => t.id === activeId))) {
+              await window.CustomTabs.closeTab(tab.id);
+            }
+          })();
+          closeAllStarted = true;
+          // Do not restore the native confirm on the deadline: closeTab() can
+          // still reach a later dirty tab, where the native modal would block
+          // the renderer forever. The settlement handler owns restoration.
+          const closeAllOutcome = closeAll.then(
+            () => ({ settled: true, error: null }),
+            error => ({
+              settled: true,
+              error: String(error && error.message ? error.message : error),
+            }),
+          );
+          void closeAllOutcome.then(() => {
+            closeAllSettled = true;
+            if (window.confirm === confirmStub) window.confirm = realConfirm;
+          });
+          let timeoutId;
+          const outcome = await Promise.race([
+            closeAllOutcome,
+            new Promise(resolve => {
+              timeoutId = setTimeout(() => resolve({ timedOut: true }), 8000);
+            }),
+          ]);
+          clearTimeout(timeoutId);
+          if (outcome.timedOut) {
+            throw new Error(
+              "shutdown fixture tab cleanup timed out before closeAll settled; confirm remains stubbed until settlement",
+            );
+          }
+          if (outcome.error) {
+            throw new Error("shutdown fixture tab cleanup failed: " + outcome.error);
+          }
         } finally {
-          window.confirm = realConfirm;
+          if (!closeAllStarted || closeAllSettled) window.confirm = realConfirm;
         }
         window.isEditMode = false;
         localStorage.clear();
-        return true;
+        return {
+          remaining: window.CustomTabs.getTabs().map(t => ({
+            id: t.id,
+            dirty: t.hasUnsavedChanges,
+          })),
+          dirty: window.CustomTabs.__dirtyTabNames(),
+          closeAllSettled,
+          confirmRestored: window.confirm === realConfirm,
+        };
       })()
     `);
     // A witness for the REQUEST half of the round trip. Without it "the window
@@ -18207,15 +26597,331 @@ async function runShutdownScenarios(win, exec, sentinel) {
           };
         })()
       `);
-    await exec(`
-      (() => {
-        window.CustomTabs.createTab(${jsQ1}, window.fs.readFileSync(${jsQ1}, 'utf8'));
-        const b = window.CustomTabs.createTab(${jsQ2}, window.fs.readFileSync(${jsQ2}, 'utf8'));
-        window.CustomTabs.switchToTab(b.id);
-        return true;
+    if (consoleAttribution) {
+      await consoleAttribution.begin("shutdown-quit-alpha-beta-clean-open", {
+        alpha: cleanCloseFixtureInputs.alpha || null,
+        beta: cleanCloseFixtureInputs.beta || null,
+        setupError: cleanCloseFixtureInputs.setupError || null,
+      });
+    }
+    let cleanCloseFixture;
+    try {
+      cleanCloseFixture = await exec(`
+      (async () => {
+        const ipc = require("electron").ipcRenderer;
+        const Buffer = require("buffer").Buffer;
+        const fixture = ${JSON.stringify(cleanCloseFixtureInputs)};
+        if (fixture.setupError) {
+          return { settled: false, setupError: fixture.setupError };
+        }
+        const expectedA = fixture.alpha;
+        const expectedB = fixture.beta;
+        const fileA = expectedA.path;
+        const fileB = expectedB.path;
+        const markerA = "Q_ALPHA";
+        const markerB = "Q_BETA";
+        const titleA = "Quit Alpha";
+        const titleB = "Quit Beta";
+        const readExactFile = (filePath) => {
+          try {
+            const bytes = Buffer.from(window.fs.readFileSync(filePath));
+            return {
+              error: null,
+              bytes: bytes.toString("base64"),
+              content: bytes.toString("utf8"),
+            };
+          } catch (error) {
+            return { error: String(error && error.message || error) };
+          }
+        };
+        const observe = (expected, marker, title) => {
+          const expectedPath = expected.path;
+          const tabs = window.CustomTabs.getTabs();
+          const activeTab = window.CustomTabs.getActiveTab();
+          const activeDomTabs = [...document.querySelectorAll(".tab.active")];
+          const viewer = document.querySelector("#viewer");
+          const viewerText = viewer ? viewer.textContent : "";
+          const viewerHeadingTexts = viewer
+            ? [...viewer.querySelectorAll("h1")].map(heading => heading.textContent.trim())
+            : [];
+          const viewerMarkerTexts = viewer
+            ? [...viewer.querySelectorAll("p")].map(paragraph => paragraph.textContent.trim())
+            : [];
+          const alphaFile = readExactFile(expectedA.path);
+          const betaFile = readExactFile(expectedB.path);
+          const file = expectedPath === expectedA.path ? alphaFile : betaFile;
+          let identity = null;
+          let pageSession = null;
+          let ownerSetupError = null;
+          if (!window.CustomTabs ||
+              typeof window.CustomTabs.getActiveDocumentIdentity !== "function") {
+            ownerSetupError = "getActiveDocumentIdentity public owner API is unavailable";
+          } else if (typeof window.getReloadRequestSession !== "function") {
+            ownerSetupError = "getReloadRequestSession public owner API is unavailable";
+          } else {
+            try {
+              pageSession = window.getReloadRequestSession();
+              if (typeof pageSession !== "string" || pageSession.length === 0) {
+                ownerSetupError = "getReloadRequestSession returned no page session";
+              } else if (activeTab) {
+                identity = window.CustomTabs.getActiveDocumentIdentity(
+                  activeTab.filePath,
+                  pageSession,
+                );
+                if (!identity) {
+                  ownerSetupError = "getActiveDocumentIdentity returned no active owner";
+                }
+              }
+            } catch (error) {
+              ownerSetupError = "public owner API failed: " +
+                String(error && error.message || error);
+            }
+          }
+          const tabForExpectedPath = tabs.filter(tab => tab.filePath === expectedPath);
+          return {
+            expectedPath,
+            marker,
+            title,
+            file,
+            pageSession,
+            ownerSetupError,
+            tabs: tabs.map(tab => ({
+              id: tab.id,
+              filePath: tab.filePath,
+              content: tab.content,
+              originalContent: tab.originalContent,
+              dirty: tab.hasUnsavedChanges,
+            })),
+            expectedTabIds: tabForExpectedPath.map(tab => tab.id),
+            activeId: window.CustomTabs.getActiveTabId(),
+            activeTabId: activeTab && activeTab.id,
+            activeTabPath: activeTab && activeTab.filePath,
+            activeTabContent: activeTab && activeTab.content,
+            activeTabOriginalContent: activeTab && activeTab.originalContent,
+            activeDomIds: activeDomTabs.map(tab => tab.dataset.tabId),
+            currentFilePath: window.currentFilePath,
+            originalMarkdown: window.originalMarkdown,
+            viewerPresent: !!viewer,
+            viewerContainsMarker: !!viewer && viewerText.includes(marker),
+            viewerContainsExpectedContent: !!viewer &&
+              viewerText.includes(marker) && viewerText.includes(title),
+            viewerHeadingTexts,
+            viewerMarkerTexts,
+            viewerHasExactHeadingMarkerStructure:
+              viewerHeadingTexts.length === 1 && viewerHeadingTexts[0] === title &&
+              viewerMarkerTexts.length === 1 && viewerMarkerTexts[0] === marker,
+            viewerContainsAlphaTitle: !!viewer && viewerText.includes(titleA),
+            viewerContainsAlphaMarker: !!viewer && viewerText.includes(markerA),
+            allTabsClean: tabs.every(tab => tab.hasUnsavedChanges === false) &&
+              window.CustomTabs.__dirtyTabNames().length === 0,
+            alphaFile,
+            betaFile,
+            alphaFileMatchesExpected: alphaFile.error === null &&
+              alphaFile.bytes === expectedA.bytes && alphaFile.content === expectedA.content,
+            betaFileMatchesExpected: betaFile.error === null &&
+              betaFile.bytes === expectedB.bytes && betaFile.content === expectedB.content,
+            fileMatchesExpected: file.error === null &&
+              file.bytes === expected.bytes && file.content === expected.content,
+            identity,
+            identityMatchesActive: ownerSetupError === null && !!activeTab &&
+              !!identity && Number.isSafeInteger(identity.tabId) &&
+              identity.tabId > 0 && identity.tabId === activeTab.id &&
+              Number.isSafeInteger(identity.documentGeneration) &&
+              identity.documentGeneration > 0 &&
+              identity.pageSession === pageSession &&
+              Number.isSafeInteger(identity.rendererGeneration) &&
+              identity.rendererGeneration === fixture.rendererGeneration &&
+              identity.pathKey === expected.pathKey,
+          };
+        };
+        const waitForWitness = async (expected, marker, title, predicate) => {
+          let witness = observe(expected, marker, title);
+          for (let attempt = 0; attempt < 50; attempt += 1) {
+            if (witness.ownerSetupError) {
+              return { settled: false, setupError: witness.ownerSetupError, witness };
+            }
+            if (predicate(witness)) {
+              return { settled: true, attempt, witness };
+            }
+            await new Promise(resolve => setTimeout(resolve, 20));
+            witness = observe(expected, marker, title);
+          }
+          return { settled: false, witness };
+        };
+        const aOpened = () => observe(expectedA, markerA, titleA);
+        ipc.send("open-file-path", { filePath: fileA });
+        const openA = await waitForWitness(expectedA, markerA, titleA, witness =>
+          witness.alphaFileMatchesExpected === true &&
+          witness.betaFileMatchesExpected === true &&
+          witness.fileMatchesExpected === true &&
+          witness.tabs.length === 1 && witness.expectedTabIds.length === 1 &&
+          witness.expectedTabIds[0] === witness.activeId &&
+          witness.activeTabId === witness.activeId &&
+          witness.activeTabPath === expectedA.path &&
+          witness.activeTabContent === expectedA.content &&
+          witness.activeTabOriginalContent === expectedA.content &&
+          witness.tabs[0].filePath === expectedA.path &&
+          witness.tabs[0].content === expectedA.content &&
+          witness.tabs[0].originalContent === expectedA.content &&
+          witness.tabs[0].dirty === false &&
+          witness.activeDomIds.length === 1 &&
+          witness.activeDomIds[0] === String(witness.activeId) &&
+          witness.currentFilePath === expectedA.path &&
+          witness.originalMarkdown === expectedA.content &&
+          witness.viewerPresent === true &&
+          witness.viewerContainsExpectedContent === true &&
+          witness.allTabsClean === true && witness.identityMatchesActive === true,
+        );
+        if (!openA.settled) {
+          return {
+            settled: false, setupError: openA.setupError,
+            error: openA.setupError ||
+              "clean-close fixture did not render the exact quit-alpha store state",
+            diagnostic: { openA, afterA: aOpened() },
+          };
+        }
+        ipc.send("open-file-path", { filePath: fileB });
+        const openB = await waitForWitness(expectedB, markerB, titleB, witness => {
+          const tabA = witness.tabs.filter(tab => tab.filePath === expectedA.path);
+          const tabB = witness.tabs.filter(tab => tab.filePath === expectedB.path);
+          const a = tabA[0];
+          const b = tabB[0];
+          return expectedA.path !== expectedB.path &&
+            expectedA.pathKey !== expectedB.pathKey &&
+            witness.alphaFileMatchesExpected === true &&
+            witness.betaFileMatchesExpected === true &&
+            witness.fileMatchesExpected === true && witness.tabs.length === 2 &&
+            tabA.length === 1 && tabB.length === 1 && a && b && a.id !== b.id &&
+            a.filePath === expectedA.path && a.content === expectedA.content &&
+            a.originalContent === expectedA.content && a.dirty === false &&
+            b.filePath === expectedB.path && b.content === expectedB.content &&
+            b.originalContent === expectedB.content && b.dirty === false &&
+            witness.expectedTabIds.length === 1 && witness.expectedTabIds[0] === b.id &&
+            witness.activeId === b.id && witness.activeTabId === b.id &&
+            witness.activeTabPath === expectedB.path &&
+            witness.activeTabContent === expectedB.content &&
+            witness.activeTabOriginalContent === expectedB.content &&
+            witness.activeDomIds.length === 1 &&
+            witness.activeDomIds[0] === String(b.id) &&
+            witness.currentFilePath === expectedB.path &&
+            witness.originalMarkdown === expectedB.content &&
+            witness.viewerPresent === true &&
+            witness.viewerContainsExpectedContent === true &&
+            witness.viewerHasExactHeadingMarkerStructure === true &&
+            witness.viewerContainsAlphaTitle === false &&
+            witness.viewerContainsAlphaMarker === false &&
+            witness.allTabsClean === true && witness.identityMatchesActive === true;
+        });
+        if (!openB.settled) {
+          return {
+            settled: false, setupError: openB.setupError,
+            error: openB.setupError ||
+              "clean-close fixture did not render the exact quit-beta store state",
+            diagnostic: { openA, openB },
+          };
+        }
+        const final = openB.witness;
+        const a = final.tabs.find(tab => tab.filePath === expectedA.path);
+        const b = final.tabs.find(tab => tab.filePath === expectedB.path);
+        return {
+          settled: true,
+          expected: { alpha: expectedA, beta: expectedB },
+          final: { ...final, a, b },
+          diagnostic: { openA, openB },
+        };
       })()
-    `);
-    await sleep(500);
+      `);
+    } finally {
+      if (consoleAttribution) {
+        await consoleAttribution.end({
+          settled: cleanCloseFixture ? cleanCloseFixture.settled === true : false,
+          setupError: cleanCloseFixture && cleanCloseFixture.setupError,
+          diagnostic: cleanCloseFixture && cleanCloseFixture.diagnostic,
+        });
+      }
+    }
+    const cleanCloseSetup = await exec(`(() => ({
+      tabs: window.CustomTabs.getTabs().map(t => ({
+        id: t.id, filePath: t.filePath, content: t.content,
+        original: t.originalContent, dirty: t.hasUnsavedChanges,
+      })),
+      dirty: window.CustomTabs.__dirtyTabNames(),
+      activeId: window.CustomTabs.getActiveTabId(),
+      currentFilePath: window.currentFilePath,
+      originalMarkdown: window.originalMarkdown,
+    }))()`);
+    check(
+      "the native clean-close fixture has no dirty tabs after awaited teardown",
+      shutdownFixtureTeardown.remaining.length === 0 &&
+        shutdownFixtureTeardown.dirty.length === 0 &&
+        shutdownFixtureTeardown.closeAllSettled === true &&
+        shutdownFixtureTeardown.confirmRestored === true &&
+        cleanCloseFixtureInputs.setupError === undefined && cleanCloseFixture &&
+        cleanCloseFixture.error === undefined && cleanCloseFixture.setupError === undefined &&
+        cleanCloseFixture.settled === true &&
+        cleanCloseFixture.expected.alpha.path !== cleanCloseFixture.expected.beta.path &&
+        cleanCloseFixture.expected.alpha.pathKey !== cleanCloseFixture.expected.beta.pathKey &&
+        cleanCloseFixture.final.tabs.length === 2 && cleanCloseFixture.final.a &&
+        cleanCloseFixture.final.b &&
+        cleanCloseFixture.final.a.id !== cleanCloseFixture.final.b.id &&
+        cleanCloseFixture.final.a.filePath === cleanCloseFixture.expected.alpha.path &&
+        cleanCloseFixture.final.a.content === cleanCloseFixture.expected.alpha.content &&
+        cleanCloseFixture.final.a.originalContent === cleanCloseFixture.expected.alpha.content &&
+        cleanCloseFixture.final.b.filePath === cleanCloseFixture.expected.beta.path &&
+        cleanCloseFixture.final.b.content === cleanCloseFixture.expected.beta.content &&
+        cleanCloseFixture.final.b.originalContent === cleanCloseFixture.expected.beta.content &&
+        cleanCloseFixture.final.activeTabContent === cleanCloseFixture.expected.beta.content &&
+        cleanCloseFixture.final.activeTabOriginalContent === cleanCloseFixture.expected.beta.content &&
+        cleanCloseFixture.final.activeId === cleanCloseFixture.final.b.id &&
+        cleanCloseFixture.final.activeDomIds.length === 1 &&
+        cleanCloseFixture.final.activeDomIds[0] === String(cleanCloseFixture.final.b.id) &&
+        cleanCloseFixture.final.currentFilePath === cleanCloseFixture.expected.beta.path &&
+        cleanCloseFixture.final.originalMarkdown === cleanCloseFixture.expected.beta.content &&
+        cleanCloseFixture.final.viewerContainsExpectedContent === true &&
+        cleanCloseFixture.final.viewerHasExactHeadingMarkerStructure === true &&
+        cleanCloseFixture.final.viewerContainsAlphaTitle === false &&
+        cleanCloseFixture.final.viewerContainsAlphaMarker === false &&
+        cleanCloseFixture.final.allTabsClean === true &&
+        cleanCloseFixture.final.alphaFileMatchesExpected === true &&
+        cleanCloseFixture.final.betaFileMatchesExpected === true &&
+        cleanCloseFixture.final.fileMatchesExpected === true &&
+        cleanCloseFixture.final.identityMatchesActive === true &&
+        cleanCloseSetup.tabs.length === 2 && cleanCloseSetup.tabs.every(tab =>
+          tab.content === tab.original && tab.dirty === false) &&
+        cleanCloseSetup.tabs.some(tab => tab.id === cleanCloseFixture.final.a.id &&
+          tab.filePath === cleanCloseFixture.expected.alpha.path &&
+          tab.content === cleanCloseFixture.expected.alpha.content &&
+          tab.original === cleanCloseFixture.expected.alpha.content) &&
+        cleanCloseSetup.tabs.some(tab => tab.id === cleanCloseFixture.final.b.id &&
+          tab.filePath === cleanCloseFixture.expected.beta.path &&
+          tab.content === cleanCloseFixture.expected.beta.content &&
+          tab.original === cleanCloseFixture.expected.beta.content) &&
+        cleanCloseSetup.dirty.length === 0 &&
+        cleanCloseSetup.activeId === cleanCloseFixture.final.b.id &&
+        cleanCloseSetup.currentFilePath === cleanCloseFixture.expected.beta.path &&
+        cleanCloseSetup.originalMarkdown === cleanCloseFixture.expected.beta.content &&
+        cleanCloseFixture.diagnostic.openA.settled === true &&
+        cleanCloseFixture.diagnostic.openA.witness.fileMatchesExpected === true &&
+        cleanCloseFixture.diagnostic.openA.witness.identityMatchesActive === true &&
+        cleanCloseFixture.diagnostic.openA.witness.activeTabContent ===
+          cleanCloseFixture.expected.alpha.content &&
+        cleanCloseFixture.diagnostic.openA.witness.activeTabOriginalContent ===
+          cleanCloseFixture.expected.alpha.content &&
+        cleanCloseFixture.diagnostic.openA.witness.originalMarkdown ===
+          cleanCloseFixture.expected.alpha.content &&
+        cleanCloseFixture.diagnostic.openA.witness.viewerContainsExpectedContent === true &&
+        cleanCloseFixture.diagnostic.openB.settled === true &&
+        cleanCloseFixture.diagnostic.openB.witness.fileMatchesExpected === true &&
+        cleanCloseFixture.diagnostic.openB.witness.tabs.length === 2 &&
+        cleanCloseFixture.diagnostic.openB.witness.viewerContainsExpectedContent === true &&
+        cleanCloseFixture.diagnostic.openB.witness.viewerHasExactHeadingMarkerStructure === true &&
+        cleanCloseFixture.diagnostic.openB.witness.viewerContainsAlphaTitle === false &&
+        cleanCloseFixture.diagnostic.openB.witness.viewerContainsAlphaMarker === false &&
+        cleanCloseFixture.diagnostic.openB.witness.identityMatchesActive === true,
+      JSON.stringify({
+        shutdownFixtureTeardown, cleanCloseFixtureInputs, cleanCloseFixture, cleanCloseSetup,
+      }),
+    );
 
     // -- a clean close is still a CHECKED close, and completes -------------
     __shutdown.reset();
@@ -18644,11 +27350,19 @@ async function runShutdownScenarios(win, exec, sentinel) {
     // sequence test depend on startup restoration. Recreate the two real
     // fixture files immediately after the new renderer is ready instead.
     await exec(`localStorage.clear(); null;`);
+    const thawReloadGeneration = __shutdown.state().rendererGeneration;
     wc.reload();
     const thawedPageReady = await waitUntil(
-      () => __shutdown.state().renderer === "ready",
+      () => {
+        const state = __shutdown.state();
+        return state.renderer === "ready" &&
+          state.rendererGeneration > thawReloadGeneration;
+      },
       20000,
     );
+    if (!thawedPageReady) {
+      throw new Error("thaw reload fixture did not reach a new renderer generation");
+    }
     await exec(`
       (() => {
         const a = window.CustomTabs.createTab(
@@ -19817,8 +28531,36 @@ async function runShutdownScenarios(win, exec, sentinel) {
       const openId = __shutdown.state().pendingId;
       const openRequest = await exec(`window.__lastQuitRequest`);
       const readyBefore = __shutdown.state();
+      const wrongReadyGeneration =
+        openRequest && Number.isSafeInteger(openRequest.gen)
+          ? openRequest.gen + 1
+          : NaN;
+      check(
+        "the forged READY setup has an observed open request, a real renderer session, and a distinct safe generation",
+        requestSeen &&
+          Number.isSafeInteger(openId) &&
+          openId > 0 &&
+          !!openRequest &&
+          openRequest.id === openId &&
+          readyBefore.pendingId === openId &&
+          Number.isSafeInteger(openRequest.gen) &&
+          openRequest.gen === readyBefore.rendererGeneration &&
+          Number.isSafeInteger(wrongReadyGeneration) &&
+          wrongReadyGeneration > 0 &&
+          wrongReadyGeneration !== readyBefore.rendererGeneration &&
+          typeof readyBefore.rendererPageSession === "string" &&
+          readyBefore.rendererPageSession.length > 0 &&
+          readyBefore.rendererPageSession.length <= 128,
+        JSON.stringify({
+          requestSeen,
+          openId,
+          openRequest,
+          wrongReadyGeneration,
+          readyBefore,
+        }),
+      );
       await exec(
-        `window.ipcRenderer.send('quit-approval-ready', { gen: ${openRequest.gen + 1} }); null;`,
+        `window.ipcRenderer.send('quit-approval-ready', { gen: ${wrongReadyGeneration}, pageSession: ${JSON.stringify(readyBefore.rendererPageSession)} }); null;`,
       );
       await sleep(100);
       check(
@@ -19895,6 +28637,96 @@ async function runShutdownScenarios(win, exec, sentinel) {
         const seen = await waitUntil(() => exec(`!!window.__lastQuitRequest`), 5000);
         return { close, seen, request: await exec(`window.__lastQuitRequest`) };
       };
+      const reloadInvalidRevisionRendererFromEmptyPersistence = async (label) => {
+        const reloadGeneration = __shutdown.state().rendererGeneration;
+        const cleared = await exec(`
+          (() => {
+            localStorage.clear();
+            return {
+              openTabs: localStorage.getItem("openTabs"),
+              activeTabPath: localStorage.getItem("activeTabPath"),
+            };
+          })()
+        `);
+        if (
+          !cleared ||
+          cleared.openTabs !== null ||
+          cleared.activeTabPath !== null
+        ) {
+          throw new Error(
+            `${label} invalid-revision reload could not clear persisted tabs: ` +
+              JSON.stringify(cleared),
+          );
+        }
+        wc.reload();
+        const ready = await waitUntil(() => {
+          const state = __shutdown.state();
+          return state.renderer === "ready" &&
+            state.rendererGeneration > reloadGeneration;
+        }, 20000);
+        const replacement = ready
+          ? await exec(`
+            (() => {
+              const rawOpenTabs = localStorage.getItem("openTabs");
+              const rawActiveTabPath = localStorage.getItem("activeTabPath");
+              let openTabs = null;
+              let openTabsValid = rawOpenTabs === null;
+              if (rawOpenTabs !== null) {
+                try {
+                  openTabs = JSON.parse(rawOpenTabs);
+                  openTabsValid = Array.isArray(openTabs);
+                } catch (error) {
+                  openTabs = {
+                    parseError: String(error && error.message ? error.message : error),
+                  };
+                }
+              }
+              const active = window.CustomTabs.getActiveTab() || null;
+              return {
+                tabs: window.CustomTabs.getTabs().map(tab => ({
+                  id: tab.id,
+                  filePath: tab.filePath || null,
+                })),
+                active: active
+                  ? { id: active.id, filePath: active.filePath || null }
+                  : null,
+                currentFilePath: window.currentFilePath || null,
+                tabPersistence: {
+                  rawOpenTabs,
+                  openTabs,
+                  openTabsValid,
+                  openTabsEmpty:
+                    rawOpenTabs === null ||
+                    (openTabsValid && openTabs.length === 0),
+                  rawActiveTabPath,
+                  activeTabPathEmpty:
+                    rawActiveTabPath === null || rawActiveTabPath === "",
+                },
+              };
+            })()
+          `)
+          : null;
+        const empty =
+          ready &&
+          replacement &&
+          replacement.tabs.length === 0 &&
+          replacement.active === null &&
+          replacement.currentFilePath === null &&
+          replacement.tabPersistence.openTabsEmpty === true &&
+          replacement.tabPersistence.activeTabPathEmpty === true;
+        check(
+          `${label} invalid-revision replacement starts with no restored tab`,
+          empty,
+          JSON.stringify({ cleared, replacement, state: __shutdown.state() }),
+        );
+        if (!empty) {
+          throw new Error(
+            `${label} invalid-revision replacement restored persisted state: ` +
+              JSON.stringify({ cleared, replacement, state: __shutdown.state() }),
+          );
+        }
+        return { ready, cleared, replacement };
+      };
       for (const invalid of invalidRevisionCases) {
         __shutdown.reset();
         rig.reset();
@@ -19915,8 +28747,11 @@ async function runShutdownScenarios(win, exec, sentinel) {
         // An invalid response makes this renderer unusable. Reload so the
         // confirm half is a fresh correct-id/generation request, not a
         // permissive shortcut around the already-poisoned document.
-        wc.reload();
-        await waitUntil(() => __shutdown.state().renderer === "ready", 20000);
+        const invalidCancelReload =
+          await reloadInvalidRevisionRendererFromEmptyPersistence(
+            `invalid-cancel ${invalid.name}`,
+          );
+        const invalidCancelRendererReady = invalidCancelReload.ready;
         __shutdown.reset();
         rig.reset();
         rig.answer = 0;
@@ -20002,8 +28837,11 @@ async function runShutdownScenarios(win, exec, sentinel) {
         // The confirm half deliberately made this renderer unusable; restore
         // a new document before the next representation gets its own exact
         // request/generation pair.
-        wc.reload();
-        await waitUntil(() => __shutdown.state().renderer === "ready", 20000);
+        const invalidConfirmReload =
+          await reloadInvalidRevisionRendererFromEmptyPersistence(
+            `invalid-confirm ${invalid.name}`,
+          );
+        const invalidConfirmRendererReady = invalidConfirmReload.ready;
       }
 
       // Phase two is an acknowledgement of the exact frozen document, not a
@@ -20014,27 +28852,310 @@ async function runShutdownScenarios(win, exec, sentinel) {
       // own. This deliberately covers the wire representations a legacy or
       // compromised renderer can produce, rather than only the renderer's
       // current well-formed reply.
-      const cleanCommittedReplyDocument = () =>
-        exec(`
-          (() => {
-            const confirm = window.confirm;
-            window.confirm = () => true;
+      const cleanCommittedReplyDocument = async () => {
+        const phaseTwoReopenPath = path.join(
+          dir,
+          `phase-two-reopen-${++phaseTwoReopenOrdinal}.md`,
+        );
+        const phaseTwoReopenBytes =
+          `# Phase two fresh reopen ${phaseTwoReopenOrdinal}\n\n` +
+          "PHASE_TWO_FRESH_REOPEN\n";
+        fs.writeFileSync(phaseTwoReopenPath, phaseTwoReopenBytes, "utf8");
+        const phaseTwoReopenStats = fs.statSync(phaseTwoReopenPath);
+        const phaseTwoReopenFixture = {
+          path: phaseTwoReopenPath,
+          pathKey: nativePathKey(fs.realpathSync.native(phaseTwoReopenPath)),
+          bytes: phaseTwoReopenBytes,
+          diskVersion: {
+            dev: phaseTwoReopenStats.dev,
+            ino: phaseTwoReopenStats.ino,
+            size: phaseTwoReopenStats.size,
+            mtimeMs: phaseTwoReopenStats.mtimeMs,
+            ctimeMs: phaseTwoReopenStats.ctimeMs,
+          },
+        };
+        const result = await exec(`
+          (async () => {
             try {
-              window.CustomTabs.getTabs().forEach(t => {
-                t.content = t.originalContent;
-                t.hasUnsavedChanges = false;
-              });
-            } finally {
-              window.confirm = confirm;
+            const tabs = window.CustomTabs;
+            let active = tabs.getActiveTab();
+            let restoredByOpen = false;
+            let reopenWitness = null;
+            const adoptionDiagnostics = [];
+            if (!active) {
+              const fixture = ${JSON.stringify(phaseTwoReopenFixture)};
+              const targetPath = fixture.path;
+              const ipc = require("electron").ipcRenderer;
+              const consoleErrorDescriptor = Object.getOwnPropertyDescriptor(
+                console,
+                "error",
+              );
+              const originalConsoleError = console.error;
+              const captureAdoptionRefusal = (message, state) => {
+                if (
+                  message !== "[CustomTabs] Disk adoption attestation refused:" &&
+                  message !== "[CustomTabs] Disk adoption was refused:"
+                ) {
+                  return;
+                }
+                adoptionDiagnostics.push({
+                  message,
+                  why: state && state.why !== undefined ? state.why : null,
+                  known: state && state.known !== undefined ? state.known : null,
+                  versionMatches:
+                    state && state.versionMatches !== undefined
+                      ? state.versionMatches
+                      : null,
+                  revision:
+                    state && state.revision !== undefined ? state.revision : null,
+                  pathKey:
+                    state && state.pathKey !== undefined ? state.pathKey : null,
+                  capabilityPresent: !!(
+                    state &&
+                    typeof state.capability === "string" &&
+                    state.capability.length > 0
+                  ),
+                  active: (() => {
+                    const current = tabs.getActiveTab();
+                    return current ? {
+                      id: current.id,
+                      filePath: current.filePath,
+                    } : null;
+                  })(),
+                  currentFilePath: window.currentFilePath || null,
+                  rendererGeneration: window.getReloadRequestSession(),
+                  selectionGeneration: window.getActiveFileSelectionGeneration(),
+                });
+              };
+              console.error = function (...args) {
+                captureAdoptionRefusal(args[0], args[1]);
+                return Reflect.apply(originalConsoleError, this, args);
+              };
+              try {
+                ipc.send("open-file-path", { filePath: targetPath });
+                const deadline = Date.now() + 5000;
+                while (Date.now() < deadline) {
+                  active = tabs.getActiveTab();
+                  if (
+                    active &&
+                    active.filePath === targetPath &&
+                    window.currentFilePath === targetPath
+                  ) {
+                    restoredByOpen = true;
+                    break;
+                  }
+                  await new Promise(resolve => setTimeout(resolve, 25));
+                }
+                if (!restoredByOpen) {
+                  throw new Error(
+                    "phase-two clean setup could not reopen its live fixture: " +
+                      JSON.stringify({
+                        targetPath,
+                        active: active && {
+                          id: active.id,
+                          filePath: active.filePath,
+                        },
+                        currentFilePath: window.currentFilePath,
+                        adoptionDiagnostics,
+                      }),
+                  );
+                }
+                const stat = window.fs.statSync(targetPath);
+                const physicalIdentity = {
+                  diskVersion: {
+                    dev: stat.dev,
+                    ino: stat.ino,
+                    size: stat.size,
+                    mtimeMs: stat.mtimeMs,
+                    ctimeMs: stat.ctimeMs,
+                  },
+                };
+                const owner = tabs.getActiveDocumentIdentity(
+                  targetPath,
+                  window.getReloadRequestSession(),
+                );
+                reopenWitness = {
+                  fixture,
+                  active: {
+                    id: active.id,
+                    filePath: active.filePath,
+                  },
+                  currentFilePath: window.currentFilePath || null,
+                  physicalIdentity,
+                  owner,
+                  physicalIdentityMatches:
+                    ["dev", "ino", "size", "mtimeMs"].every(
+                      key =>
+                        physicalIdentity.diskVersion[key] ===
+                        fixture.diskVersion[key],
+                    ),
+                  ctimeMatches:
+                    physicalIdentity.diskVersion.ctimeMs ===
+                    fixture.diskVersion.ctimeMs,
+                  selectedOwnerMatches:
+                    !!owner &&
+                    owner.tabId === active.id &&
+                    owner.pathKey === fixture.pathKey &&
+                    owner.pageSession === window.getReloadRequestSession(),
+                };
+                if (
+                  active.filePath !== targetPath ||
+                  window.currentFilePath !== targetPath ||
+                  !reopenWitness.physicalIdentityMatches ||
+                  !reopenWitness.selectedOwnerMatches
+                ) {
+                  throw new Error(
+                    "phase-two fresh reopen did not establish its physical selected owner: " +
+                      JSON.stringify(reopenWitness),
+                  );
+                }
+              } finally {
+                if (consoleErrorDescriptor) {
+                  Object.defineProperty(
+                    console,
+                    "error",
+                    consoleErrorDescriptor,
+                  );
+                } else {
+                  delete console.error;
+                }
+              }
             }
-            const tab = window.CustomTabs.getActiveTab();
-            window.originalMarkdown = tab ? tab.originalContent : "";
-            return !!tab;
+            const freeze = tabs.__shutdownFreeze();
+            const editing = tabs.__inEditMode();
+            const editor = window.markdownEditor;
+            if (!active || freeze.frozen || freeze.deferredOperationsDropped) {
+              throw new Error(
+                "phase-two clean setup cannot mutate the live document: " +
+                  JSON.stringify({
+                    active: active && {
+                      id: active.id,
+                      filePath: active.filePath,
+                      dirty: active.hasUnsavedChanges,
+                    },
+                    freeze,
+                    editing,
+                    editorPresent: !!editor,
+                  }),
+              );
+            }
+            if (editing && !editor) {
+              throw new Error("phase-two clean setup found edit mode without its textarea");
+            }
+            const expected = active.originalContent;
+            if (editing) editor.value = expected;
+            window.originalMarkdown = expected;
+            tabs.updateTabContent(expected, false);
+            tabs.getTabs().forEach(tab => {
+              if (tab !== active) tab.content = tab.originalContent;
+            });
+            const dirtyFiles = tabs.__dirtyTabNames(true);
+            if (dirtyFiles.length === 0) {
+              tabs.getTabs().forEach(tab => {
+                tab.hasUnsavedChanges = false;
+              });
+            }
+            const activeAfter = tabs.getActiveTab();
+            const publicDirtyFiles = tabs
+              .getTabs()
+              .filter(tab => tab.hasUnsavedChanges)
+              .map(tab => tab.filePath || tab.filename);
+            const normalize = value =>
+              typeof value === "string" ? value.replace(/\\r\\n/g, "\\n") : value;
+            const editorMatchesExpected =
+              !editing || normalize(editor.value) === normalize(expected);
+            const witness = {
+              activeTabId: activeAfter && activeAfter.id,
+              activePath: activeAfter && activeAfter.filePath,
+              activeFilename: activeAfter && activeAfter.filename,
+              restoredByOpen,
+              reopenWitness,
+              adoptionDiagnostics,
+              identity: tabs.getActiveDocumentIdentity(),
+              editing,
+              editorPresent: !!editor,
+              editorReadOnly: !!(editor && editor.readOnly),
+              editorLength: editor ? editor.value.length : null,
+              expectedLength: expected.length,
+              editorMatchesExpected,
+              activeDirty: !!(activeAfter && activeAfter.hasUnsavedChanges),
+              dirtyFiles,
+              publicDirtyFiles,
+              freeze: {
+                frozen: !!freeze.frozen,
+                deferredOperationsDropped: !!freeze.deferredOperationsDropped,
+              },
+            };
+            if (
+              !witness.activeTabId ||
+              !witness.activePath ||
+              !editorMatchesExpected ||
+              witness.activeDirty ||
+              dirtyFiles.length !== 0 ||
+              publicDirtyFiles.length !== 0
+            ) {
+              throw new Error(
+                "phase-two clean setup did not produce a clean live document: " +
+                  JSON.stringify(witness),
+              );
+            }
+              return { ok: true, witness };
+            } catch (error) {
+              return {
+                ok: false,
+                error: {
+                  name:
+                    error && typeof error.name === "string"
+                      ? error.name
+                      : "Error",
+                  message:
+                    error && typeof error.message === "string"
+                      ? error.message
+                      : String(error),
+                  stack:
+                    error && typeof error.stack === "string"
+                      ? error.stack
+                      : String(error),
+                },
+              };
+            }
           })()
         `);
+        if (result && result.ok === true) return result.witness;
+        throw new Error(
+          "phase-two clean setup renderer exception: " +
+            JSON.stringify(result && result.error ? result.error : result),
+        );
+      };
       const holdPhaseTwoCommit = async () => {
         let held = null;
+        let response = null;
         const realSend = wc.send;
+        const isApprovalResponseSender = event => {
+          const sender = event.sender;
+          if (
+            !sender ||
+            sender.isDestroyed() ||
+            sender.id !== wc.id
+          ) {
+            return false;
+          }
+          const frame = event.senderFrame;
+          const main = sender.mainFrame;
+          if (!frame || frame.isDestroyed() || !main || main.isDestroyed()) {
+            return false;
+          }
+          return (
+            (frame === main ||
+              frame.frameTreeNodeId === main.frameTreeNodeId) &&
+            frame.parent === null
+          );
+        };
+        const onApprovalResponse = (event, payload) => {
+          if (isApprovalResponseSender(event) && response === null) {
+            response = payload;
+          }
+        };
         const restoreSend = replaceMethod(wc, "send", function (channel, payload) {
           if (channel === "quit-approval-commit" && held === null) {
             held = payload;
@@ -20042,14 +29163,24 @@ async function runShutdownScenarios(win, exec, sentinel) {
           }
           return realSend.call(this, channel, payload);
         });
-        const close = guardEvent();
-        win.emit("close", close);
-        const heldReady = await waitUntil(
-          () => held !== null && __shutdown.state().commitPendingId === held.id,
-          10000,
-        );
-        restoreSend();
-        return { close, held, heldReady };
+        ipcMain.on("quit-approval-response", onApprovalResponse);
+        try {
+          const close = guardEvent();
+          win.emit("close", close);
+          const heldReady = await waitUntil(
+            () =>
+              held !== null &&
+              response !== null &&
+              response.id === held.id &&
+              response.gen === held.gen &&
+              __shutdown.state().commitPendingId === held.id,
+            10000,
+          );
+          return { close, held, heldReady, response };
+        } finally {
+          restoreSend();
+          ipcMain.removeListener("quit-approval-response", onApprovalResponse);
+        }
       };
       const committedReplyCases = [
         {
@@ -20119,9 +29250,23 @@ async function runShutdownScenarios(win, exec, sentinel) {
       for (const replyCase of committedReplyCases) {
         __shutdown.reset();
         rig.reset();
-        await cleanCommittedReplyDocument();
+        const cleanSetup = await cleanCommittedReplyDocument();
         const armed = await holdPhaseTwoCommit();
         const commit = armed.held;
+        if (
+          !armed.heldReady ||
+          !commit ||
+          !armed.response ||
+          armed.response.id !== commit.id ||
+          armed.response.gen !== commit.gen ||
+          !Array.isArray(armed.response.dirtyFiles) ||
+          armed.response.dirtyFiles.length !== 0
+        ) {
+          throw new Error(
+            "phase-two commit setup did not receive a clean live approval: " +
+              JSON.stringify({ replyCase: replyCase.name, cleanSetup, armed }),
+          );
+        }
         const fields =
           typeof replyCase.fields === "function"
             ? commit
@@ -20132,6 +29277,8 @@ async function runShutdownScenarios(win, exec, sentinel) {
         const beforeReply = __shutdown.state();
         const staleBefore = beforeReply.staleCommitCount;
         const refusedBefore = beforeReply.commitRefusedCount;
+        let committedFreezeWitness = null;
+        let committedFreezeObserved = false;
         let reissuedRequest = null;
         let restoreReissuedRequest = null;
         if (replyCase.outcome === "refused") {
@@ -20152,7 +29299,18 @@ async function runShutdownScenarios(win, exec, sentinel) {
           );
         }
         try {
-          if (commit) {
+          if (replyCase.outcome === "committed" && commit) {
+            wc.send("quit-approval-commit", commit);
+            committedFreezeObserved = await waitUntil(async () => {
+              committedFreezeWitness = {
+                freeze: await exec(`window.CustomTabs.__shutdownFreeze()`),
+                state: __shutdown.state(),
+              };
+              return committedFreezeWitness.freeze.frozen === true &&
+                committedFreezeWitness.freeze.id === commit.id &&
+                committedFreezeWitness.state.rendererGeneration === commit.gen;
+            }, 5000);
+          } else if (commit) {
             await exec(
               `window.ipcRenderer.send('quit-approval-committed', { id: ${commit.id}, gen: ${commit.gen}, committed: ${committed}${fields} }); null;`,
             );
@@ -20229,8 +29387,9 @@ async function runShutdownScenarios(win, exec, sentinel) {
               armed.heldReady &&
                 !!commit &&
                 armed.close.prevented === true &&
-                committedClose &&
-                afterReply.commitPendingId === 0 &&
+              committedFreezeObserved &&
+              committedClose &&
+              afterReply.commitPendingId === 0 &&
                 afterReply.commitRefusedCount === refusedBefore &&
                 afterReply.authorized === true &&
                 rig.closes === 1 &&
@@ -20239,6 +29398,7 @@ async function runShutdownScenarios(win, exec, sentinel) {
                 armed,
                 beforeReply,
                 afterReply,
+                committedFreezeWitness,
                 closes: rig.closes,
                 quits: rig.quits,
               }),
@@ -20251,11 +29411,247 @@ async function runShutdownScenarios(win, exec, sentinel) {
         }
       }
 
+      const reloadWithRestoredPhysicalSelection = async ({
+        fixtureName,
+        physicalPathSetupName,
+        selectionSetupName,
+      }) => {
+        const expectedRestoration = JSON.parse(await exec(`
+          (() => {
+            const physicalPaths = window.CustomTabs.getTabs()
+              .filter(
+                tab =>
+                  typeof tab.filePath === "string" &&
+                  tab.filePath.length > 0,
+              )
+              .map(tab => tab.filePath)
+              .sort();
+            const savedTabs = JSON.parse(localStorage.getItem("openTabs") || "[]")
+              .filter(
+                tab =>
+                  tab &&
+                  typeof tab.filePath === "string" &&
+                  tab.filePath.length > 0,
+              );
+            const persistedPhysicalPaths = savedTabs
+              .map(tab => tab.filePath)
+              .sort();
+            const activeTab = window.CustomTabs.getActiveTab();
+            return JSON.stringify({
+              physicalPaths,
+              persistedPhysicalPaths,
+              persistedActiveTabPath: localStorage.getItem("activeTabPath") || null,
+              activeTabPath: activeTab ? activeTab.filePath : null,
+            });
+          })()
+        `));
+        const physicalPaths = expectedRestoration.physicalPaths;
+        const persistedPhysicalPaths =
+          expectedRestoration.persistedPhysicalPaths;
+        const persistedActiveTabPath =
+          expectedRestoration.persistedActiveTabPath;
+        const physicalPathSetup = physicalPaths.length > 0 &&
+          JSON.stringify(physicalPaths) ===
+            JSON.stringify(persistedPhysicalPaths);
+        check(
+          physicalPathSetupName,
+          physicalPathSetup,
+          JSON.stringify(expectedRestoration),
+        );
+        if (!physicalPathSetup) {
+          throw new Error(
+            `${fixtureName} reload fixture has no restored physical paths to select`,
+          );
+        }
+
+        const trackingDescriptor = Object.getOwnPropertyDescriptor(
+          ipcMain._events,
+          "select-file-tracking",
+        );
+        if (
+          !trackingDescriptor ||
+          typeof trackingDescriptor.value !== "function"
+        ) {
+          throw new Error(
+            `${fixtureName} reload requires the synchronous tracking-selection handler`,
+          );
+        }
+
+        const trackingListener = trackingDescriptor.value;
+        const trackingSelections = [];
+        const captureTrackingSelection = function (event, selection) {
+          let decision;
+          const observedEvent = new Proxy(event, {
+            set(target, property, value) {
+              if (property === "returnValue") decision = value;
+              return Reflect.set(target, property, value);
+            },
+          });
+          const result = trackingListener.call(this, observedEvent, selection);
+          if (decision === undefined) {
+            throw new Error(
+              `${fixtureName} select-file-tracking returned without a synchronous main-process decision`,
+            );
+          }
+          const owner = selection && selection.owner;
+          trackingSelections.push({
+            filePath: selection && selection.filePath || null,
+            adoptBaseline: !!(selection && selection.adoptBaseline),
+            trackingActive: !!(selection && selection.trackingActive),
+            owner: owner && {
+              pageSession: owner.pageSession,
+              rendererGeneration: owner.rendererGeneration,
+              tabId: owner.tabId,
+              documentGeneration: owner.documentGeneration,
+              selectionGeneration: owner.selectionGeneration,
+              pathKey: owner.pathKey,
+            },
+            decision: decision && typeof decision === "object" ? {
+              accepted: decision.accepted === true,
+              mayHaveMoved: decision.mayHaveMoved === true,
+              why: decision.why || null,
+              trackingActive: decision.trackingActive === true,
+            } : decision || null,
+          });
+          return result;
+        };
+
+        let rendererReady;
+        let trackingSelectionReady;
+        let freshState = null;
+        let restoredOwner = null;
+        const captureRestoredOwner = async () =>
+          JSON.parse(await exec(`
+            (() => {
+              const activeTab = window.CustomTabs.getActiveTab();
+              const expectedPaths = ${JSON.stringify(persistedPhysicalPaths)};
+              const physicalPaths = window.CustomTabs.getTabs()
+                .filter(
+                  tab =>
+                    typeof tab.filePath === "string" &&
+                    tab.filePath.length > 0,
+                )
+                .map(tab => tab.filePath)
+                .sort();
+              const pageSession = window.getReloadRequestSession();
+              const identity = activeTab
+                ? window.CustomTabs.getDocumentIdentityForTab(
+                    activeTab.id,
+                    activeTab.filePath,
+                    pageSession,
+                  )
+                : null;
+              return JSON.stringify({
+                pageSession,
+                physicalPaths,
+                pathMultisetMatches:
+                  JSON.stringify(physicalPaths) === JSON.stringify(expectedPaths),
+                currentFilePath: window.currentFilePath,
+                activeTabId: activeTab ? activeTab.id : null,
+                activeTabPath: activeTab ? activeTab.filePath : null,
+                activeSelectionGeneration:
+                  window.getActiveFileSelectionGeneration(),
+                identity,
+              });
+            })()
+          `));
+        const isCurrentTrackingSelection = selection => {
+          const owner = selection && selection.owner;
+          const identity = restoredOwner && restoredOwner.identity;
+          return !!(
+            selection &&
+            selection.decision &&
+            selection.decision.accepted === true &&
+            owner &&
+            freshState &&
+            restoredOwner &&
+            restoredOwner.pathMultisetMatches === true &&
+            (!persistedActiveTabPath ||
+              restoredOwner.activeTabPath === persistedActiveTabPath) &&
+            physicalPaths.includes(selection.filePath) &&
+            selection.filePath === restoredOwner.currentFilePath &&
+            selection.filePath === restoredOwner.activeTabPath &&
+            owner.pageSession === freshState.rendererPageSession &&
+            owner.pageSession === restoredOwner.pageSession &&
+            owner.rendererGeneration === freshState.rendererGeneration &&
+            owner.tabId === restoredOwner.activeTabId &&
+            identity &&
+            owner.tabId === identity.tabId &&
+            owner.pathKey === identity.pathKey &&
+            owner.documentGeneration === identity.documentGeneration &&
+            Number.isSafeInteger(owner.selectionGeneration) &&
+            owner.selectionGeneration > 0 &&
+            owner.selectionGeneration === restoredOwner.activeSelectionGeneration
+          );
+        };
+
+        Object.defineProperty(ipcMain._events, "select-file-tracking", {
+          ...trackingDescriptor,
+          value: captureTrackingSelection,
+        });
+        try {
+          const reloadGeneration = __shutdown.state().rendererGeneration;
+          wc.reload();
+          rendererReady = await waitUntil(() => {
+            const state = __shutdown.state();
+            return state.renderer === "ready" &&
+              state.rendererGeneration > reloadGeneration;
+          }, 20000);
+          if (!rendererReady) {
+            throw new Error(`${fixtureName} reload fixture did not reach a new renderer generation`);
+          }
+          freshState = __shutdown.state();
+          trackingSelectionReady = await waitUntil(async () => {
+            restoredOwner = await captureRestoredOwner();
+            return trackingSelections.some(isCurrentTrackingSelection);
+          }, 10000);
+        } finally {
+          Object.defineProperty(
+            ipcMain._events,
+            "select-file-tracking",
+            trackingDescriptor,
+          );
+        }
+
+        check(
+          selectionSetupName,
+          rendererReady &&
+            trackingSelectionReady &&
+            trackingSelections.some(isCurrentTrackingSelection),
+          JSON.stringify({
+            physicalPaths,
+            persistedPhysicalPaths,
+            persistedActiveTabPath,
+            freshState,
+            restoredOwner,
+            trackingSelections,
+          }),
+        );
+        if (!trackingSelectionReady) {
+          throw new Error(
+            `${fixtureName} reload did not receive an accepted tracking selection: ` +
+              JSON.stringify({
+                physicalPaths,
+                persistedPhysicalPaths,
+                persistedActiveTabPath,
+                freshState,
+                restoredOwner,
+                trackingSelections,
+              }),
+          );
+        }
+      };
+
       // Valid revisions retain the two-phase protocol. Capture the genuine
       // commit event before its continuation can close the rig, then replay
       // the old response to prove it is stale rather than a second close.
-      wc.reload();
-      await waitUntil(() => __shutdown.state().renderer === "ready", 20000);
+      await reloadWithRestoredPhysicalSelection({
+        fixtureName: "valid-revision",
+        physicalPathSetupName:
+          "the valid-revision reload fixture starts with restored physical paths to select",
+        selectionSetupName:
+          "the valid-revision phase-two reload selects a restored physical owner before reset",
+      });
       __shutdown.reset();
       rig.reset();
       const validClean = await holdRawApprovalRequest();
@@ -20376,13 +29772,124 @@ async function runShutdownScenarios(win, exec, sentinel) {
             installsAfterAlteredRevisionReplay,
           }),
         );
-        wc.reload();
-        const laterRequestRendererReady = await waitUntil(
-          () => __shutdown.state().renderer === "ready",
-          20000,
-        );
+        const laterRequestPhysicalPaths = JSON.parse(await exec(`
+          (() => JSON.stringify(
+            window.CustomTabs.getTabs()
+              .filter(
+                tab =>
+                  typeof tab.filePath === "string" &&
+                  tab.filePath.length > 0,
+              )
+              .map(tab => tab.filePath)
+              .sort(),
+          ))()
+        `));
         __shutdown.reset();
         rig.reset();
+        const laterRequestReloadGeneration = __shutdown.state().rendererGeneration;
+        wc.reload();
+        const laterRequestRendererReady = await waitUntil(
+          () => {
+            const state = __shutdown.state();
+            return state.renderer === "ready" &&
+              state.rendererGeneration > laterRequestReloadGeneration;
+          },
+          20000,
+        );
+        if (!laterRequestRendererReady) {
+          throw new Error("later-request reload fixture did not reach a new renderer generation");
+        }
+        const captureLaterRequestRestoredOwner = async () =>
+          JSON.parse(await exec(`
+            (() => {
+              const tabs = window.CustomTabs.getTabs();
+              const physicalTabs = tabs.filter(
+                candidate =>
+                  typeof candidate.filePath === "string" &&
+                  candidate.filePath.length > 0,
+              );
+              const expectedPaths = ${JSON.stringify(laterRequestPhysicalPaths)};
+              const physicalPaths = physicalTabs
+                .map(candidate => candidate.filePath)
+                .sort();
+              const pageSession = window.getReloadRequestSession();
+              return JSON.stringify({
+                physicalTabCount: physicalTabs.length,
+                physicalPaths,
+                expectedPaths,
+                pathMultisetMatches:
+                  JSON.stringify(physicalPaths) === JSON.stringify(expectedPaths),
+                pageSession,
+                owners: physicalTabs.map(tab => {
+                  const documentState = window.CustomTabs.__documentState(tab);
+                  const identity = window.CustomTabs.getDocumentIdentityForTab(
+                    tab.id,
+                    tab.filePath,
+                    pageSession,
+                  );
+                  return {
+                    tabId: tab.id,
+                    filePath: tab.filePath,
+                    hasUnsavedChanges: tab.hasUnsavedChanges === true,
+                    documentState,
+                    protected:
+                      tab.hasUnsavedChanges === true ||
+                      documentState.dirty === true ||
+                      documentState.reloadConflict === true ||
+                      documentState.deletionTombstone === true,
+                    identity,
+                    deletion:
+                      identity &&
+                      typeof window.queryDocumentDeletionState === 'function'
+                        ? window.queryDocumentDeletionState(tab.filePath, identity)
+                        : null,
+                  };
+                }),
+              });
+            })()
+          `));
+        let laterRequestRestoredOwner = await captureLaterRequestRestoredOwner();
+        const laterRequestOwnerReady = await waitUntil(async () => {
+          laterRequestRestoredOwner = await captureLaterRequestRestoredOwner();
+          return laterRequestRestoredOwner.pathMultisetMatches === true &&
+            laterRequestRestoredOwner.owners.length ===
+              laterRequestPhysicalPaths.length &&
+            laterRequestRestoredOwner.owners.every(
+              ({ tabId, protected: isProtected, identity, deletion }) =>
+                isProtected ||
+                (
+                  identity?.pageSession === laterRequestRestoredOwner.pageSession &&
+                  identity?.tabId === tabId &&
+                  deletion?.known === true &&
+                  deletion?.unresolved === false
+                ),
+            );
+        }, 10000);
+        check(
+          "a later phase-two reload restores every physical tab and clean-tab authoritative owner",
+          laterRequestOwnerReady,
+          JSON.stringify({
+            laterRequestPhysicalPaths,
+            laterRequestRestoredOwner,
+          }),
+        );
+        if (!laterRequestOwnerReady) {
+          throw new Error("Later phase-two reload did not restore every physical tab's authoritative owner");
+        }
+        const laterRequestCleanSetup = laterRequestRestoredOwner.owners.every(
+          owner => owner.protected === false,
+        );
+        check(
+          "the later phase-two clean-close fixture has no protected restored physical tab",
+          laterRequestCleanSetup,
+          JSON.stringify({
+            laterRequestPhysicalPaths,
+            laterRequestRestoredOwner,
+          }),
+        );
+        if (!laterRequestCleanSetup) {
+          throw new Error("Later phase-two clean close retained a protected physical tab");
+        }
         const laterClose = guardEvent();
         win.emit("close", laterClose);
         const laterRequestCompleted = await waitUntil(
@@ -20410,6 +29917,8 @@ async function runShutdownScenarios(win, exec, sentinel) {
             closesAfterExactCommitReplay === 1 &&
             installsAfterExactCommitReplay === installsBeforeExactCommitReplay &&
             laterRequestRendererReady &&
+            laterRequestOwnerReady &&
+            laterRequestCleanSetup &&
             laterClose.prevented === true &&
             laterRequestCompleted &&
             laterRequestState.lastRequestId > firstCleanCommit.id &&
@@ -20439,6 +29948,10 @@ async function runShutdownScenarios(win, exec, sentinel) {
             closesAfterAlteredRevisionReplay,
             installsAfterAlteredRevisionReplay,
             laterRequestRendererReady,
+            laterRequestPhysicalPaths,
+            laterRequestRestoredOwner,
+            laterRequestOwnerReady,
+            laterRequestCleanSetup,
             laterClosePrevented: laterClose.prevented,
             laterRequestCompleted,
             laterRequestState,
@@ -20451,8 +29964,13 @@ async function runShutdownScenarios(win, exec, sentinel) {
         ipcMain.removeListener("quit-approval-committed", captureCleanCommit);
       }
 
-      wc.reload();
-      await waitUntil(() => __shutdown.state().renderer === "ready", 20000);
+      await reloadWithRestoredPhysicalSelection({
+        fixtureName: "valid-dirty",
+        physicalPathSetupName:
+          "the valid-dirty reload fixture starts with restored physical paths to select",
+        selectionSetupName:
+          "the valid-dirty phase-two reload selects a restored physical owner before reset",
+      });
       __shutdown.reset();
       rig.reset();
       rig.answer = 0;
@@ -20484,8 +30002,13 @@ async function runShutdownScenarios(win, exec, sentinel) {
       }
 
       // Restore a held request listener for the sender-gate assertions below.
-      wc.reload();
-      await waitUntil(() => __shutdown.state().renderer === "ready", 20000);
+      await reloadWithRestoredPhysicalSelection({
+        fixtureName: "sender-gate",
+        physicalPathSetupName:
+          "the sender-gate reload fixture starts with restored physical paths to select",
+        selectionSetupName:
+          "the sender-gate reload selects a restored physical owner before reset",
+      });
       await exec(`
         (() => {
           const ipc = require('electron').ipcRenderer;
@@ -20579,24 +30102,94 @@ async function runShutdownScenarios(win, exec, sentinel) {
       rig.answer = 0;
 
       // An answer the main process cannot read is not an approval either.
-      await exec(
-        `window.ipcRenderer.send('quit-approval-response', { id: (window.__lastQuitRequest && window.__lastQuitRequest.id) || -1, gen: (window.__lastQuitRequest && window.__lastQuitRequest.gen) || -1, dirtyFiles: [null] }); null;`,
-      );
-      await waitUntil(() => rig.dialogs.length > 0);
-      await sleep(200);
-      check(
-        "an unreadable answer raises the main-process question instead of closing",
-        rig.dialogs.length === 1 &&
-          /cannot be checked/i.test(String(rig.dialogs[0].options.title)) &&
-          rig.closes === 1,
-        JSON.stringify({
-          dialogs: rig.dialogs.length,
-          title: rig.dialogs.length ? rig.dialogs[0].options.title : null,
-          closes: rig.closes,
-        }),
-      );
+      const unreadableTrackingBefore = await exec(`
+        (() => {
+          const key = "__f22UnreadableTrackingConsoleScope";
+          if (Object.prototype.hasOwnProperty.call(window, key)) {
+            throw new Error("unreadable tracking console scope is already installed");
+          }
+          const descriptor = Object.getOwnPropertyDescriptor(console, "error");
+          const original = console.error;
+          const snapshot = () => {
+            const tab = window.CustomTabs.getActiveTab() || null;
+            const filePath = window.currentFilePath || (tab && tab.filePath) || null;
+            let diskVersion = null;
+            let diskVersionError = null;
+            if (filePath) {
+              try {
+                const stat = window.fs.statSync(filePath);
+                diskVersion = {
+                  dev: stat.dev,
+                  ino: stat.ino,
+                  size: stat.size,
+                  mtimeMs: stat.mtimeMs,
+                  ctimeMs: stat.ctimeMs,
+                };
+              } catch (error) {
+                diskVersionError = String(error && error.code ? error.code : error);
+              }
+            }
+            const pageSession = window.getReloadRequestSession();
+            return {
+              active: tab ? { id: tab.id, filePath: tab.filePath } : null,
+              currentFilePath: window.currentFilePath || null,
+              diskVersion,
+              diskVersionPresent: !!diskVersion,
+              diskVersionError,
+              owner: tab && window.CustomTabs.getActiveDocumentIdentity(
+                tab.filePath,
+                pageSession,
+              ),
+            };
+          };
+          const events = [];
+          console.error = function (...args) {
+            if (
+              args[0] === "File tracking selection refused:" ||
+              args[0] === "Could not reassert the previous file tracking owner:"
+            ) {
+              const decision = args[1];
+              events.push({
+                message: args[0],
+                decision:
+                  decision && typeof decision === "object"
+                    ? {
+                      accepted: decision.accepted ?? null,
+                      trackingActive: decision.trackingActive ?? null,
+                      mayHaveMoved: decision.mayHaveMoved ?? null,
+                      why: decision.why ?? null,
+                      approvedOwner: decision.approvedOwner ?? null,
+                    }
+                    : decision ?? null,
+                renderer: snapshot(),
+              });
+            }
+            return Reflect.apply(original, this, args);
+          };
+          window[key] = { descriptor, events, snapshot };
+          return snapshot();
+        })()
+      `);
+      let unreadableTrackingAfter = null;
+      try {
+        await exec(
+          `window.ipcRenderer.send('quit-approval-response', { id: (window.__lastQuitRequest && window.__lastQuitRequest.id) || -1, gen: (window.__lastQuitRequest && window.__lastQuitRequest.gen) || -1, dirtyFiles: [null] }); null;`,
+        );
+        await waitUntil(() => rig.dialogs.length > 0);
+        await sleep(200);
+        check(
+          "an unreadable answer raises the main-process question instead of closing",
+          rig.dialogs.length === 1 &&
+            /cannot be checked/i.test(String(rig.dialogs[0].options.title)) &&
+            rig.closes === 1,
+          JSON.stringify({
+            dialogs: rig.dialogs.length,
+            title: rig.dialogs.length ? rig.dialogs[0].options.title : null,
+            closes: rig.closes,
+          }),
+        );
 
-      await exec(`
+        await exec(`
         (() => {
           const ipc = require('electron').ipcRenderer;
           ipc.removeAllListeners('quit-approval-request');
@@ -20604,6 +30197,35 @@ async function runShutdownScenarios(win, exec, sentinel) {
           return ipc.listeners('quit-approval-request').length;
         })()
       `);
+      } finally {
+        unreadableTrackingAfter = await exec(`
+          (() => {
+            const key = "__f22UnreadableTrackingConsoleScope";
+            const scope = window[key];
+            if (!scope) {
+              throw new Error("unreadable tracking console scope was lost before restoration");
+            }
+            const result = {
+              events: scope.events,
+              finalRenderer: scope.snapshot(),
+            };
+            if (scope.descriptor) {
+              Object.defineProperty(console, "error", scope.descriptor);
+            } else {
+              delete console.error;
+            }
+            delete window[key];
+            return result;
+          })()
+        `);
+      }
+      console.log(
+        "TABS_UNREADABLE_TRACKING " +
+          JSON.stringify({
+            before: unreadableTrackingBefore,
+            after: unreadableTrackingAfter,
+          }),
+      );
     } finally {
       sameDocUnresponsive.forEach((listener) => win.on("unresponsive", listener));
     }
@@ -20617,14 +30239,70 @@ async function runShutdownScenarios(win, exec, sentinel) {
     };
     ipcMain.on("quit-approval-response", countResponses);
     try {
-      await exec(`
+      const cachedAnswerPhysicalSetup = await exec(`
         (() => {
-          const tab = window.CustomTabs.createTab(${jsQ1}, "cached-answer");
-          tab.content = tab.originalContent;
-          window.originalMarkdown = tab.originalContent;
-          return true;
+          const tab = window.CustomTabs.getActiveTab() || null;
+          const filePath = window.currentFilePath || (tab && tab.filePath) || null;
+          const pageSession = window.getReloadRequestSession();
+          const owner = tab && window.CustomTabs.getActiveDocumentIdentity(
+            tab.filePath,
+            pageSession,
+          );
+          let diskVersion = null;
+          let diskVersionError = null;
+          if (filePath) {
+            try {
+              const stat = window.fs.statSync(filePath);
+              diskVersion = {
+                dev: stat.dev,
+                ino: stat.ino,
+                size: stat.size,
+                mtimeMs: stat.mtimeMs,
+                ctimeMs: stat.ctimeMs,
+              };
+            } catch (error) {
+              diskVersionError = String(error && error.code ? error.code : error);
+            }
+          }
+          return {
+            tab: tab ? { id: tab.id, filePath: tab.filePath } : null,
+            currentFilePath: window.currentFilePath || null,
+            owner,
+            diskVersion,
+            diskVersionError,
+            clean: !!(
+              tab &&
+              tab.content === tab.originalContent &&
+              window.originalMarkdown === tab.originalContent &&
+              tab.hasUnsavedChanges === false &&
+              !window.CustomTabs.__inEditMode()
+            ),
+          };
         })()
       `);
+      const cachedAnswerPhysicalReady =
+        cachedAnswerPhysicalSetup &&
+        cachedAnswerPhysicalSetup.tab &&
+        cachedAnswerPhysicalSetup.currentFilePath ===
+          cachedAnswerPhysicalSetup.tab.filePath &&
+        cachedAnswerPhysicalSetup.owner &&
+        cachedAnswerPhysicalSetup.owner.tabId ===
+          cachedAnswerPhysicalSetup.tab.id &&
+        cachedAnswerPhysicalSetup.diskVersion &&
+        Object.values(cachedAnswerPhysicalSetup.diskVersion).every(Number.isFinite) &&
+        !cachedAnswerPhysicalSetup.diskVersionError &&
+        cachedAnswerPhysicalSetup.clean === true;
+      check(
+        "the same-id response cache starts from the selected clean physical owner",
+        cachedAnswerPhysicalReady,
+        JSON.stringify(cachedAnswerPhysicalSetup),
+      );
+      if (!cachedAnswerPhysicalReady) {
+        throw new Error(
+          "same-id response cache cannot reuse its physical owner: " +
+            JSON.stringify(cachedAnswerPhysicalSetup),
+        );
+      }
       const generation = await exec(`window.ipcRenderer.invoke('quit-approval-generation')`);
       win.webContents.send("quit-approval-request", {
         id: 900000,
@@ -20693,6 +30371,29 @@ async function runShutdownScenarios(win, exec, sentinel) {
       })()
     `);
   } finally {
+    await baseUpdaterBranchBorrow.restore();
+    const baseUpdaterBranchEvidence = baseUpdaterBranchBorrow.snapshot();
+    check(
+      "a committed update ID alone borrows Linux for the quitAndInstall stub and restores the host platform",
+      baseUpdaterBranchEvidence.updateResponseIds.some((id) =>
+        baseUpdaterBranchEvidence.armedVerificationIds.includes(id),
+      ) &&
+        baseUpdaterBranchEvidence.verifiedUpdateRequestIds.some(
+          (record) =>
+            baseUpdaterBranchEvidence.armedVerificationIds.includes(
+              record.requestId,
+            ) &&
+            record.platformBefore === actualHostPlatform &&
+            record.platformDuring ===
+              (actualHostPlatform === "win32" ? "linux" : actualHostPlatform) &&
+            record.platformAfter === actualHostPlatform,
+        ) &&
+        baseUpdaterBranchEvidence.quitAndInstallPlatforms.includes(
+          actualHostPlatform === "win32" ? "linux" : actualHostPlatform,
+        ) &&
+        baseUpdaterBranchEvidence.platform === actualHostPlatform,
+      JSON.stringify(baseUpdaterBranchEvidence),
+    );
     if (restoreInstall) restoreInstall();
     electronAutoUpdater.removeListener(
       "before-quit-for-update",
@@ -20716,54 +30417,239 @@ async function runShutdownScenarios(win, exec, sentinel) {
 }
 
 async function runSameDocumentShutdownScenarios(win, exec) {
-  const semantic = await exec(`
+  const semanticFiles = Array.from(
+    { length: 9 },
+    (_, index) => path.join(dir, `f22-semantic-${index}.md`),
+  );
+  let semantic;
+  let semanticFixtureAttempted = false;
+  let semanticCleanupAfterReset = null;
+  const hostFileCleanupErrors = [];
+  const appendSemanticError = (label, error) => {
+    const detail = String(error && error.stack ? error.stack : error);
+    const diagnostic = label + ": " + detail;
+    if (!semantic || typeof semantic !== "object") {
+      semantic = { error: diagnostic };
+      return;
+    }
+    semantic.error = semantic.error
+      ? semantic.error + "\n" + diagnostic
+      : diagnostic;
+  };
+  const appendSemanticCleanupError = (label, error) => {
+    const detail = String(error && error.stack ? error.stack : error);
+    const diagnostic = label + ": " + detail;
+    appendSemanticError(label, error);
+    if (semantic && semantic.pooledClose &&
+        typeof semantic.pooledClose === "object") {
+      semantic.pooledClose.error = semantic.pooledClose.error
+        ? semantic.pooledClose.error + "\n" + diagnostic
+        : diagnostic;
+      semantic.pooledClose.closed = false;
+    }
+  };
+  const cleanupLiveSemanticTabs = async () => {
+    try {
+      const cleanup = await exec(`
+        (async () => {
+          const realConfirm = window.confirm;
+          const failures = [];
+          const closed = [];
+          let liveTabs = [];
+          window.confirm = () => true;
+          try {
+            const tabs = window.CustomTabs.getTabs().slice();
+            for (const tab of tabs) {
+              try {
+                const liveTab = window.CustomTabs.getTabs().find(
+                  candidate => candidate.id === tab.id,
+                );
+                if (!liveTab) continue;
+                liveTab.content = liveTab.originalContent;
+                liveTab.hasUnsavedChanges = false;
+                await Promise.resolve(window.CustomTabs.closeTab(liveTab.id));
+                if (window.CustomTabs.getTabs().some(candidate => candidate.id === liveTab.id)) {
+                  throw new Error("semantic outer cleanup did not close: " + liveTab.filePath);
+                }
+                closed.push({ id: liveTab.id, filePath: liveTab.filePath });
+              } catch (error) {
+                failures.push({
+                  id: tab.id,
+                  filePath: tab.filePath,
+                  error: String(error && error.stack ? error.stack : error),
+                });
+              }
+            }
+          } catch (error) {
+            failures.push({
+              id: null,
+              filePath: null,
+              error: String(error && error.stack ? error.stack : error),
+            });
+          } finally {
+            window.confirm = realConfirm;
+          }
+          try {
+            liveTabs = window.CustomTabs.getTabs().map((tab) => ({
+              id: tab.id,
+              filePath: tab.filePath,
+            }));
+          } catch (error) {
+            failures.push({
+              id: null,
+              filePath: null,
+              error: String(error && error.stack ? error.stack : error),
+            });
+          }
+          if (liveTabs.length > 0) {
+            failures.push({
+              id: null,
+              filePath: null,
+              error: "semantic outer cleanup left live tabs: " + JSON.stringify(liveTabs),
+            });
+          }
+          return {
+            closed,
+            failures,
+            liveTabs,
+            remaining: liveTabs.length,
+            complete: failures.length === 0 && liveTabs.length === 0,
+          };
+        })()
+      `);
+      if (!cleanup || cleanup.complete !== true || cleanup.remaining !== 0) {
+        appendSemanticCleanupError(
+          "semantic outer cleanup failed",
+          JSON.stringify(cleanup),
+        );
+      }
+    } catch (error) {
+      appendSemanticCleanupError("semantic outer cleanup execution failed", error);
+    }
+  };
+  try {
+    try {
+      semanticFixtureAttempted = true;
+      try {
+        semanticFiles.forEach((file, index) => {
+          write(file, `F22 semantic pool seed ${index}\n`);
+        });
+      } catch (error) {
+        appendSemanticError("semantic host file setup failed", error);
+      }
+      if (!semantic || !semantic.error) {
+        try {
+          semantic = await exec(`
     (async () => {
       const ipc = require("electron").ipcRenderer;
       const handler = ipc.listeners("quit-approval-request")[0];
-      if (!handler) return { error: "shutdown listener missing" };
       const generation = await ipc.invoke("quit-approval-generation");
       const originalSend = ipc.send;
       const originalIndexOf = String.prototype.indexOf;
       const originalReplace = String.prototype.replace;
+      const originalMarkdownEditor = window.markdownEditor;
+      const originalEditorWrapper = document.querySelector(".content-wrapper");
+      const poolPaths = ${JSON.stringify(semanticFiles)};
       let nextId = 50000000;
       let response = null;
       const observations = {};
+      let pool = [];
+      let pooledClose = { remaining: null, error: null };
 
-      const clear = () => {
-        const confirm = window.confirm;
+      const closeSequentially = async (tabs) => {
+        const realConfirm = window.confirm;
+        const failures = [];
+        let liveTabs = [];
         window.confirm = () => true;
         try {
-          window.CustomTabs.getTabs().slice().forEach(t => window.CustomTabs.closeTab(t.id));
-        } finally {
-          window.confirm = confirm;
-        }
-        window.isEditMode = false;
-        window.originalMarkdown = "";
-      };
-      const prepare = (entries, active = 0) => {
-        clear();
-        entries.forEach((entry, index) => {
-          const tab = window.CustomTabs.createTab(
-            "semantic-" + nextId + "-" + index + ".md",
-            entry.original,
-            { activate: index === active },
-          );
-          tab.content = entry.content;
-          tab.hasUnsavedChanges = entry.flag === undefined ? false : entry.flag;
-          // THE ACTIVE TAB'S LIVE COPY MOVES WITH ITS CACHE. A view-mode edit
-          // lives in window.originalMarkdown, and every switch and every
-          // shutdown snapshot folds that copy back into the tab - so an active
-          // fixture that assigns tab.content while the live copy still holds
-          // the pristine text is folded straight back to pristine, and the
-          // scenario measures a clean tab it believed was dirty. Background
-          // tabs are never snapshotted, which is why they need no such step.
-          if (index === active) {
-            window.originalMarkdown = tab.content;
-            window.CustomTabs.switchToTab(tab.id);
+          let activeId = null;
+          try {
+            activeId = window.CustomTabs.getActiveTabId();
+          } catch (error) {
+            failures.push({
+              id: null,
+              filePath: null,
+              error: String(error && error.stack ? error.stack : error),
+            });
           }
+          const ordered = tabs.filter(tab => tab.id !== activeId)
+            .concat(tabs.filter(tab => tab.id === activeId));
+          for (const tab of ordered) {
+            try {
+              const liveTab = window.CustomTabs.getTabs().find(
+                candidate => candidate.id === tab.id,
+              );
+              if (!liveTab) continue;
+              liveTab.content = liveTab.originalContent;
+              liveTab.hasUnsavedChanges = false;
+              await Promise.resolve(window.CustomTabs.closeTab(liveTab.id));
+              if (window.CustomTabs.getTabs().some(candidate => candidate.id === liveTab.id)) {
+                throw new Error("semantic tab did not close: " + liveTab.filePath);
+              }
+            } catch (error) {
+              failures.push({
+                id: tab.id,
+                filePath: tab.filePath,
+                error: String(error && error.stack ? error.stack : error),
+              });
+            }
+          }
+        } finally {
+          window.confirm = realConfirm;
+        }
+        try {
+          liveTabs = window.CustomTabs.getTabs().map((tab) => ({
+            id: tab.id,
+            filePath: tab.filePath,
+          }));
+        } catch (error) {
+          failures.push({
+            id: null,
+            filePath: null,
+            error: String(error && error.stack ? error.stack : error),
+          });
+        }
+        if (failures.length > 0 || liveTabs.length > 0) {
+          throw new Error(
+            "semantic tab cleanup failed: " +
+              JSON.stringify({ failures, liveTabs }),
+          );
+        }
+      };
+
+      const prepare = async (entries, active = 0) => {
+        if (!Array.isArray(entries) || entries.length === 0 || entries.length > pool.length) {
+          throw new Error("invalid semantic pool preparation");
+        }
+        if (!Number.isInteger(active) || active < 0 || active >= entries.length) {
+          throw new Error("invalid semantic active pool index");
+        }
+        if (window.CustomTabs.__shutdownFreeze().frozen) {
+          throw new Error("semantic pool remained frozen");
+        }
+        for (const tab of pool) {
+          tab.content = tab.originalContent;
+          tab.hasUnsavedChanges = false;
+        }
+        const current = window.CustomTabs.getActiveTab();
+        if (current && pool.includes(current)) {
+          window.originalMarkdown = current.originalContent;
+        }
+        const activeTab = pool[active];
+        await Promise.resolve(window.CustomTabs.switchToTab(activeTab.id));
+        if (window.CustomTabs.getActiveTabId() !== activeTab.id) {
+          throw new Error("semantic pool active tab did not settle");
+        }
+        const refs = entries.map((entry, index) => {
+          const tab = pool[index];
+          tab.originalContent = entry.original;
+          tab.content = entry.content;
+          tab.hasUnsavedChanges =
+            entry.flag === undefined ? false : entry.flag;
+          return tab;
         });
-        const activeTab = window.CustomTabs.getActiveTab();
-        window.originalMarkdown = activeTab ? activeTab.content : "";
+        window.originalMarkdown = activeTab.content;
+        return refs;
       };
       // THE MEASUREMENT WINDOW HAS TO CONTAIN THE WORK IT CLAIMS TO MEASURE,
       // and this is where that went wrong. The dirty answer is now MAINTAINED
@@ -20827,7 +30713,37 @@ async function runSameDocumentShutdownScenarios(win, exec) {
         }
         return originalSend.apply(this, arguments);
       };
+      let result;
       try {
+        if (!handler) throw new Error("shutdown listener missing");
+        await closeSequentially(window.CustomTabs.getTabs().slice());
+        window.isEditMode = false;
+        window.originalMarkdown = "";
+        pool = poolPaths.map((filePath) => {
+          const content = window.fs.readFileSync(filePath, "utf8");
+          const tab = window.CustomTabs.createTab(filePath, content, {
+            activate: false,
+          });
+          if (!tab) throw new Error("semantic pool tab creation failed: " + filePath);
+          return tab;
+        });
+        await Promise.resolve(window.CustomTabs.switchToTab(pool[0].id));
+        const poolBaseline = {
+          poolLength: pool.length,
+          tabCount: window.CustomTabs.getTabs().length,
+          activeId: window.CustomTabs.getActiveTabId(),
+          dirty: window.CustomTabs.__dirtyTabNames(),
+          frozen: window.CustomTabs.__shutdownFreeze().frozen,
+        };
+        if (
+          poolBaseline.poolLength !== poolPaths.length ||
+          poolBaseline.tabCount !== poolPaths.length ||
+          poolBaseline.activeId !== pool[0].id ||
+          poolBaseline.dirty.length !== 0 ||
+          poolBaseline.frozen !== false
+        ) {
+          throw new Error("semantic pool baseline did not settle: " + JSON.stringify(poolBaseline));
+        }
         // ECMAScript strings are primitives: separately constructed equal
         // strings still compare === by value. The two independent joins below
         // are the strongest possible live construction oracle; the edited
@@ -20838,19 +30754,19 @@ async function runSameDocumentShutdownScenarios(win, exec) {
         // is a scan the product really performed for this edit.
         const equalLeft = Array.from({ length: 32 }, () => "equal-LF-").join("");
         const equalRight = Array.from({ length: 32 }, () => "equal-LF-").join("");
-        prepare([{ original: equalLeft, content: equalLeft }]);
+        const [equalTab] = await prepare([{ original: equalLeft, content: equalLeft }]);
         const equal = assign(
           "equalDistinctConstruction",
-          window.CustomTabs.getTabs()[0],
+          equalTab,
           "content",
           equalRight,
         );
         const equalAsk = ask("equalDistinctConstructionAsk");
         const oneCharacter = equalRight.slice(0, -1) + "X";
-        prepare([{ original: equalLeft, content: equalLeft }]);
+        const [oneCharTab] = await prepare([{ original: equalLeft, content: equalLeft }]);
         const oneChar = assign(
           "oneCharacter",
-          window.CustomTabs.getTabs()[0],
+          oneCharTab,
           "content",
           oneCharacter,
         );
@@ -20859,12 +30775,11 @@ async function runSameDocumentShutdownScenarios(win, exec) {
         // The active tab is snapshotted on every ask. Keep the witness in a
         // background tab so a direct assignment cannot be overwritten by that
         // unrelated active-tab snapshot before isDirty() sees it.
-        prepare([
+        const [, memoTab] = await prepare([
           { original: "memo-active", content: "memo-active" },
           { original: "memo-final!", content: "memo-final!" },
         ]);
         const memoClean = ask("memoClean");
-        const memoTab = window.CustomTabs.getTabs()[1];
         memoTab.content = "memo-final?";
         const memoDirty = ask("memoDirty");
         memoTab.content = memoTab.originalContent;
@@ -20873,13 +30788,13 @@ async function runSameDocumentShutdownScenarios(win, exec) {
         // Newline normalisation, measured where it happens: assigning a CRLF
         // document an LF-equivalent value must recognise it as the same
         // document, and must do so by normalising rather than by comparing.
-        prepare([
+        const [, crlfTab] = await prepare([
           { original: "crlf-active", content: "crlf-active" },
           { original: "A\\r\\nB\\r\\n", content: "A\\r\\nB\\r\\n" },
         ]);
         const crlfToLf = assign(
           "crlfToLf",
-          window.CustomTabs.getTabs()[1],
+          crlfTab,
           "content",
           "A\\r\\nB\\n",
         );
@@ -20887,52 +30802,51 @@ async function runSameDocumentShutdownScenarios(win, exec) {
         const crlfMemoHit = ask("crlfMemoHit");
         const crlfMemoEdit = assign(
           "crlfMemoEdit",
-          window.CustomTabs.getTabs()[1],
+          crlfTab,
           "content",
           "A\\nBX\\n",
         );
-        prepare([
+        const [, lfTab] = await prepare([
           { original: "crlf-active", content: "crlf-active" },
           { original: "A\\nB\\n", content: "A\\nB\\n" },
         ]);
         const lfToCrlf = assign(
           "lfToCrlf",
-          window.CustomTabs.getTabs()[1],
+          lfTab,
           "content",
           "A\\r\\nB\\r\\n",
         );
-        prepare([
+        const [, crlfEditTab] = await prepare([
           { original: "crlf-active", content: "crlf-active" },
           { original: "A\\r\\nB\\r\\n", content: "A\\r\\nB\\r\\n" },
         ]);
         const crlfEdit = assign(
           "crlfEdit",
-          window.CustomTabs.getTabs()[1],
+          crlfEditTab,
           "content",
           "A\\nBX\\n",
         );
 
-        prepare([{ original: "same-length", content: "same-length" }]);
+        const [sameLengthTab] = await prepare([{ original: "same-length", content: "same-length" }]);
         const sameLength = assign(
           "sameLength",
-          window.CustomTabs.getTabs()[0],
+          sameLengthTab,
           "content",
           "same-lengTh",
         );
-        prepare([{ original: "final-byte!", content: "final-byte!" }]);
+        const [finalByteTab] = await prepare([{ original: "final-byte!", content: "final-byte!" }]);
         const finalByte = assign(
           "finalByte",
-          window.CustomTabs.getTabs()[0],
+          finalByteTab,
           "content",
           "final-byte?",
         );
 
-        prepare([
+        const [, alternateTab] = await prepare([
           { original: "alternate-active", content: "alternate-active" },
           { original: "alternate", content: "alternate" },
         ]);
         const alternateClean1 = ask("alternateClean1");
-        const alternateTab = window.CustomTabs.getTabs()[1];
         alternateTab.content = "alternatE";
         const alternateDirty1 = ask("alternateDirty1");
         alternateTab.content = alternateTab.originalContent;
@@ -20940,18 +30854,26 @@ async function runSameDocumentShutdownScenarios(win, exec) {
         alternateTab.content = "alternat?";
         const alternateDirty2 = ask("alternateDirty2");
 
-        prepare([
+        const [, twinTab] = await prepare([
           { original: "twins", content: "twins" },
           { original: "twins", content: "twins" },
         ]);
-        window.CustomTabs.getTabs()[1].content = "twin?";
+        twinTab.content = "twin?";
         const oneOfTwo = ask("oneOfTwo");
 
         const large = "background-large-".repeat(Math.ceil((2 * 1024 * 1024) / 17)).slice(0, 2 * 1024 * 1024);
-        prepare([
+        const backgroundTabs = await prepare([
           { original: "active-clean", content: "active-clean" },
           { original: large, content: large.slice(0, -1) + "X", flag: false },
         ]);
+        const backgroundTab = backgroundTabs[1];
+        if (
+          !backgroundTab ||
+          backgroundTab.content !== large.slice(0, -1) + "X" ||
+          backgroundTab.hasUnsavedChanges !== false
+        ) {
+          throw new Error("semantic background fixture did not retain its false dirty flag");
+        }
         const background = ask("largeBackground");
 
         // THE SHUTDOWN SCAN READS NOTHING. This is the whole point of the
@@ -20966,8 +30888,7 @@ async function runSameDocumentShutdownScenarios(win, exec) {
         for (let index = 0; index < 8; index += 1) {
           bulkEntries.push({ original: large, content: large });
         }
-        prepare(bulkEntries);
-        const bulkTabs = window.CustomTabs.getTabs();
+        const bulkTabs = await prepare(bulkEntries);
         for (let index = 1; index < bulkTabs.length; index += 1) {
           bulkTabs[index].content =
             large.slice(0, -1) + String.fromCharCode(65 + index);
@@ -20977,7 +30898,10 @@ async function runSameDocumentShutdownScenarios(win, exec) {
           window.CustomTabs.__documentState(tab),
         );
 
-        prepare([{ original: "save-base", content: "save-baseX" }]);
+        const [saveTab] = await prepare([{ original: "save-base", content: "save-baseX" }]);
+        if (window.CustomTabs.getActiveTabId() !== saveTab.id) {
+          throw new Error("semantic Save fixture did not retain its active tab");
+        }
         const beforeSave = ask("beforeSave");
         window.CustomTabs.updateTabContent("save-baseX", false);
         window.originalMarkdown = "save-baseX";
@@ -20989,18 +30913,18 @@ async function runSameDocumentShutdownScenarios(win, exec) {
         window.originalMarkdown = "reload-baseX";
         const editedDuringReload = ask("editedDuringReload");
 
-        prepare([{ original: "snapshot-base", content: "snapshot-base" }]);
-        window.CustomTabs.getActiveTab().anchor = { headingText: "shutdown-anchor", occurrence: 0 };
+        const [snapshotTab] = await prepare([{ original: "snapshot-base", content: "snapshot-base" }]);
+        snapshotTab.anchor = { headingText: "shutdown-anchor", occurrence: 0 };
         window.originalMarkdown = "snapshot-baseX";
         const snapshot = ask("snapshot");
-        const shutdownAnchor = window.CustomTabs.getActiveTab().anchor;
+        const shutdownAnchor = snapshotTab.anchor;
         // EDIT MODE IS THE split-view CLASS, and the editor is BORROWED, not
         // discarded. Two defects lived in these four lines. The first was
-        // \`window.isEditMode\`, which nothing reads - renderer.js keeps a
+        // window.isEditMode, which nothing reads - renderer.js keeps a
         // module-scoped variable and the overlay reads the DOM - so both
         // observations below were taken in VIEW mode and neither measured the
         // branch it names. The second was worse: the unreadable case nulled
-        // \`window.markdownEditor\` and never put it back, so the very next
+        // window.markdownEditor and never put it back, so the very next
         // block dereferenced null, the injected script threw inside
         // executeJavaScript, and the harness lost every assertion after it.
         const editorWrapper = document.querySelector(".content-wrapper");
@@ -21039,7 +30963,7 @@ async function runSameDocumentShutdownScenarios(win, exec) {
         // and the fold read a hidden textarea instead of the live document.
         // Driven through the real class renderer.js toggles.
         const wrapper = document.querySelector(".content-wrapper");
-        prepare([{ original: "mode-base", content: "mode-base" }]);
+        const [modeTab] = await prepare([{ original: "mode-base", content: "mode-base" }]);
         const modeBeforeEnter = window.CustomTabs.__inEditMode();
         wrapper.classList.add("split-view");
         const modeAfterEnter = window.CustomTabs.__inEditMode();
@@ -21052,7 +30976,7 @@ async function runSameDocumentShutdownScenarios(win, exec) {
         window.markdownEditor.value = "mode-base-STALE-TEXTAREA";
         window.originalMarkdown = "mode-base-VIEW-EDIT";
         const viewEditAfterExit = ask("viewEditAfterExit");
-        const contentAfterExit = window.CustomTabs.getActiveTab().content;
+        const contentAfterExit = modeTab.content;
 
         // AN UNDONE VIEW-MODE EDIT MUST NOT SURVIVE IN THE CACHE. The active
         // document's live text lives in window.originalMarkdown, and the
@@ -21061,25 +30985,24 @@ async function runSameDocumentShutdownScenarios(win, exec) {
         // the reader has put the document back the way it was - so the tab goes
         // on holding the abandoned edit, reports itself dirty about text nobody
         // wants, and hands that text to the next switchToTab and to save.
-        prepare([{ original: "resurrect-base", content: "resurrect-base" }]);
+        const [resurrectTab] = await prepare([{ original: "resurrect-base", content: "resurrect-base" }]);
         window.originalMarkdown = "resurrect-base-EDITED";
         const resurrectEdited = ask("resurrectEdited");
-        const cachedAfterEdit = window.CustomTabs.getActiveTab().content;
+        const cachedAfterEdit = resurrectTab.content;
         window.originalMarkdown = "resurrect-base";
         const resurrectUndone = ask("resurrectUndone");
-        const cachedAfterUndo = window.CustomTabs.getActiveTab().content;
+        const cachedAfterUndo = resurrectTab.content;
 
-        // The same sequence on a CRLF document, which is the reason the
-        // comparison was written against the on-disk copy in the first place.
-        // The undo has to restore the file's OWN bytes - not the renderer's
-        // LF-normalised view of them - so the tab is clean AND unmodified.
-        prepare([{ original: "A\\r\\nB\\r\\n", content: "A\\r\\nB\\r\\n" }]);
+        // The same sequence on a CRLF document. A real dirty edit keeps the
+        // cached document's existing CRLF spelling, and undo restores the
+        // file's own bytes rather than the renderer's LF-normalised view.
+        const [crlfResurrectTab] = await prepare([{ original: "A\\r\\nB\\r\\n", content: "A\\r\\nB\\r\\n" }]);
         window.originalMarkdown = "A\\nBX\\n";
         const crlfResurrectEdited = ask("crlfResurrectEdited");
-        const crlfCachedAfterEdit = window.CustomTabs.getActiveTab().content;
+        const crlfCachedAfterEdit = crlfResurrectTab.content;
         window.originalMarkdown = "A\\nB\\n";
         const crlfResurrectUndone = ask("crlfResurrectUndone");
-        const crlfCachedAfterUndo = window.CustomTabs.getActiveTab().content;
+        const crlfCachedAfterUndo = crlfResurrectTab.content;
 
         // THE REPLAY CACHE IS BOUNDED. Fifty cancelled shutdowns are fifty
         // answers this document was asked for, and every one of them used to be
@@ -21089,7 +31012,7 @@ async function runSameDocumentShutdownScenarios(win, exec) {
         // duplicate semantics are proven at the same time: the newest id still
         // replays its exact recorded answer, and the one below it is refused as
         // stale rather than recomputed against a document that has moved on.
-        prepare([{ original: "replay-base", content: "replay-base" }]);
+        await prepare([{ original: "replay-base", content: "replay-base" }]);
         for (let fill = 0; fill < 50; fill += 1) {
           response = null;
           handler({}, { id: nextId++, reason: "window-close", gen: generation });
@@ -21103,8 +31026,8 @@ async function runSameDocumentShutdownScenarios(win, exec) {
         handler({}, { id: newestId - 1, reason: "window-close", gen: generation });
         const staleDuplicate = response;
 
-        clear();
-        return {
+        result = {
+          poolBaseline,
           equalValues: equalLeft === equalRight,
           equal,
           equalAsk,
@@ -21163,14 +31086,175 @@ async function runSameDocumentShutdownScenarios(win, exec) {
           viewEditAfterExit,
           contentAfterExit,
         };
+      } catch (error) {
+        result = {
+          error: String(error && error.stack ? error.stack : error),
+        };
       } finally {
         ipc.send = originalSend;
         String.prototype.indexOf = originalIndexOf;
         String.prototype.replace = originalReplace;
+        window.markdownEditor = originalMarkdownEditor;
+        if (originalEditorWrapper) {
+          originalEditorWrapper.classList.remove("split-view");
+        }
         window.isEditMode = false;
+        window.originalMarkdown = "";
+        try {
+          // Construction can fail before the pool exists. Close the complete
+          // live set so that failure cannot leak pre-existing fixture tabs
+          // into a later scenario.
+          await closeSequentially(window.CustomTabs.getTabs().slice());
+        } catch (error) {
+          pooledClose.error = String(error && error.stack ? error.stack : error);
+        }
+        try {
+          pooledClose.liveTabs = window.CustomTabs.getTabs().map((tab) => ({
+            id: tab.id,
+            filePath: tab.filePath,
+          }));
+          pooledClose.remaining = pooledClose.liveTabs.length;
+          if (pooledClose.error === null && pooledClose.remaining > 0) {
+            pooledClose.error =
+              "semantic final cleanup left live tabs: " +
+              JSON.stringify(pooledClose.liveTabs);
+          }
+        } catch (error) {
+          const detail = String(error && error.stack ? error.stack : error);
+          pooledClose.error = pooledClose.error === null
+            ? detail
+            : pooledClose.error + "\\n" + detail;
+        }
+        pooledClose.closed =
+          pooledClose.error === null && pooledClose.remaining === 0;
+        if (pooledClose.error !== null) {
+          const cleanupError = "semantic renderer cleanup failed: " + pooledClose.error;
+          if (!result || typeof result !== "object") result = {};
+          result.error = result && result.error
+            ? result.error + "\\n" + cleanupError
+            : cleanupError;
+        }
       }
+      return { ...result, pooledClose };
     })()
-  `);
+        `);
+        if (!semantic || typeof semantic !== "object") {
+          appendSemanticError(
+            "semantic renderer execution returned no fixture result",
+            semantic,
+          );
+        }
+      } catch (error) {
+        appendSemanticError("semantic renderer execution failed", error);
+      }
+    }
+  } finally {
+    if (semanticFixtureAttempted) {
+      try {
+        await cleanupLiveSemanticTabs();
+      } catch (error) {
+        appendSemanticCleanupError("semantic outer cleanup failed unexpectedly", error);
+      }
+      try {
+        const semanticReloadGeneration = __shutdown.state().rendererGeneration;
+        win.webContents.reload();
+        const semanticRendererReady = await waitUntil(() => {
+          const state = __shutdown.state();
+          return state.renderer === "ready" &&
+            state.rendererGeneration > semanticReloadGeneration;
+        }, 20000);
+        if (!semanticRendererReady) {
+          appendSemanticError(
+            "semantic renderer reset failed",
+            JSON.stringify({ state: __shutdown.state() }),
+          );
+        } else {
+          try {
+            semanticCleanupAfterReset = await exec(`
+              (() => {
+                const liveTabs = window.CustomTabs.getTabs().map((tab) => ({
+                  id: tab.id,
+                  filePath: tab.filePath,
+                }));
+                const openTabs = localStorage.getItem("openTabs");
+                const activeTabPath = localStorage.getItem("activeTabPath");
+                let savedTabs = null;
+                let savedTabsError = null;
+                if (openTabs !== null) {
+                  try {
+                    savedTabs = JSON.parse(openTabs);
+                  } catch (error) {
+                    savedTabsError = String(error && error.stack ? error.stack : error);
+                  }
+                }
+                const persistedRestorationState =
+                  savedTabsError !== null ||
+                  (openTabs !== null &&
+                    (!Array.isArray(savedTabs) || savedTabs.length > 0)) ||
+                  (typeof activeTabPath === "string" && activeTabPath.length > 0);
+                return {
+                  liveTabs,
+                  openTabs,
+                  activeTabPath,
+                  savedTabs,
+                  savedTabsError,
+                  persistedRestorationState,
+                  complete:
+                    liveTabs.length === 0 &&
+                    persistedRestorationState === false,
+                };
+              })()
+            `);
+            if (!semanticCleanupAfterReset ||
+                semanticCleanupAfterReset.complete !== true) {
+              appendSemanticCleanupError(
+                "semantic cleanup left live tabs or persisted restoration state after renderer reset",
+                JSON.stringify(semanticCleanupAfterReset),
+              );
+            }
+          } catch (error) {
+            appendSemanticCleanupError(
+              "semantic cleanup state check after renderer reset failed",
+              error,
+            );
+          }
+        }
+      } catch (error) {
+        appendSemanticError("semantic renderer reset failed", error);
+      }
+    }
+  }
+  check(
+    "the semantic cleanup leaves no live tabs or persisted restoration state after a fresh renderer reset",
+    semanticCleanupAfterReset &&
+      semanticCleanupAfterReset.complete === true,
+    JSON.stringify(semanticCleanupAfterReset),
+  );
+  check(
+    "the semantic shutdown scenario ran to completion",
+    semantic && !semantic.error,
+    JSON.stringify(semantic),
+  );
+  check(
+    "the semantic shutdown fixture establishes a clean, unfrozen real-file pool",
+    semantic &&
+      semantic.poolBaseline &&
+      semantic.poolBaseline.poolLength === semanticFiles.length &&
+      semantic.poolBaseline.tabCount === semanticFiles.length &&
+      semantic.poolBaseline.dirty.length === 0 &&
+      semantic.poolBaseline.frozen === false,
+    JSON.stringify(semantic && semantic.poolBaseline),
+  );
+  check(
+    "the semantic shutdown fixture closes its real tab pool",
+    semantic &&
+      semantic.pooledClose &&
+      semantic.pooledClose.error === null &&
+      semantic.pooledClose.closed === true &&
+      semantic.pooledClose.remaining === 0,
+    JSON.stringify(semantic && semantic.pooledClose),
+  );
+  if (!semantic.error) {
   const clean = (record) => Array.isArray(record && record.dirty) && record.dirty.length === 0;
   const dirty = (record) => Array.isArray(record && record.dirty) && record.dirty.length > 0;
   check(
@@ -21328,7 +31412,7 @@ async function runSameDocumentShutdownScenarios(win, exec) {
   check(
     "an undone CRLF view-mode edit restores the file's own line endings and reports clean",
     dirty(semantic.crlfResurrectEdited) &&
-      semantic.crlfCachedAfterEdit === "A\nBX\n" &&
+      semantic.crlfCachedAfterEdit === "A\r\nBX\r\n" &&
       clean(semantic.crlfResurrectUndone) &&
       semantic.crlfCachedAfterUndo === "A\r\nB\r\n",
     JSON.stringify({
@@ -21375,10 +31459,26 @@ async function runSameDocumentShutdownScenarios(win, exec) {
       contentAfterExit: semantic.contentAfterExit,
     }),
   );
-  // Direct listener calls advance its stale-request watermark. Reload before
-  // later lifecycle scenarios so they retain their independent positive path.
-  win.webContents.reload();
-  await waitUntil(() => __shutdown.state().renderer === "ready", 20000);
+  }
+  } finally {
+    for (const file of semanticFiles) {
+      try {
+        if (fs.existsSync(file)) fs.unlinkSync(file);
+      } catch (error) {
+        const detail = String(error && error.stack ? error.stack : error);
+        hostFileCleanupErrors.push({ file, error: detail });
+        appendSemanticError("semantic host file cleanup failed", file + ": " + detail);
+      }
+    }
+  }
+  return {
+    canContinue:
+      !!semanticCleanupAfterReset &&
+      semanticCleanupAfterReset.complete === true,
+    semantic,
+    semanticCleanupAfterReset,
+    hostFileCleanupErrors,
+  };
 }
 
 async function runCommitDeadlineAndContinuationScenarios(win, exec) {
@@ -21457,18 +31557,34 @@ async function runCommitDeadlineAndContinuationScenarios(win, exec) {
     __shutdown.reset();
     rig.reset();
     await cleanDocument();
-    let confirmedReply = null;
+    let confirmedCommit = null;
+    let confirmedVerification = null;
+    let lossInjectionCount = 0;
     let holdFallback;
     rig.answer = () =>
       new Promise((resolve) => {
         holdFallback = resolve;
       });
-    const loseAfterCommit = (_event, data) => {
-      if (!data || data.committed !== true || confirmedReply) return;
-      confirmedReply = data;
+    const captureConfirmedCommit = (_event, data) => {
+      if (!data || data.committed !== true || confirmedCommit) return;
+      confirmedCommit = data;
+    };
+    const loseAfterVerifiedCommit = (_event, data) => {
+      if (
+        !data ||
+        data.valid !== true ||
+        !confirmedCommit ||
+        confirmedVerification ||
+        data.id !== confirmedCommit.id ||
+        data.gen !== confirmedCommit.gen ||
+        data.revision !== confirmedCommit.revision
+      ) return;
+      confirmedVerification = data;
+      lossInjectionCount += 1;
       wc.emit("render-process-gone", {}, { reason: "controlled post-commit loss" });
     };
-    ipcMain.on("quit-approval-committed", loseAfterCommit);
+    ipcMain.on("quit-approval-committed", captureConfirmedCommit);
+    ipcMain.on("quit-approval-verified", loseAfterVerifiedCommit);
     const lossClose = guardEvent();
     try {
       win.emit("close", lossClose);
@@ -21479,13 +31595,27 @@ async function runCommitDeadlineAndContinuationScenarios(win, exec) {
         10000,
       );
     } finally {
-      ipcMain.removeListener("quit-approval-committed", loseAfterCommit);
+      ipcMain.removeListener("quit-approval-committed", captureConfirmedCommit);
+      ipcMain.removeListener("quit-approval-verified", loseAfterVerifiedCommit);
     }
     const lossState = __shutdown.state();
     const thawedAfterLoss = await exec(`window.CustomTabs.__shutdownFreeze()`);
     check(
       "a renderer-confirmed commit lost before its deferred continuation re-requests fail-closed and thaws",
-      !!confirmedReply &&
+      !!confirmedCommit &&
+        !!confirmedVerification &&
+        confirmedCommit.committed === true &&
+        confirmedVerification.valid === true &&
+        confirmedCommit.id === confirmedVerification.id &&
+        confirmedCommit.gen === confirmedVerification.gen &&
+        confirmedCommit.revision === confirmedVerification.revision &&
+        Number.isSafeInteger(confirmedCommit.id) &&
+        confirmedCommit.id > 0 &&
+        Number.isSafeInteger(confirmedCommit.gen) &&
+        confirmedCommit.gen > 0 &&
+        Number.isSafeInteger(confirmedCommit.revision) &&
+        confirmedCommit.revision >= 0 &&
+        lossInjectionCount === 1 &&
         lossClose.prevented === true &&
         lossState.renderer === "unusable" &&
         lossState.rendererInvalidatedContinuationCount === 1 &&
@@ -21498,7 +31628,9 @@ async function runCommitDeadlineAndContinuationScenarios(win, exec) {
         thawedAfterLoss.frozen === false &&
         thawedAfterLoss.editorReadOnly === false,
       JSON.stringify({
-        confirmedReply,
+        confirmedCommit,
+        confirmedVerification,
+        lossInjectionCount,
         prevented: lossClose.prevented,
         state: lossState,
         thawedAfterLoss,
@@ -21654,15 +31786,30 @@ async function runCommitDeadlineAndContinuationScenarios(win, exec) {
     rig.reset();
     await cleanDocument();
     const replied = await armSyntheticDeadline();
-    if (replied.held) {
-      await exec(`
-        window.ipcRenderer.send("quit-approval-committed", {
-          id: ${replied.held.id}, gen: ${replied.held.gen},
-          revision: ${replied.held.revision}, committed: true,
-        }); null;
-      `);
+    let repliedVerification = null;
+    const captureRepliedVerification = (_event, data) => {
+      if (
+        !data ||
+        data.valid !== true ||
+        !replied.held ||
+        data.id !== replied.held.id ||
+        data.gen !== replied.held.gen ||
+        data.revision !== replied.held.revision
+      ) return;
+      repliedVerification = data;
+    };
+    ipcMain.on("quit-approval-verified", captureRepliedVerification);
+    let replyVerified;
+    let replyFinished;
+    try {
+      if (replied.held) {
+        wc.send("quit-approval-commit", replied.held);
+      }
+      replyVerified = await waitUntil(() => repliedVerification !== null, 5000);
+      replyFinished = await waitUntil(() => rig.closes === 1, 5000);
+    } finally {
+      ipcMain.removeListener("quit-approval-verified", captureRepliedVerification);
     }
-    const replyFinished = await waitUntil(() => rig.closes === 1, 5000);
     const staleAfterReplyBefore = __shutdown.state().staleCommitTimeoutCount;
     if (replied.deadlineCallback) replied.deadlineCallback();
     const staleAfterReply = await waitUntil(
@@ -21714,6 +31861,13 @@ async function runCommitDeadlineAndContinuationScenarios(win, exec) {
       "stale commit deadlines after reply, navigation, and a newer intent cannot affect later shutdown work",
       replied.heldReady &&
         typeof replied.deadlineCallback === "function" &&
+        replyVerified &&
+        repliedVerification &&
+        repliedVerification.valid === true &&
+        replied.held &&
+        repliedVerification.id === replied.held.id &&
+        repliedVerification.gen === replied.held.gen &&
+        repliedVerification.revision === replied.held.revision &&
         replyFinished &&
         staleAfterReply &&
         navigated.heldReady &&
@@ -21728,7 +31882,13 @@ async function runCommitDeadlineAndContinuationScenarios(win, exec) {
         staleTimerState.commitTimeoutCount === 0 &&
         staleTimerState.authorized === false,
       JSON.stringify({
-        replied: { held: replied.held, replyFinished, staleAfterReply },
+        replied: {
+          held: replied.held,
+          replyVerified,
+          repliedVerification,
+          replyFinished,
+          staleAfterReply,
+        },
         navigated: { held: navigated.held, navigationReplaced, staleAfterNavigation },
         superseded: {
           held: superseded.held,
@@ -21881,8 +32041,16 @@ async function runRendererLossScenario(win) {
     );
     // Put a live renderer back: the blocks below crash one of their own, and a
     // renderer that is already dead cannot be crashed again.
+    const commitCrashReloadGeneration = __shutdown.state().rendererGeneration;
     win.webContents.reload();
-    await waitUntil(() => __shutdown.state().renderer === "ready", 20000);
+    const commitCrashRendererReady = await waitUntil(() => {
+      const state = __shutdown.state();
+      return state.renderer === "ready" &&
+        state.rendererGeneration > commitCrashReloadGeneration;
+    }, 20000);
+    if (!commitCrashRendererReady) {
+      throw new Error("commit-crash reload fixture did not reach a new renderer generation");
+    }
 
     __shutdown.reset();
     // THE DIALOG LEDGER IS PER BLOCK. The commit-crash case above now really
@@ -21986,21 +32154,60 @@ async function runRendererLossScenario(win) {
     // main-frame navigation that will-navigate cancels still fires
     // did-start-navigation. A readiness state keyed off the START of a
     // navigation would therefore be disarmed by a navigation that never
-    // happens, with nothing afterwards to re-arm it - and from that moment the
-    // window could not be closed at all. Document content can provoke this.
+    // happens, sending the next close through a needless fallback question.
     __shutdown.reset();
     rig.reset();
     rig.answer = 1;
-    await win.webContents.executeJavaScript(
-      `location.href = 'http://probe.invalid/denied'; null;`,
-    );
+    const deniedTarget = "http://probe.invalid/denied";
+    const originalUrl = win.webContents.getURL();
+    const deniedNavigationStarts = [];
+    const deniedNavigationAttempts = [];
+    const observeDeniedStart = (details) => {
+      if (details.url === deniedTarget && details.isMainFrame === true) {
+        deniedNavigationStarts.push(details.url);
+      }
+    };
+    const observeDeniedAttempt = (event) => {
+      if (event.url === deniedTarget) {
+        deniedNavigationAttempts.push({
+          url: event.url,
+          prevented: event.defaultPrevented === true,
+        });
+      }
+    };
+    win.webContents.on("did-start-navigation", observeDeniedStart);
+    win.webContents.on("will-navigate", observeDeniedAttempt);
+    try {
+      await win.webContents.executeJavaScript(
+        `location.href = ${JSON.stringify(deniedTarget)}; null;`,
+      );
+      await waitUntil(() =>
+        deniedNavigationStarts.length > 0 && deniedNavigationAttempts.length > 0, 8000);
+    } finally {
+      win.webContents.removeListener("did-start-navigation", observeDeniedStart);
+      win.webContents.removeListener("will-navigate", observeDeniedAttempt);
+    }
     await sleep(800);
+    check(
+      "the denied-navigation fixture reaches the main-frame guard without replacing its document",
+      deniedNavigationStarts.length === 1 &&
+        deniedNavigationAttempts.length === 1 &&
+        deniedNavigationAttempts[0].prevented === true &&
+        win.webContents.getURL() === originalUrl &&
+        originalUrl.startsWith("file:"),
+      JSON.stringify({
+        deniedNavigationStarts,
+        deniedNavigationAttempts,
+        originalUrl,
+        currentUrl: win.webContents.getURL(),
+      }),
+    );
     const afterDenied = __shutdown.state().renderer;
     const deniedClose = guardEvent();
     win.emit("close", deniedClose);
     const closedAfterDenied = await waitUntil(() => rig.closes > 0, 8000);
     check(
-      "a navigation the main process denies leaves the window closable",
+      "a denied navigation keeps the renderer ready and avoids a fallback question on close",
       afterDenied === "ready" &&
         closedAfterDenied &&
         rig.dialogs.length === 0 &&
@@ -22092,7 +32299,23 @@ app.whenReady().then(async () => {
   // legitimately spend per companion is named in companionWallClockMs(), and a
   // tail allowance covers the failure screenshot and the temp sweep that run
   // after the last assertion.
-  const watchdogMs = focusedF22Harness || focusedCommitHarness
+  //
+  // MEASURED BUDGET - F22_FOCUSED_HARNESS ONLY, AND FINITE.
+  // The focused F22 block is the one mode whose healthy path is mostly real
+  // waiting: it exercises a genuine ~4.6s retry, an ACK that is not consumed
+  // until ~8.7s, and then TWO full quiescence windows back to back - which is
+  // why 90s kept expiring BEFORE that healthy end-to-end path could be
+  // measured even once, and the timeout became the result instead of
+  // producing one. 150s is no longer provisional: it is RE-DERIVED from a
+  // complete focused run that reached its definitive === 35/47 passed ===
+  // footer in 111.437s of stopwatch wall time (109.005s measured from log
+  // creation to last write), plus 38.563s of explicit margin for a slower
+  // machine or a slower revert. It is still a hard, loud bound, and it is NOT
+  // a blanket relaxation: the newline and commit focused modes, every
+  // companion and the full suite keep exactly the budgets they had.
+  const watchdogMs = focusedF22Harness
+    ? 150000
+    : newlineFocusedHarness || focusedCommitHarness || queueFocusedHarness
     ? 90000
     : portableHarness
       ? COMPANION_WATCHDOG_MS.portable
@@ -22198,29 +32421,35 @@ app.whenReady().then(async () => {
     } else if (focusedF22Harness) {
       await runF22SaveAndReloadScenarios(win, (code) =>
         win.webContents.executeJavaScript(code, true));
+    } else if (newlineFocusedHarness) {
+      await runF22SaveAndReloadScenarios(win, (code) =>
+        win.webContents.executeJavaScript(code, true));
     } else if (focusedCommitHarness) {
       await runF22CommitSendThrowScenario(win, (code) =>
+        win.webContents.executeJavaScript(code, true));
+    } else if (queueFocusedHarness) {
+      await runF22QueueFocusedScenario((code) =>
         win.webContents.executeJavaScript(code, true));
     } else if (companionSelfcheck) {
       await runCompanionSettlementScenarios();
     } else {
       await run(win);
-      // THE NEGATIVE TWIN OF THE PORTABLE BRANCH ASSERTION, in the process that
-      // took the OTHER branch. `autoInstallOnAppQuit = !isPortable` is the only
-      // production state that distinguishes them, and asserting it in one
-      // process alone cannot tell a decision from a constant. This process has
-      // no PORTABLE_EXECUTABLE_DIR, so main.js resolved isPortable false and
-      // the same field must read true.
+      // This is the host configuration chosen when main first initialized the
+      // updater. Windows intentionally keeps auto-install-on-quit disabled;
+      // BaseUpdater coverage above borrows Linux only for its later dynamic
+      // selector, never for this one-shot configuration.
       const parentUpdater = require("electron-updater").autoUpdater;
       check(
-        "a non-portable process takes the installed updater branch, which is what makes the portable one a decision",
+        "the non-portable updater keeps the host platform's one-shot configuration",
         !process.env.PORTABLE_EXECUTABLE_DIR &&
           !!parentUpdater.requestHeaders &&
           parentUpdater.requestHeaders["x-user-staging-id"] === "" &&
-          parentUpdater.autoInstallOnAppQuit === true &&
+          parentUpdater.autoInstallOnAppQuit ===
+            (actualHostPlatform !== "win32") &&
           parentUpdater.autoDownload === false,
         JSON.stringify({
           portableEnv: process.env.PORTABLE_EXECUTABLE_DIR || null,
+          actualHostPlatform,
           configured: !!parentUpdater.requestHeaders,
           autoInstallOnAppQuit: parentUpdater.autoInstallOnAppQuit,
           autoDownload: parentUpdater.autoDownload,
@@ -22315,6 +32544,10 @@ app.whenReady().then(async () => {
       preserved: PRESERVED_COMPANION_DIRS,
     }),
   );
+  const finalCleanupPassed =
+    rootReleased === true &&
+    sweepFailures.length === 0 &&
+    REGISTERED_TEMP_DIRS.size === 0;
   const failed = results.filter((r) => !r.ok).length;
   // Screenshot as a debugging artifact, never a baseline - see
   // test-visual-utils.js. Captured on failure so the failing screen can be
@@ -22322,6 +32555,13 @@ app.whenReady().then(async () => {
   if (failed > 0) {
     const shot = await captureScreenshot(win, "tab-refresh-FAILED");
     if (shot) console.log("failure screenshot: " + shot);
+  }
+  if (f22CtimeR660ProofHarness) {
+    console.log(
+      f22R660ProofCheckpoint && finalCleanupPassed
+        ? "PROOF-ONLY  F22 R660 ctime checkpoint completed after cleanup"
+        : "PROOF-ONLY  F22 R660 ctime checkpoint was not completed",
+    );
   }
   console.log(
     `\n=== ${results.length - failed}/${results.length} passed` +

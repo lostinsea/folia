@@ -498,6 +498,8 @@ let fileToOpen = null;
 
 // File watching state
 let fileWatcher = null;
+let fileWatcherKind = null;
+let fileWatcherRearmPending = false;
 let watchedFilePath = null;
 let watchedFileKey = null;
 // Set while the renderer has asked us to stop reporting external changes
@@ -511,8 +513,1502 @@ const documentModifiedTimes = new Map();
 const documentVersions = new Map();
 const documentsWithUnadoptedChanges = new Set();
 const pathsWithUnadoptedChanges = new Set();
+const deletionOverflowDocumentMarkerRefs = new Map();
+const deletionOverflowPathMarkerRefs = new Map();
 const deletedDocuments = new Set();
+const pathOnlyDeletionEvidence = new Map();
+const pathOnlyDeletionByPathKey = new Map();
+const documentDeletionTombstones = new Map();
+const deletionTombstonesBySpelling = new Map();
+const deletionTombstonesByPathKey = new Map();
+const deletionTombstonesById = new Map();
 const filePathAliases = new Map();
+
+// WHO A DELETION IS FOR, AND WHETHER THEY HEARD IT.
+//
+// An external deletion used to be marked "reported" the moment it was sent.
+// The renderer, correctly, refuses a report that names a document other than
+// the one on screen - so a file deleted while its tab sat in the background was
+// announced to nobody, and the flag said it had been announced. Returning to
+// that tab never warned, and a save then recreated the file and cleared the
+// evidence that it had ever been deleted.
+//
+// A report is therefore a DELIVERY with an owner and an acknowledgement. The
+// owner is the document selection that held the watcher when the deletion was
+// observed - a page session and a tab, not a path, because a closed tab and a
+// new tab opened on the same path are not the tab that was reading the file.
+// The delivery stays open until its owner says it consumed it, and selecting
+// that owner again replays it exactly once per selection.
+let watchedOwner = null;
+let watchedWatcherGeneration = 0;
+let latestWatcherSelectionGeneration = 0;
+let nextDeletionDeliveryId = 0;
+const deletionDeliveries = new Map();
+const DELETION_DELIVERY_ACK_TIMEOUT_MS = 4000;
+const DELETION_DELIVERY_RETRY_DELAY_MS = 100;
+const DELETION_DELIVERY_MAX_RETRY_DELAY_MS = 4000;
+const MAX_DELETION_DELIVERIES = 256;
+// Owner tombstones are the durable facts. Only their retry/delivery records are
+// capacity-bounded against MAX_DELETION_DELIVERIES; compacting a delivery must
+// never forget the underlying owner-specific deletion.
+//
+// RETAINED DELETION EVIDENCE LIVES ONLY IN THIS PROCESS, AND ITS BUDGET IS
+// FIRM. One total allowance covers every unit of it:
+//   - an owner tombstone (documentDeletionTombstones, and the BySpelling,
+//     ByPathKey and ById indexes, which alias those same records),
+//   - a path-only (spelling, pathKey) pair (pathOnlyDeletionEvidence and
+//     pathOnlyDeletionByPathKey are two views of the same pair set),
+//   - an overflow evidence record (deletionOverflowEvidence, whose marker
+//     reference maps hold at most one entry per record).
+// deletionDeliveries only ever holds tombstone records, so it is bounded by
+// the same allowance as well as by MAX_DELETION_DELIVERIES.
+//
+// Evidence is NEVER evicted to make room. Evicting it is precisely how a later
+// Save silently recreates a document the reader deleted. When a new unit
+// cannot be reserved, this process LATCHES CLOSED FIRST and only then drops
+// the evidence: from that moment every Save is refused - including saves for
+// paths that have nothing to do with the dropped evidence - until Folia is
+// restarted. Nothing releases the latch. Adoption and retirement free
+// capacity, but they do not, and must not, re-open saving: the one fact that
+// was lost cannot be recovered by the arrival of unrelated facts.
+const MAX_DELETION_EVIDENCE = 100;
+let deletionEvidenceCapacityLatched = false;
+let deletionEvidenceCapacityLatchWhy = null;
+// THE LATCH IS SHARED, SO THE CAUSE TRAVELS WITH IT. Deletion evidence was
+// the first fact whose loss had to stop every write; the stale-owner fence is
+// the second. Both close the SAME one-way door - one flag, one set of refusal
+// sites, nothing to miss - and these three slots carry which fact was lost so
+// a refusal never tells the reader about deletions when a document generation
+// was what went missing.
+let saveAuthorityLatchReason = "deletion-evidence-capacity";
+let deletionEvidenceCapacityDropCount = 0;
+let deletionEvidenceCapacityRefusalCount = 0;
+// ONE notice for the whole latched session. A download has no result channel
+// to settle, so the only way to tell the reader is out of band - and a notice
+// per blocked download would be exactly the unbounded queue the latch's own
+// logging deliberately avoids.
+let deletionEvidenceCapacityDownloadNoticeShown = false;
+const deletionOverflowEvidence = new Map();
+let deletionEvidenceOverflowCount = 0;
+let deletionEvidenceRevision = 0;
+// Observability for the close/retire handshake: a refusal the reader has to be
+// asked about again, and a retirement that arrived describing an older event
+// for the same document than the one main now holds.
+let deletionRetirementUnacknowledgedCount = 0;
+let deletionRetirementEventDriftCount = 0;
+const knownDocumentOwners = new Map();
+const ownerDocumentBaselines = new Map();
+const quarantinedDocumentOwners = new Set();
+// SUPERSEDED, BUT NOT DISCARDED. A tab that moves to a new document generation
+// deauthorizes its previous owner immediately - that owner may never authorize
+// another save, watcher change or quarantine. It is a separate question whether
+// its FACTS may be dropped: a baseline that still pins a deletion the reader
+// has not answered, a quarantine, a grant or a save still settling all have to
+// outlive the supersession. Owners whose facts are still pinned stay in
+// `knownDocumentOwners` and are listed here instead, which is what keeps the
+// recognition table a superset of the other owner tables while denying the
+// stale owner any authority.
+const supersededDocumentOwners = new Set();
+const notifiedExternalVersionsByOwner = new Map();
+const pendingDiskAdoptions = new Map();
+const committedDiskAdoptions = new Map();
+const MAX_PENDING_DISK_ADOPTIONS = 128;
+const DISK_ADOPTION_CAPABILITY_MS = 60000;
+const MAX_KNOWN_DOCUMENT_OWNERS = 256;
+// THE STALE-OWNER FENCE IS EVIDENCE, AND NOTHING CAN REBUILD IT. For one tab
+// the fence is a single fact - "this tab has moved past generation N" - and
+// the only place it is written down is the owner table itself: the NEWEST
+// entry a tab has in `knownDocumentOwners` is what `canRememberDocumentOwner`
+// compares a late arrival against. An older entry, superseded or not, adds
+// nothing while a newer one is present, and its marker adds nothing either:
+// anything the older entry would refuse, the newer one refuses too, because
+// a tab's entries always carry DISTINCT document generations (a second entry
+// at the same generation is exactly what the newer-owner test refuses). So
+// dropping a COVERED entry is free, and dropping a tab's newest entry is the
+// one eviction that cannot be undone - after it, a delayed registration for a
+// generation the tab has already left reads as a first-ever registration and
+// would be admitted with a fresh baseline and full authority.
+//
+// The table is bounded, so a session with more live tabs than slots has to
+// give up one of the two. This process keeps the BOUND and gives up the
+// fence - but never silently, and never in a way a stale owner can use.
+// Before an eviction drops a tab's newest entry the save-authority latch
+// below is closed, so from that moment every write this process would make on
+// the reader's behalf is refused until Folia is restarted; and this counter
+// seals `canRememberDocumentOwner` against every owner it does not already
+// know, so the generation that lost its fence is never readmitted at all.
+let documentOwnerFenceDropCount = 0;
+// THE SEALED TABLE HAS NO RESULT CHANNEL EITHER. `register-document-owner` is
+// fire-and-forget: nothing waits on it and there is nothing to answer, so a
+// registration the seal refuses is invisible to the renderer. The tab it
+// belonged to stays on screen looking ordinary while it can no longer be
+// saved, is not watched, and cannot answer the close prompt's deletion query -
+// and NOTHING IN THIS PROCESS CAN TAKE IT AWAY: no main->renderer channel
+// closes, disables or quarantines a tab, and the ones that could be bent into
+// the shape of one (`file-open-result` settles a navigation token;
+// `file-deleted` would fabricate a deletion and retain a tombstone for it)
+// would have to lie to do it. So the reader is told ONCE, out of band, and
+// every later refusal is counted rather than announced: the seal is a one-way
+// door, and a message per refused registration is exactly the unbounded queue
+// the latch's own logging deliberately avoids.
+//
+// WHAT THIS DOES AND DOES NOT ANNOUNCE, EXACTLY. The counter and the notice
+// cover the BACKGROUND REGISTRATION refusal and nothing else, because that is
+// the only seal refusal with no way back to the renderer. The drop itself is
+// not announced here: it happens inside `rememberDocumentOwner`, which the
+// foreground open and the disk-adoption completion both sit on, and a dialog
+// raised there would land in the middle of an adoption - and it needs no
+// announcement of its own, because the latch it closes answers the reader
+// through the Save and export result channels they already await. The other
+// seal refusals - adoption admission, watcher authority - each return a
+// machine-readable reason the renderer surfaces itself.
+let documentOwnerSealRegistrationRefusalCount = 0;
+let documentOwnerSealNoticeShown = false;
+// ANNOUNCED ONCE, COUNTED FOREVER. The two refusals below are the only ones a
+// caller can drive without limit: once a fence has been dropped the table
+// refuses EVERY owner it does not already know, and a table that is full with
+// every entry pinned refuses EVERY insertion, so both answer the same way for
+// the rest of the session however often they are asked. A line per attempt
+// would let a repeated - or hostile - registration grow this process's log
+// without bound, which is the same unbounded queue the seal's reader notice
+// already refuses to be. Each condition is therefore logged in FULL the first
+// time it is reached and counted after that, with the counters saturating
+// rather than wrapping and reported in the diagnostics snapshot. Nothing else
+// is quietened: supersession, a newer sibling and a malformed envelope all
+// still log per refusal, because none of them is a session-long verdict. The
+// pinned refusal is announced once per CALLER, for the reason given with it.
+let documentOwnerSealAdmissionRefusalCount = 0;
+let documentOwnerSealAdmissionRefusalLogged = false;
+let documentOwnerTablePinnedRefusalCount = 0;
+let documentOwnerRegistrationTablePinnedRefusalLogged = false;
+let documentOwnerAdoptionTablePinnedRefusalLogged = false;
+// DELIBERATELY NOT "DID THE COUNTER MOVE". A caller that needs to know whether
+// the refusal it just took was the exhausted table cannot read that off the
+// count above: the count SATURATES, so once it stops moving a genuine refusal
+// and no refusal at all look identical, and the suppression this drives would
+// silently come undone at exactly the point it matters most. This flag is set
+// by every pinned refusal and cleared by the caller immediately before the
+// call it is asking about, so it carries one synchronous answer and no history.
+let lastDocumentOwnerRefusalWasTablePinned = false;
+const invalidatedSaveScopes = new WeakSet();
+const quarantinedSaveScopes = new WeakSet();
+
+function normaliseDocumentIdentity(
+  owner,
+  filePath,
+  { useCurrentPathIdentity = false } = {},
+) {
+  if (!owner || typeof owner !== "object") return null;
+  if (
+    typeof owner.pageSession !== "string" ||
+    owner.pageSession.length === 0 ||
+    owner.pageSession.length > 128 ||
+    !Number.isSafeInteger(owner.rendererGeneration) ||
+    owner.rendererGeneration <= 0 ||
+    !Number.isSafeInteger(owner.tabId) ||
+    owner.tabId <= 0 ||
+    !Number.isSafeInteger(owner.documentGeneration) ||
+    owner.documentGeneration <= 0 ||
+    typeof owner.pathKey !== "string" ||
+    owner.pathKey.length === 0 ||
+    owner.pathKey.includes("\0")
+  ) {
+    return null;
+  }
+  const spelling = filePathSpellingKey(filePath);
+  const pathKey = useCurrentPathIdentity
+    ? resolveCanonicalFileKey(filePath) || spelling
+    : canonicalFileKey(filePath);
+  if (!spelling || !pathKey || owner.pathKey !== pathKey) return null;
+  return Object.freeze({
+    pageSession: owner.pageSession,
+    rendererGeneration: owner.rendererGeneration,
+    tabId: owner.tabId,
+    documentGeneration: owner.documentGeneration,
+    pathKey,
+    spelling,
+  });
+}
+
+function normaliseDocumentOwner(owner, filePath, options = {}) {
+  const identity = normaliseDocumentIdentity(owner, filePath, options);
+  if (
+    !identity ||
+    !Number.isSafeInteger(owner.selectionGeneration) ||
+    owner.selectionGeneration <= 0
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    ...identity,
+    selectionGeneration: owner.selectionGeneration,
+  });
+}
+
+function documentOwnerKey(owner) {
+  return owner
+    ? [
+        owner.pageSession,
+        owner.rendererGeneration,
+        owner.tabId,
+        owner.documentGeneration,
+        owner.pathKey,
+        owner.spelling,
+      ].join("\0")
+    : null;
+}
+
+function sameDocumentOwner(left, right) {
+  return (
+    !!left &&
+    !!right &&
+    left.pageSession === right.pageSession &&
+    left.rendererGeneration === right.rendererGeneration &&
+    left.tabId === right.tabId &&
+    left.documentGeneration === right.documentGeneration &&
+    left.pathKey === right.pathKey &&
+    left.spelling === right.spelling
+  );
+}
+
+function sameDocumentGeneration(left, right) {
+  return (
+    !!left &&
+    !!right &&
+    left.pageSession === right.pageSession &&
+    left.rendererGeneration === right.rendererGeneration &&
+    left.tabId === right.tabId &&
+    left.documentGeneration === right.documentGeneration &&
+    left.spelling === right.spelling
+  );
+}
+
+function sameDocumentSelectionOwner(left, right) {
+  return (
+    sameDocumentOwner(left, right) &&
+    left.selectionGeneration === right.selectionGeneration
+  );
+}
+
+// An owner with a save in flight is the authority that save's result is
+// checked against. Evicting it to make room turns a completed disk write into
+// a settlement-only failure for a document that really was written, so the
+// oldest FORGETTABLE owner is taken instead of the oldest owner. A pinned
+// owner is one whose loss would cost a settlement, a grant, a quarantine, the
+// watch, or a deletion the reader has not answered, and capacity is never
+// allowed to buy room with any of those - when nothing is forgettable the new
+// registration is refused instead, so the cap itself still holds.
+function documentOwnerHasActiveSave(ownerKey) {
+  if (!ownerKey) return false;
+  for (const scope of activeSaveCorrelations.values()) {
+    if (documentOwnerKey(scope.owner) === ownerKey) return true;
+  }
+  for (const record of pendingSaveOutcomeDeliveries.values()) {
+    if (documentOwnerKey(record.scope.owner) === ownerKey) return true;
+  }
+  return false;
+}
+
+// AN OWNER IS ONE UNIT ACROSS SIX TABLES. Dropping the recognition entry on
+// its own leaves the baseline, the quarantine flag and the external-version
+// notice with nothing left to reach them - the supersession sweep below walks
+// `knownDocumentOwners`, so an owner missing from it is never revisited when
+// its tab moves on. Those orphans are not just memory: a surviving baseline
+// answers "this owner is still live" forever, which is the test that keeps a
+// tombstone from being retired and makes the sibling checks stat a document
+// that is gone. Keeping the tables in step is what makes the baseline table's
+// keys a subset of the recognition table's.
+function forgetDocumentOwnerAliases(ownerKey) {
+  knownDocumentOwners.delete(ownerKey);
+  ownerDocumentBaselines.delete(ownerKey);
+  quarantinedDocumentOwners.delete(ownerKey);
+  supersededDocumentOwners.delete(ownerKey);
+  notifiedExternalVersionsByOwner.delete(ownerKey);
+  latestAcceptedSaveSequenceByDocument.delete(ownerKey);
+}
+
+// `consumedCapability` names a COMMITTED grant whose holder is about to spend
+// it, so the pin it contributes is about to disappear. Only the committed map
+// is allowed to honour it, and a Map holds at most one entry per key, so the
+// discount can skip exactly the one grant the caller is consuming and nothing
+// else. Pending grants are never discounted: a capability leaves
+// `pendingDiskAdoptions` before it is committed, so a pending entry under that
+// string is a DIFFERENT grant and still pins its owners.
+function documentOwnerHasDiskAdoptionGrant(ownerKey, consumedCapability = null) {
+  for (const grant of pendingDiskAdoptions.values()) {
+    if (
+      grant.oldOwnerKey === ownerKey ||
+      grant.proposedOwnerKey === ownerKey
+    ) return true;
+  }
+  for (const [capability, grant] of committedDiskAdoptions) {
+    if (capability === consumedCapability) continue;
+    if (
+      grant.oldOwnerKey === ownerKey ||
+      grant.proposedOwnerKey === ownerKey
+    ) return true;
+  }
+  return false;
+}
+
+// Evidence is never retired to make room. An owner named by a tombstone, an
+// open report, or any path-only or overflow record for its path is pinned in
+// the tables instead, so a capacity decision can never be the thing that
+// discards a deletion the reader has not answered yet. The spelling arms are
+// deliberately wider than the path-key ones and are NOT redundant with them:
+// an owner whose path key has since been retargeted still has to be able to
+// answer `query-document-deletion-state`, which needs its baseline, and that
+// query reports path-only evidence by SPELLING. Forgetting such an owner would
+// leave a live document with deletion evidence it can no longer be told about.
+// The cost is that one retained record pins every owner sharing its path or
+// spelling; that is the side to err on when the alternative is silence.
+function documentOwnerHasRetainedEvidence(ownerKey, owner) {
+  if (
+    documentDeletionTombstones.has(ownerKey) ||
+    deletionDeliveries.has(ownerKey) ||
+    deletedDocuments.has(owner.pathKey) ||
+    pathKeyHasDeletionEvidence(owner.pathKey) ||
+    pathOnlyDeletionEvidence.has(owner.spelling) ||
+    deletionTombstonesBySpelling.has(owner.spelling)
+  ) return true;
+  for (const record of deletionOverflowEvidence.values()) {
+    if (
+      record.ownerKey === ownerKey ||
+      record.pathKey === owner.pathKey ||
+      record.spelling === owner.spelling
+    ) return true;
+  }
+  return false;
+}
+
+function documentOwnerCanBeForgotten(ownerKey, consumedCapability = null) {
+  const owner = knownDocumentOwners.get(ownerKey);
+  if (!owner) return false;
+  return (
+    !documentOwnerHasActiveSave(ownerKey) &&
+    !quarantinedDocumentOwners.has(ownerKey) &&
+    !sameDocumentOwner(owner, watchedOwner) &&
+    !documentOwnerHasDiskAdoptionGrant(ownerKey, consumedCapability) &&
+    !documentOwnerHasRetainedEvidence(ownerKey, owner)
+  );
+}
+
+// A TAB'S FENCE IS CARRIED BY EXACTLY ONE ROW. Two entries for the same tab
+// can never share a document generation - the newer-owner test in
+// `canRememberDocumentOwner` refuses a second owner at the same generation,
+// whatever its path or spelling - so the entries of a tab are totally ordered
+// by generation, and the newest one refuses everything the older ones would,
+// including their own keys. An entry with a strictly newer sibling in the
+// table is therefore COVERED: forgetting it, and the supersession marker that
+// travels with it, changes no admission decision. An entry with no such
+// sibling is the tab's high-water mark and is the fence itself.
+//
+// This is deliberately computed from the table rather than kept alongside it.
+// A separate high-water map would have to hold one entry per tab with nothing
+// bounding the tab count, which is the unbounded growth the owner cap exists
+// to prevent; the scratch map built here lives for one call and is bounded by
+// the table it is read from.
+function documentOwnerTabKey(owner) {
+  return owner
+    ? [owner.pageSession, owner.rendererGeneration, owner.tabId].join("\0")
+    : null;
+}
+
+function newestDocumentGenerationByTab() {
+  const newest = new Map();
+  for (const knownOwner of knownDocumentOwners.values()) {
+    const tabKey = documentOwnerTabKey(knownOwner);
+    const seen = newest.get(tabKey);
+    if (seen === undefined || knownOwner.documentGeneration > seen) {
+      newest.set(tabKey, knownOwner.documentGeneration);
+    }
+  }
+  return newest;
+}
+
+// `requireCoveredFence` asks for an eviction that costs NOTHING beyond the
+// entry itself. Callers that cannot pay the fence use it first and fall back
+// only after latching.
+function oldestForgettableDocumentOwnerKey(
+  consumedCapability = null,
+  { requireCoveredFence = false } = {},
+) {
+  const newestByTab = requireCoveredFence
+    ? newestDocumentGenerationByTab()
+    : null;
+  for (const [knownKey, knownOwner] of knownDocumentOwners) {
+    if (
+      newestByTab &&
+      !(
+        newestByTab.get(documentOwnerTabKey(knownOwner)) >
+        knownOwner.documentGeneration
+      )
+    ) continue;
+    if (documentOwnerCanBeForgotten(knownKey, consumedCapability)) {
+      return knownKey;
+    }
+  }
+  return null;
+}
+
+// LATCH FIRST, DROP SECOND, AND SEAL THE TABLE BEHIND BOTH. Once this returns
+// the fence for one tab is gone: nothing is left that can tell a delayed
+// registration naming a generation that tab has already left from a first
+// registration. Two things make that survivable. The latch is closed before
+// the evidence disappears, so this process refuses every write until it is
+// restarted; and the drop counter this bumps seals `canRememberDocumentOwner`
+// against any owner not already on record, so the stale owner is never
+// admitted in the first place rather than merely kept away from the disk.
+// Owners already in the table keep their marker and their newer siblings, so
+// live tabs are untouched. The counter is also the record that it happened,
+// and it is bumped on EVERY drop, including ones after the latch is shut.
+function dropDocumentOwnerFenceEvidence() {
+  documentOwnerFenceDropCount = Math.min(
+    Number.MAX_SAFE_INTEGER,
+    documentOwnerFenceDropCount + 1,
+  );
+  latchSaveAuthority({
+    why: "document-owner-fence-capacity",
+    reason: "document-owner-fence",
+    summary:
+      `Document owner capacity exhausted at ${MAX_KNOWN_DOCUMENT_OWNERS} ` +
+      "owners with every forgettable entry holding the newest generation of " +
+      "its tab, so a stale-owner fence had to be dropped",
+    writeError: DOCUMENT_OWNER_FENCE_WRITE_ERROR,
+    saveError: DOCUMENT_OWNER_FENCE_SAVE_ERROR,
+  });
+}
+
+function noteDocumentOwnerSealAdmissionRefusal() {
+  documentOwnerSealAdmissionRefusalCount = Math.min(
+    Number.MAX_SAFE_INTEGER,
+    documentOwnerSealAdmissionRefusalCount + 1,
+  );
+  if (documentOwnerSealAdmissionRefusalLogged) return;
+  documentOwnerSealAdmissionRefusalLogged = true;
+  console.error(
+    "Refusing an unknown document owner: a stale-owner fence has been " +
+      "dropped, so this process can no longer prove the owner is current. " +
+      "Every later unknown owner is refused the same way and counted in " +
+      "documentOwnerSealAdmissionRefusalCount rather than logged again.",
+  );
+}
+
+// ONE SHOT PER CALLER, ONE COUNT FOR THE CONDITION. The exhausted table is a
+// single fact, but WHICH door it closed is worth knowing - a registration
+// refused for capacity and an adoption refused for capacity are abused, and
+// diagnosed, differently - so each of the two callers announces itself once
+// and both are counted together. The adoption callers also answer their
+// renderer with a machine-readable reason, so a counted refusal is never an
+// invisible one.
+function noteDocumentOwnerTablePinnedRefusal(kind) {
+  documentOwnerTablePinnedRefusalCount = Math.min(
+    Number.MAX_SAFE_INTEGER,
+    documentOwnerTablePinnedRefusalCount + 1,
+  );
+  lastDocumentOwnerRefusalWasTablePinned = true;
+  // "adoption" names the two disk-adoption doors; the registration drain is
+  // the only other caller and is the default.
+  const forAdoption = kind === "adoption";
+  if (forAdoption) {
+    if (documentOwnerAdoptionTablePinnedRefusalLogged) return;
+    documentOwnerAdoptionTablePinnedRefusalLogged = true;
+  } else {
+    if (documentOwnerRegistrationTablePinnedRefusalLogged) return;
+    documentOwnerRegistrationTablePinnedRefusalLogged = true;
+  }
+  console.error(
+    `Refusing ${forAdoption ? "a disk adoption" : "a document owner"}: the ` +
+      "owner table is full and every owner in it is pinned. Every later " +
+      "refusal for this reason is counted in " +
+      "documentOwnerTablePinnedRefusalCount rather than logged again.",
+  );
+}
+
+function canRememberDocumentOwner(owner) {
+  const key = documentOwnerKey(owner);
+  if (!key) return false;
+  // SUPERSESSION IS TERMINAL FOR THE KEY IT NAMES, and the marker outlives
+  // every eviction that could make it matter. It is cleared only by
+  // `forgetDocumentOwnerAliases`, and capacity reaches that only for an entry
+  // its tab's high-water still COVERS - in which case the generation test
+  // below refuses everything this marker would have - or, when no covered
+  // entry is left, after `dropDocumentOwnerFenceEvidence` has already latched
+  // every write closed. So an owner reaching here is refused by the marker, by
+  // a newer sibling, or on a machine that can no longer write at all.
+  if (supersededDocumentOwners.has(key)) {
+    console.error("Refusing to re-register a superseded document owner");
+    return false;
+  }
+  // AND ONCE A FENCE HAS ACTUALLY BEEN SPENT, THE TABLE IS SEALED. The latch
+  // that `dropDocumentOwnerFenceEvidence` closes stops this process writing,
+  // but writing is not the only authority an owner carries - it can arm the
+  // watch, quarantine a document and answer for deletion evidence - and the
+  // requirement is that a stale owner is never ADMITTED, not merely that it
+  // cannot save. After a drop there is one tab for which this function can no
+  // longer tell a first registration from a replay, and nothing left to tell
+  // them apart with, so every owner this process does not ALREADY know is
+  // refused. Owners already on record are unaffected: their keys are still
+  // fenced by the marker above and the generation test below, so live tabs go
+  // on working exactly as before, on a machine that has already declared
+  // itself unable to write. This is the closed side of a door that only opens
+  // at 256 simultaneously live owners, and only after every cheaper eviction
+  // has been spent.
+  if (documentOwnerFenceDropCount > 0 && !knownDocumentOwners.has(key)) {
+    // Bounded announcement: the verdict is session-long, so it is logged once
+    // and counted after that.
+    noteDocumentOwnerSealAdmissionRefusal();
+    return false;
+  }
+  for (const knownOwner of knownDocumentOwners.values()) {
+    if (
+      knownOwner.pageSession === owner.pageSession &&
+      knownOwner.rendererGeneration === owner.rendererGeneration &&
+      knownOwner.tabId === owner.tabId &&
+      (knownOwner.documentGeneration > owner.documentGeneration ||
+        (knownOwner.documentGeneration === owner.documentGeneration &&
+          (knownOwner.pathKey !== owner.pathKey ||
+            knownOwner.spelling !== owner.spelling ||
+            knownOwner.selectionGeneration > owner.selectionGeneration)))
+    ) {
+      console.error("Refusing to replace a newer document owner");
+      return false;
+    }
+  }
+  return true;
+}
+
+// THE CAP IS ENFORCED AT REGISTRATION, AND ONE CALLER CANNOT SURVIVE A
+// REFUSAL THERE. `completeDocumentDiskAdoption` spends its capability and
+// retires the reader's unanswered deletion evidence, and a capacity refusal
+// for the adopting owner after that point would discard a deletion warning
+// nobody has seen, burn a grant that cannot be reissued, and leave the
+// PREVIOUS owner still watched, still known and so still able to save - with
+// the evidence that would have stopped it gone. That completion asks the same
+// question here first, while a refusal is still free, and then admits the
+// owner itself rather than leaving it to a later message.
+//
+// The answer is conservative by construction. Between the question and the
+// registration a completion only REMOVES the things that pin an owner - the
+// grant discounted below, and the evidence it retires - and never registers
+// another owner nor adds a pin, so room proven here is still room at the
+// registration that follows. Discounting the one committed grant is exact
+// rather than speculative: if the completion refuses, nothing irreversible
+// has run and the grant simply stays; if it succeeds, the grant is gone
+// before the registration looks. Without that discount a predecessor pinned
+// ONLY by the capability this adoption is about to consume would read as a
+// dead end of our own making.
+function documentOwnerTableHasRoomFor(owner, consumedCapability = null) {
+  const key = documentOwnerKey(owner);
+  if (!key) return false;
+  if (knownDocumentOwners.has(key)) return true;
+  if (knownDocumentOwners.size < MAX_KNOWN_DOCUMENT_OWNERS) return true;
+  // One forgettable owner is enough: the drain removes entries one at a time
+  // and the table is never over its cap, so a single eviction makes the room
+  // the insertion needs. Forgetting one owner cannot pin another - the
+  // forgettable test reads only that owner's own saves, quarantine, watch,
+  // grants and evidence - so the sweep that precedes the drain cannot take
+  // this candidate away either.
+  //
+  // DELIBERATELY BLIND TO THE FENCE. The drain can always make this room, and
+  // when the only way left is to spend a tab's high-water mark it latches
+  // every write closed before doing so. Answering "no room" here instead
+  // would refuse the adoption - and adoption is the one caller that cannot be
+  // refused for capacity at all, because by the time the question is asked
+  // again it has spent a grant and retired evidence. The latch is the price,
+  // and it is paid identically whichever caller reaches the drain first.
+  return oldestForgettableDocumentOwnerKey(consumedCapability) !== null;
+}
+
+function rememberDocumentOwner(
+  owner,
+  { diskVersion = null, modifiedTime = null, adopted = false } = {},
+) {
+  if (!canRememberDocumentOwner(owner)) return false;
+  const key = documentOwnerKey(owner);
+  // SUPERSESSION DEAUTHORIZES, BUT ONLY ONCE THE REPLACEMENT IS ADMITTED, AND
+  // IT FORGETS ONLY WHAT IT MAY. An older generation in this tab that nothing
+  // is holding is collected here: "forgettable" already means no save is
+  // settling against it, it is not quarantined, it is not watched, it holds no
+  // grant and it names no unanswered deletion, so dropping it cannot cost a
+  // fact even if the admission below refuses. Everything else is RETAINED -
+  // its baseline is the only thing keeping an unanswered deletion from looking
+  // historical - and is deauthorized by being listed as superseded, which the
+  // next sweep and the capacity drain both revisit once the pin clears.
+  //
+  // THE SWEEP COSTS NO FENCE. `canRememberDocumentOwner` has already refused
+  // this owner if any same-tab entry is newer, so every entry this loop
+  // touches sits at a STRICTLY older generation than the one about to be
+  // admitted - and the drain below cannot refuse after the sweep collected
+  // something, because collecting anything puts the table under its cap and
+  // the drain's loop never runs. Whatever is forgotten here is covered by the
+  // replacement before control leaves this function.
+  const supersededKeys = new Set();
+  for (const [knownKey, knownOwner] of knownDocumentOwners) {
+    if (
+      knownKey !== key &&
+      knownOwner.pageSession === owner.pageSession &&
+      knownOwner.rendererGeneration === owner.rendererGeneration &&
+      knownOwner.tabId === owner.tabId
+    ) {
+      if (documentOwnerCanBeForgotten(knownKey)) {
+        forgetDocumentOwnerAliases(knownKey);
+      } else {
+        supersededKeys.add(knownKey);
+      }
+    }
+  }
+  if (!knownDocumentOwners.has(key)) {
+    // DRAIN, NOT ONE-FOR-ONE. When every candidate was pinned the table can
+    // already be at its cap, and evicting a single owner per insertion would
+    // hold it there for the rest of the session instead of letting it settle
+    // once the pins clear. Each pass removes an entry that is certainly
+    // present, so the loop strictly shrinks the table.
+    //
+    // AND THE CAP IS HARD. When nothing may be forgotten the registration is
+    // REFUSED rather than admitted over the cap: admitting it would let a
+    // renderer that keeps every owner pinned grow this table, and the owner,
+    // baseline, quarantine and evidence state hanging off it, without bound.
+    // Refusing is the closed side - the caller has no owner, so its watcher is
+    // not armed and `captureSaveScope` rejects its saves - and it is visible,
+    // unlike an eviction that silently costs somebody a settlement. NOTHING
+    // THE TAB STILL NEEDS HAS BEEN TOUCHED WHEN THIS RETURNS: a refusal is
+    // only reachable when the sweep above collected nothing, so the pinned
+    // predecessor keeps its authority rather than being left deauthorized
+    // behind a replacement that was never admitted.
+    //
+    // COVERED ENTRIES FIRST, AND THE FENCE ONLY AS A LAST RESORT. Taking the
+    // oldest forgettable entry outright would happily evict a tab's newest
+    // owner while an older, already-superseded entry for the same tab sat
+    // untouched - the exact churn that leaves nothing to compare a delayed
+    // registration against. Every covered entry is drained before any
+    // high-water mark is considered, so the newest generation of each tab is
+    // the LAST thing this loop is willing to spend, and spending it closes
+    // the save-authority latch first.
+    while (knownDocumentOwners.size >= MAX_KNOWN_DOCUMENT_OWNERS) {
+      const coveredKey = oldestForgettableDocumentOwnerKey(null, {
+        requireCoveredFence: true,
+      });
+      if (coveredKey) {
+        forgetDocumentOwnerAliases(coveredKey);
+        continue;
+      }
+      const forgettableKey = oldestForgettableDocumentOwnerKey();
+      if (!forgettableKey) {
+        noteDocumentOwnerTablePinnedRefusal("registration");
+        return false;
+      }
+      dropDocumentOwnerFenceEvidence();
+      forgetDocumentOwnerAliases(forgettableKey);
+    }
+  }
+  for (const supersededKey of supersededKeys) {
+    supersededDocumentOwners.add(supersededKey);
+  }
+  // A save still settling against a superseded owner is reported as replaced
+  // rather than dropped. Only retained owners can have one: a forgettable
+  // owner has no save in flight by definition.
+  for (const scope of activeSaveCorrelations.values()) {
+    if (supersededKeys.has(documentOwnerKey(scope.owner))) {
+      invalidatedSaveScopes.add(scope);
+    }
+  }
+  knownDocumentOwners.set(key, owner);
+  const suppliedVersion = normaliseDiskVersion(diskVersion);
+  const previousBaseline = ownerDocumentBaselines.get(key);
+  if (!previousBaseline || adopted) {
+    ownerDocumentBaselines.set(key, Object.freeze({
+      owner,
+      version: suppliedVersion,
+      modifiedTime: suppliedVersion
+        ? suppliedVersion.mtimeMs
+        : Number.isFinite(modifiedTime) ? modifiedTime : null,
+    }));
+    if (adopted) notifiedExternalVersionsByOwner.delete(key);
+  }
+  return true;
+}
+
+function isKnownDocumentOwner(owner) {
+  const key = documentOwnerKey(owner);
+  if (!key || supersededDocumentOwners.has(key)) return false;
+  const known = knownDocumentOwners.get(key);
+  return sameDocumentSelectionOwner(known, owner);
+}
+
+function indexDeletionTombstone(index, key, record) {
+  let records = index.get(key);
+  if (!records) {
+    records = new Set();
+    index.set(key, records);
+  }
+  records.add(record);
+}
+
+function unindexDeletionTombstone(index, key, record) {
+  const records = index.get(key);
+  if (!records) return;
+  records.delete(record);
+  if (records.size === 0) index.delete(key);
+}
+
+function retainDeletionTombstone(record) {
+  documentDeletionTombstones.set(record.key, record);
+  indexDeletionTombstone(deletionTombstonesBySpelling, record.spelling, record);
+  indexDeletionTombstone(deletionTombstonesByPathKey, record.pathKey, record);
+  deletionTombstonesById.set(record.id, record);
+}
+
+function removeDeletionTombstone(record) {
+  if (documentDeletionTombstones.get(record.key) !== record) return false;
+  documentDeletionTombstones.delete(record.key);
+  unindexDeletionTombstone(deletionTombstonesBySpelling, record.spelling, record);
+  unindexDeletionTombstone(deletionTombstonesByPathKey, record.pathKey, record);
+  deletionTombstonesById.delete(record.id);
+  return true;
+}
+
+function deletionTombstonesForPath(filePath, owner = null) {
+  const spelling = filePathSpellingKey(filePath);
+  if (!spelling) return [];
+  const ownerKey = documentOwnerKey(owner);
+  const records = deletionTombstonesBySpelling.get(spelling);
+  return records
+    ? Array.from(records).filter(
+        (record) => !ownerKey || record.key === ownerKey,
+      )
+    : [];
+}
+
+function pathHasDeletionTombstone(filePath, owner = null) {
+  return deletionTombstonesForPath(filePath, owner).length > 0;
+}
+
+function pathOnlyDeletionForSpelling(filePath) {
+  return pathOnlyDeletionEvidence.has(filePathSpellingKey(filePath));
+}
+
+function pathKeyHasDeletionEvidence(key) {
+  return deletionTombstonesByPathKey.has(key) ||
+    pathOnlyDeletionByPathKey.has(key);
+}
+
+// EVERY RETAINED UNIT, COUNTED ONCE. The two path-only maps describe the same
+// (spelling, pathKey) pairs and the tombstone indexes alias the tombstone
+// records, so counting pairs and owner tombstones once bounds all of them.
+function deletionEvidenceFootprint() {
+  let pathOnlyPairs = 0;
+  for (const keys of pathOnlyDeletionEvidence.values()) {
+    pathOnlyPairs += keys.size;
+  }
+  return (
+    documentDeletionTombstones.size +
+    pathOnlyPairs +
+    deletionOverflowEvidence.size
+  );
+}
+
+function latchSaveAuthority({ why, reason, summary, writeError, saveError }) {
+  if (deletionEvidenceCapacityLatched) return;
+  deletionEvidenceCapacityLatched = true;
+  deletionEvidenceCapacityLatchWhy = why;
+  saveAuthorityLatchReason = reason;
+  saveAuthorityLatchWriteError = writeError;
+  saveAuthorityLatchSaveError = saveError;
+  // A shutdown answer taken against the pre-latch picture described a machine
+  // that could still save. Bumping the revision fails its commit closed rather
+  // than letting it discard documents on the strength of a stale question.
+  noteDeletionEvidenceMutation();
+  // ONCE. The latch is a one-way door, so a per-drop log would be an unbounded
+  // queue by another name; the drop and refusal counters carry the rest.
+  console.error(
+    `${summary}. Saving is now refused for every document until Folia is ` +
+      "restarted.",
+  );
+}
+
+function latchDeletionEvidenceCapacity(why) {
+  latchSaveAuthority({
+    why,
+    reason: "deletion-evidence-capacity",
+    summary:
+      `Deletion evidence capacity exhausted at ${MAX_DELETION_EVIDENCE} ` +
+      `retained units (${why})`,
+    writeError: DELETION_EVIDENCE_CAPACITY_WRITE_ERROR,
+    saveError: DELETION_EVIDENCE_CAPACITY_SAVE_ERROR,
+  });
+}
+
+// ROOM FOR ONE NEW UNIT. Callers must reserve BEFORE they mutate anything and
+// must record nothing at all when this refuses: a half-recorded unit is
+// evidence the retire paths cannot find. Mutations that add no unit - re-arming
+// an existing tombstone, re-asserting a known path-only pair, replacing an
+// overflow record under its own key - never consult this and stay legal after
+// the latch, because a duplicate cannot exhaust anything.
+function reserveDeletionEvidenceCapacity(why) {
+  if (
+    !deletionEvidenceCapacityLatched &&
+    deletionEvidenceFootprint() < MAX_DELETION_EVIDENCE
+  ) {
+    return true;
+  }
+  latchDeletionEvidenceCapacity(why);
+  deletionEvidenceCapacityDropCount = Math.min(
+    Number.MAX_SAFE_INTEGER,
+    deletionEvidenceCapacityDropCount + 1,
+  );
+  return false;
+}
+
+// EVERY WRITE THIS PROCESS MAKES ON THE READER'S BEHALF, not only the markdown
+// Save. The latch's promise is "Folia refuses to write any file until it is
+// restarted", and a PDF export, an image export or a table download that still
+// lands on disk breaks that promise in the most visible way available: it
+// creates a file at a destination the reader has just chosen, in a session the
+// app has already declared unable to prove what was deleted. These paths carry
+// no document identity and no save correlation, so they are refused with the
+// same machine-readable reason and counted on the same counter, and nothing
+// here fabricates an id that the existing protocol never had.
+const DELETION_EVIDENCE_CAPACITY_WRITE_ERROR =
+  "Folia can no longer prove which documents were deleted - its in-memory " +
+  "record of deletions is full - so it refuses to write any file, including " +
+  "exports and downloads to newly chosen destinations, until Folia is " +
+  "restarted.";
+
+// THE SAME PROMISE, THE OTHER FACT. When the stale-owner fence is what was
+// lost, telling the reader their deletion record is full would be a lie about
+// the one thing the latch exists to be honest about. The refusal, the stage
+// and the counters are identical; only the sentence differs.
+const DOCUMENT_OWNER_FENCE_WRITE_ERROR =
+  "Folia can no longer prove which document each of its tabs has moved on " +
+  "to - its in-memory record of replaced documents is full - so it refuses " +
+  "to write any file, including exports and downloads to newly chosen " +
+  "destinations, until Folia is restarted.";
+
+let saveAuthorityLatchWriteError = DELETION_EVIDENCE_CAPACITY_WRITE_ERROR;
+// A download cannot be told anything - `will-download` can only cancel it - so
+// this is the only channel left. Shown at most ONCE per latched session by its
+// single caller, non-blocking, and inert if the dialog cannot be raised: a
+// notice that failed to appear must not take the app down with it.
+function notifyDeletionEvidenceCapacityDownloadBlocked() {
+  try {
+    const win =
+      BrowserWindow.getFocusedWindow() ||
+      (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null);
+    const options = {
+      type: "warning",
+      buttons: ["OK"],
+      defaultId: 0,
+      cancelId: 0,
+      title: "Saving is blocked",
+      message: "Folia stopped writing files and cannot resume until it restarts.",
+      detail:
+        saveAuthorityLatchWriteError +
+        "\n\nThe download you just started was cancelled. Further downloads " +
+        "stay blocked without another message.",
+    };
+    const shown = win
+      ? dialog.showMessageBox(win, options)
+      : dialog.showMessageBox(options);
+    shown.catch(() => {});
+  } catch {
+    // Nothing else to try; the refusal counter still records it.
+  }
+}
+
+// DELIBERATELY NOT `saveAuthorityLatchWriteError`. The latch keeps the FIRST
+// cause that closed it, so a session whose deletion evidence filled up before
+// a fence was ever dropped still describes deletions there - while the seal
+// this notice is about is driven by `documentOwnerFenceDropCount` alone and
+// can arrive second. Only a sentence written for the seal itself is true in
+// both orders.
+const DOCUMENT_OWNER_SEAL_NOTICE_SUMMARY =
+  "Folia stopped tracking documents and cannot resume until it restarts. " +
+  "Any document it is asked to record from now on is refused: that tab " +
+  "cannot be saved and will not prompt about unsaved work when it is " +
+  "closed - copy any edits out of it by hand, then restart Folia.";
+const DOCUMENT_OWNER_SEAL_NOTICE_DETAIL =
+  "Folia can no longer prove which document each of its tabs has moved on " +
+  "to, so it has stopped writing files and refuses every document it is " +
+  "asked to record from now on.\n\nA document Folia could not record still " +
+  "appears in a tab, but it cannot be saved or exported, it is not watched " +
+  "for changes on disk, and closing it will not prompt about unsaved work. " +
+  "Copy any edits you still need out of those tabs by hand, then restart " +
+  "Folia. Tabs Folia had already recorded keep working, but nothing in this " +
+  "session can be saved. There will be no further message.";
+
+// `show-error` is an established main->renderer notice channel - the renderer
+// answers it with an in-app message - and this sender is the approval
+// renderer that owns the tab in question, so it is the best-aimed way in.
+// It is a transient toast, which is why it is the fallback for a dialog that
+// could not be raised and never the notice itself: a terminal, session-long
+// condition must not be announced by something that disappears on its own.
+function sendDocumentOwnerSealToast(sender) {
+  try {
+    if (sender && !sender.isDestroyed()) {
+      sender.send("show-error", DOCUMENT_OWNER_SEAL_NOTICE_SUMMARY);
+      return true;
+    }
+  } catch {
+    // Nothing else to try; the refusal counter still records it.
+  }
+  return false;
+}
+
+// The reader-facing half of the seal, raised at most ONCE per session by its
+// single caller. Returns whether the notice was dispatched: one that could
+// not be raised at all leaves the one shot UNSPENT rather than counting
+// itself delivered.
+function notifyDocumentOwnerSealRefusal(sender) {
+  // A frozen shutdown commit is the one place this must not land. The window
+  // is mid-close, the reader has already answered for their unsaved work, and
+  // a dialog raised now would sit squarely on that critical path. The notice
+  // stays owed instead, so a shutdown that is cancelled still gets it at the
+  // next refused registration.
+  if (shutdownCommitIngressBlocked) return false;
+  try {
+    const win =
+      BrowserWindow.getFocusedWindow() ||
+      (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null);
+    const options = {
+      type: "warning",
+      buttons: ["OK"],
+      defaultId: 0,
+      cancelId: 0,
+      title: "Folia must be restarted",
+      message:
+        "Folia stopped tracking documents and cannot resume until it restarts.",
+      detail: DOCUMENT_OWNER_SEAL_NOTICE_DETAIL,
+    };
+    const shown = win
+      ? dialog.showMessageBox(win, options)
+      : dialog.showMessageBox(options);
+    // A DIALOG CAN ALSO FAIL LATE. `showMessageBox` resolves asynchronously,
+    // so a rejection arrives after the one shot has already been spent, and
+    // re-opening it here would risk a SECOND dialog for the same condition.
+    // The toast is dispatched instead: one notice attempt, still exactly one
+    // message, and the reader is not left with silence because the dialog
+    // failed a turn later than the `catch` below can see.
+    shown.catch(() => {
+      sendDocumentOwnerSealToast(sender);
+    });
+    return true;
+  } catch {
+    return sendDocumentOwnerSealToast(sender);
+  }
+}
+
+function noteDocumentOwnerSealRefusal(sender) {
+  documentOwnerSealRegistrationRefusalCount = Math.min(
+    Number.MAX_SAFE_INTEGER,
+    documentOwnerSealRegistrationRefusalCount + 1,
+  );
+  if (documentOwnerSealNoticeShown) return;
+  if (!notifyDocumentOwnerSealRefusal(sender)) return;
+  documentOwnerSealNoticeShown = true;
+  console.error(
+    "Refused a background document registration after a stale-owner fence " +
+      "was dropped: " + DOCUMENT_OWNER_SEAL_NOTICE_SUMMARY,
+  );
+}
+
+function noteDeletionEvidenceCapacityRefusal() {
+  deletionEvidenceCapacityRefusalCount = Math.min(
+    Number.MAX_SAFE_INTEGER,
+    deletionEvidenceCapacityRefusalCount + 1,
+  );
+}
+
+// `stage` is "ingress" when the request is refused before it opens a dialog or
+// renders anything, and "before-write" when the latch tripped while a dialog
+// or a print was awaiting and the bytes would otherwise go out now.
+function deletionEvidenceCapacityWriteRefusal(stage, extra = {}) {
+  noteDeletionEvidenceCapacityRefusal();
+  return {
+    ...extra,
+    success: false,
+    saveBlocked: saveAuthorityLatchReason,
+    saveBlockedStage: stage,
+    saveBlockedWhy: deletionEvidenceCapacityLatchWhy,
+    error: saveAuthorityLatchWriteError,
+  };
+}
+
+function rememberPathOnlyDeletion(filePath, pathKey) {
+  const spelling = filePathSpellingKey(filePath);
+  if (!spelling || !pathKey) return;
+  const knownKeys = pathOnlyDeletionEvidence.get(spelling);
+  if (
+    !knownKeys?.has(pathKey) &&
+    !reserveDeletionEvidenceCapacity("path-only-deletion")
+  ) {
+    return;
+  }
+  let keys = knownKeys;
+  if (!keys) {
+    keys = new Set();
+    pathOnlyDeletionEvidence.set(spelling, keys);
+  }
+  if (!keys.has(pathKey)) {
+    keys.add(pathKey);
+    let spellings = pathOnlyDeletionByPathKey.get(pathKey);
+    if (!spellings) {
+      spellings = new Set();
+      pathOnlyDeletionByPathKey.set(pathKey, spellings);
+    }
+    spellings.add(spelling);
+    noteDeletionEvidenceMutation();
+  }
+  deletedDocuments.add(pathKey);
+  addDocumentUnadoptedChange(pathKey);
+  addPathUnadoptedChange(spelling);
+}
+
+function retirePathOnlyDeletion(filePath, pathKey) {
+  const spelling = filePathSpellingKey(filePath);
+  const keys = pathOnlyDeletionEvidence.get(spelling);
+  if (!keys || !keys.delete(pathKey)) return false;
+  if (keys.size === 0) pathOnlyDeletionEvidence.delete(spelling);
+  const spellings = pathOnlyDeletionByPathKey.get(pathKey);
+  spellings.delete(spelling);
+  if (spellings.size === 0) pathOnlyDeletionByPathKey.delete(pathKey);
+  noteDeletionEvidenceMutation();
+  return true;
+}
+
+function orphanedDeletionForSpelling(filePath, owner = null) {
+  const records = deletionTombstonesBySpelling.get(
+    filePathSpellingKey(filePath),
+  );
+  return !!records && Array.from(records).some(
+    (record) =>
+      record.owner.pageSession !== approvalRendererPageSession ||
+      record.owner.rendererGeneration !== approvalRendererGeneration ||
+      (!!owner &&
+        record.owner.pageSession === owner.pageSession &&
+        record.owner.rendererGeneration === owner.rendererGeneration &&
+        record.owner.tabId === owner.tabId &&
+        record.owner.documentGeneration !== owner.documentGeneration),
+  );
+}
+
+function noteDeletionEvidenceMutation() {
+  deletionEvidenceRevision =
+    deletionEvidenceRevision === Number.MAX_SAFE_INTEGER
+      ? 1
+      : deletionEvidenceRevision + 1;
+}
+
+function addUnadoptedMarker(markerSet, referenceMap, key, overflow = false) {
+  if (!key) return false;
+  let reference = referenceMap.get(key);
+  if (overflow) {
+    if (!reference) {
+      reference = {
+        count: 0,
+        independent: markerSet.has(key),
+      };
+      referenceMap.set(key, reference);
+    }
+    reference.count += 1;
+  } else if (reference) {
+    reference.independent = true;
+  }
+  markerSet.add(key);
+  return true;
+}
+
+function deleteUnadoptedMarker(markerSet, referenceMap, key) {
+  if (!key) return false;
+  const deleted = markerSet.delete(key);
+  const reference = referenceMap.get(key);
+  if (reference) {
+    reference.independent = false;
+    if (reference.count > 0) markerSet.add(key);
+  }
+  return deleted;
+}
+
+function addDocumentUnadoptedChange(key, { overflow = false } = {}) {
+  return addUnadoptedMarker(
+    documentsWithUnadoptedChanges,
+    deletionOverflowDocumentMarkerRefs,
+    key,
+    overflow,
+  );
+}
+
+function deleteDocumentUnadoptedChange(key) {
+  return deleteUnadoptedMarker(
+    documentsWithUnadoptedChanges,
+    deletionOverflowDocumentMarkerRefs,
+    key,
+  );
+}
+
+function addPathUnadoptedChange(spelling, { overflow = false } = {}) {
+  return addUnadoptedMarker(
+    pathsWithUnadoptedChanges,
+    deletionOverflowPathMarkerRefs,
+    spelling,
+    overflow,
+  );
+}
+
+function deletePathUnadoptedChange(spelling) {
+  return deleteUnadoptedMarker(
+    pathsWithUnadoptedChanges,
+    deletionOverflowPathMarkerRefs,
+    spelling,
+  );
+}
+
+function deletionOverflowEvidenceKey(filePath, owner = null) {
+  const ownerKey = documentOwnerKey(owner);
+  if (ownerKey) return `owner\0${ownerKey}`;
+  const spelling = filePathSpellingKey(filePath);
+  return spelling ? `path\0${spelling}` : null;
+}
+
+function releaseDeletionOverflowMarker(
+  markerSet,
+  referenceMap,
+  key,
+  stillCovered,
+) {
+  const reference = referenceMap.get(key);
+  if (!reference) return;
+  reference.count = Math.max(0, reference.count - 1);
+  if (reference.count > 0) return;
+  referenceMap.delete(key);
+  if (!reference.independent && !stillCovered) markerSet.delete(key);
+}
+
+function releaseDeletionOverflowEvidence(key) {
+  const record = deletionOverflowEvidence.get(key);
+  if (!record || !deletionOverflowEvidence.delete(key)) return null;
+  releaseDeletionOverflowMarker(
+    documentsWithUnadoptedChanges,
+    deletionOverflowDocumentMarkerRefs,
+    record.pathKey,
+    deletedDocuments.has(record.pathKey) ||
+      deletionTombstonesByPathKey.has(record.pathKey),
+  );
+  releaseDeletionOverflowMarker(
+    pathsWithUnadoptedChanges,
+    deletionOverflowPathMarkerRefs,
+    record.spelling,
+    deletionTombstonesBySpelling.has(record.spelling) ||
+      deletionTombstonesByPathKey.has(record.pathKey),
+  );
+  return record;
+}
+
+function rememberDeletionOverflowEvidence(filePath, owner = null) {
+  const key = deletionOverflowEvidenceKey(filePath, owner);
+  const spelling = filePathSpellingKey(filePath);
+  const pathKey = canonicalFileKey(filePath);
+  if (!key || !spelling || !pathKey) return false;
+  // Replacing a record already held under this key costs no new unit; only a
+  // key this process has never retained does.
+  if (
+    !deletionOverflowEvidence.has(key) &&
+    !reserveDeletionEvidenceCapacity("deletion-overflow-evidence")
+  ) {
+    return false;
+  }
+  releaseDeletionOverflowEvidence(key);
+  deletionOverflowEvidence.set(
+    key,
+    Object.freeze({
+      owner,
+      ownerKey: documentOwnerKey(owner),
+      spelling,
+      pathKey,
+    }),
+  );
+  addDocumentUnadoptedChange(pathKey, { overflow: true });
+  addPathUnadoptedChange(spelling, { overflow: true });
+  deletionEvidenceOverflowCount = Math.min(
+    Number.MAX_SAFE_INTEGER,
+    deletionEvidenceOverflowCount + 1,
+  );
+  noteDeletionEvidenceMutation();
+  return true;
+}
+
+function hasDeletionOverflowEvidence(filePath, owner = null) {
+  const identity = normaliseDocumentIdentity(owner, filePath);
+  const ownerKey = documentOwnerKey(identity);
+  const spelling = filePathSpellingKey(filePath);
+  const pathKey = canonicalFileKey(filePath);
+  return Array.from(deletionOverflowEvidence.values()).some(
+    (record) =>
+      (!!ownerKey && record.ownerKey === ownerKey) ||
+      (!record.ownerKey &&
+        ((!!spelling && record.spelling === spelling) ||
+          (!!pathKey && record.pathKey === pathKey))),
+  );
+}
+
+function clearDeletionDeliveryAttempt(record) {
+  if (!record) return;
+  if (record.ackTimeout) clearTimeout(record.ackTimeout);
+  if (record.retryTimeout) clearTimeout(record.retryTimeout);
+  record.ackTimeout = null;
+  record.retryTimeout = null;
+  record.retryDelayMs = 0;
+  record.inFlight = false;
+}
+
+function releaseDeletionDelivery(record) {
+  if (!record) return false;
+  clearDeletionDeliveryAttempt(record);
+  if (!deletionDeliveries.delete(record.key)) return false;
+  return true;
+}
+
+function compactDeletionDeliveryCapacity() {
+  while (deletionDeliveries.size >= MAX_DELETION_DELIVERIES) {
+    let candidate = null;
+    for (const record of deletionDeliveries.values()) {
+      if (
+        record.consumed ||
+        !sameDocumentOwner(record.owner, watchedOwner)
+      ) {
+        candidate = record;
+        break;
+      }
+    }
+    if (!candidate) {
+      candidate = deletionDeliveries.values().next().value || null;
+    }
+    if (!candidate) break;
+    releaseDeletionDelivery(candidate);
+    candidate.parked = true;
+    candidate.compacted = true;
+    candidate.sends = 0;
+    candidate.retryDelayMs = 0;
+    candidate.backoffMs = DELETION_DELIVERY_RETRY_DELAY_MS;
+    candidate.consecutiveSendFailures = 0;
+    candidate.lastSendError = null;
+    candidate.physicalVersion = null;
+    candidate.recreationVersion = null;
+    deletionEvidenceOverflowCount = Math.min(
+      Number.MAX_SAFE_INTEGER,
+      deletionEvidenceOverflowCount + 1,
+    );
+  }
+}
+
+function activateDeletionDelivery(record) {
+  if (!record || record.consumed) return false;
+  if (!deletionDeliveries.has(record.key)) {
+    compactDeletionDeliveryCapacity();
+    deletionDeliveries.set(record.key, record);
+  }
+  record.compacted = false;
+  return true;
+}
+
+function retireDeletionOwnerEvidence(record) {
+  if (!record) return false;
+  let retired = false;
+  if (removeDeletionTombstone(record)) retired = true;
+  if (releaseDeletionDelivery(record)) retired = true;
+  const overflowKey = deletionOverflowEvidenceKey(record.path, record.owner);
+  if (overflowKey && releaseDeletionOverflowEvidence(overflowKey)) {
+    retired = true;
+  }
+  const samePhysicalEvidence =
+    deletionTombstonesByPathKey.has(record.pathKey);
+  const samePathEvidence = deletionTombstonesBySpelling.has(record.spelling);
+  const samePhysicalOverflow = Array.from(
+    deletionOverflowEvidence.values(),
+  ).some((candidate) => candidate.pathKey === record.pathKey);
+  const samePathOverflow = Array.from(
+    deletionOverflowEvidence.values(),
+  ).some((candidate) => candidate.spelling === record.spelling);
+  if (
+    !samePhysicalEvidence &&
+    !samePhysicalOverflow &&
+    !pathOnlyDeletionByPathKey.has(record.pathKey)
+  ) {
+    deletedDocuments.delete(record.pathKey);
+    deleteDocumentUnadoptedChange(record.pathKey);
+  }
+  if (
+    !samePathEvidence &&
+    !samePathOverflow &&
+    !pathOnlyDeletionEvidence.has(record.spelling)
+  ) {
+    deletePathUnadoptedChange(record.spelling);
+  }
+  if (retired) noteDeletionEvidenceMutation();
+  return retired;
+}
+
+// An episode is over only when disk content is explicitly adopted, or when the
+// owning document explicitly adopts a replacement from disk.
+// The evidence and the delivery are released together - keeping one without the
+// other would either warn about a deletion that has been dealt with, or leave a
+// conflict nothing can clear.
+function clearDeletionEvidenceForAdoption(
+  filePath,
+  owner = null,
+  {
+    allowPathReplacement = false,
+    priorPathKey = null,
+    retireOrphanedOwners = false,
+    retirePathOnlyKey = null,
+    allowedOverflowKeys = null,
+    evidencePathKey = null,
+  } = {},
+) {
+  const spelling = filePathSpellingKey(filePath);
+  const key = spelling &&
+    (filePathAliases.get(spelling) ||
+      resolveCanonicalFileKey(filePath) ||
+      spelling);
+  if (!spelling || !key) return false;
+  const adoptedOwner = owner
+    ? typeof owner.spelling === "string" && owner.spelling === spelling
+      ? owner
+      : normaliseDocumentIdentity(owner, filePath, {
+          useCurrentPathIdentity: allowPathReplacement,
+        })
+    : null;
+  if (owner && !adoptedOwner) return false;
+  const adoptedOwnerKey = documentOwnerKey(adoptedOwner);
+  const pathOnlyKeys =
+    retirePathOnlyKey && adoptedOwner
+      ? [retirePathOnlyKey]
+      : [];
+  const affectedKeys = new Set(
+    [key, priorPathKey].filter(
+      (candidate) =>
+        typeof candidate === "string" && candidate.length > 0,
+    ),
+  );
+  let cleared = false;
+  const relatedTombstones = new Set([
+    ...(deletionTombstonesBySpelling.get(spelling) || []),
+    ...(deletionTombstonesByPathKey.get(key) || []),
+  ]);
+  for (const record of relatedTombstones) {
+    if (evidencePathKey && record.pathKey !== evidencePathKey) {
+      continue;
+    }
+    const orphanedOwner =
+      retireOrphanedOwners &&
+      record.spelling === spelling &&
+      (record.owner.pageSession !== approvalRendererPageSession ||
+        record.owner.rendererGeneration !== approvalRendererGeneration ||
+        (adoptedOwner &&
+          record.owner.tabId === adoptedOwner.tabId &&
+          record.owner.documentGeneration !==
+            adoptedOwner.documentGeneration));
+    if (
+      adoptedOwnerKey &&
+      !allowPathReplacement &&
+      record.key !== adoptedOwnerKey &&
+      !orphanedOwner
+    ) {
+      continue;
+    }
+    if (
+      adoptedOwner &&
+      allowPathReplacement &&
+      !orphanedOwner &&
+      !sameDocumentGeneration(record.owner, adoptedOwner)
+    ) {
+      continue;
+    }
+    if (record.spelling !== spelling && record.pathKey !== key) continue;
+    removeDeletionTombstone(record);
+    affectedKeys.add(record.pathKey);
+    releaseDeletionDelivery(record);
+    cleared = true;
+  }
+  for (const [overflowKey, record] of deletionOverflowEvidence) {
+    if (
+      !allowedOverflowKeys ||
+      !allowedOverflowKeys.includes(overflowKey) ||
+      record.spelling !== spelling
+    ) continue;
+    if (
+      adoptedOwnerKey &&
+      !allowPathReplacement &&
+      record.ownerKey &&
+      record.ownerKey !== adoptedOwnerKey
+    ) {
+      continue;
+    }
+    if (
+      adoptedOwner &&
+      record.owner &&
+      allowPathReplacement &&
+      !retireOrphanedOwners &&
+      !sameDocumentGeneration(record.owner, adoptedOwner)
+    ) {
+      continue;
+    }
+    if (record.spelling !== spelling && record.pathKey !== key) continue;
+    releaseDeletionOverflowEvidence(overflowKey);
+    affectedKeys.add(record.pathKey);
+    cleared = true;
+  }
+  if (
+    pathOnlyKeys.length &&
+    retirePathOnlyDeletion(filePath, pathOnlyKeys[0])
+  ) {
+    for (const pathOnlyKey of pathOnlyKeys) affectedKeys.add(pathOnlyKey);
+    cleared = true;
+  }
+  for (const candidateKey of affectedKeys) {
+    const stillDeleted = pathKeyHasDeletionEvidence(candidateKey) ||
+      Array.from(deletionOverflowEvidence.values()).some(
+        (record) => record.pathKey === candidateKey,
+      );
+    if (stillDeleted) continue;
+    if (deletedDocuments.delete(candidateKey)) cleared = true;
+    deleteDocumentUnadoptedChange(candidateKey);
+    if (
+      candidateKey !== key &&
+      !Array.from(ownerDocumentBaselines.values()).some(
+        (baseline) => baseline.owner.pathKey === candidateKey,
+      )
+    ) {
+      documentModifiedTimes.delete(candidateKey);
+      documentVersions.delete(candidateKey);
+    }
+  }
+  if (
+    !deletionTombstonesBySpelling.has(spelling) &&
+    !pathOnlyDeletionEvidence.has(spelling) &&
+    !Array.from(deletionOverflowEvidence.values()).some(
+      (record) => record.spelling === spelling,
+    )
+  ) {
+    deletePathUnadoptedChange(spelling);
+  }
+  if (cleared) noteDeletionEvidenceMutation();
+  return cleared;
+}
+
+function documentDeletionUnresolved(filePath, owner) {
+  const identity = normaliseDocumentIdentity(owner, filePath);
+  const ownerKey = documentOwnerKey(identity);
+  const pathKey = canonicalFileKey(filePath);
+  return (
+    (!!ownerKey && documentDeletionTombstones.has(ownerKey)) ||
+    pathHasDeletionTombstone(filePath, identity) ||
+    orphanedDeletionForSpelling(filePath, identity) ||
+    pathOnlyDeletionForSpelling(filePath) ||
+    (!ownerKey && !!pathKey && deletedDocuments.has(pathKey)) ||
+    hasDeletionOverflowEvidence(filePath, identity)
+  );
+}
 
 function normaliseFilePath(filePath) {
   if (typeof filePath !== "string" || filePath.length === 0) return null;
@@ -560,7 +2056,12 @@ function rebindCanonicalFileKey(filePath) {
   const key =
     resolveCanonicalFileKey(normalised.resolved) || normalised.spelling;
   filePathAliases.set(normalised.spelling, key);
-  pathsWithUnadoptedChanges.delete(normalised.spelling);
+  if (
+    !pathOnlyDeletionEvidence.has(normalised.spelling) &&
+    !deletionTombstonesBySpelling.has(normalised.spelling)
+  ) {
+    deletePathUnadoptedChange(normalised.spelling);
+  }
   return key;
 }
 
@@ -634,17 +2135,43 @@ function rememberDocumentVersion(filePath, stats) {
   let key = expectedKey;
   if (diskChangedBeforeAdoption && currentKey !== expectedKey) {
     const spelling = filePathSpellingKey(filePath);
-    if (spelling) pathsWithUnadoptedChanges.add(spelling);
+    if (spelling) addPathUnadoptedChange(spelling);
   } else if (diskChangedBeforeAdoption) {
-    documentsWithUnadoptedChanges.add(expectedKey);
+    addDocumentUnadoptedChange(expectedKey);
   } else if (currentKey) {
     key = rebindCanonicalFileKey(filePath);
   }
   documentVersions.set(key, version);
   documentModifiedTimes.set(key, version.mtimeMs);
-  if (!diskChangedBeforeAdoption) {
-    documentsWithUnadoptedChanges.delete(key);
-    deletedDocuments.delete(key);
+  if (!diskChangedBeforeAdoption && !pathKeyHasDeletionEvidence(key)) {
+    deleteDocumentUnadoptedChange(key);
+  }
+  return key;
+}
+
+function rememberVerifiedSaveVersion(filePath, stats, expectedKey, owner = null) {
+  if (!stats || !expectedKey) return null;
+  const currentKey = resolveCanonicalFileKey(filePath);
+  if (!currentKey || currentKey !== expectedKey) {
+    const spelling = filePathSpellingKey(filePath);
+    if (spelling) addPathUnadoptedChange(spelling);
+    return null;
+  }
+  const key = rebindCanonicalFileKey(filePath);
+  if (key !== expectedKey) return null;
+  const version = diskVersionFromStats(stats);
+  documentVersions.set(key, version);
+  documentModifiedTimes.set(key, version.mtimeMs);
+  if (!pathKeyHasDeletionEvidence(key)) deleteDocumentUnadoptedChange(key);
+  const ownerKey = documentOwnerKey(owner);
+  const baseline = ownerDocumentBaselines.get(ownerKey);
+  if (baseline) {
+    ownerDocumentBaselines.set(ownerKey, Object.freeze({
+      owner: baseline.owner,
+      version,
+      modifiedTime: version.mtimeMs,
+    }));
+    notifiedExternalVersionsByOwner.delete(ownerKey);
   }
   return key;
 }
@@ -654,14 +2181,14 @@ function markDocumentChangedExternally(filePath) {
   const currentKey = resolveCanonicalFileKey(filePath);
   const spelling = filePathSpellingKey(filePath);
   if (key && currentKey && key !== currentKey) {
-    if (spelling) pathsWithUnadoptedChanges.add(spelling);
+    if (spelling) addPathUnadoptedChange(spelling);
   } else if (currentKey || !spelling) {
-    if (key) documentsWithUnadoptedChanges.add(key);
+    if (key) addDocumentUnadoptedChange(key);
   } else {
     // A missing path may later be recreated or retargeted. Keep the conflict
     // attached to the spelling rather than guessing which physical identity
     // the path will name when save is retried.
-    pathsWithUnadoptedChanges.add(spelling);
+    addPathUnadoptedChange(spelling);
   }
   return key;
 }
@@ -671,83 +2198,91 @@ function adoptDocumentBaseline(
   modifiedTime,
   operation,
   suppliedVersion = null,
+  outcome = null,
+  expectedPhysicalKey = null,
+  markConflictOnFailure = true,
 ) {
+  if (outcome) outcome.accepted = false;
   if (!Number.isFinite(modifiedTime)) return null;
   const expectedKey = canonicalFileKey(filePath);
   if (!expectedKey) return null;
+  const adoptedVersion = normaliseDiskVersion(suppliedVersion);
+  if (
+    suppliedVersion != null &&
+    (!adoptedVersion || adoptedVersion.mtimeMs !== modifiedTime)
+  ) {
+    console.error("Refusing incoherent supplied disk version:", filePath);
+    if (markConflictOnFailure) markDocumentChangedExternally(filePath);
+    return null;
+  }
   const stats = readDocumentStats(filePath, operation);
   const currentVersion = stats ? diskVersionFromStats(stats) : null;
-  const adoptedVersion = normaliseDiskVersion(suppliedVersion);
   const currentKey = resolveCanonicalFileKey(filePath);
-  const currentMatchesAdoption =
-    !!currentVersion &&
-    ((!!adoptedVersion &&
-      adoptedVersion.mtimeMs === modifiedTime &&
-      !diskVersionChanged(adoptedVersion, currentVersion)) ||
-      (!adoptedVersion && currentVersion.mtimeMs === modifiedTime));
-  const targetChanged =
-    !!currentKey && expectedKey !== currentKey;
-
-  // A renderer may be adopting bytes read immediately before another process
-  // retargets the symlink. Those bytes still belong to the expected target;
-  // moving the spelling to the new target here would erase the only evidence
-  // the next save has that B was not the document the reader opened.
-  if (targetChanged && !currentMatchesAdoption) {
-    const spelling = filePathSpellingKey(filePath);
-    if (spelling) pathsWithUnadoptedChanges.add(spelling);
-    documentModifiedTimes.set(expectedKey, modifiedTime);
-    if (adoptedVersion) documentVersions.set(expectedKey, adoptedVersion);
-    else documentVersions.delete(expectedKey);
-    return expectedKey;
-  }
-
-  const key = currentMatchesAdoption
-    ? rebindCanonicalFileKey(filePath)
-    : expectedKey;
   if (
-    adoptedVersion &&
-    adoptedVersion.mtimeMs === modifiedTime &&
-    currentVersion &&
-    !diskVersionChanged(adoptedVersion, currentVersion)
+    !currentKey ||
+    !currentVersion ||
+    (expectedPhysicalKey && currentKey !== expectedPhysicalKey) ||
+    currentVersion.mtimeMs !== modifiedTime ||
+    (adoptedVersion && diskVersionChanged(adoptedVersion, currentVersion)) ||
+    (!adoptedVersion && currentKey !== expectedKey)
   ) {
-    return rememberDocumentVersion(filePath, stats);
+    if (markConflictOnFailure) markDocumentChangedExternally(filePath);
+    return null;
   }
-  if (adoptedVersion && adoptedVersion.mtimeMs === modifiedTime) {
-    documentModifiedTimes.set(key, modifiedTime);
-    documentVersions.set(key, adoptedVersion);
-    if (currentVersion) {
-      documentsWithUnadoptedChanges.add(key);
-    } else {
-      const spelling = filePathSpellingKey(filePath);
-      if (spelling) pathsWithUnadoptedChanges.add(spelling);
-    }
-    return key;
+  const verifiedStats = readDocumentStats(
+    filePath,
+    "while verifying disk adoption",
+  );
+  const verifiedKey = resolveCanonicalFileKey(filePath);
+  if (
+    !verifiedStats ||
+    verifiedKey !== currentKey ||
+    (expectedPhysicalKey && verifiedKey !== expectedPhysicalKey) ||
+    diskVersionChanged(currentVersion, diskVersionFromStats(verifiedStats))
+  ) {
+    if (markConflictOnFailure) markDocumentChangedExternally(filePath);
+    return null;
   }
-  if (currentVersion && currentVersion.mtimeMs === modifiedTime) {
-    return rememberDocumentVersion(filePath, stats);
+  const finalStats = readDocumentStats(
+    filePath,
+    "while finalizing disk adoption",
+  );
+  if (
+    resolveCanonicalFileKey(filePath) !== verifiedKey ||
+    !finalStats ||
+    diskVersionChanged(currentVersion, diskVersionFromStats(finalStats))
+  ) {
+    if (markConflictOnFailure) markDocumentChangedExternally(filePath);
+    return null;
   }
-
-  // Keep the version paired with the bytes the renderer adopted. If disk has
-  // already moved again, the next active check must compare against this mtime
-  // and report that later change rather than silently adopting it.
+  const spelling = filePathSpellingKey(filePath);
+  filePathAliases.set(spelling, verifiedKey);
+  if (
+    !pathOnlyDeletionEvidence.has(spelling) &&
+    !deletionTombstonesBySpelling.has(spelling)
+  ) {
+    deletePathUnadoptedChange(spelling);
+  }
+  const key = verifiedKey;
+  documentVersions.set(key, currentVersion);
   documentModifiedTimes.set(key, modifiedTime);
-  documentVersions.delete(key);
-  if (currentVersion) {
-    documentsWithUnadoptedChanges.add(key);
-  } else {
-    const spelling = filePathSpellingKey(filePath);
-    if (spelling) pathsWithUnadoptedChanges.add(spelling);
-  }
+  if (!pathKeyHasDeletionEvidence(key)) deleteDocumentUnadoptedChange(key);
+  // An mtime-only assertion can establish an ordinary watcher baseline, but
+  // cannot retire a deletion or prove an externally replaced file's bytes.
+  if (outcome) outcome.accepted = !!adoptedVersion;
   return key;
 }
 
 function diskVersionChanged(left, right) {
+  // Windows ctime can drift without changed bytes. Ignoring it also misses
+  // same-size edits with restored mtime (docs/PLANNED-WORK.md: ctime-byte-witness).
   return (
+    !Number.isFinite(left.ctimeMs) ||
+    !Number.isFinite(right.ctimeMs) ||
     left.dev !== right.dev ||
     left.ino !== right.ino ||
     left.size !== right.size ||
-    left.mtimeMs !== right.mtimeMs ||
-    left.ctimeMs !== right.ctimeMs
+    left.mtimeMs !== right.mtimeMs
   );
 }
 
@@ -1073,6 +2608,7 @@ let fileChangeDebounce = null;
 function closeCurrentFileWatcher() {
   clearTimeout(fileChangeDebounce);
   fileChangeDebounce = null;
+  fileWatcherRearmPending = false;
 
   if (!fileWatcher) return false;
   if (typeof fileWatcher.close === "function") {
@@ -1085,6 +2621,7 @@ function closeCurrentFileWatcher() {
     clearInterval(fileWatcher);
   }
   fileWatcher = null;
+  fileWatcherKind = null;
   return true;
 }
 
@@ -1094,34 +2631,332 @@ function clearWatchedDocument({ clearBaseline = false } = {}) {
   if (clearBaseline && watchedFileKey) {
     documentModifiedTimes.delete(watchedFileKey);
     documentVersions.delete(watchedFileKey);
-    documentsWithUnadoptedChanges.delete(watchedFileKey);
+    deleteDocumentUnadoptedChange(watchedFileKey);
     const spelling = filePathSpellingKey(watchedFilePath);
-    if (spelling) pathsWithUnadoptedChanges.delete(spelling);
-    deletedDocuments.delete(watchedFileKey);
+    if (spelling) deletePathUnadoptedChange(spelling);
   }
   watchedFilePath = null;
   watchedFileKey = null;
+  watchedOwner = null;
   if (hadWatchingState) console.log("Stopped file watching");
+}
+
+function scheduleDeletionDeliveryRetry(
+  record,
+  delay = null,
+) {
+  if (
+    !record ||
+    record.consumed ||
+    record.inFlight ||
+    record.retryTimeout ||
+    deletionDeliveries.get(record.key) !== record
+  ) {
+    return false;
+  }
+  const requestedDelay =
+    Number.isFinite(delay) && delay > 0
+      ? delay
+      : DELETION_DELIVERY_RETRY_DELAY_MS *
+        (2 ** Math.max(0, record.attempt - 1));
+  const boundedDelay = Math.max(
+    DELETION_DELIVERY_RETRY_DELAY_MS,
+    Math.min(DELETION_DELIVERY_MAX_RETRY_DELAY_MS, requestedDelay),
+  );
+  record.retryDelayMs = boundedDelay;
+  record.retryTimeout = setTimeout(() => {
+    record.retryTimeout = null;
+    record.retryDelayMs = 0;
+    if (
+      record.consumed ||
+      deletionDeliveries.get(record.key) !== record ||
+      !sameDocumentOwner(record.owner, watchedOwner)
+    ) {
+      return;
+    }
+    deliverDeletionReport(record, watchedOwner);
+  }, boundedDelay);
+  record.retryTimeout.unref?.();
+  return true;
+}
+
+// Send a deletion report to its owner. An unanswered attempt is retired by a
+// timeout, and a later attempt keeps the same event ID while being stamped with
+// the exact current selection and watcher generations.
+function deliverDeletionReport(record, selectionOwner = watchedOwner) {
+  // While retry is armed, duplicate watcher production waits so attempts, timers, and ACKs cannot overlap or reuse stale backoff.
+  if (!record || record.consumed || record.inFlight || record.retryTimeout) return false;
+  if (!sameDocumentOwner(record.owner, selectionOwner)) return false;
+  if (
+    approvalRendererState !== "ready" ||
+    record.owner.rendererGeneration !== approvalRendererGeneration ||
+    record.owner.pageSession !== approvalRendererPageSession
+  ) {
+    return false;
+  }
+  const target =
+    mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents : null;
+  if (!target || target.isDestroyed()) return false;
+  record.inFlight = true;
+  record.sends += 1;
+  record.attempt += 1;
+  record.selectionGeneration = selectionOwner.selectionGeneration;
+  record.watcherGeneration = watchedWatcherGeneration;
+  record.parked = false;
+  const attempt = record.attempt;
+  try {
+    target.send("file-deleted", {
+      path: record.path,
+      delivery: Object.freeze({
+        eventId: record.id,
+        pageSession: record.owner.pageSession,
+        rendererGeneration: record.owner.rendererGeneration,
+        owner: Object.freeze({
+          pageSession: record.owner.pageSession,
+          rendererGeneration: record.owner.rendererGeneration,
+          tabId: record.owner.tabId,
+          documentGeneration: record.owner.documentGeneration,
+          pathKey: record.owner.pathKey,
+        }),
+        selectionGeneration: selectionOwner.selectionGeneration,
+        watcherGeneration: watchedWatcherGeneration,
+        attempt,
+      }),
+    });
+  } catch (error) {
+    if (
+      deletionDeliveries.get(record.key) !== record ||
+      record.consumed
+    ) {
+      return true;
+    }
+    record.inFlight = false;
+    record.consecutiveSendFailures += 1;
+    record.lastSendError =
+      error && error.message ? error.message : String(error);
+    const retryDelay =
+      DELETION_DELIVERY_RETRY_DELAY_MS *
+      (2 ** Math.max(0, record.attempt - 1));
+    record.backoffMs = Math.min(
+      DELETION_DELIVERY_MAX_RETRY_DELAY_MS,
+      retryDelay,
+    );
+    scheduleDeletionDeliveryRetry(record, retryDelay);
+    return false;
+  }
+  if (
+    deletionDeliveries.get(record.key) !== record ||
+    record.consumed ||
+    !record.inFlight ||
+    record.attempt !== attempt
+  ) {
+    return true;
+  }
+  record.consecutiveSendFailures = 0;
+  record.backoffMs = DELETION_DELIVERY_RETRY_DELAY_MS;
+  record.lastSendError = null;
+  record.ackTimeout = setTimeout(() => {
+    if (
+      deletionDeliveries.get(record.key) !== record ||
+      record.consumed ||
+      !record.inFlight ||
+      record.attempt !== attempt
+    ) {
+      return;
+    }
+    record.ackTimeout = null;
+    record.inFlight = false;
+    scheduleDeletionDeliveryRetry(record);
+  }, DELETION_DELIVERY_ACK_TIMEOUT_MS);
+  record.ackTimeout.unref?.();
+  return true;
+}
+
+function openDeletionDelivery(filePath, owner) {
+  const ownerKey = documentOwnerKey(owner);
+  if (!ownerKey) {
+    const pathKey = canonicalFileKey(filePath);
+    if (pathKey) rememberPathOnlyDeletion(filePath, pathKey);
+    return null;
+  }
+  const existing = documentDeletionTombstones.get(ownerKey);
+  if (existing) {
+    activateDeletionDelivery(existing);
+    deliverDeletionReport(existing);
+    return existing;
+  }
+  const pathKey = owner.pathKey;
+  if (!pathKey) return null;
+  // A NEW owner tombstone, so a new retained unit. Reserved before the id is
+  // minted and before any map is touched: if the budget is gone, this deletion
+  // goes unrecorded and the latch above has already made every Save refuse,
+  // which is the only safe reading of "we may have forgotten a deletion".
+  if (!reserveDeletionEvidenceCapacity("owner-tombstone")) return null;
+  do {
+    nextDeletionDeliveryId =
+      nextDeletionDeliveryId === Number.MAX_SAFE_INTEGER
+        ? 1
+        : nextDeletionDeliveryId + 1;
+  } while (findDeletionTombstoneById(nextDeletionDeliveryId));
+  const record = {
+    id: nextDeletionDeliveryId,
+    key: ownerKey,
+    pathKey,
+    spelling: owner.spelling,
+    path: filePath,
+    owner,
+    consumed: false,
+    inFlight: false,
+    sends: 0,
+    attempt: 0,
+    ackTimeout: null,
+    retryTimeout: null,
+    retryDelayMs: 0,
+    backoffMs: DELETION_DELIVERY_RETRY_DELAY_MS,
+    consecutiveSendFailures: 0,
+    lastSendError: null,
+    parked: false,
+    compacted: false,
+    selectionGeneration: 0,
+    watcherGeneration: 0,
+    deletionWatcherGeneration: watchedWatcherGeneration,
+    physicalVersion: documentVersions.get(pathKey) || null,
+    recreationReported: false,
+    recreationVersion: null,
+  };
+  retainDeletionTombstone(record);
+  compactDeletionDeliveryCapacity();
+  deletionDeliveries.set(ownerKey, record);
+  deletedDocuments.add(pathKey);
+  addDocumentUnadoptedChange(pathKey);
+  noteDeletionEvidenceMutation();
+  deliverDeletionReport(record);
+  return record;
+}
+
+function findDeletionDeliveryById(deliveryId) {
+  for (const record of deletionDeliveries.values()) {
+    if (record.id === deliveryId) return record;
+  }
+  return null;
+}
+
+function findDeletionTombstoneById(deliveryId) {
+  return deletionTombstonesById.get(deliveryId) || null;
+}
+
+function deletionDeliverySummaries() {
+  return Object.freeze(
+    Array.from(deletionDeliveries.values(), (record) =>
+      Object.freeze({
+        eventId: record.id,
+        owner: Object.freeze({
+          pageSession: record.owner.pageSession,
+          rendererGeneration: record.owner.rendererGeneration,
+          tabId: record.owner.tabId,
+          documentGeneration: record.owner.documentGeneration,
+          pathKey: record.owner.pathKey,
+        }),
+        attempt: record.attempt,
+        sends: record.sends,
+        inFlight: record.inFlight,
+        parked: record.parked,
+        compacted: record.compacted === true,
+        ackTimerActive: record.ackTimeout !== null,
+        retryTimerActive: record.retryTimeout !== null,
+        retryDelayMs: record.retryDelayMs,
+        backoffMs: record.backoffMs,
+        consecutiveSendFailures: record.consecutiveSendFailures,
+        lastSendError: record.lastSendError,
+        watcherGeneration: record.watcherGeneration,
+        selectionGeneration: record.selectionGeneration,
+      }),
+    ),
+  );
+}
+
+// Re-offer a pending report when its owner is selected again. This is the half
+// that was missing: the first send is rejected by a renderer showing another
+// document, and without a replay the owner never hears about it at all.
+function replayDeletionForOwner(filePath) {
+  const ownerKey = documentOwnerKey(watchedOwner);
+  if (!ownerKey) return false;
+  const record =
+    deletionDeliveries.get(ownerKey) ||
+    documentDeletionTombstones.get(ownerKey);
+  if (!record) return false;
+  if (record.consumed) return false;
+  if (!sameDocumentOwner(record.owner, watchedOwner)) {
+    return false;
+  }
+  if (
+    record.selectionGeneration === watchedOwner.selectionGeneration &&
+    (record.inFlight || record.retryTimeout || record.parked)
+  ) {
+    return false;
+  }
+  activateDeletionDelivery(record);
+  clearDeletionDeliveryAttempt(record);
+  record.parked = false;
+  if (!deliverDeletionReport(record, watchedOwner)) return false;
+  return true;
+}
+
+// A navigation replaces the page: its tabs, and the sessions that named them,
+// are gone, so no report addressed to them can ever be answered. The DELETION
+// EVIDENCE stays - the files are still missing, and the next selection reopens
+// a report for whoever owns the path then.
+function releaseDeletionDeliveriesForPage() {
+  for (const record of Array.from(deletionDeliveries.values())) {
+    releaseDeletionDelivery(record);
+  }
+  watchedOwner = null;
+  knownDocumentOwners.clear();
+  ownerDocumentBaselines.clear();
+  quarantinedDocumentOwners.clear();
+  supersededDocumentOwners.clear();
+  notifiedExternalVersionsByOwner.clear();
+  pendingDiskAdoptions.clear();
+  committedDiskAdoptions.clear();
+  latestAcceptedSaveSequenceByDocument.clear();
 }
 
 function reportWatchedFileDeleted() {
   if (!watchedFilePath) return;
   const deletedPath = watchedFilePath;
   const deletedKey = watchedFileKey || canonicalFileKey(deletedPath);
-  const firstReport = !!deletedKey && !deletedDocuments.has(deletedKey);
-  if (deletedKey) {
-    deletedDocuments.add(deletedKey);
-    documentsWithUnadoptedChanges.add(deletedKey);
+  openDeletionDelivery(deletedPath, watchedOwner);
+  for (const baseline of ownerDocumentBaselines.values()) {
+    const owner = baseline.owner;
+    if (
+      owner.pathKey === deletedKey &&
+      owner.pageSession === approvalRendererPageSession &&
+      owner.rendererGeneration === approvalRendererGeneration &&
+      !sameDocumentOwner(owner, watchedOwner)
+    ) {
+      try {
+        fs.statSync(owner.spelling);
+        if (resolveCanonicalFileKey(owner.spelling) !== owner.pathKey) {
+          addPathUnadoptedChange(owner.spelling);
+        }
+      } catch (error) {
+        if (error.code === "ENOENT" || error.code === "ENOTDIR") {
+          openDeletionDelivery(owner.spelling, owner);
+        } else {
+          console.error("Could not check a sibling deletion owner:", error);
+          addPathUnadoptedChange(owner.spelling);
+        }
+      }
+    }
   }
-  if (firstReport && mainWindow && mainWindow.webContents) {
-    mainWindow.webContents.send("file-deleted", { path: deletedPath });
-  }
-  closeCurrentFileWatcher();
-  if (!watchingPaused) {
+  const alreadyPollingMissingPath = fileWatcherKind === "poll";
+  if (!alreadyPollingMissingPath) closeCurrentFileWatcher();
+  if (!watchingPaused && !alreadyPollingMissingPath) {
     // Keep lightweight ownership of the missing path. A later recreation must
     // be reported against the retained pre-deletion baseline rather than being
     // silently adopted as a brand-new document.
     fileWatcher = setInterval(() => checkFileChanges(), 2000);
+    fileWatcherKind = "poll";
   }
 }
 
@@ -1153,29 +2988,118 @@ function selectWatchedDocument(
     adoptBaseline = false,
     modifiedTime = null,
     diskVersion = null,
+    owner = undefined,
+    ownerUsesCurrentPathIdentity = false,
+    verifySelection = null,
+    verifiedOwner = null,
+    verifiedKey = null,
   } = {},
 ) {
+  if ((verifiedOwner === null) !== (verifiedKey === null)) return false;
+  const suppliedVersion = diskVersion === null
+    ? null
+    : normaliseDiskVersion(diskVersion);
+  if (
+    diskVersion !== null &&
+    (!suppliedVersion ||
+      (Number.isFinite(modifiedTime) &&
+        suppliedVersion.mtimeMs !== modifiedTime))
+  ) {
+    console.error("Refusing watcher selection with incoherent disk version");
+    return false;
+  }
+  const normalisedOwner =
+    owner === undefined
+      ? null
+      : verifiedOwner || normaliseDocumentOwner(owner, filePath, {
+          useCurrentPathIdentity: ownerUsesCurrentPathIdentity,
+        });
+  if (
+    owner !== undefined &&
+    (!normalisedOwner ||
+      (verifiedOwner &&
+        (!sameDocumentSelectionOwner(owner, verifiedOwner) ||
+          verifiedOwner.pathKey !== verifiedKey)) ||
+      !canRememberDocumentOwner(normalisedOwner))
+  ) return false;
+  const previousOwnerBaseline = ownerDocumentBaselines.get(
+    documentOwnerKey(normalisedOwner),
+  );
+  if (
+    adoptBaseline &&
+    previousOwnerBaseline &&
+    previousOwnerBaseline.version &&
+    suppliedVersion &&
+    diskVersionChanged(previousOwnerBaseline.version, suppliedVersion)
+  ) {
+    console.error("Refusing to replace an owner's baseline without disk adoption");
+    return false;
+  }
+  if (verifySelection && !verifySelection()) return false;
   let key;
+  let verifiedAdoption = false;
+  let missingOwnedDocument = false;
   if (adoptBaseline) {
+    try {
+      fs.statSync(filePath);
+    } catch (error) {
+      if (error.code !== "ENOENT" && error.code !== "ENOTDIR") {
+        console.error("Could not check selected document:", error);
+        return false;
+      }
+      if (
+        !normalisedOwner ||
+        !documentHasSaveBaseline(filePath, normalisedOwner)
+      ) {
+        console.error("Refusing missing document without a prior owner baseline");
+        return false;
+      }
+      missingOwnedDocument = true;
+    }
+    const adoption = {};
     const adoptedTime = Number.isFinite(modifiedTime)
       ? modifiedTime
       : readDocumentModifiedTime(filePath, "while adopting disk content");
-    key = adoptDocumentBaseline(
-      filePath,
-      adoptedTime,
-      "while adopting disk content",
-      diskVersion,
-    );
+    key = missingOwnedDocument
+      ? normalisedOwner.pathKey
+      : Number.isFinite(adoptedTime)
+      ? adoptDocumentBaseline(
+          filePath,
+          adoptedTime,
+          "while adopting disk content",
+          diskVersion,
+          adoption,
+        )
+      : null;
+    if (!key) return false;
+    verifiedAdoption = adoption.accepted === true;
   } else {
-    key = canonicalFileKey(filePath);
+    key = verifiedKey || canonicalFileKey(filePath);
   }
   if (!key) return false;
 
+  if (owner !== undefined &&
+      !rememberDocumentOwner(normalisedOwner, {
+        diskVersion: suppliedVersion,
+        modifiedTime,
+        adopted: verifiedAdoption,
+      })) return false;
   const changedSpelling = watchedFilePath !== filePath;
   const changedDocument = watchedFileKey !== key;
   if (changedSpelling || changedDocument) closeCurrentFileWatcher();
   watchedFilePath = filePath;
   watchedFileKey = key;
+  if (owner !== undefined) {
+    watchedOwner = normalisedOwner;
+    if (missingOwnedDocument) {
+      openDeletionDelivery(filePath, normalisedOwner);
+    }
+  } else if (changedSpelling || changedDocument) {
+    // Re-arming the watcher for the SAME document keeps whoever asked for it.
+    // A selection that names a different document and no owner cannot speak
+    // for the previous one, so the seat is left empty rather than inherited.
+    watchedOwner = null;
+  }
 
   if (!adoptBaseline && !documentModifiedTimes.has(key)) {
     const initialStats = readDocumentStats(
@@ -1191,13 +3115,19 @@ function selectWatchedDocument(
 
 function startFileWatching(filePath, options = {}) {
   if (!selectWatchedDocument(filePath, options)) return;
+  watchedWatcherGeneration += 1;
 
   // Explicitly arming the watcher for a file clears any earlier pause, so a
   // stale paused flag cannot leave the selected clean file silently unwatched.
   watchingPaused = false;
 
   if (!fs.existsSync(filePath)) {
-    reportWatchedFileDeleted();
+    if (
+      documentHasSaveBaseline(filePath) ||
+      pathHasDeletionTombstone(filePath, watchedOwner)
+    ) {
+      reportWatchedFileDeleted();
+    }
     return;
   }
 
@@ -1222,14 +3152,17 @@ function startFileWatching(filePath, options = {}) {
       fileChangeDebounce = setTimeout(() => checkFileChanges(), 150);
     });
     fileWatcher = watcher;
+    fileWatcherKind = "fs";
 
     watcher.on("error", (err) => {
       if (fileWatcher !== watcher) return;
       console.error("fs.watch error, falling back to polling:", err.message);
       fileWatcher = null;
+      fileWatcherKind = null;
       if (watchingPaused) return;
       // Fallback to polling every 2 seconds (faster than before)
       fileWatcher = setInterval(() => checkFileChanges(), 2000);
+      fileWatcherKind = "poll";
     });
 
     console.log("Started watching file (OS-level):", filePath);
@@ -1237,10 +3170,73 @@ function startFileWatching(filePath, options = {}) {
     console.error("fs.watch not available, using polling:", err.message);
     // Fallback to polling every 2 seconds
     fileWatcher = setInterval(() => checkFileChanges(), 2000);
+    fileWatcherKind = "poll";
     console.log("Started watching file (polling):", filePath);
   }
 
-  checkFileChanges();
+  if (options.skipInitialCheck !== true) checkFileChanges();
+}
+
+function scheduleWatcherRearmAfterRecreation(filePath, owner) {
+  if (fileWatcherRearmPending || fileWatcherKind !== "poll") return false;
+  fileWatcherRearmPending = true;
+  setImmediate(() => {
+    if (!fileWatcherRearmPending) return;
+    fileWatcherRearmPending = false;
+    const currentOwner = watchedOwner;
+    if (
+      watchingPaused ||
+      !sameFilePath(watchedFilePath, filePath) ||
+      !sameDocumentOwner(currentOwner, owner) ||
+      !fs.existsSync(filePath) ||
+      !pathHasDeletionTombstone(filePath, owner)
+    ) {
+      return;
+    }
+    startFileWatching(filePath, {
+      owner: currentOwner,
+      skipInitialCheck: true,
+    });
+  });
+  return true;
+}
+
+function sendAuthorisedWatcherEvent(channel, filePath, data = {}) {
+  const owner = watchedOwner;
+  const target =
+    mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents : null;
+  if (
+    !target ||
+    target.isDestroyed() ||
+    !owner ||
+    owner.pageSession !== approvalRendererPageSession ||
+    owner.rendererGeneration !== approvalRendererGeneration
+  ) {
+    return false;
+  }
+  try {
+    target.send(channel, {
+      ...data,
+      path: filePath,
+      watcher: Object.freeze({
+        pageSession: owner.pageSession,
+        rendererGeneration: owner.rendererGeneration,
+        owner: Object.freeze({
+          pageSession: owner.pageSession,
+          rendererGeneration: owner.rendererGeneration,
+          tabId: owner.tabId,
+          documentGeneration: owner.documentGeneration,
+          pathKey: owner.pathKey,
+        }),
+        selectionGeneration: owner.selectionGeneration,
+        watcherGeneration: watchedWatcherGeneration,
+      }),
+    });
+    return true;
+  } catch (error) {
+    console.error(`Error delivering ${channel}:`, error);
+    return false;
+  }
 }
 
 function checkFileChanges() {
@@ -1257,12 +3253,19 @@ function checkFileChanges() {
     const stats = fs.statSync(watchedFilePath);
     const currentVersion = diskVersionFromStats(stats);
     const currentModTime = currentVersion.mtimeMs;
-    const baseline = watchedFileKey
-      ? documentModifiedTimes.get(watchedFileKey)
-      : undefined;
-    const baselineVersion = watchedFileKey
-      ? documentVersions.get(watchedFileKey)
-      : undefined;
+    const ownerKey = documentOwnerKey(watchedOwner);
+    const selectedBaseline = ownerDocumentBaselines.get(ownerKey);
+    const baseline = selectedBaseline &&
+      Number.isFinite(selectedBaseline.modifiedTime)
+      ? selectedBaseline.modifiedTime
+      : watchedFileKey
+        ? documentModifiedTimes.get(watchedFileKey)
+        : undefined;
+    const baselineVersion = selectedBaseline && selectedBaseline.version
+      ? selectedBaseline.version
+      : watchedFileKey
+        ? documentVersions.get(watchedFileKey)
+        : undefined;
     const currentFileKey = resolveCanonicalFileKey(watchedFilePath);
     const spelling = filePathSpellingKey(watchedFilePath);
     const targetChanged =
@@ -1272,11 +3275,45 @@ function checkFileChanges() {
     const targetChangeAlreadyReported =
       !!spelling && pathsWithUnadoptedChanges.has(spelling);
     const wasDeleted =
-      !!watchedFileKey && deletedDocuments.has(watchedFileKey);
+      pathHasDeletionTombstone(watchedFilePath, watchedOwner) ||
+      (!watchedOwner &&
+        !!watchedFileKey &&
+        deletedDocuments.has(watchedFileKey));
+
+    if (wasDeleted) {
+      const tombstones = deletionTombstonesForPath(
+        watchedFilePath,
+        watchedOwner,
+      );
+      const firstRecreationReport = tombstones.some(
+        (record) => !record.recreationReported,
+      );
+      for (const record of tombstones) {
+        record.recreationReported = true;
+        record.recreationVersion = currentVersion;
+      }
+      addDocumentUnadoptedChange(watchedFileKey);
+      if (
+        firstRecreationReport &&
+        mainWindow &&
+        mainWindow.webContents
+      ) {
+        console.log("Deleted file recreated externally:", watchedFilePath);
+        sendAuthorisedWatcherEvent(
+          "file-changed-externally",
+          watchedFilePath,
+          {
+          modifiedTime: currentModTime,
+          },
+        );
+      }
+      scheduleWatcherRearmAfterRecreation(watchedFilePath, watchedOwner);
+      return;
+    }
 
     if (targetChanged || targetChangeAlreadyReported) {
       if (targetChanged && spelling) {
-        pathsWithUnadoptedChanges.add(spelling);
+        addPathUnadoptedChange(spelling);
       }
       if (
         targetChanged &&
@@ -1285,10 +3322,13 @@ function checkFileChanges() {
         mainWindow.webContents
       ) {
         console.log("File target changed externally:", watchedFilePath);
-        mainWindow.webContents.send("file-changed-externally", {
-          path: watchedFilePath,
+        sendAuthorisedWatcherEvent(
+          "file-changed-externally",
+          watchedFilePath,
+          {
           modifiedTime: currentModTime,
-        });
+          },
+        );
       }
       return;
     }
@@ -1333,21 +3373,35 @@ function checkFileChanges() {
       (baselineVersion &&
         diskVersionChanged(baselineVersion, currentVersion))
     ) {
-      console.log("File modified externally:", watchedFilePath);
+      const previouslyNotified = notifiedExternalVersionsByOwner.get(
+        ownerKey,
+      );
+      const alreadyNotified = !!previouslyNotified &&
+        sameDiskVersion(previouslyNotified, currentVersion);
       documentModifiedTimes.set(watchedFileKey, currentModTime);
       documentVersions.set(watchedFileKey, currentVersion);
-      documentsWithUnadoptedChanges.add(watchedFileKey);
+      addDocumentUnadoptedChange(watchedFileKey);
+      if (alreadyNotified) return;
+      // ONLY AGAINST AN OWNER THE TABLES STILL HOLD. `watchedOwner` is not
+      // cleared when its own tab supersedes it, so this is the one writer that
+      // could name an owner `forgetDocumentOwnerAliases` has already collected
+      // - and the entry would then be unreachable for the rest of the session
+      // while suppressing nothing, because no live owner reads that key. Not
+      // recording it only risks repeating a notice, which is the safe side.
+      if (ownerKey && knownDocumentOwners.has(ownerKey)) {
+        notifiedExternalVersionsByOwner.set(ownerKey, currentVersion);
+      }
+      console.log("File modified externally:", watchedFilePath);
 
       // Notify renderer about file change
       if (mainWindow && mainWindow.webContents) {
-        mainWindow.webContents.send("file-changed-externally", {
-          path: watchedFilePath,
+        sendAuthorisedWatcherEvent(
+          "file-changed-externally",
+          watchedFilePath,
+          {
           modifiedTime: currentModTime,
-        });
-      }
-      if (wasDeleted) {
-        deletedDocuments.delete(watchedFileKey);
-        startFileWatching(watchedFilePath);
+          },
+        );
       }
     }
   } catch (err) {
@@ -1360,9 +3414,20 @@ function stopFileWatching({ clearBaselines = true } = {}) {
   if (clearBaselines) {
     documentModifiedTimes.clear();
     documentVersions.clear();
-    documentsWithUnadoptedChanges.clear();
-    pathsWithUnadoptedChanges.clear();
-    deletedDocuments.clear();
+    for (const key of Array.from(documentsWithUnadoptedChanges)) {
+      if (!deletedDocuments.has(key)) {
+        deleteDocumentUnadoptedChange(key);
+      }
+    }
+    for (const spelling of Array.from(pathsWithUnadoptedChanges)) {
+      if (
+        !pathOnlyDeletionEvidence.has(spelling) &&
+        !deletionTombstonesBySpelling.has(spelling)
+      ) {
+        deletePathUnadoptedChange(spelling);
+      }
+    }
+    releaseDeletionDeliveriesForPage();
     filePathAliases.clear();
   }
 }
@@ -1459,6 +3524,23 @@ function safeSendFileOpen(target, channel, data, rendererGeneration = null) {
       !mainWindow ||
       mainWindow.webContents !== target)
   ) {
+    return false;
+  }
+  if (
+    (channel === "file-opened" || channel === "file-open-result") &&
+    shutdownCommitIngressBlocked
+  ) {
+    log("File open refused while a shutdown commit is frozen:", data.path);
+    try {
+      target.send(
+        "show-error",
+        `File open was refused while closing: ${safeFileLabel(
+          path.basename(data.path),
+        )}. Retry after closing is cancelled.`,
+      );
+    } catch (error) {
+      log("Could not report refused file open:", error);
+    }
     return false;
   }
   try {
@@ -1778,6 +3860,18 @@ ipcMain.on("export-pdf", async (event, data) => {
   try {
     const { currentFileName } = data;
 
+    // INGRESS. Refused before a destination is even chosen, so the latch never
+    // lets the reader pick a path Folia is going to refuse to write anyway.
+    // This protocol carries no request id, so none is invented here: the
+    // renderer correlates the result exactly as it always has.
+    if (deletionEvidenceCapacityLatched) {
+      mainWindow.webContents.send(
+        "pdf-export-result",
+        deletionEvidenceCapacityWriteRefusal("ingress"),
+      );
+      return;
+    }
+
     // Determine default filename
     let defaultFilename = "document.pdf";
     if (currentFileName) {
@@ -1811,6 +3905,19 @@ ipcMain.on("export-pdf", async (event, data) => {
       pageSize: "A4",
       preferCSSPageSize: false,
     });
+
+    // BEFORE THE WRITE. The save dialog, the light-mode handshake and
+    // printToPDF are all awaits: the latch can trip inside any of them, and
+    // the destination now in hand is a file that does not exist yet.
+    if (deletionEvidenceCapacityLatched) {
+      mainWindow.webContents.send(
+        "pdf-export-result",
+        deletionEvidenceCapacityWriteRefusal("before-write", {
+          path: result.filePath,
+        }),
+      );
+      return;
+    }
 
     // Write PDF to file
     fs.writeFile(result.filePath, pdfData, (err) => {
@@ -1847,8 +3954,27 @@ ipcMain.on("export-pdf", async (event, data) => {
 // last write issued the last write applied, which is the only ordering a user
 // can reason about.
 const saveQueues = new Map();
+// WHICH LIFECYCLE A QUEUED SAVE BELONGS TO. `__shutdown.reset` tears the
+// machine down and, last of all, re-opens the deletion-evidence latch - but
+// `saveQueues` can still hold a Save that was accepted BEFORE the latch tripped
+// and is parked behind a prior write or a gate hold, and `knownDocumentOwners`
+// is deliberately retained, so every identity check that save makes would still
+// pass. Clearing the latch would then let a save the previous scenario had
+// already stopped wake up and create or truncate a file in the next one.
+// A monotonic epoch fails those scopes CLOSED: a save carries the epoch it was
+// accepted under, and every stage that could still write re-checks it. Nothing
+// releases an expired scope - like the latch it invalidates against, it is a
+// one-way door for the save that holds it.
+let saveLifecycleEpoch = 1;
 const activeSaveRunsByKey = new Map();
 const activeSaveVerifications = new Map();
+const activeSaveCorrelations = new Map();
+const pendingSaveOutcomeDeliveries = new Map();
+const latestAcceptedSaveSequenceByDocument = new Map();
+const MAX_ACTIVE_SAVE_CORRELATIONS = 128;
+const SAVE_OUTCOME_ACK_TIMEOUT_MS = 4000;
+const SAVE_OUTCOME_RETRY_DELAY_MS = 100;
+const SAVE_OUTCOME_MAX_RETRY_DELAY_MS = 4000;
 // Monotonic diagnostics. Tests can compare two snapshots without replacing
 // fs methods or changing the write path merely to make serialization visible.
 let saveQueueEnqueuedCount = 0;
@@ -1857,6 +3983,671 @@ let saveQueueCompletedCount = 0;
 let saveQueuePendingCount = 0;
 let saveQueueOverlapCount = 0;
 let saveQueueMaxActiveForSinglePath = 0;
+
+// Test-only: no renderer IPC or test-supplied scope can enter this gate.
+// A matching, authenticated save pauses inside its existing per-path queue.
+const liveSaveGate = app.isPackaged ? null : (() => {
+  const MAX_MS = 30000;
+  let nextToken = 0;
+  let armed = null;
+  let claimed = null;
+  let held = null;
+  let waiter = null;
+  let lastEnd = null;
+  let unclaimedRefusal = null;
+  const failedClaims = new Map();
+  const refusedScopes = new Set();
+
+  function milliseconds(value, name, fallback) {
+    if (value === undefined) return fallback;
+    if (!Number.isSafeInteger(value) || value < 1 || value > MAX_MS) {
+      throw new Error(`Save gate ${name} must be 1-${MAX_MS} milliseconds`);
+    }
+    return value;
+  }
+
+  function selector(value, name) {
+    if (value === undefined) return null;
+    if (typeof value !== "string" || !value || value.includes("\0")) {
+      throw new Error(`Save gate ${name} must be a nonempty string without NUL`);
+    }
+    return value;
+  }
+
+  function summary(item) {
+    if (!item) return null;
+    const scope = item.scope;
+    return Object.freeze({
+      token: item.token,
+      path: scope.path,
+      pathKey: scope.owner.pathKey,
+      requestId: scope.requestId,
+      pageSession: scope.pageSession,
+      rendererGeneration: scope.rendererGeneration,
+      tabId: scope.owner.tabId,
+      documentGeneration: scope.owner.documentGeneration,
+      selectionGeneration: scope.owner.selectionGeneration,
+      sequence: scope.sequence,
+    });
+  }
+
+  function notifyWaiter(error, value) {
+    if (!waiter) return;
+    const current = waiter;
+    waiter = null;
+    clearTimeout(current.timer);
+    if (error) current.reject(error);
+    else current.resolve(value);
+  }
+
+  function disarm(reason) {
+    if (!armed) return;
+    const target = armed;
+    clearTimeout(target.timer);
+    const token = target.token;
+    armed = null;
+    if (claimed) {
+      const scope = claimed.scope;
+      failedClaims.set(scope, reason);
+      if (activeSaveCorrelations.get(scope.correlationKey) === scope) {
+        refusedScopes.add(scope);
+      }
+      claimed = null;
+    } else {
+      // A Save IPC may already be in flight even though main has not seen it.
+      // No finite grace period can prove that such an IPC will never arrive.
+      // Keep one epoch-scoped refusal until a new ready renderer generation
+      // makes every request from this page fail captureSaveScope().
+      unclaimedRefusal = Object.freeze({
+        token,
+        reason,
+        path: target.path,
+        pathKey: target.pathKey,
+        requestId: target.requestId,
+        pageSession: target.pageSession,
+        rendererGeneration: target.rendererGeneration,
+        epochGeneration: target.epochGeneration,
+        epochPageSession: target.epochPageSession,
+      });
+    }
+    lastEnd = Object.freeze({ token, reason });
+    notifyWaiter(new Error(`Save gate ${reason}`));
+  }
+
+  function finish(reason) {
+    if (!held) return null;
+    const current = held;
+    held = null;
+    clearTimeout(current.timer);
+    lastEnd = Object.freeze({ token: current.token, reason });
+    if (reason === "released") {
+      current.resolve();
+    } else {
+      if (
+        activeSaveCorrelations.get(current.scope.correlationKey) ===
+        current.scope
+      ) {
+        refusedScopes.add(current.scope);
+      }
+      current.reject(new Error(`Save gate ${reason}; the save was not written`));
+    }
+    return summary(current);
+  }
+
+  function arm(options) {
+    if (!options || typeof options !== "object" || Array.isArray(options)) {
+      throw new Error("Save gate arm requires options");
+    }
+    if (unclaimedRefusal) {
+      throw new Error(
+        "Save gate has an unclaimed refusal; retire it after a new ready renderer generation",
+      );
+    }
+    if (armed || claimed || held) {
+      throw new Error("Save gate is already armed or held");
+    }
+    if (
+      approvalRendererState !== "ready" ||
+      !Number.isSafeInteger(approvalRendererGeneration) ||
+      approvalRendererGeneration < 1 ||
+      typeof approvalRendererPageSession !== "string" ||
+      !approvalRendererPageSession
+    ) {
+      throw new Error("Save gate requires a ready renderer page");
+    }
+    const path = selector(options.path, "path");
+    const pathKey = selector(options.pathKey, "pathKey");
+    if (!path && !pathKey) {
+      throw new Error("Save gate requires path or pathKey");
+    }
+    const pageSession = selector(options.pageSession, "pageSession");
+    const requestId = options.requestId;
+    if (requestId !== undefined && !validSaveRequestId(requestId)) {
+      throw new Error("Save gate requestId is invalid");
+    }
+    const rendererGeneration = options.rendererGeneration;
+    if (
+      rendererGeneration !== undefined &&
+      (!Number.isSafeInteger(rendererGeneration) || rendererGeneration < 1)
+    ) {
+      throw new Error("Save gate rendererGeneration is invalid");
+    }
+    if (
+      (pageSession !== null &&
+        pageSession !== approvalRendererPageSession) ||
+      (rendererGeneration !== undefined &&
+        rendererGeneration !== approvalRendererGeneration)
+    ) {
+      throw new Error("Save gate selectors must name the current renderer page");
+    }
+    const armMs = milliseconds(options.armMs, "armMs", 10000);
+    const holdMs = milliseconds(options.holdMs, "holdMs", 10000);
+    const token = ++nextToken;
+    const entry = {
+      token, path, pathKey, pageSession, requestId, rendererGeneration,
+      epochGeneration: approvalRendererGeneration,
+      epochPageSession: approvalRendererPageSession,
+      holdMs, timer: null,
+    };
+    armed = entry;
+    entry.timer = setTimeout(() => {
+      if (armed === entry) disarm("arm timed out");
+    }, armMs);
+    entry.timer.unref?.();
+    return token;
+  }
+
+  function waitForHold(token, options = {}) {
+    if (!options || typeof options !== "object" || Array.isArray(options)) {
+      return Promise.reject(new Error("Save gate wait requires options"));
+    }
+    let timeoutMs;
+    try {
+      timeoutMs = milliseconds(options.timeoutMs, "timeoutMs", 10000);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    if (held && held.token === token) return Promise.resolve(summary(held));
+    if (!armed || armed.token !== token) {
+      const reason = lastEnd && lastEnd.token === token
+        ? lastEnd.reason
+        : "token is not armed";
+      return Promise.reject(new Error(`Save gate ${reason}`));
+    }
+    if (waiter) return Promise.reject(new Error("Save gate already has a waiter"));
+    return new Promise((resolve, reject) => {
+      const current = { resolve, reject, timer: null };
+      waiter = current;
+      current.timer = setTimeout(() => {
+        if (waiter === current) disarm("wait timed out");
+      }, timeoutMs);
+      current.timer.unref?.();
+    });
+  }
+
+  function matches(target, scope) {
+    return !!scope &&
+      activeSaveCorrelations.get(scope.correlationKey) === scope &&
+      target.epochGeneration === scope.rendererGeneration &&
+      target.epochPageSession === scope.pageSession &&
+      (target.path === null || target.path === scope.path) &&
+      (target.pathKey === null || target.pathKey === scope.owner.pathKey) &&
+      (target.requestId === undefined ||
+        target.requestId === scope.requestId) &&
+      (target.pageSession === null ||
+        target.pageSession === scope.pageSession) &&
+      (target.rendererGeneration === undefined ||
+        target.rendererGeneration === scope.rendererGeneration);
+  }
+
+  // Bind the target before queueing; only enter() pauses it. An expired arm
+  // cannot let a previously accepted, still-queued Save write unobserved.
+  function claim(scope) {
+    if (unclaimedRefusal && matches(unclaimedRefusal, scope)) {
+      failedClaims.set(scope, unclaimedRefusal.reason);
+      refusedScopes.add(scope);
+      return;
+    }
+    if (!armed || claimed || !matches(armed, scope)) return;
+    const target = armed;
+    claimed = { token: target.token, scope };
+  }
+
+  function enter(scope) {
+    if (failedClaims.has(scope)) {
+      const reason = failedClaims.get(scope);
+      failedClaims.delete(scope);
+      throw new Error(`Save gate ${reason}; the save was not written`);
+    }
+    if (!claimed || claimed.scope !== scope) return null;
+    const target = armed;
+    claimed = null;
+    if (!target) {
+      throw new Error("Save gate expired before its queued save could run");
+    }
+    clearTimeout(target.timer);
+    armed = null;
+    const promise = new Promise((resolve, reject) => {
+      held = {
+        token: target.token, scope, resolve, reject, timer: null,
+      };
+    });
+    const current = held;
+    current.timer = setTimeout(() => {
+      if (held === current) finish("hold timed out");
+    }, target.holdMs);
+    current.timer.unref?.();
+    notifyWaiter(null, summary(current));
+    return promise;
+  }
+
+  function release(token) {
+    if (!held || held.token !== token) {
+      throw new Error("Save gate release token is not held");
+    }
+    return finish("released");
+  }
+
+  function cancel(token) {
+    if (armed && armed.token === token) {
+      disarm("cancelled");
+      return;
+    }
+    if (held && held.token === token) {
+      finish("cancelled");
+      return;
+    }
+    throw new Error("Save gate cancel token is not active");
+  }
+
+  function dispose() {
+    disarm("reset");
+    finish("reset");
+  }
+
+  function retire(token) {
+    if (!unclaimedRefusal || unclaimedRefusal.token !== token) {
+      throw new Error("Save gate has no matching unclaimed refusal to retire");
+    }
+    if (
+      approvalRendererState !== "ready" ||
+      approvalRendererGeneration === unclaimedRefusal.epochGeneration ||
+      typeof approvalRendererPageSession !== "string" ||
+      !approvalRendererPageSession
+    ) {
+      throw new Error(
+        "Save gate refusal cannot retire until a new renderer generation is ready",
+      );
+    }
+    unclaimedRefusal = null;
+    return true;
+  }
+
+  function stillCorrelated(scope) {
+    const key = scope.correlationKey;
+    const delivery = pendingSaveOutcomeDeliveries.get(key);
+    return activeSaveCorrelations.get(key) === scope &&
+      (!delivery || delivery.scope === scope);
+  }
+
+  function correlatedRefusals() {
+    const result = [];
+    for (const scope of refusedScopes) {
+      if (!stillCorrelated(scope)) {
+        refusedScopes.delete(scope);
+        continue;
+      }
+      result.push({
+        key: scope.correlationKey,
+        scope,
+        delivery: pendingSaveOutcomeDeliveries.get(scope.correlationKey),
+      });
+    }
+    return result;
+  }
+
+  return Object.freeze({
+    arm, waitForHold, release, cancel, retire, claim, enter, dispose,
+    correlatedRefusals,
+    forget: (scope) => {
+      if (claimed && claimed.scope === scope) disarm("save abandoned");
+      failedClaims.delete(scope);
+      refusedScopes.delete(scope);
+    },
+    refused: (scope) => refusedScopes.has(scope),
+    state: () => Object.freeze({
+      armedToken: armed ? armed.token : null,
+      claimed: claimed ? summary(claimed) : null,
+      held: summary(held),
+      lastEnd,
+      unclaimedRefusal,
+      refusedOutcomeCount: Array.from(refusedScopes).filter(stillCorrelated).length,
+    }),
+  });
+})();
+
+function validSaveRequestId(value) {
+  return (
+    (Number.isSafeInteger(value) && value > 0) ||
+    (typeof value === "string" &&
+      value.length > 0 &&
+      value.length <= 128 &&
+      !value.includes("\0"))
+  );
+}
+
+function saveCorrelationKey(owner, requestId) {
+  return owner
+    ? `${documentOwnerKey(owner)}\0${typeof requestId}:${String(requestId)}`
+    : null;
+}
+
+function clearSaveOutcomeDeliveryAttempt(record) {
+  if (!record) return;
+  if (record.ackTimeout) clearTimeout(record.ackTimeout);
+  if (record.retryTimeout) clearTimeout(record.retryTimeout);
+  record.ackTimeout = null;
+  record.retryTimeout = null;
+  record.inFlight = false;
+}
+
+function releaseSaveOutcomeDelivery(record) {
+  if (!record) return false;
+  clearSaveOutcomeDeliveryAttempt(record);
+  pendingSaveOutcomeDeliveries.delete(record.key);
+  activeSaveCorrelations.delete(record.key);
+  liveSaveGate?.forget(record.scope);
+  return true;
+}
+
+function scheduleSaveOutcomeRetry(record, delay = null) {
+  if (
+    !record ||
+    record.inFlight ||
+    record.retryTimeout ||
+    pendingSaveOutcomeDeliveries.get(record.key) !== record
+  ) {
+    return false;
+  }
+  const requestedDelay =
+    Number.isFinite(delay) && delay > 0
+      ? delay
+      : SAVE_OUTCOME_RETRY_DELAY_MS *
+        (2 ** Math.max(0, record.attempt - 1));
+  const boundedDelay = Math.max(
+    SAVE_OUTCOME_RETRY_DELAY_MS,
+    Math.min(SAVE_OUTCOME_MAX_RETRY_DELAY_MS, requestedDelay),
+  );
+  record.retryTimeout = setTimeout(() => {
+    record.retryTimeout = null;
+    deliverSaveOutcome(record);
+  }, boundedDelay);
+  record.retryTimeout.unref?.();
+  return true;
+}
+
+function deliverSaveOutcome(record) {
+  if (
+    !record ||
+    record.inFlight ||
+    pendingSaveOutcomeDeliveries.get(record.key) !== record
+  ) {
+    return false;
+  }
+  // The payload was already shaped against the scope state when it was queued.
+  // The only question left here is whether the page it is addressed to can
+  // still be reached; a page that can be reached is one that is still waiting.
+  if (saveScopeUnreachableWhy(record.scope)) {
+    releaseSaveOutcomeDelivery(record);
+    return false;
+  }
+  if (record.payload.success === true &&
+      saveScopeQuarantined(record.scope)) {
+    record.payload = Object.freeze({
+      ...record.payload,
+      success: false,
+      conflict: true,
+      settlementOnly: false,
+      error:
+        "The document was quarantined before its Save result was delivered. Review the conflict before saving.",
+    });
+  }
+  if (shutdownCommitIngressBlocked) {
+    scheduleSaveOutcomeRetry(record);
+    return false;
+  }
+  const target = record.scope.sender;
+  record.inFlight = true;
+  record.attempt += 1;
+  const attempt = record.attempt;
+  try {
+    target.send("save-markdown-result", {
+      ...record.payload,
+      saveResultAttempt: attempt,
+    });
+  } catch (error) {
+    if (pendingSaveOutcomeDeliveries.get(record.key) !== record) {
+      return true;
+    }
+    record.inFlight = false;
+    record.lastSendError =
+      error && error.message ? error.message : String(error);
+    scheduleSaveOutcomeRetry(record);
+    return false;
+  }
+  if (
+    pendingSaveOutcomeDeliveries.get(record.key) !== record ||
+    !record.inFlight ||
+    record.attempt !== attempt
+  ) {
+    return true;
+  }
+  record.lastSendError = null;
+  record.ackTimeout = setTimeout(() => {
+    if (
+      pendingSaveOutcomeDeliveries.get(record.key) !== record ||
+      !record.inFlight ||
+      record.attempt !== attempt
+    ) {
+      return;
+    }
+    record.ackTimeout = null;
+    record.inFlight = false;
+    scheduleSaveOutcomeRetry(record);
+  }, SAVE_OUTCOME_ACK_TIMEOUT_MS);
+  record.ackTimeout.unref?.();
+  return true;
+}
+
+function queueSaveOutcomeDelivery(scope, payload) {
+  if (!scope || !scope.correlationKey) return false;
+  let record = pendingSaveOutcomeDeliveries.get(scope.correlationKey);
+  if (!record) {
+    record = {
+      key: scope.correlationKey,
+      scope,
+      payload: Object.freeze({ ...payload }),
+      attempt: 0,
+      inFlight: false,
+      ackTimeout: null,
+      retryTimeout: null,
+      lastSendError: null,
+    };
+    pendingSaveOutcomeDeliveries.set(scope.correlationKey, record);
+  }
+  deliverSaveOutcome(record);
+  return true;
+}
+
+function captureSaveScope(event, data, filePath) {
+  if (
+    !isApprovalSender(event) ||
+    approvalRendererState !== "ready" ||
+    !data ||
+    typeof data !== "object" ||
+    data.saveRequestSession !== approvalRendererPageSession
+  ) {
+    return null;
+  }
+  const request = data.saveRequest;
+  const owner = normaliseDocumentOwner(request, filePath);
+  if (
+    !owner ||
+    owner.pageSession !== data.saveRequestSession ||
+    owner.rendererGeneration !== approvalRendererGeneration ||
+    !validSaveRequestId(data.requestId) ||
+    request.requestId !== data.requestId ||
+    !Number.isSafeInteger(request.sequence) ||
+    request.sequence <= 0 ||
+    !sameDocumentSelectionOwner(owner, watchedOwner) ||
+    !isKnownDocumentOwner(owner)
+  ) {
+    return null;
+  }
+  const sender = event.sender;
+  const frame = event.senderFrame;
+  if (
+    !frame ||
+    !Number.isSafeInteger(frame.frameTreeNodeId) ||
+    frame.frameTreeNodeId <= 0
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    sender,
+    frame,
+    frameTreeNodeId: frame.frameTreeNodeId,
+    rendererGeneration: approvalRendererGeneration,
+    pageSession: approvalRendererPageSession,
+    owner,
+    requestId: data.requestId,
+    sequence: request.sequence,
+    path: filePath,
+    correlationKey: saveCorrelationKey(owner, data.requestId),
+    lifecycleEpoch: saveLifecycleEpoch,
+  });
+}
+
+// WHETHER THE PAGE CAN STILL BE TOLD. That is a different question from
+// whether it may still be trusted to authorize new work, and conflating the
+// two is what strands a renderer.
+//
+// `approvalRendererState` is demoted to "unusable" for a page that is still
+// loaded, still owns the window, still has its listener attached and is still
+// holding a promise for every save it sent. `invalidatedSaveScopes` likewise
+// marks a save whose DOCUMENT generation was replaced by an ordinary reload -
+// the page issuing it never went anywhere. Dropping a terminal result in
+// either case leaves that promise unsettled for the life of the page, which
+// blocks close and quit, holds watching off, and eventually exhausts the
+// correlation table. Only a destroyed sender, a replaced page session or
+// generation, a replaced window or a replaced frame actually removes the
+// listener the result is addressed to.
+function saveScopeUnreachableWhy(scope) {
+  if (!scope || !scope.sender) return "renderer-replaced";
+  if (scope.sender.isDestroyed()) return "sender-destroyed";
+  if (
+    approvalRendererGeneration !== scope.rendererGeneration ||
+    approvalRendererPageSession !== scope.pageSession
+  ) {
+    return "renderer-replaced";
+  }
+  const owner = shutdownOwnerWindow();
+  if (!owner || owner.webContents !== scope.sender) return "window-replaced";
+  try {
+    const mainFrame = scope.sender.mainFrame;
+    if (
+      !scope.frame ||
+      scope.frame.isDestroyed() ||
+      !mainFrame ||
+      mainFrame.isDestroyed() ||
+      (mainFrame !== scope.frame &&
+        mainFrame.frameTreeNodeId !== scope.frameTreeNodeId)
+    ) {
+      return "frame-replaced";
+    }
+  } catch {
+    return "frame-replaced";
+  }
+  return null;
+}
+
+function saveScopeQuarantined(scope) {
+  return quarantinedSaveScopes.has(scope) ||
+    quarantinedDocumentOwners.has(documentOwnerKey(scope.owner));
+}
+
+// DELIBERATELY NOT PART OF `saveScopeState`. `sendSaveResult` consults that
+// function to shape a payload for delivery, and `__shutdown.reset` retains the
+// gate's refused correlations precisely so their refusal - which settles on a
+// later microtask, after reset has returned - still reaches the renderer with
+// the words the gate gave it. Folding the epoch in there would rewrite those
+// refusals into generic staleness. The epoch's job is narrower and harder:
+// stop a queued save from WRITING, which is what the stages below check.
+function saveScopeLifecycleExpired(scope) {
+  return !scope || scope.lifecycleEpoch !== saveLifecycleEpoch;
+}
+
+function saveScopeState(scope, { allowMissingPath = false } = {}) {
+  const unreachableWhy = saveScopeUnreachableWhy(scope);
+  if (unreachableWhy) return unreachableWhy;
+  if (
+    approvalRendererState !== "ready" ||
+    !validSaveRequestId(scope.requestId) ||
+    !Number.isSafeInteger(scope.sequence) ||
+    scope.sequence <= 0
+  ) {
+    return "renderer-replaced";
+  }
+  // A reload replaced the document this save was issued for. The page is still
+  // there and still waiting, so this is the same class of failure as an owner
+  // replaced in the table below: reported as a settlement, never dropped.
+  if (saveScopeQuarantined(scope)) return "document-quarantined";
+  if (invalidatedSaveScopes.has(scope)) return "document-replaced";
+  const currentOwnerKey = documentOwnerKey(scope.owner);
+  const currentOwner = knownDocumentOwners.get(currentOwnerKey);
+  if (
+    !currentOwner ||
+    // Retained past its supersession so its facts survive, but no longer the
+    // authority for anything. Read exactly like an owner that was collected.
+    supersededDocumentOwners.has(currentOwnerKey) ||
+    !sameDocumentOwner(currentOwner, scope.owner) ||
+    currentOwner.rendererGeneration !== approvalRendererGeneration ||
+    currentOwner.pageSession !== approvalRendererPageSession
+  ) {
+    return "document-replaced";
+  }
+  const currentKey = resolveCanonicalFileKey(scope.path);
+  if (!currentKey) {
+    try {
+      if (fs.lstatSync(scope.path).isSymbolicLink()) return null;
+    } catch {
+      // The save path validation below owns the missing-path decision.
+    }
+    if (allowMissingPath) return null;
+    return "path-replaced";
+  }
+  if (currentKey !== scope.owner.pathKey) {
+    return "path-replaced";
+  }
+  return null;
+}
+
+async function openedHandleMatchesPath(filePath, handle) {
+  try {
+    const [pathStats, handleStats] = await Promise.all([
+      fs.promises.stat(filePath),
+      handle.stat(),
+    ]);
+    return !!(
+      pathStats.isFile() &&
+      handleStats.isFile() &&
+      pathStats.dev === handleStats.dev &&
+      pathStats.ino === handleStats.ino
+    );
+  } catch {
+    return false;
+  }
+}
 
 function queueSave(filePath, run) {
   const saveKey = canonicalFileKey(filePath) || filePath;
@@ -1919,28 +4710,44 @@ function reconsiderShutdownAfterSaveSettlement() {
   });
 }
 
-function conflictsWithDocumentBaseline(filePath, stats, { missing = false } = {}) {
+function conflictsWithDocumentBaseline(
+  filePath,
+  stats,
+  { missing = false, owner = null } = {},
+) {
   const spelling = filePathSpellingKey(filePath);
   const key = canonicalFileKey(filePath);
-  if (!key) return false;
-  if (missing) {
-    documentModifiedTimes.delete(key);
-    documentVersions.delete(key);
-    documentsWithUnadoptedChanges.delete(key);
-    if (spelling) pathsWithUnadoptedChanges.delete(spelling);
-    deletedDocuments.delete(key);
-    return false;
-  }
+  if (!key) return true;
+  if (quarantinedDocumentOwners.has(documentOwnerKey(owner))) return true;
+  if (missing) return false;
   const currentKey = resolveCanonicalFileKey(filePath);
-  if (
-    (spelling && pathsWithUnadoptedChanges.has(spelling)) ||
-    !currentKey ||
-    currentKey !== key
-  ) {
-    if (spelling) pathsWithUnadoptedChanges.add(spelling);
+  if (!currentKey || currentKey !== key) {
+    if (spelling) addPathUnadoptedChange(spelling);
     return true;
   }
-  if (documentsWithUnadoptedChanges.has(key)) return true;
+  const ownerBaseline = ownerDocumentBaselines.get(documentOwnerKey(owner));
+  if (owner && !ownerBaseline) return true;
+  if (ownerBaseline) {
+    if (ownerBaseline.owner.pathKey !== key || !stats) return true;
+    if (ownerBaseline.version) {
+      // A different tab may have changed the shared watcher baseline. Its
+      // newer version cannot stand in for this owner's older cached bytes.
+      return diskVersionChanged(
+        ownerBaseline.version,
+        diskVersionFromStats(stats),
+      );
+    }
+    if (!Number.isFinite(ownerBaseline.modifiedTime)) return true;
+    if (
+      documentsWithUnadoptedChanges.has(key) ||
+      (spelling && pathsWithUnadoptedChanges.has(spelling))
+    ) return true;
+    return stats.mtimeMs !== ownerBaseline.modifiedTime;
+  }
+  if (
+    documentsWithUnadoptedChanges.has(key) ||
+    (spelling && pathsWithUnadoptedChanges.has(spelling))
+  ) return true;
   const modifiedTime = documentModifiedTimes.get(key);
   if (!Number.isFinite(modifiedTime)) return false;
   if (!stats || stats.mtimeMs !== modifiedTime) return true;
@@ -1976,7 +4783,36 @@ function saveCompletionConflictError(cause = null) {
   );
 }
 
-async function openDocumentForSave(filePath) {
+// A KNOWN DELETION IS NOT AN EMPTY SLOT. Recreating a file that something
+// outside Folia deleted is a decision, not a detail of writing: the write also
+// clears the only evidence that the deletion ever happened, so a reader who
+// never saw the warning ends up with a resurrected file and nothing to say it
+// was gone. Refused here rather than after the handle exists - `wx+` CREATES
+// the file, so a refusal any later would leave an empty one behind.
+function deletedDocumentSaveError(filePath) {
+  const error = new SaveConflictError(
+    `The file was deleted outside Folia and has not been restored: ${filePath}`,
+  );
+  error.deletedDocument = true;
+  return error;
+}
+
+function documentHasSaveBaseline(filePath, owner = null) {
+  const key = canonicalFileKey(filePath);
+  const ownerBaseline = ownerDocumentBaselines.get(documentOwnerKey(owner));
+  return !!(
+    key &&
+    ((ownerBaseline &&
+      (ownerBaseline.version ||
+        Number.isFinite(ownerBaseline.modifiedTime))) ||
+      documentModifiedTimes.has(key) ||
+      documentVersions.has(key) ||
+      documentsWithUnadoptedChanges.has(key) ||
+      pathKeyHasDeletionEvidence(key))
+  );
+}
+
+async function openDocumentForSave(filePath, { allowCreate = true } = {}) {
   try {
     return {
       handle: await fs.promises.open(filePath, "r+"),
@@ -1999,9 +4835,18 @@ async function openDocumentForSave(filePath) {
     throw savePathRaceError();
   }
 
+  if (!allowCreate) throw deletedDocumentSaveError(filePath);
+
   let handle;
   try {
-    handle = await fs.promises.open(filePath, "wx+");
+    // No event-loop turn between the latch check and the exclusive create.
+    if (deletionEvidenceCapacityLatched) throw savePathRaceError();
+    const fd = fs.openSync(filePath, "wx+");
+    handle = {
+      fd,
+      stat: async () => fs.fstatSync(fd),
+      close: async () => fs.closeSync(fd),
+    };
   } catch (error) {
     if (error.code === "EEXIST") {
       let racedStats = null;
@@ -2034,6 +4879,7 @@ async function openDocumentForSave(filePath) {
       }
       throw savePathRaceError();
     }
+    if (deletionEvidenceCapacityLatched) throw savePathRaceError();
     return {
       handle,
       created: true,
@@ -2075,16 +4921,169 @@ async function readStableRawSnapshot(filePath) {
   throw saveCompletionConflictError();
 }
 
+// WHAT THE LATCH OWES THE READER. A Save refused because deletion evidence was
+// lost is correlated to the exact request that asked for it and is shaped as an
+// ordinary Save FAILURE - never a success, never a settlement-only drop the
+// renderer would swallow. The renderer keeps its in-memory copy, marks the
+// document failed and conflicted, and shows this text; the machine-readable
+// `saveBlocked` reason names the cause for anything reading the payload.
+const DELETION_EVIDENCE_CAPACITY_SAVE_ERROR =
+  "Folia can no longer prove which documents were deleted - its in-memory " +
+  "record of deletions is full - so it refuses to write any file rather " +
+  "than risk recreating a document you deleted. Saving stays blocked for " +
+  "every document until Folia is restarted. Copy your unsaved changes " +
+  "somewhere else before closing this window.";
+
+// The stale-owner fence's version of the same refusal. Named for what was
+// actually lost, so the reader is not told a deletion record filled up when
+// the fact that went missing was which document their tab has moved on to.
+const DOCUMENT_OWNER_FENCE_SAVE_ERROR =
+  "Folia can no longer prove which document this tab has moved on to - its " +
+  "in-memory record of replaced documents is full - so it refuses to write " +
+  "any file rather than risk writing an older version of a document over a " +
+  "newer one. Saving stays blocked for every document until Folia is " +
+  "restarted. Copy your unsaved changes somewhere else before closing this " +
+  "window.";
+
+let saveAuthorityLatchSaveError = DELETION_EVIDENCE_CAPACITY_SAVE_ERROR;
+
+function refuseSaveForDeletionEvidenceCapacity(
+  sendSaveResult,
+  filePath,
+  requestId,
+  stage,
+) {
+  noteDeletionEvidenceCapacityRefusal();
+  sendSaveResult({
+    success: false,
+    conflict: true,
+    saveBlocked: saveAuthorityLatchReason,
+    saveBlockedStage: stage,
+    saveBlockedWhy: deletionEvidenceCapacityLatchWhy,
+    error: saveAuthorityLatchSaveError,
+    path: filePath,
+    requestId,
+  });
+}
+
 ipcMain.on("save-markdown-file", (event, data) => {
+  if (!isApprovalSender(event)) return;
   const replyTarget = event.sender;
   const saveRequestSession = data && data.saveRequestSession;
+  const saveRequest = data && data.saveRequest;
+  let saveScope = null;
   const sendSaveResult = (result) => {
-    if (!replyTarget || replyTarget.isDestroyed()) return false;
-    replyTarget.send("save-markdown-result", {
-      ...result,
+    let outgoing = result;
+    if (saveScope) {
+      // THE ONLY REASON TO DROP A TERMINAL RESULT is that there is nobody left
+      // to hand it to. Every other failure - a distrusted renderer, a replaced
+      // document generation, an evicted owner - still has a page waiting on a
+      // promise, and that page is told.
+      if (saveScopeUnreachableWhy(saveScope)) return false;
+      const staleWhy = saveScopeState(saveScope, {
+        allowMissingPath: result && result.deleted === true,
+      });
+      if (staleWhy) {
+        if (staleWhy === "path-replaced") {
+          if (result && result.conflict === true) {
+            outgoing = {
+              ...result,
+              pathReplaced: true,
+              originalPathKey: saveScope.owner.pathKey,
+            };
+          } else {
+            const { settlementOnly: _settlementOnly, ...authorisedResult } =
+              result;
+            outgoing = {
+              ...authorisedResult,
+              success: false,
+              conflict: true,
+              pathReplaced: true,
+              originalPathKey: saveScope.owner.pathKey,
+              error:
+                "The file path identity changed before the save result was delivered. Reload or reopen it before saving.",
+            };
+          }
+        } else if (staleWhy === "document-quarantined") {
+          outgoing = {
+            ...result,
+            success: false,
+            conflict: true,
+            settlementOnly: false,
+            error:
+              "The document was quarantined during Save. Its in-memory copy was kept; review the conflict before saving.",
+          };
+        } else {
+          outgoing = {
+            ...result,
+            success: false,
+            settlementOnly: true,
+            error: `Save result became stale before delivery (${staleWhy})`,
+          };
+        }
+        if (liveSaveGate?.refused(saveScope) && result.success === false) {
+          outgoing = {
+            ...outgoing,
+            error: `${result.error}; ${outgoing.error}`,
+          };
+        }
+      }
+    }
+    const payload = {
+      ...outgoing,
       saveRequestSession,
+      saveRequest,
+    };
+    if (
+      saveScope &&
+      saveScope.correlationKey &&
+      activeSaveCorrelations.get(saveScope.correlationKey) === saveScope
+    ) {
+      return queueSaveOutcomeDelivery(saveScope, payload);
+    }
+    if (!replyTarget || replyTarget.isDestroyed()) return false;
+    try {
+      replyTarget.send("save-markdown-result", {
+        ...outgoing,
+        saveRequestSession,
+        saveRequest,
+      });
+      return true;
+    } catch (error) {
+      console.error("Error delivering save result:", error);
+      return false;
+    }
+  };
+  const sendSaveScopeFailure = (why, stage, filePath, requestId) => {
+    if (why === "document-quarantined") {
+      sendSaveResult({
+        success: false,
+        conflict: true,
+        error:
+          `The document was quarantined ${stage}. Review its conflict before saving.`,
+        path: filePath, requestId,
+      });
+      return;
+    }
+    if (why === "path-replaced") {
+      sendSaveResult({
+        success: false,
+        conflict: true,
+        pathReplaced: true,
+        originalPathKey: saveScope.owner.pathKey,
+        error: `The file path identity changed ${stage}. Reload or reopen it before saving.`,
+        path: filePath,
+        requestId,
+      });
+      return;
+    }
+    sendSaveResult({
+      success: false,
+      settlementOnly: true,
+      error: `Save authorization expired ${stage} (${why})`,
+      path: filePath,
+      requestId,
     });
-    return true;
   };
   try {
     const { filePath, content, requestId } = data;
@@ -2094,15 +5093,82 @@ ipcMain.on("save-markdown-file", (event, data) => {
     // renderer cannot tell which document was written, and a save for a
     // background tab gets applied to whatever the user is looking at now.
 
-    if (!filePath) {
+    if (
+      typeof filePath !== "string" ||
+      filePath.length === 0 ||
+      filePath.includes("\0")
+    ) {
       sendSaveResult({
         success: false,
-        error: "No file path provided",
-        path: filePath || null,
+        error: "Invalid file path",
+        path: typeof filePath === "string" ? filePath : null,
         requestId: requestId,
       });
       return;
     }
+    saveScope = captureSaveScope(event, data, filePath);
+    const saveOwner = saveScope && saveScope.owner;
+    if (
+      typeof content !== "string" ||
+      !saveScope
+    ) {
+      sendSaveResult({
+        success: false,
+        settlementOnly: true,
+        error: "Save request identity is invalid",
+        path: filePath,
+        requestId,
+      });
+      return;
+    }
+    if (
+      !saveScope.correlationKey ||
+      activeSaveCorrelations.has(saveScope.correlationKey)
+    ) {
+      return;
+    }
+    // INGRESS. Refused before the sequence is accepted, before the correlation
+    // is registered and before the gate is claimed, so a blocked Save consumes
+    // nothing the reader's next attempt would need. The refusal carries this
+    // request's requestId, saveRequestSession, saveRequest and path, so the
+    // renderer settles the promise it is actually holding.
+    if (deletionEvidenceCapacityLatched) {
+      refuseSaveForDeletionEvidenceCapacity(
+        sendSaveResult,
+        filePath,
+        requestId,
+        "ingress",
+      );
+      return;
+    }
+    const saveDocumentKey = documentOwnerKey(saveOwner);
+    const latestAcceptedSequence =
+      latestAcceptedSaveSequenceByDocument.get(saveDocumentKey) || 0;
+    if (saveScope.sequence <= latestAcceptedSequence) {
+      sendSaveResult({
+        success: false,
+        settlementOnly: true,
+        error: "Save request sequence is stale",
+        path: filePath,
+        requestId,
+      });
+      return;
+    }
+    if (activeSaveCorrelations.size >= MAX_ACTIVE_SAVE_CORRELATIONS) {
+      sendSaveResult({
+        success: false,
+        error: "Too many save requests are awaiting settlement",
+        path: filePath,
+        requestId,
+      });
+      return;
+    }
+    latestAcceptedSaveSequenceByDocument.set(
+      saveDocumentKey,
+      saveScope.sequence,
+    );
+    activeSaveCorrelations.set(saveScope.correlationKey, saveScope);
+    liveSaveGate?.claim(saveScope);
 
     // Open first, then compare the opened object to the document baseline.
     // Atomic replacement after the open moves the path to a different inode;
@@ -2113,6 +5179,34 @@ ipcMain.on("save-markdown-file", (event, data) => {
       let opened;
       let verification = null;
       try {
+        if (liveSaveGate) {
+          const hold = liveSaveGate.enter(saveScope);
+          if (hold) await hold;
+        }
+        const queuedIdentityFailure = saveScopeState(saveScope, {
+          allowMissingPath: true,
+        });
+        if (queuedIdentityFailure) {
+          sendSaveScopeFailure(
+            queuedIdentityFailure,
+            "while queued",
+            filePath,
+            requestId,
+          );
+          return;
+        }
+        // BEFORE ANYTHING TOUCHES THE FILESYSTEM. The save was accepted in a
+        // lifecycle that has since been torn down, so it may not act on the
+        // state that replaced it.
+        if (saveScopeLifecycleExpired(saveScope)) {
+          sendSaveScopeFailure(
+            "lifecycle-reset",
+            "while queued",
+            filePath,
+            requestId,
+          );
+          return;
+        }
         const currentSaveKey = canonicalFileKey(filePath) || filePath;
         if (currentSaveKey !== queuedSaveKey) {
           markDocumentChangedExternally(filePath);
@@ -2126,11 +5220,72 @@ ipcMain.on("save-markdown-file", (event, data) => {
           });
           return;
         }
-        opened = await openDocumentForSave(filePath);
+        const hadBaseline = documentHasSaveBaseline(filePath, saveOwner);
+        if (documentDeletionUnresolved(filePath, saveOwner)) {
+          throw deletedDocumentSaveError(filePath);
+        }
+        let missingBeforeOpen = false;
+        try {
+          await fs.promises.lstat(filePath);
+        } catch (error) {
+          if (error.code !== "ENOENT" && error.code !== "ENOTDIR") throw error;
+          missingBeforeOpen = true;
+        }
+        if (missingBeforeOpen && hadBaseline) {
+          if (saveOwner) openDeletionDelivery(filePath, saveOwner);
+          throw deletedDocumentSaveError(filePath);
+        }
+        const preOpenIdentityFailure = saveScopeState(saveScope, {
+          allowMissingPath: true,
+        });
+        if (preOpenIdentityFailure) {
+          sendSaveScopeFailure(
+            preOpenIdentityFailure,
+            "before open",
+            filePath,
+            requestId,
+          );
+          return;
+        }
+        if (documentDeletionUnresolved(filePath, saveOwner)) {
+          throw deletedDocumentSaveError(filePath);
+        }
+        // BEFORE THE OPEN. `openDocumentForSave` may CREATE the file when this
+        // document has no baseline, which is itself a write; a latch that
+        // tripped while this save sat in the queue must stop it here.
+        if (deletionEvidenceCapacityLatched) {
+          refuseSaveForDeletionEvidenceCapacity(
+            sendSaveResult,
+            filePath,
+            requestId,
+            "before-open",
+          );
+          return;
+        }
+        if (saveScopeLifecycleExpired(saveScope)) {
+          sendSaveScopeFailure(
+            "lifecycle-reset",
+            "before open",
+            filePath,
+            requestId,
+          );
+          return;
+        }
+        try {
+          opened = await openDocumentForSave(filePath, {
+            allowCreate: !hadBaseline,
+          });
+        } catch (error) {
+          if (saveOwner && error && error.deletedDocument === true) {
+            openDeletionDelivery(filePath, saveOwner);
+          }
+          throw error;
+        }
         const beforeWrite = await opened.handle.stat();
         if (
           conflictsWithDocumentBaseline(filePath, beforeWrite, {
             missing: opened.created,
+            owner: saveOwner,
           })
         ) {
           markDocumentChangedExternally(filePath);
@@ -2162,6 +5317,93 @@ ipcMain.on("save-markdown-file", (event, data) => {
           });
           return;
         }
+        const preWriteIdentityFailure = saveScopeState(saveScope);
+        if (preWriteIdentityFailure) {
+          sendSaveScopeFailure(
+            preWriteIdentityFailure,
+            "before write",
+            filePath,
+            requestId,
+          );
+          return;
+        }
+        if (documentDeletionUnresolved(filePath, saveOwner)) {
+          throw deletedDocumentSaveError(filePath);
+        }
+        if (!(await openedHandleMatchesPath(filePath, opened.handle))) {
+          markDocumentChangedExternally(filePath);
+          sendSaveResult({
+            success: false,
+            conflict: true,
+            error:
+              "The file path no longer names the opened file. Reload or reopen it before saving.",
+            path: filePath,
+            requestId,
+          });
+          return;
+        }
+        if (documentDeletionUnresolved(filePath, saveOwner)) {
+          throw deletedDocumentSaveError(filePath);
+        }
+
+        const finalIdentityFailure = saveScopeState(saveScope);
+        if (finalIdentityFailure) {
+          sendSaveScopeFailure(
+            finalIdentityFailure, "at the write boundary", filePath, requestId,
+          );
+          return;
+        }
+        const handleStats = fs.fstatSync(opened.handle.fd);
+        const pathStats = fs.statSync(filePath);
+        if (
+          !handleStats.isFile() ||
+          !pathStats.isFile() ||
+          handleStats.dev !== pathStats.dev ||
+          handleStats.ino !== pathStats.ino ||
+          resolveCanonicalFileKey(filePath) !== saveOwner.pathKey ||
+          diskVersionChanged(beforeWrite, diskVersionFromStats(handleStats)) ||
+          diskVersionChanged(beforeWrite, diskVersionFromStats(pathStats)) ||
+          conflictsWithDocumentBaseline(filePath, handleStats, {
+            missing: opened.created,
+            owner: saveOwner,
+          })
+        ) {
+          markDocumentChangedExternally(filePath);
+          sendSaveResult({
+            success: false,
+            conflict: true,
+            error:
+              "The file changed at the write boundary. Reload or reopen it before saving.",
+            path: filePath,
+            requestId,
+          });
+          return;
+        }
+
+        // THE LAST LOOK, with no yield left before the bytes go. An exclusive
+        // create admitted before the latch may leave an empty file if the
+        // latch closes during subsequent checks; it must not be removed by
+        // pathname, which another writer could have replaced.
+        if (deletionEvidenceCapacityLatched) {
+          refuseSaveForDeletionEvidenceCapacity(
+            sendSaveResult,
+            filePath,
+            requestId,
+            "before-write",
+          );
+          return;
+        }
+        // THE LAST LOOK AT THE LIFECYCLE TOO, for the same reason and in the
+        // same place: after this line the file is truncated.
+        if (saveScopeLifecycleExpired(saveScope)) {
+          sendSaveScopeFailure(
+            "lifecycle-reset",
+            "before write",
+            filePath,
+            requestId,
+          );
+          return;
+        }
 
         const saveKey = canonicalFileKey(filePath) || filePath;
         verification = {
@@ -2170,9 +5412,11 @@ ipcMain.on("save-markdown-file", (event, data) => {
         };
         activeSaveVerifications.set(saveKey, verification);
 
-        await opened.handle.truncate(0);
-        await opened.handle.writeFile(content, "utf8");
-        await opened.handle.sync();
+        // Do not yield after the final owner/path/version check: a quarantine
+        // received between truncation and the write cannot undo lost bytes.
+        fs.ftruncateSync(opened.handle.fd, 0);
+        fs.writeFileSync(opened.handle.fd, content, "utf8");
+        fs.fsyncSync(opened.handle.fd);
         verification.writtenVersion = diskVersionFromStats(
           await opened.handle.stat(),
         );
@@ -2201,35 +5445,21 @@ ipcMain.on("save-markdown-file", (event, data) => {
           return;
         }
 
-        const rememberedKey = rememberDocumentVersion(
-          filePath,
-          savedSnapshot.stats,
-        );
-        let adoptedStats;
-        try {
-          adoptedStats = await fs.promises.stat(filePath);
-        } catch (error) {
-          markDocumentChangedExternally(filePath);
-          console.warn(
-            "File disappeared while save baseline was being adopted:",
-            filePath,
+        const completionIdentityFailure = saveScopeState(saveScope);
+        if (completionIdentityFailure) {
+          sendSaveScopeFailure(
+            completionIdentityFailure, "while finalizing Save",
+            filePath, requestId,
           );
-          sendSaveResult({
-            success: false,
-            conflict: true,
-            error:
-              "The file changed while the save was being finalized. Reload or reopen it before saving again.",
-            path: filePath,
-            requestId: requestId,
-          });
           return;
         }
-        const adoptedVersion = diskVersionFromStats(adoptedStats);
-        if (
-          !rememberedKey ||
-          diskVersionChanged(savedVersion, adoptedVersion) ||
-          conflictsWithDocumentBaseline(filePath, adoptedStats)
-        ) {
+        const rememberedKey = rememberVerifiedSaveVersion(
+          filePath,
+          savedSnapshot.stats,
+          verification.key,
+          saveOwner,
+        );
+        if (!rememberedKey) {
           markDocumentChangedExternally(filePath);
           console.warn(
             "File changed while save baseline was being adopted:",
@@ -2248,7 +5478,7 @@ ipcMain.on("save-markdown-file", (event, data) => {
         console.log("File saved successfully:", filePath);
         console.log(
           "Updated document baseline after save:",
-          adoptedStats.mtimeMs,
+          savedSnapshot.stats.mtimeMs,
         );
 
         sendSaveResult({
@@ -2256,16 +5486,25 @@ ipcMain.on("save-markdown-file", (event, data) => {
           path: filePath,
           requestId: requestId,
           savedContent: content,
-          modifiedTime: adoptedStats.mtimeMs,
-          diskVersion: adoptedVersion,
+          modifiedTime: savedSnapshot.stats.mtimeMs,
+          diskVersion: savedVersion,
         });
       } catch (error) {
         console.error("Error saving file:", error);
+        if (deletionEvidenceCapacityLatched) {
+          refuseSaveForDeletionEvidenceCapacity(
+            sendSaveResult, filePath, requestId, "save-error",
+          );
+          return;
+        }
         const conflict = error instanceof SaveConflictError;
-        if (conflict) markDocumentChangedExternally(filePath);
+        const deleted = conflict && error.deletedDocument === true;
+        if (conflict && !deleted) markDocumentChangedExternally(filePath);
         sendSaveResult({
           success: false,
           ...(conflict ? { conflict: true } : {}),
+          // Distinguish the durable tombstone from an ordinary content race.
+          ...(deleted ? { deleted: true } : {}),
           error: error.message,
           path: filePath,
           requestId: requestId,
@@ -2290,6 +5529,12 @@ ipcMain.on("save-markdown-file", (event, data) => {
             checkFileChanges();
           }
         }
+        if (
+          !pendingSaveOutcomeDeliveries.has(saveScope.correlationKey)
+        ) {
+          activeSaveCorrelations.delete(saveScope.correlationKey);
+          liveSaveGate?.forget(saveScope);
+        }
       }
     });
   } catch (error) {
@@ -2300,72 +5545,1909 @@ ipcMain.on("save-markdown-file", (event, data) => {
       path: (data && data.filePath) || null,
       requestId: data && data.requestId,
     });
+    if (
+      saveScope &&
+      saveScope.correlationKey &&
+      !pendingSaveOutcomeDeliveries.has(saveScope.correlationKey)
+    ) {
+      activeSaveCorrelations.delete(saveScope.correlationKey);
+      liveSaveGate?.forget(saveScope);
+    }
   }
+});
+
+ipcMain.handle("save-markdown-result-ack", (event, data) => {
+  if (
+    !isApprovalSender(event) ||
+    !data ||
+    typeof data !== "object" ||
+    typeof data.saveRequestSession !== "string" ||
+    !validSaveRequestId(data.requestId) ||
+    !Number.isSafeInteger(data.saveResultAttempt) ||
+    data.saveResultAttempt <= 0
+  ) {
+    return false;
+  }
+  const request = data.saveRequest;
+  const spelling = filePathSpellingKey(data.path);
+  const record = Array.from(pendingSaveOutcomeDeliveries.values()).find(
+    (candidate) =>
+      candidate.scope.requestId === data.requestId &&
+      candidate.scope.pageSession === data.saveRequestSession,
+  );
+  if (
+    !record ||
+    !request ||
+    spelling !== record.scope.owner.spelling ||
+    data.saveResultAttempt !== record.attempt ||
+    data.requestId !== record.scope.requestId ||
+    data.saveRequestSession !== record.scope.pageSession ||
+    request.sequence !== record.scope.sequence ||
+    request.requestId !== record.scope.requestId ||
+    request.pageSession !== record.scope.owner.pageSession ||
+    request.rendererGeneration !== record.scope.owner.rendererGeneration ||
+    request.tabId !== record.scope.owner.tabId ||
+    request.documentGeneration !==
+      record.scope.owner.documentGeneration ||
+    request.pathKey !== record.scope.owner.pathKey ||
+    request.selectionGeneration !==
+      record.scope.owner.selectionGeneration
+  ) {
+    return false;
+  }
+  releaseSaveOutcomeDelivery(record);
+  return true;
 });
 
 // ============================================
 // IPC HANDLERS - File Watching
 // ============================================
 
-ipcMain.on("start-file-watching", (event, data) => {
-  const { filePath, modifiedTime, diskVersion } = data;
-  startFileWatching(filePath, {
-    adoptBaseline: true,
-    modifiedTime,
-    diskVersion,
+function authorisedWatcherEnvelope(
+  event,
+  data,
+  {
+    requireKnownOwner = false,
+    requireWatchedOwner = false,
+    rejectStaleSelection = false,
+    allowCurrentPathIdentity = false,
+  } = {},
+) {
+  if (
+    !isApprovalSender(event) ||
+    approvalRendererState !== "ready" ||
+    !data ||
+    typeof data !== "object" ||
+    typeof data.filePath !== "string" ||
+    data.filePath.length === 0 ||
+    data.filePath.includes("\0") ||
+    data.pageSession !== approvalRendererPageSession ||
+    !Number.isSafeInteger(data.rendererGeneration) ||
+    data.rendererGeneration !== approvalRendererGeneration
+  ) {
+    return null;
+  }
+  const owner = normaliseDocumentOwner(data.owner, data.filePath, {
+    useCurrentPathIdentity: allowCurrentPathIdentity,
   });
+  if (
+    !owner ||
+    owner.pageSession !== data.pageSession ||
+    owner.rendererGeneration !== data.rendererGeneration ||
+    // A superseded owner is retained so its facts survive, never so it can
+    // still be obeyed. `watchedOwner` is deliberately not cleared when its own
+    // tab moves on, so the watched-owner arm below would otherwise let a
+    // replaced generation go on pausing, resuming, stopping and quarantining
+    // the watch.
+    supersededDocumentOwners.has(documentOwnerKey(owner)) ||
+    (rejectStaleSelection &&
+      owner.selectionGeneration < latestWatcherSelectionGeneration) ||
+    (requireKnownOwner && !isKnownDocumentOwner(owner)) ||
+    (requireWatchedOwner &&
+      !sameDocumentSelectionOwner(owner, watchedOwner))
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    filePath: data.filePath,
+    owner,
+  });
+}
+
+ipcMain.on("register-document-owner", (event, data) => {
+  if (
+    !isApprovalSender(event) ||
+    approvalRendererState !== "ready" ||
+    !data ||
+    data.pageSession !== approvalRendererPageSession ||
+    data.rendererGeneration !== approvalRendererGeneration
+  ) return;
+  const owner = normaliseDocumentOwner(data.owner, data.filePath);
+  const version = normaliseDiskVersion(data.diskVersion);
+  if (
+    !owner ||
+    owner.pageSession !== data.pageSession ||
+    owner.rendererGeneration !== data.rendererGeneration ||
+    !version ||
+    data.modifiedTime !== version.mtimeMs ||
+    Array.from(knownDocumentOwners.values()).some((known) =>
+      known.pageSession === owner.pageSession &&
+      known.rendererGeneration === owner.rendererGeneration &&
+      known.tabId === owner.tabId &&
+      known.documentGeneration > owner.documentGeneration)
+  ) {
+    console.error("Refusing background document owner registration");
+    return;
+  }
+  // WHICH REFUSAL THIS WOULD BE, DECIDED WHILE IT IS STILL DECIDABLE.
+  // `canRememberDocumentOwner` tests the supersession marker FIRST and the
+  // seal second, so an owner that is neither marked nor already on record is
+  // refused BY THE SEAL once a fence has been dropped - the newer-owner test
+  // below it never runs, and the capacity refusal past it is reachable only
+  // when the seal let the owner through. Read after the call the same three
+  // facts would be worthless: a registration that SUCCEEDS puts this key in
+  // the table, and the eviction drain inside it can forget a marker, so the
+  // reason has to be taken before anything moves.
+  //
+  // The message this arms is about the SESSION, never about this document,
+  // and that is what makes it honest: after a drop this process genuinely
+  // cannot tell a first registration from a replay of one a tab has left, so
+  // it says only what is true either way - that nothing opened from now on is
+  // recorded, and that the work has to be carried out by hand.
+  const ownerKey = documentOwnerKey(owner);
+  const sealRefused =
+    documentOwnerFenceDropCount > 0 &&
+    !knownDocumentOwners.has(ownerKey) &&
+    !supersededDocumentOwners.has(ownerKey);
+  // Cleared immediately before the call it is asked about, so it answers for
+  // THIS registration and nothing earlier.
+  lastDocumentOwnerRefusalWasTablePinned = false;
+  if (!rememberDocumentOwner(owner, {
+    diskVersion: version,
+    modifiedTime: version.mtimeMs,
+  })) {
+    if (sealRefused) {
+      // The seal already announced itself once inside the admission test and
+      // tells the reader once here; a line per refusal would be the unbounded
+      // log both of those exist to avoid.
+      noteDocumentOwnerSealRefusal(event.sender);
+    } else if (!lastDocumentOwnerRefusalWasTablePinned) {
+      // Supersession, a newer sibling, a stale envelope: none of them is a
+      // session-long verdict, so each is still reported on its own.
+      console.error("Refusing stale background document registration");
+    }
+  }
 });
 
-ipcMain.on("pause-file-watching", () => {
+ipcMain.on("start-file-watching", (event, data) => {
+  const authorised = authorisedWatcherEnvelope(event, data, {
+    rejectStaleSelection: true,
+    allowCurrentPathIdentity: data && data.adoptPathIdentity === true,
+  });
+  if (!authorised) return;
+  const {
+    modifiedTime,
+    diskVersion,
+  } = data;
+  startFileWatching(authorised.filePath, {
+    adoptBaseline: data.adoptBaseline === true,
+    modifiedTime,
+    diskVersion,
+    owner: authorised.owner,
+    ownerUsesCurrentPathIdentity: data.adoptPathIdentity === true,
+  });
+  latestWatcherSelectionGeneration = Math.max(
+    latestWatcherSelectionGeneration,
+    authorised.owner.selectionGeneration,
+  );
+});
+
+ipcMain.on("pause-file-watching", (event, data) => {
+  if (
+    !authorisedWatcherEnvelope(event, data, {
+      rejectStaleSelection: true,
+    })
+  ) {
+    return;
+  }
   watchingPaused = true;
   pauseFileWatching();
 });
 
-ipcMain.on("resume-file-watching", () => {
+ipcMain.on("resume-file-watching", (event, data) => {
+  if (
+    !authorisedWatcherEnvelope(event, data, {
+      requireWatchedOwner: true,
+    })
+  ) {
+    return;
+  }
   watchingPaused = false;
   resumeFileWatching();
 });
 
-ipcMain.on("stop-file-watching", () => {
+ipcMain.on("stop-file-watching", (event, data) => {
+  if (
+    !authorisedWatcherEnvelope(event, data, {
+      requireWatchedOwner: true,
+    })
+  ) {
+    return;
+  }
   watchingPaused = false;
   stopFileWatching();
 });
 
 // Selection and tracking intent are separate messages so the renderer can
 // order them safely: pause before selecting a dirty target; select before
-// resuming a clean one. Selection never discards another document's evidence.
-ipcMain.on("set-active-file", (event, data) => {
-  const structured = data && typeof data === "object";
-  const filePath = structured ? data.filePath : data;
-  if (!filePath) return;
-
-  const wasWatching = !watchingPaused;
-  selectWatchedDocument(filePath, {
-    adoptBaseline: structured && data.adoptBaseline === true,
-    modifiedTime: structured ? data.modifiedTime : null,
-    diskVersion: structured ? data.diskVersion : null,
+// resuming a clean one. Only a committed exact-owner grant can retire evidence
+// as part of a foreground selection.
+function selectActiveFileFromRenderer(
+  authorised, data, {
+    resumeTracking = false,
+    verifySelection = null,
+    verifiedOwner = null,
+    verifiedKey = null,
+  } = {},
+) {
+  const filePath = authorised.filePath;
+  const wasPaused = watchingPaused;
+  const requestedTrackingActive = data.trackingActive === true;
+  if (!requestedTrackingActive) {
+    watchingPaused = true;
+    pauseFileWatching();
+  }
+  const wasWatching = requestedTrackingActive && !watchingPaused;
+  const selected = selectWatchedDocument(filePath, {
+    adoptBaseline: data.adoptBaseline === true,
+    modifiedTime: data.modifiedTime,
+    diskVersion: data.diskVersion,
+    owner: authorised.owner,
+    ownerUsesCurrentPathIdentity: data.adoptPathIdentity === true,
+    verifySelection,
+    verifiedOwner,
+    verifiedKey,
   });
+  if (!selected) {
+    if (!wasPaused && watchingPaused) {
+      watchingPaused = false;
+      resumeFileWatching();
+    }
+    return false;
+  }
+  latestWatcherSelectionGeneration = Math.max(
+    latestWatcherSelectionGeneration,
+    authorised.owner.selectionGeneration,
+  );
   if (wasWatching && !fileWatcher) {
     startFileWatching(filePath);
   }
+  if (resumeTracking && requestedTrackingActive && watchingPaused) {
+    watchingPaused = false;
+    resumeFileWatching();
+  }
+  // Selecting a document is the moment its owner can hear about it again. A
+  // deletion reported while another tab was on screen is still open, and this
+  // is the replay: it is refused unless this selection is that report's own
+  // owner, and it sends at most once per selection.
+  replayDeletionForOwner(filePath);
+  return true;
+}
+
+ipcMain.on("set-active-file", (event, data) => {
+  const authorised = authorisedWatcherEnvelope(event, data, {
+    rejectStaleSelection: true,
+    allowCurrentPathIdentity: data && data.adoptPathIdentity === true,
+  });
+  if (!authorised) return;
+  selectActiveFileFromRenderer(authorised, data);
 });
 
-// A successful disk adoption can belong to a background tab. Update only that
-// document's canonical baseline; never retarget the active OS watcher.
-ipcMain.on("adopt-file-baseline", (event, data) => {
+ipcMain.on("select-file-tracking", (event, data) => {
+  const authorised = authorisedWatcherEnvelope(event, data, {
+    rejectStaleSelection: true,
+    allowCurrentPathIdentity: data && data.adoptPathIdentity === true,
+  });
+  if (!authorised) {
+    event.returnValue = Object.freeze({
+      accepted: false, mayHaveMoved: false,
+      why: "invalid-tracking-owner",
+    });
+    return;
+  }
+  const expected = data.adoptBaseline === true
+    ? normaliseDiskVersion(data.diskVersion)
+    : null;
+  if (data.adoptBaseline === true && !expected) {
+    console.error("Refusing watcher selection without a valid disk version");
+    event.returnValue = Object.freeze({
+      accepted: false, mayHaveMoved: false,
+      why: "invalid-selection-disk-version",
+    });
+    return;
+  }
+  const verifySelection = expected
+    ? () => {
+        const observed = readDocumentStats(
+          authorised.filePath, "while selecting the file tracking owner",
+        );
+        if (
+          observed &&
+          resolveCanonicalFileKey(authorised.filePath) ===
+            authorised.owner.pathKey &&
+          !diskVersionChanged(expected, diskVersionFromStats(observed)) &&
+          (data.adoption ||
+            !documentDeletionUnresolved(authorised.filePath, authorised.owner))
+        ) return true;
+        if (!data.adoption) {
+          markDocumentChangedExternally(authorised.filePath);
+        }
+        return false;
+      }
+    : null;
+  if (verifySelection && !verifySelection()) {
+    event.returnValue = Object.freeze({
+      accepted: false, mayHaveMoved: true,
+      why: "disk-or-deletion-moved-before-selection",
+    });
+    return;
+  }
+  if (data.adoption) {
+    const grant = committedDiskAdoptions.get(data.adoption.capability);
+    if (
+      data.adoptBaseline !== true ||
+      data.adoptPathIdentity !== true ||
+      !expected ||
+      data.modifiedTime !== expected.mtimeMs ||
+      !grant ||
+      grant.sourcePath !== data.adoption.sourceFilePath ||
+      grant.ownerPath !== authorised.filePath ||
+      grant.ownerPath !== data.adoption.ownerFilePath ||
+      grant.proposedOwnerKey !== documentOwnerKey(authorised.owner) ||
+      grant.revision !== data.adoption.revision ||
+      grant.contentDigest !== data.adoption.contentDigest ||
+      diskVersionChanged(grant.version, expected)
+    ) {
+      event.returnValue = Object.freeze({
+        accepted: false, mayHaveMoved: false,
+        why: "invalid-selection-adoption",
+      });
+      return;
+    }
+    if (!canRememberDocumentOwner(authorised.owner)) {
+      event.returnValue = Object.freeze({
+        accepted: false, mayHaveMoved: false,
+        why: "stale-selection-owner",
+      });
+      return;
+    }
+    // The completion below asks both of these questions again, for every
+    // caller, and admits the owner itself. They are kept here so a foreground
+    // refusal keeps its own reason and is answered before the completion
+    // touches the filesystem at all; the two answers cannot disagree, because
+    // nothing between them mutates the owner table.
+    if (!documentOwnerTableHasRoomFor(
+      authorised.owner, data.adoption.capability,
+    )) {
+      noteDocumentOwnerTablePinnedRefusal("adoption");
+      event.returnValue = Object.freeze({
+        accepted: false, mayHaveMoved: false,
+        why: "selection-owner-table-full",
+      });
+      return;
+    }
+    const completion = completeDocumentDiskAdoption({
+      capability: data.adoption.capability,
+      pageSession: data.pageSession,
+      rendererGeneration: data.rendererGeneration,
+      filePath: data.adoption.sourceFilePath,
+      ownerFilePath: data.adoption.ownerFilePath,
+      actualOwner: data.owner,
+      revision: data.adoption.revision,
+    });
+    if (!completion.completed) {
+      event.returnValue = Object.freeze({
+        accepted: false, mayHaveMoved: true,
+        why: completion.why,
+      });
+      return;
+    }
+    // Completion has established the exact baseline. Selecting it without
+    // re-adopting avoids a second filesystem check after the commit boundary.
+    const selected = selectActiveFileFromRenderer(
+      authorised, {
+        ...data,
+        adoptBaseline: false,
+        trackingActive: completion.unresolvedEvidence === true
+          ? false
+          : data.trackingActive,
+      },
+      {
+        resumeTracking: true,
+        verifiedOwner: authorised.owner,
+        verifiedKey: grant.versionPathKey,
+      },
+    );
+    if (!selected) {
+      // The completion has now ADMITTED this owner, which makes the two ways
+      // the selection below could still refuse it - a stale-owner test and a
+      // capacity refusal - unreachable, and this is what happens if that ever
+      // stops being true. The completion has already retired this path's
+      // deletion evidence, so the owner that held the watch cannot be left
+      // able to come back for it: `captureSaveScope` authorises a save on
+      // a matching `watchedOwner`, and the warning that would have refused
+      // that save no longer exists. Vacating the seat is not enough on its
+      // own, because the renderer's refusal path restores its previous
+      // selection and would simply re-select the same owner into the empty
+      // seat. So the seat is vacated AND the owners that could claim it for
+      // this episode - the one holding the watch, and the one the grant
+      // replaced - are deauthorized the way supersession already does it:
+      // listed, so their facts survive for anything still reading them, but
+      // never obeyed again. Saves still settling against them are reported as
+      // replaced, which is what they are. The adopting owner is deliberately
+      // NOT deauthorized with them: it is the one owner here whose baseline
+      // is the disk's, it holds no watch, and refusing it too would strand a
+      // tab that has already taken the adopted bytes. Finally the path is
+      // recorded as changed underneath, so a later selection has to
+      // re-establish a baseline rather than inherit the one just adopted.
+      console.error("Completed disk adoption could not select its verified owner");
+      const staleOwnerKeys = new Set();
+      for (const staleKey of [documentOwnerKey(watchedOwner), grant.oldOwnerKey]) {
+        if (staleKey && knownDocumentOwners.has(staleKey)) {
+          supersededDocumentOwners.add(staleKey);
+          staleOwnerKeys.add(staleKey);
+        }
+      }
+      for (const scope of activeSaveCorrelations.values()) {
+        if (staleOwnerKeys.has(documentOwnerKey(scope.owner))) {
+          invalidatedSaveScopes.add(scope);
+        }
+      }
+      markDocumentChangedExternally(authorised.filePath);
+      watchingPaused = true;
+      clearWatchedDocument();
+      event.returnValue = Object.freeze({
+        accepted: false, mayHaveMoved: true,
+        why: "completed-adoption-selection-invariant",
+      });
+      return;
+    }
+    const selectedStats = readDocumentStats(
+      authorised.filePath, "after selecting the disk adoption owner",
+    );
+    const trackingConflict =
+      !selectedStats ||
+      resolveCanonicalFileKey(authorised.filePath) !== grant.versionPathKey ||
+      diskVersionChanged(
+        grant.version, diskVersionFromStats(selectedStats),
+      );
+    if (trackingConflict) {
+      markDocumentChangedExternally(authorised.filePath);
+      watchingPaused = true;
+      pauseFileWatching();
+    }
+    event.returnValue = Object.freeze({
+      accepted: true,
+      trackingActive:
+        data.trackingActive === true &&
+        completion.unresolvedEvidence !== true &&
+        !trackingConflict,
+      completedAdoption: data.adoption.capability,
+      approvedOwner: authorised.owner,
+      approvedPathKey: grant.versionPathKey,
+      approvedDiskVersion: grant.version,
+      approvedSourceFilePath: grant.sourcePath,
+      approvedOwnerFilePath: grant.ownerPath,
+      unresolvedEvidence: completion.unresolvedEvidence === true,
+      trackingConflict,
+    });
+    return;
+  }
+  if (!selectActiveFileFromRenderer(
+    authorised, data, { resumeTracking: true, verifySelection },
+  )) {
+    event.returnValue = Object.freeze({
+      accepted: false, mayHaveMoved: data.adoptBaseline === true,
+      why: "selection-refused",
+    });
+    return;
+  }
+  event.returnValue = Object.freeze({
+    accepted: true,
+    trackingActive: data.trackingActive === true,
+  });
+});
+
+ipcMain.on("quarantine-selected-file-tracking", (event, data) => {
+  const background = data && data.background === true;
+  const authorised = authorisedWatcherEnvelope(event, data, {
+    requireKnownOwner: background,
+    requireWatchedOwner: !background,
+  });
+  const ownerKey = authorised && documentOwnerKey(authorised.owner);
+  const baseline = ownerKey && ownerDocumentBaselines.get(ownerKey);
+  const requestedVersion = normaliseDiskVersion(
+    data && data.approvedDiskVersion,
+  );
+  if (
+    !authorised ||
+    !baseline ||
+    !baseline.version ||
+    !requestedVersion ||
+    data.approvedPathKey !== authorised.owner.pathKey ||
+    (!background && watchedFileKey !== data.approvedPathKey) ||
+    !sameDiskVersion(baseline.version, requestedVersion)
+  ) {
+    console.error("Refusing quarantine without the selected disk owner");
+    event.returnValue = Object.freeze({
+      quarantined: false, why: "selected-owner-moved",
+    });
+    return;
+  }
+  quarantinedDocumentOwners.add(ownerKey);
+  for (const scope of activeSaveCorrelations.values()) {
+    if (documentOwnerKey(scope.owner) === ownerKey) {
+      quarantinedSaveScopes.add(scope);
+    }
+  }
+  for (const record of pendingSaveOutcomeDeliveries.values()) {
+    if (
+      documentOwnerKey(record.scope.owner) === ownerKey &&
+      record.payload.success === true
+    ) {
+      record.payload = Object.freeze({
+        ...record.payload,
+        success: false,
+        conflict: true,
+        settlementOnly: false,
+        error:
+          "The document was quarantined before its Save result settled. Review the conflict before saving.",
+      });
+    }
+  }
+  if (sameDocumentSelectionOwner(authorised.owner, watchedOwner)) {
+    watchingPaused = true;
+    pauseFileWatching();
+  }
+  event.returnValue = Object.freeze({
+    quarantined: true,
+    owner: authorised.owner,
+    pathKey: authorised.owner.pathKey,
+    diskVersion: baseline.version,
+  });
+});
+
+// The renderer answers every deletion report: consumed, or refused with the
+// reason it could not be. A refusal keeps the report open so the owning
+// document is warned when it is selected again; only an owner that can never
+// return releases it, because holding a report for a page or a tab that is gone
+// would make the next deletion of that path unreportable.
+ipcMain.on("file-deleted-ack", (event, data) => {
+  if (!isApprovalSender(event)) return;
+  const deliveryId = data && data.eventId;
+  if (!Number.isSafeInteger(deliveryId)) return;
+  const record = findDeletionDeliveryById(deliveryId);
+  if (!record) return;
   if (
     !data ||
-    typeof data.filePath !== "string" ||
-    !Number.isFinite(data.modifiedTime)
+    data.pageSession !== record.owner.pageSession ||
+    data.tabId !== record.owner.tabId ||
+    data.documentGeneration !== record.owner.documentGeneration ||
+    data.pathKey !== record.owner.pathKey ||
+    data.rendererGeneration !== record.owner.rendererGeneration ||
+    data.selectionGeneration !== record.selectionGeneration ||
+    data.watcherGeneration !== record.watcherGeneration ||
+    data.attempt !== record.attempt
   ) {
     return;
   }
-  adoptDocumentBaseline(
-    data.filePath,
-    data.modifiedTime,
-    "while accepting renderer disk adoption",
-    data.diskVersion,
+  clearDeletionDeliveryAttempt(record);
+  const why = (data && data.why) || null;
+  if (data.consumed === true) {
+    record.consumed = true;
+    releaseDeletionDelivery(record);
+    return;
+  }
+  if (
+    why === "owner-closed" ||
+    why === "foreign-session" ||
+    why === "replacement-owner" ||
+    why === "owner-path-moved"
+  ) {
+    releaseDeletionDelivery(record);
+  } else if (why === "frozen") {
+    record.parked = true;
+  } else if (sameDocumentOwner(record.owner, watchedOwner)) {
+    scheduleDeletionDeliveryRetry(
+      record,
+      why === "stale-selection"
+        ? null
+        : DELETION_DELIVERY_ACK_TIMEOUT_MS,
+    );
+  }
+});
+
+// The identity a closing document speaks with. Both the deletion-state query
+// and the retirement below authenticate the same envelope, so they agree by
+// construction about which owner is being asked about.
+function closingDocumentOwnerFromEnvelope(event, data) {
+  if (
+    !isApprovalSender(event) ||
+    !data ||
+    typeof data !== "object" ||
+    typeof data.filePath !== "string" ||
+    data.filePath.length === 0 ||
+    data.filePath.includes("\0") ||
+    typeof data.pageSession !== "string" ||
+    data.pageSession.length === 0 ||
+    data.pageSession !== approvalRendererPageSession ||
+    !Number.isSafeInteger(data.rendererGeneration) ||
+    data.rendererGeneration <= 0 ||
+    data.rendererGeneration !== approvalRendererGeneration ||
+    !Number.isSafeInteger(data.tabId) ||
+    data.tabId <= 0 ||
+    !Number.isSafeInteger(data.documentGeneration) ||
+    data.documentGeneration <= 0 ||
+    typeof data.pathKey !== "string" ||
+    data.pathKey.length === 0 ||
+    data.pathKey.includes("\0")
+  ) {
+    return null;
+  }
+  const spelling = filePathSpellingKey(data.filePath);
+  if (!spelling) return null;
+  return Object.freeze({
+    pageSession: data.pageSession,
+    rendererGeneration: data.rendererGeneration,
+    tabId: data.tabId,
+    documentGeneration: data.documentGeneration,
+    pathKey: data.pathKey,
+    spelling,
+  });
+}
+
+// Owner-scoped, and authoritative because it is read out of the records that
+// refuse the save rather than out of whatever the renderer happens to have
+// been told. A report that was parked, compacted, refused or never delivered
+// is invisible to the renderer's own tombstone, so a close that consults only
+// the renderer closes a deleted document with no warning at all.
+function describeDocumentDeletionState(owner, filePath) {
+  const ownerKey = documentOwnerKey(owner);
+  const baseline = ownerDocumentBaselines.get(ownerKey);
+  let unreadable = false;
+  if (baseline && sameDocumentOwner(baseline.owner, owner)) {
+    try {
+      fs.statSync(filePath);
+    } catch (error) {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") {
+        openDeletionDelivery(filePath, owner);
+      } else {
+        console.error("Could not check closing document path:", error);
+        unreadable = true;
+      }
+    }
+  }
+  const tombstone = ownerKey
+    ? documentDeletionTombstones.get(ownerKey) || null
+    : null;
+  const orphaned = orphanedDeletionForSpelling(filePath, owner);
+  return Object.freeze({
+    known: true,
+    // Monotonic marker for the deletion evidence this answer describes. Carried
+    // back in a refusal too, so a caller - or a test - can see that live state
+    // moved between the question and the retirement rather than inferring it.
+    revision: deletionEvidenceRevision,
+    ownDeletion: !!tombstone,
+    orphaned,
+    pathOnly: pathOnlyDeletionForSpelling(filePath),
+    unreadable,
+    // An in-memory copy is about to be closed over a file that is not there:
+    // this document's own unresolved report, or a path that is missing for
+    // whoever owns it. Either way the reader has something to be told.
+    unresolved:
+      !!tombstone ||
+      unreadable ||
+      orphaned ||
+      pathOnlyDeletionForSpelling(filePath) ||
+      hasDeletionOverflowEvidence(filePath, owner),
+  });
+}
+
+function prunePendingDiskAdoptions() {
+  const now = Date.now();
+  for (const [nonce, grant] of pendingDiskAdoptions) {
+    if (now - grant.createdAt > DISK_ADOPTION_CAPABILITY_MS) {
+      pendingDiskAdoptions.delete(nonce);
+    }
+  }
+  for (const [nonce, grant] of committedDiskAdoptions) {
+    if (now - grant.acceptedAt > DISK_ADOPTION_CAPABILITY_MS) {
+      committedDiskAdoptions.delete(nonce);
+    }
+  }
+}
+
+function adoptionOverflowKeys(spelling, oldOwner, proposedOwner, pathKey) {
+  const oldKey = documentOwnerKey(oldOwner);
+  const matches = [];
+  for (const [key, record] of deletionOverflowEvidence) {
+    if (record.spelling !== spelling) continue;
+    if (
+      (oldKey && record.ownerKey === oldKey) ||
+      (!record.ownerKey &&
+        (record.pathKey === pathKey ||
+          (oldOwner && record.pathKey === oldOwner.pathKey))) ||
+      (record.owner &&
+        (record.owner.pageSession !== approvalRendererPageSession ||
+          record.owner.rendererGeneration !== approvalRendererGeneration ||
+          (proposedOwner &&
+            record.owner.tabId === proposedOwner.tabId &&
+            record.owner.documentGeneration !==
+              proposedOwner.documentGeneration)))
+    ) {
+      matches.push(key);
+    }
+  }
+  return Object.freeze(matches);
+}
+
+function adoptionEvidencePathKeys(spelling, oldOwner, proposedOwner) {
+  const oldKey = documentOwnerKey(oldOwner);
+  const keys = new Set();
+  for (const record of deletionTombstonesBySpelling.get(spelling) || []) {
+    if (
+      record.key === oldKey ||
+      record.owner.pageSession !== approvalRendererPageSession ||
+      record.owner.rendererGeneration !== approvalRendererGeneration ||
+      (proposedOwner &&
+        record.owner.tabId === proposedOwner.tabId &&
+        record.owner.documentGeneration !==
+          proposedOwner.documentGeneration)
+    ) {
+      keys.add(record.pathKey);
+    }
+  }
+  return keys;
+}
+
+function historicalEpisodeCanBeRetired(
+  spelling, pathKey, oldOwner,
+) {
+  if (
+    (oldOwner && oldOwner.pathKey === pathKey) ||
+    deletionEvidenceHasDependentSibling(null, pathKey)
+  ) return false;
+  if (Array.from(
+    deletionTombstonesBySpelling.get(spelling) || [],
+  ).some((record) =>
+    record.pathKey === pathKey &&
+    !ownerDocumentBaselines.has(record.key))) return true;
+  if (pathOnlyDeletionEvidence.get(spelling)?.has(pathKey)) return true;
+  return Array.from(deletionOverflowEvidence.values()).some(
+    (record) => record.spelling === spelling &&
+      record.pathKey === pathKey &&
+      (!record.ownerKey ||
+        !ownerDocumentBaselines.has(record.ownerKey)),
   );
+}
+
+function sharedDeletionEvidenceNeedsSiblingCheck(
+  spelling, pathKey, oldOwner, pathOnlyKey, overflowKeys,
+) {
+  if (!pathKey) return false;
+  if (pathOnlyKey === pathKey) return true;
+  if (overflowKeys.some((key) => {
+    const record = deletionOverflowEvidence.get(key);
+    return record && !record.ownerKey && record.pathKey === pathKey;
+  })) return true;
+  const oldKey = documentOwnerKey(oldOwner);
+  return Array.from(
+    deletionTombstonesBySpelling.get(spelling) || [],
+  ).some((record) =>
+    record.pathKey === pathKey &&
+    record.key !== oldKey &&
+    (record.owner.pageSession !== approvalRendererPageSession ||
+      record.owner.rendererGeneration !== approvalRendererGeneration ||
+      !ownerDocumentBaselines.has(record.key)));
+}
+
+function deletionEvidenceHasDependentSibling(
+  ownerKey, evidencePathKey,
+) {
+  for (const baseline of ownerDocumentBaselines.values()) {
+    const sibling = baseline.owner;
+    if (
+      documentOwnerKey(sibling) === ownerKey ||
+      sibling.pathKey !== evidencePathKey
+    ) continue;
+    try {
+      const stats = fs.statSync(sibling.spelling);
+      if (
+        resolveCanonicalFileKey(sibling.spelling) !== sibling.pathKey ||
+        (baseline.version &&
+          diskVersionChanged(
+            baseline.version, diskVersionFromStats(stats),
+          )) ||
+        (Number.isFinite(baseline.modifiedTime) &&
+          baseline.modifiedTime !== stats.mtimeMs)
+      ) return true;
+    } catch (error) {
+      if (error.code !== "ENOENT" && error.code !== "ENOTDIR") {
+        console.error("Could not check a deletion sibling:", error);
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
+function matchedOwnerHasDeletionEvidence(owner, filePath) {
+  if (!owner) return false;
+  const key = documentOwnerKey(owner);
+  return documentDeletionTombstones.has(key) ||
+    pathOnlyDeletionForSpelling(filePath) ||
+    orphanedDeletionForSpelling(filePath, owner) ||
+    hasDeletionOverflowEvidence(filePath, owner);
+}
+
+function unreachablePhysicalDeletionSpellings(pathKey, incomingSpelling) {
+  const spellings = new Set();
+  for (const record of deletionTombstonesByPathKey.get(pathKey) || []) {
+    if (
+      record.spelling !== incomingSpelling &&
+      !ownerDocumentBaselines.has(record.key)
+    ) spellings.add(record.spelling);
+  }
+  for (const record of deletionOverflowEvidence.values()) {
+    if (
+      record.pathKey === pathKey &&
+      record.spelling !== incomingSpelling &&
+      (!record.ownerKey ||
+        !ownerDocumentBaselines.has(record.ownerKey))
+    ) spellings.add(record.spelling);
+  }
+  for (const [spelling, keys] of pathOnlyDeletionEvidence) {
+    if (spelling === incomingSpelling || !keys.has(pathKey)) continue;
+    const live = Array.from(ownerDocumentBaselines.values()).some(
+      (baseline) => baseline.owner.spelling === spelling &&
+        baseline.owner.pathKey === pathKey,
+    );
+    if (!live) spellings.add(spelling);
+  }
+  return Object.freeze(Array.from(spellings).sort());
+}
+
+ipcMain.on("query-document-disk-adoption-state", (event, data) => {
+  const unknown = Object.freeze({ known: false });
+  if (
+    !isApprovalSender(event) ||
+    approvalRendererState !== "ready" ||
+    !data ||
+    typeof data.filePath !== "string" ||
+    !data.filePath ||
+    data.filePath.includes("\0") ||
+    typeof data.ownerFilePath !== "string" ||
+    !data.ownerFilePath ||
+    data.ownerFilePath.includes("\0") ||
+    data.pageSession !== approvalRendererPageSession ||
+    data.rendererGeneration !== approvalRendererGeneration
+  ) {
+    event.returnValue = unknown;
+    return;
+  }
+  const owner = data.tabId === null
+    ? null
+    : closingDocumentOwnerFromEnvelope(event, {
+        ...data,
+        filePath: data.ownerFilePath,
+      });
+  if (data.tabId !== null && !owner) {
+    event.returnValue = unknown;
+    return;
+  }
+  const ownDeletion = !!(
+    owner && documentDeletionTombstones.has(documentOwnerKey(owner))
+  );
+  const spelling = filePathSpellingKey(data.filePath);
+  const version = normaliseDiskVersion(data.diskVersion);
+  const first = version && Number.isFinite(data.modifiedTime) &&
+    version.mtimeMs === data.modifiedTime
+    ? readDocumentStats(data.filePath, "while checking disk adoption")
+    : null;
+  const firstKey = first ? resolveCanonicalFileKey(data.filePath) : null;
+  const second = firstKey
+    ? readDocumentStats(data.filePath, "while verifying disk adoption query")
+    : null;
+  const secondKey = second ? resolveCanonicalFileKey(data.filePath) : null;
+  const versionMatches = !!(
+    spelling &&
+    version &&
+    firstKey &&
+    secondKey === firstKey &&
+    first &&
+    second &&
+    !diskVersionChanged(version, diskVersionFromStats(first)) &&
+    !diskVersionChanged(version, diskVersionFromStats(second))
+  );
+  event.returnValue = Object.freeze({
+    known: true,
+    revision: deletionEvidenceRevision,
+    ownDeletion,
+    orphaned: orphanedDeletionForSpelling(data.filePath, owner),
+    pathOnly: pathOnlyDeletionForSpelling(data.filePath),
+    overflow: hasDeletionOverflowEvidence(data.filePath, owner),
+    pathKey: firstKey,
+    versionMatches,
+  });
+});
+
+ipcMain.handle("prepare-document-disk-adoption", async (event, data) => {
+  const refuse = (why) => Object.freeze({ known: false, why });
+  if (
+    !isApprovalSender(event) ||
+    approvalRendererState !== "ready" ||
+    !data ||
+    typeof data.filePath !== "string" ||
+    !data.filePath ||
+    data.filePath.includes("\0") ||
+    typeof data.ownerFilePath !== "string" ||
+    !data.ownerFilePath ||
+    data.ownerFilePath.includes("\0") ||
+    data.pageSession !== approvalRendererPageSession ||
+    data.rendererGeneration !== approvalRendererGeneration
+  ) return refuse("invalid-adoption-sender");
+
+  const owner = data.tabId === null
+    ? null
+    : closingDocumentOwnerFromEnvelope(event, {
+        ...data, filePath: data.ownerFilePath,
+      });
+  const proposed = normaliseDocumentIdentity(
+    data.proposedOwner,
+    data.ownerFilePath,
+    { useCurrentPathIdentity: true },
+  );
+  const version = normaliseDiskVersion(data.diskVersion);
+  const pathKey = resolveCanonicalFileKey(data.filePath);
+  const spelling = filePathSpellingKey(data.filePath);
+  const matchedSpelling = filePathSpellingKey(data.ownerFilePath);
+  const oldKey = documentOwnerKey(owner);
+  if (
+    (data.tabId !== null && !owner) ||
+    !proposed ||
+    !version ||
+    !pathKey ||
+    proposed.pathKey !== pathKey ||
+    resolveCanonicalFileKey(data.ownerFilePath) !== pathKey ||
+    version.mtimeMs !== data.modifiedTime ||
+    !spelling ||
+    !/^[a-f0-9]{64}$/.test(data.contentDigest) ||
+    (owner && (
+      owner.tabId !== proposed.tabId ||
+      (data.replaceDocument === true
+        ? owner.documentGeneration === proposed.documentGeneration
+        : owner.documentGeneration !== proposed.documentGeneration) ||
+      (!ownerDocumentBaselines.has(oldKey) &&
+        !documentDeletionTombstones.has(oldKey))
+    ))
+  ) return refuse("invalid-adoption-identity");
+  const revision = deletionEvidenceRevision;
+
+  let handle;
+  try {
+    handle = await fs.promises.open(data.filePath, "r");
+    const before = await handle.stat();
+    const raw = await handle.readFile({ encoding: "utf8" });
+    const after = await handle.stat();
+    const pathStats = await fs.promises.stat(data.filePath);
+    const content = wrapMermaidContent(
+      removeBOM(raw), data.filePath,
+    );
+    const digest = Buffer.from(await crypto.webcrypto.subtle.digest(
+      "SHA-256", Buffer.from(content, "utf8"),
+    )).toString("hex");
+    if (
+      !before.isFile() ||
+      resolveCanonicalFileKey(data.filePath) !== pathKey ||
+      diskVersionChanged(version, diskVersionFromStats(before)) ||
+      diskVersionChanged(version, diskVersionFromStats(after)) ||
+      diskVersionChanged(version, diskVersionFromStats(pathStats)) ||
+      digest !== data.contentDigest
+    ) return refuse("disk-bytes-or-target-moved");
+  } catch (error) {
+    console.error("Could not attest disk adoption:", error);
+    return refuse("disk-read-failed");
+  } finally {
+    if (handle) await handle.close();
+  }
+  if (
+    !isApprovalSender(event) ||
+    approvalRendererState !== "ready" ||
+    data.pageSession !== approvalRendererPageSession ||
+    data.rendererGeneration !== approvalRendererGeneration ||
+    revision !== deletionEvidenceRevision ||
+    resolveCanonicalFileKey(data.filePath) !== pathKey
+  ) return refuse("adoption-moved-during-read");
+  if (
+    owner &&
+    matchedSpelling !== spelling &&
+    matchedOwnerHasDeletionEvidence(owner, data.ownerFilePath)
+  ) return refuse("matched-owner-deletion-evidence");
+
+  prunePendingDiskAdoptions();
+  const pathOnlyKeys = pathOnlyDeletionEvidence.get(spelling);
+  const overflowKeys = adoptionOverflowKeys(
+    spelling, owner, proposed, pathKey,
+  );
+  const evidenceKeys = adoptionEvidencePathKeys(
+    spelling, owner, proposed,
+  );
+  if (pathOnlyKeys) {
+    for (const key of pathOnlyKeys) evidenceKeys.add(key);
+  }
+  for (const key of overflowKeys) {
+    const record = deletionOverflowEvidence.get(key);
+    if (
+      !record ||
+      typeof record.pathKey !== "string" ||
+      !record.pathKey
+    ) return refuse("invalid-overflow-provenance");
+    evidenceKeys.add(record.pathKey);
+  }
+  const resolutionOnly = evidenceKeys.size > 1;
+  const evidencePathKey = resolutionOnly
+    ? Array.from(evidenceKeys).sort().find((key) =>
+        historicalEpisodeCanBeRetired(spelling, key, owner)) || null
+    : evidenceKeys.values().next().value || null;
+  if (resolutionOnly && !evidencePathKey) {
+    return refuse("ambiguous-multiple-physical-deletions");
+  }
+  const pathOnlyKey = pathOnlyKeys
+    ? resolutionOnly
+      ? pathOnlyKeys.has(evidencePathKey) ? evidencePathKey : null
+      : pathOnlyKeys.values().next().value
+    : null;
+  const selectedOverflowKeys = resolutionOnly
+    ? Object.freeze(overflowKeys.filter((key) =>
+        deletionOverflowEvidence.get(key)?.pathKey === evidencePathKey))
+    : overflowKeys;
+  const relatedOrphanSpellings = unreachablePhysicalDeletionSpellings(
+    pathKey, spelling,
+  );
+  const dependentSibling =
+    sharedDeletionEvidenceNeedsSiblingCheck(
+      spelling, evidencePathKey, owner, pathOnlyKey,
+      selectedOverflowKeys,
+    ) &&
+    deletionEvidenceHasDependentSibling(oldKey, evidencePathKey);
+  if (
+    (!resolutionOnly && pathOnlyKeys && pathOnlyKeys.size > 1) ||
+    dependentSibling ||
+    pendingDiskAdoptions.size + committedDiskAdoptions.size >=
+      MAX_PENDING_DISK_ADOPTIONS
+  ) return refuse(dependentSibling
+    ? "live-sibling-deletion-evidence"
+    : "ambiguous-or-full-adoption-capacity");
+  let capability;
+  do {
+    capability = crypto.randomBytes(16).toString("hex");
+  } while (pendingDiskAdoptions.has(capability));
+  pendingDiskAdoptions.set(capability, Object.freeze({
+    createdAt: Date.now(),
+    pageSession: data.pageSession,
+    rendererGeneration: data.rendererGeneration,
+    incomingSpelling: spelling,
+    ownerSpelling: filePathSpellingKey(data.ownerFilePath),
+    sourcePath: data.filePath,
+    ownerPath: data.ownerFilePath,
+    oldOwnerKey: oldKey,
+    proposedOwnerKey: documentOwnerKey(proposed),
+    oldOwner: owner,
+    proposedOwner: proposed,
+    versionPathKey: pathKey,
+    version,
+    contentDigest: data.contentDigest,
+    revision,
+    replaceDocument: data.replaceDocument === true,
+    pathOnlyKey,
+    evidencePathKey,
+    overflowKeys: selectedOverflowKeys,
+    resolutionOnly,
+    relatedOrphanSpellings,
+  }));
+  if (resolutionOnly) {
+    return Object.freeze({
+      known: false,
+      why: "resolve-historical-episode",
+      capability,
+      revision,
+      pathKey,
+      remainingPhysicalEpisodes: evidenceKeys.size,
+    });
+  }
+  return Object.freeze({
+    known: true,
+    pathKey,
+    revision,
+    versionMatches: true,
+    capability,
+    ownDeletion: !!(owner &&
+      documentDeletionTombstones.has(oldKey)),
+    orphaned: orphanedDeletionForSpelling(data.filePath, owner),
+    pathOnly: !!pathOnlyKeys,
+    overflow: overflowKeys.length > 0,
+    relatedOrphanCount: relatedOrphanSpellings.length,
+  });
+});
+
+ipcMain.on("commit-document-disk-adoption", (event, data) => {
+  const refuse = (why) => {
+    event.returnValue = Object.freeze({ accepted: false, why });
+  };
+  if (
+    !isApprovalSender(event) ||
+    approvalRendererState !== "ready" ||
+    !data ||
+    typeof data.capability !== "string" ||
+    !/^[a-f0-9]{32}$/.test(data.capability) ||
+    data.pageSession !== approvalRendererPageSession ||
+    data.rendererGeneration !== approvalRendererGeneration
+  ) {
+    refuse("stale-adoption-identity");
+    return;
+  }
+  const grant = pendingDiskAdoptions.get(data.capability);
+  if (!grant) {
+    refuse("unknown-or-used-adoption-capability");
+    return;
+  }
+  pendingDiskAdoptions.delete(data.capability);
+  if (
+    Date.now() - grant.createdAt > DISK_ADOPTION_CAPABILITY_MS ||
+    grant.pageSession !== data.pageSession ||
+    grant.rendererGeneration !== data.rendererGeneration ||
+    grant.revision !== deletionEvidenceRevision ||
+    data.revision !== grant.revision ||
+    data.filePath !== grant.sourcePath ||
+    data.ownerFilePath !== grant.ownerPath ||
+    data.replaceDocument !== grant.replaceDocument ||
+    data.contentDigest !== grant.contentDigest
+  ) {
+    refuse("stale-or-replayed-adoption-capability");
+    return;
+  }
+  const version = normaliseDiskVersion(data.diskVersion);
+  const currentKey = resolveCanonicalFileKey(data.filePath);
+  const proposedOwner = normaliseDocumentIdentity(
+    data.proposedOwner,
+    data.ownerFilePath,
+    { useCurrentPathIdentity: true },
+  );
+  const oldOwner = data.oldOwner
+    ? closingDocumentOwnerFromEnvelope(event, {
+        ...data.oldOwner,
+        filePath: data.ownerFilePath,
+      })
+    : null;
+  if (
+    !version ||
+    diskVersionChanged(version, grant.version) ||
+    version.mtimeMs !== data.modifiedTime ||
+    !currentKey ||
+    currentKey !== grant.proposedOwner.pathKey ||
+    resolveCanonicalFileKey(data.ownerFilePath) !== currentKey ||
+    !proposedOwner ||
+    documentOwnerKey(proposedOwner) !== grant.proposedOwnerKey ||
+    documentOwnerKey(oldOwner) !== grant.oldOwnerKey ||
+    (data.oldOwner && !oldOwner) ||
+    (oldOwner &&
+      (oldOwner.tabId !== proposedOwner.tabId ||
+        (!ownerDocumentBaselines.has(documentOwnerKey(oldOwner)) &&
+          !documentDeletionTombstones.has(documentOwnerKey(oldOwner))))) ||
+    filePathSpellingKey(data.filePath) !== grant.incomingSpelling ||
+    filePathSpellingKey(data.ownerFilePath) !== grant.ownerSpelling
+  ) {
+    refuse("capability-target-mismatch");
+    return;
+  }
+  if (
+    oldOwner &&
+    grant.ownerSpelling !== grant.incomingSpelling &&
+    matchedOwnerHasDeletionEvidence(oldOwner, grant.ownerPath)
+  ) {
+    refuse("matched-owner-deletion-evidence");
+    return;
+  }
+  const relatedOrphans = unreachablePhysicalDeletionSpellings(
+    currentKey, grant.incomingSpelling,
+  );
+  if (
+    relatedOrphans.length !== grant.relatedOrphanSpellings.length ||
+    relatedOrphans.some((spelling, index) =>
+      spelling !== grant.relatedOrphanSpellings[index])
+  ) {
+    refuse("physical-orphan-evidence-changed");
+    return;
+  }
+  const ownDeletion = !!(
+    oldOwner &&
+    documentDeletionTombstones.has(documentOwnerKey(oldOwner))
+  );
+  const overflowKeys = adoptionOverflowKeys(
+    grant.incomingSpelling, oldOwner, proposedOwner, currentKey,
+  );
+  const evidenceKeys = adoptionEvidencePathKeys(
+    grant.incomingSpelling, oldOwner, proposedOwner,
+  );
+  const livePathOnlyKeys = pathOnlyDeletionEvidence.get(
+    grant.incomingSpelling,
+  );
+  if (livePathOnlyKeys) {
+    for (const key of livePathOnlyKeys) evidenceKeys.add(key);
+  }
+  for (const key of overflowKeys) {
+    const record = deletionOverflowEvidence.get(key);
+    if (!record || !record.pathKey) {
+      refuse("invalid-overflow-provenance");
+      return;
+    }
+    evidenceKeys.add(record.pathKey);
+  }
+  if (grant.resolutionOnly) {
+    const selectedOverflow = overflowKeys.filter((key) =>
+      deletionOverflowEvidence.get(key)?.pathKey ===
+        grant.evidencePathKey);
+    if (
+      evidenceKeys.size < 2 ||
+      !evidenceKeys.has(grant.evidencePathKey) ||
+      !historicalEpisodeCanBeRetired(
+        grant.incomingSpelling, grant.evidencePathKey, oldOwner,
+      ) ||
+      selectedOverflow.length !== grant.overflowKeys.length ||
+      selectedOverflow.some((key) =>
+        !grant.overflowKeys.includes(key)) ||
+      (grant.pathOnlyKey !== null &&
+        !livePathOnlyKeys?.has(grant.pathOnlyKey))
+    ) {
+      refuse("historical-episode-moved");
+      return;
+    }
+    const win = mainWindow && !mainWindow.isDestroyed()
+      ? mainWindow
+      : null;
+    if (!win) {
+      refuse("approval-window-unavailable");
+      return;
+    }
+    let choice;
+    try {
+      choice = dialog.showMessageBoxSync(win, {
+        type: "warning",
+        buttons: ["Retire this older copy", "Keep it"],
+        defaultId: 1,
+        cancelId: 1,
+        title: "Earlier deleted document",
+        message: `"${safeFileLabel(path.basename(data.filePath))}" has an older unresolved file target.`,
+        detail: `Former target: ${safeFileLabel(grant.evidencePathKey)}\n\nThis confirmation retires only that older copy. Other open copies remain protected.`,
+      });
+    } catch (error) {
+      console.error("Could not ask about an older document:", error);
+      refuse("approval-dialog-failed");
+      return;
+    }
+    if (choice !== 0) {
+      refuse("historical-episode-kept");
+      return;
+    }
+    const currentStats = readDocumentStats(
+      data.filePath, "while retiring a historical episode",
+    );
+    if (
+      grant.revision !== deletionEvidenceRevision ||
+      !currentStats ||
+      resolveCanonicalFileKey(data.filePath) !== currentKey ||
+      diskVersionChanged(
+        grant.version, diskVersionFromStats(currentStats),
+      )
+    ) {
+      refuse("historical-episode-changed");
+      return;
+    }
+    clearDeletionEvidenceForAdoption(data.filePath, proposedOwner, {
+      allowPathReplacement: true,
+      priorPathKey: grant.evidencePathKey,
+      retireOrphanedOwners: true,
+      retirePathOnlyKey: grant.pathOnlyKey,
+      allowedOverflowKeys: grant.overflowKeys,
+      evidencePathKey: grant.evidencePathKey,
+    });
+    if (
+      adoptionEvidencePathKeys(
+        grant.incomingSpelling, oldOwner, proposedOwner,
+      ).has(grant.evidencePathKey) ||
+      pathOnlyDeletionEvidence.get(grant.incomingSpelling)
+        ?.has(grant.evidencePathKey) ||
+      grant.overflowKeys.some((key) =>
+        deletionOverflowEvidence.has(key))
+    ) {
+      refuse("historical-episode-remains");
+      return;
+    }
+    event.returnValue = Object.freeze({
+      accepted: false,
+      why: "resolved-historical-episode",
+      revision: deletionEvidenceRevision,
+      remainingPhysicalEpisodes: evidenceKeys.size - 1,
+    });
+    return;
+  }
+  const deletionNeedsConsent =
+    ownDeletion ||
+    orphanedDeletionForSpelling(data.filePath, proposedOwner) ||
+    pathOnlyDeletionForSpelling(data.filePath) ||
+    overflowKeys.length > 0;
+  if (
+    overflowKeys.length !== grant.overflowKeys.length ||
+    overflowKeys.some((key) => !grant.overflowKeys.includes(key)) ||
+    evidenceKeys.size !== (grant.evidencePathKey ? 1 : 0) ||
+    (grant.evidencePathKey &&
+      !evidenceKeys.has(grant.evidencePathKey)) ||
+    (pathOnlyDeletionEvidence.get(grant.incomingSpelling)
+      ? pathOnlyDeletionEvidence.get(grant.incomingSpelling).size !== 1 ||
+        !pathOnlyDeletionEvidence.get(grant.incomingSpelling)
+          .has(grant.pathOnlyKey)
+      : grant.pathOnlyKey !== null)
+  ) {
+    refuse("adoption-evidence-changed");
+    return;
+  }
+  if (
+    sharedDeletionEvidenceNeedsSiblingCheck(
+      grant.incomingSpelling, grant.evidencePathKey,
+      oldOwner, grant.pathOnlyKey, grant.overflowKeys,
+    ) &&
+    deletionEvidenceHasDependentSibling(
+      grant.oldOwnerKey, grant.evidencePathKey,
+    )
+  ) {
+    refuse("live-sibling-deletion-evidence");
+    return;
+  }
+  if (
+    deletionNeedsConsent &&
+    grant.ownerSpelling !== grant.incomingSpelling
+  ) {
+    refuse("cross-spelling-deletion-adoption");
+    return;
+  }
+  const confirmationRequired =
+    deletionNeedsConsent ||
+    relatedOrphans.length > 0 ||
+    !!(oldOwner && oldOwner.pathKey !== currentKey);
+  if (confirmationRequired) {
+    const win = mainWindow && !mainWindow.isDestroyed()
+      ? mainWindow
+      : null;
+    if (!win) {
+      refuse("approval-window-unavailable");
+      return;
+    }
+    let choice;
+    try {
+      choice = dialog.showMessageBoxSync(win, {
+        type: "warning",
+        buttons: ["Replace from disk", "Keep in-memory copy"],
+        defaultId: 1,
+        cancelId: 1,
+        title: "Confirm document replacement",
+        message: relatedOrphans.length > 0 && !deletionNeedsConsent
+          ? `"${safeFileLabel(path.basename(data.filePath))}" shares a file with an unresolved older copy.`
+          : `"${safeFileLabel(path.basename(data.ownerFilePath))}" has an unresolved deletion or a changed file target.`,
+        detail: relatedOrphans.length > 0 && !deletionNeedsConsent
+          ? "The earlier copy stays protected. Opening this file does not retire its deletion evidence."
+          : "Replacing it with the current disk file discards the earlier in-memory copy.",
+      });
+    } catch (error) {
+      console.error("Could not ask about disk adoption:", error);
+      refuse("approval-dialog-failed");
+      return;
+    }
+    if (choice !== 0) {
+      refuse("adoption-declined");
+      return;
+    }
+  }
+  if (grant.revision !== deletionEvidenceRevision ||
+      grant.pageSession !== approvalRendererPageSession ||
+      grant.rendererGeneration !== approvalRendererGeneration) {
+    refuse("adoption-moved-during-confirmation");
+    return;
+  }
+  const before = readDocumentStats(
+    data.filePath, "while committing disk adoption",
+  );
+  const after = before && readDocumentStats(
+    data.filePath, "while confirming disk adoption",
+  );
+  if (
+    !before ||
+    !after ||
+    resolveCanonicalFileKey(data.filePath) !== currentKey ||
+    diskVersionChanged(version, diskVersionFromStats(before)) ||
+    diskVersionChanged(version, diskVersionFromStats(after))
+  ) {
+    refuse("disk-version-or-target-moved");
+    return;
+  }
+  committedDiskAdoptions.set(data.capability, Object.freeze({
+    ...grant,
+    acceptedAt: Date.now(),
+    priorPathKey: oldOwner
+      ? oldOwner.pathKey
+      : filePathAliases.get(filePathSpellingKey(data.filePath)) ||
+        filePathSpellingKey(data.filePath),
+    deletionNeedsConsent,
+  }));
+  event.returnValue = Object.freeze({
+    accepted: true,
+    capability: data.capability,
+    incomingSpelling: grant.incomingSpelling,
+    ownerSpelling: grant.ownerSpelling,
+    tabId: proposedOwner.tabId,
+    documentGeneration: proposedOwner.documentGeneration,
+    version,
+    contentDigest: grant.contentDigest,
+    confirmed: confirmationRequired,
+    pathKey: currentKey,
+    revision: deletionEvidenceRevision,
+  });
+});
+
+function completeDocumentDiskAdoption(data) {
+  const refused = (why) => Object.freeze({ completed: false, why });
+  if (
+    !data ||
+    typeof data.capability !== "string" ||
+    data.pageSession !== approvalRendererPageSession ||
+    data.rendererGeneration !== approvalRendererGeneration
+  ) {
+    return refused("invalid-adoption-completion");
+  }
+  const grant = committedDiskAdoptions.get(data.capability);
+  if (!grant) {
+    return refused("unknown-or-used-adoption-capability");
+  }
+  const owner = normaliseDocumentIdentity(
+    data.actualOwner,
+    grant.ownerPath,
+    { useCurrentPathIdentity: true },
+  );
+  const stats = readDocumentStats(
+    grant.sourcePath,
+    "while completing disk adoption",
+  );
+  if (
+    !owner ||
+    documentOwnerKey(owner) !== grant.proposedOwnerKey ||
+    data.filePath !== grant.sourcePath ||
+    data.ownerFilePath !== grant.ownerPath ||
+    data.revision !== grant.revision ||
+    grant.revision !== deletionEvidenceRevision ||
+    Date.now() - grant.acceptedAt > DISK_ADOPTION_CAPABILITY_MS ||
+    !stats ||
+    resolveCanonicalFileKey(grant.sourcePath) !== grant.versionPathKey ||
+    diskVersionChanged(grant.version, diskVersionFromStats(stats))
+  ) {
+    return refused("adoption-moved-before-completion");
+  }
+  if (grant.deletionNeedsConsent) {
+    const evidenceKeys = adoptionEvidencePathKeys(
+      grant.incomingSpelling, grant.oldOwner, grant.proposedOwner,
+    );
+    const pathOnlyKeys = pathOnlyDeletionEvidence.get(
+      grant.incomingSpelling,
+    );
+    if (pathOnlyKeys) {
+      for (const key of pathOnlyKeys) evidenceKeys.add(key);
+    }
+    const overflowKeys = adoptionOverflowKeys(
+      grant.incomingSpelling, grant.oldOwner,
+      grant.proposedOwner, grant.versionPathKey,
+    );
+    for (const key of overflowKeys) {
+      const record = deletionOverflowEvidence.get(key);
+      if (record) evidenceKeys.add(record.pathKey);
+    }
+    if (
+      evidenceKeys.size !== 1 ||
+      !evidenceKeys.has(grant.evidencePathKey) ||
+      (pathOnlyKeys
+        ? pathOnlyKeys.size !== 1 ||
+          !pathOnlyKeys.has(grant.pathOnlyKey)
+        : grant.pathOnlyKey !== null) ||
+      overflowKeys.length !== grant.overflowKeys.length ||
+      overflowKeys.some((key) => !grant.overflowKeys.includes(key)) ||
+      (grant.pathOnlyKey &&
+        !pathOnlyDeletionByPathKey.get(grant.pathOnlyKey)
+          ?.has(grant.incomingSpelling)) ||
+      grant.overflowKeys.some((key) => {
+        const record = deletionOverflowEvidence.get(key);
+        return !record ||
+          record.spelling !== grant.incomingSpelling ||
+          record.pathKey !== grant.evidencePathKey;
+      }) ||
+      (sharedDeletionEvidenceNeedsSiblingCheck(
+        grant.incomingSpelling, grant.evidencePathKey,
+        grant.oldOwner, grant.pathOnlyKey, grant.overflowKeys,
+      ) && deletionEvidenceHasDependentSibling(
+        grant.oldOwnerKey, grant.evidencePathKey,
+      ))
+    ) {
+      return refused("deletion-evidence-moved-before-completion");
+    }
+    // Clearing is irreversible (including queued deletion deliveries). Prove
+    // the one episode is retireable before changing the alias or its baseline.
+    const records = deletionTombstonesBySpelling.get(
+      grant.incomingSpelling,
+    );
+    if (records && Array.from(records).some((record) => {
+      const relevant =
+        record.key === grant.oldOwnerKey ||
+        record.owner.pageSession !== approvalRendererPageSession ||
+        record.owner.rendererGeneration !== approvalRendererGeneration ||
+        (record.owner.tabId === owner.tabId &&
+          record.owner.documentGeneration !== owner.documentGeneration);
+      if (!relevant) return false;
+      const orphaned =
+        record.owner.pageSession !== approvalRendererPageSession ||
+        record.owner.rendererGeneration !== approvalRendererGeneration ||
+        (record.owner.tabId === owner.tabId &&
+          record.owner.documentGeneration !== owner.documentGeneration);
+      return record.pathKey !== grant.evidencePathKey ||
+        documentDeletionTombstones.get(record.key) !== record ||
+        (!orphaned && !sameDocumentGeneration(record.owner, owner));
+    })) {
+      return refused("deletion-episode-cannot-be-retired");
+    }
+  }
+  // ADMISSION IS PART OF THE ADOPTION, NOT A MESSAGE THAT FOLLOWS IT. Every
+  // caller arrives here - the foreground selection, and the background,
+  // owner-bound and independent tabs that complete straight over IPC - but
+  // only the foreground one asked whether the adopting owner could still be
+  // admitted. For the others the owner was offered afterwards, in a separate
+  // fire-and-forget `register-document-owner` that nobody waits on and that
+  // the hard owner-table cap may refuse outright. By then this function has
+  // spent a capability that cannot be reissued and retired deletion evidence
+  // the reader never saw, for a document whose owner is not on record: the
+  // previous owner is still known, still watched and so still able to save,
+  // with the warning that would have stopped it gone. So the owner is
+  // admitted HERE, in the same synchronous step that retires the evidence,
+  // and the admission is proved possible before anything irreversible runs.
+  // The registration those callers still send afterwards then re-states a
+  // fact rather than establishing one.
+  //
+  // THE IDENTITY IS THE ONE ALREADY VALIDATED ABOVE, never a second reading
+  // of the request: `owner` has been checked against the grant's proposed
+  // owner key, so reusing it verbatim keeps the admitted owner and the
+  // adopted grant the same document by construction. Only the selection
+  // generation is taken from the envelope, under the same predicate
+  // `normaliseDocumentOwner` applies to it - and deliberately NOT by
+  // re-normalising, which would resolve this path a second time and could
+  // report "no generation supplied" for a path that merely moved between the
+  // two resolutions, silently admitting a foreground owner at generation 1.
+  const suppliedSelection =
+    Number.isSafeInteger(data.actualOwner.selectionGeneration) &&
+    data.actualOwner.selectionGeneration > 0
+      ? data.actualOwner.selectionGeneration
+      : null;
+  const registeredSelection = knownDocumentOwners.get(
+    grant.proposedOwnerKey,
+  );
+  const selectionOwner = Object.freeze({
+    ...owner,
+    // A completion that carries no selection generation - the background
+    // callers build their envelope from a bare identity - is admitted with
+    // the least authority that is legal, which is exactly what the background
+    // registration it stands in for would have used. An owner already on
+    // record keeps its own, so re-admitting it can never read as a downgrade
+    // to `canRememberDocumentOwner` and refuse a completion that used to
+    // succeed. A supplied generation confers nothing the same renderer could
+    // not already register directly: the watcher handlers read the generation
+    // they are given, not the one on record, and admission alone is not a
+    // watch.
+    selectionGeneration: suppliedSelection !== null
+      ? suppliedSelection
+      : registeredSelection
+        ? registeredSelection.selectionGeneration
+        : 1,
+  });
+  if (!canRememberDocumentOwner(selectionOwner)) {
+    return refused("adoption-owner-cannot-be-admitted");
+  }
+  // Asked while a refusal is still free: nothing has been spent, the grant
+  // stays committed and the deletion evidence stays unread, so the renderer
+  // can retry with both intact. The answer still holds at the registration
+  // below because a completion is ONE synchronous step - no other IPC message
+  // can interleave - and because everything done in between only removes pins
+  // (the capability it spends, the evidence it retires) or adds the very
+  // owner this is proving room for.
+  if (!documentOwnerTableHasRoomFor(selectionOwner, data.capability)) {
+    noteDocumentOwnerTablePinnedRefusal("adoption");
+    return refused("adoption-owner-table-full");
+  }
+  const adoption = {};
+  const adoptedKey = adoptDocumentBaseline(
+    grant.sourcePath,
+    grant.version.mtimeMs,
+    "while completing disk adoption",
+    grant.version,
+    adoption,
+    grant.versionPathKey,
+    false,
+  );
+  if (
+    !adoptedKey ||
+    !adoption.accepted ||
+    adoptedKey !== grant.versionPathKey
+  ) {
+    return refused("disk-version-moved-before-completion");
+  }
+  // The capability is spent FIRST so the pin it contributes is really gone:
+  // the room proved above discounted exactly this grant, and the drain inside
+  // `rememberDocumentOwner` cannot know which capability is being consumed.
+  // Admission is unreachable as a failure here, and this is what happens if
+  // that ever stops being true. The capability goes back and the evidence is
+  // never touched, but `adoptDocumentBaseline` has already run and cannot be
+  // undone - it has bound the alias, taken the disk version as the baseline
+  // and CLEARED this path's changed-underneath markers, while the renderer
+  // keeps the copy it already had. So the markers are put back: a refusal
+  // must not be the thing that lets the next save overwrite a file main has
+  // quietly adopted for nobody.
+  committedDiskAdoptions.delete(data.capability);
+  if (!rememberDocumentOwner(selectionOwner, {
+    diskVersion: grant.version,
+    modifiedTime: grant.version.mtimeMs,
+    adopted: true,
+  })) {
+    committedDiskAdoptions.set(data.capability, grant);
+    markDocumentChangedExternally(grant.sourcePath);
+    console.error("Refusing a disk adoption: its owner could not be admitted");
+    return refused("adoption-owner-not-admitted");
+  }
+  let unresolvedEvidence = false;
+  if (grant.deletionNeedsConsent) {
+    clearDeletionEvidenceForAdoption(grant.sourcePath, owner, {
+      allowPathReplacement: true,
+      priorPathKey: grant.priorPathKey,
+      retireOrphanedOwners: true,
+      retirePathOnlyKey: grant.pathOnlyKey,
+      allowedOverflowKeys: grant.overflowKeys,
+      evidencePathKey: grant.evidencePathKey,
+    });
+    if (
+      (grant.pathOnlyKey &&
+        pathOnlyDeletionEvidence.get(grant.incomingSpelling)
+          ?.has(grant.pathOnlyKey)) ||
+      orphanedDeletionForSpelling(grant.sourcePath, owner) ||
+      (grant.oldOwnerKey &&
+        documentDeletionTombstones.has(grant.oldOwnerKey)) ||
+      grant.overflowKeys.some((key) =>
+        deletionOverflowEvidence.has(key))
+    ) {
+      console.error("Disk adoption left deletion evidence for its owner");
+      unresolvedEvidence = true;
+    }
+  }
+  if (grant.ownerSpelling !== grant.incomingSpelling) {
+    filePathAliases.set(grant.ownerSpelling, grant.versionPathKey);
+  }
+  // The adopting owner's baseline is not refreshed here any more: the
+  // admission above registered it as an ADOPTED baseline carrying this
+  // grant's version, which is the same write this block used to make and
+  // which now also happens for an owner that was not already on record.
+  return Object.freeze({
+    completed: true,
+    capability: data.capability,
+    revision: deletionEvidenceRevision,
+    unresolvedEvidence,
+  });
+}
+
+ipcMain.on("complete-document-disk-adoption", (event, data) => {
+  event.returnValue = isApprovalSender(event)
+    ? completeDocumentDiskAdoption(data)
+    : Object.freeze({
+        completed: false, why: "invalid-adoption-sender",
+      });
+});
+
+ipcMain.on("abandon-document-disk-adoption", (event, data) => {
+  if (!isApprovalSender(event) || !data ||
+      data.pageSession !== approvalRendererPageSession ||
+      data.rendererGeneration !== approvalRendererGeneration) return;
+  committedDiskAdoptions.delete(data.capability);
+  pendingDiskAdoptions.delete(data.capability);
+});
+
+ipcMain.on("query-document-deletion-state", (event, data) => {
+  const owner = closingDocumentOwnerFromEnvelope(event, data);
+  const ownerKey = documentOwnerKey(owner);
+  event.returnValue = owner &&
+    (ownerDocumentBaselines.has(ownerKey) ||
+      documentDeletionTombstones.has(ownerKey))
+    ? describeDocumentDeletionState(owner, data.filePath)
+    : Object.freeze({ known: false });
+});
+
+ipcMain.on("report-adoption-tracking-conflict", (event, data) => {
+  const owner = data && closingDocumentOwnerFromEnvelope(event, {
+    ...data.owner,
+    filePath: data.filePath,
+  });
+  if (
+    !owner ||
+    data.pageSession !== owner.pageSession ||
+    data.rendererGeneration !== owner.rendererGeneration ||
+    !ownerDocumentBaselines.has(documentOwnerKey(owner))
+  ) return;
+  try {
+    fs.statSync(data.filePath);
+    markDocumentChangedExternally(data.filePath);
+  } catch (error) {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") {
+      openDeletionDelivery(data.filePath, owner);
+    } else {
+      console.error("Could not check rejected file tracking:", error);
+      addPathUnadoptedChange(owner.spelling);
+    }
+  }
+});
+
+function retirementRefusal(why, state = null) {
+  return Object.freeze({
+    retired: false,
+    why,
+    revision: deletionEvidenceRevision,
+    // `null` where the caller could not be authenticated, which is not the
+    // same claim as "nothing is deleted".
+    unresolved: state ? state.unresolved : null,
+  });
+}
+
+function retireDeletedDocumentOwner(event, data) {
+  const closingOwner = closingDocumentOwnerFromEnvelope(event, data);
+  if (!closingOwner) return retirementRefusal("invalid-identity");
+  const closingOwnerKey = documentOwnerKey(closingOwner);
+  if (!closingOwnerKey) return retirementRefusal("invalid-identity");
+  // The tombstone table is keyed by owner, so this lookup is owner-scoped by
+  // construction: it can never reach another tab's record.
+  const record = documentDeletionTombstones.get(closingOwnerKey) || null;
+  const state = describeDocumentDeletionState(closingOwner, data.filePath);
+
+  if (state.unreadable) {
+    return retirementRefusal("deletion-state-unreadable", state);
+  }
+  if (
+    state.unresolved &&
+    !record &&
+    !ownerDocumentBaselines.has(closingOwnerKey)
+  ) {
+    return retirementRefusal("owner-not-registered", state);
+  }
+  // VALIDATED BEFORE ANYTHING IS MUTATED. Deauthorizing the owner and then
+  // refusing left a still-open tab with no save authority and no way to get it
+  // back, which is a worse outcome than the refusal was protecting against.
+  if (state.unresolved && data.acknowledgedDeletion !== true) {
+    // Evidence the reader was never shown. Refuse without touching anything,
+    // so the close can consult again, warn, and come back.
+    deletionRetirementUnacknowledgedCount += 1;
+    return retirementRefusal("deletion-unacknowledged", state);
+  }
+
+  // MUTABLE DRIFT IS NOT A MISMATCH. `attempt`, `selectionGeneration` and
+  // `watcherGeneration` are rewritten on every delivery attempt, so a token
+  // the renderer read a moment ago is stale by design and comparing it
+  // manufactured refusals. A newer event id for the SAME owner is the same
+  // fact about the same document. What authorises the retirement is the
+  // authenticated owner plus the reader's explicit confirmation, evaluated
+  // against live state above - not a snapshot token.
+  if (
+    record &&
+    Number.isSafeInteger(data.eventId) &&
+    data.eventId !== record.id
+  ) {
+    deletionRetirementEventDriftCount += 1;
+  }
+
+  forgetDocumentOwnerAliases(closingOwnerKey);
+  const retiredEvidence = record ? retireDeletionOwnerEvidence(record) : false;
+  let retiredPathOnly = false;
+  if (
+    data.acknowledgedDeletion === true &&
+    pathOnlyDeletionForSpelling(data.filePath)
+  ) {
+    const spelling = filePathSpellingKey(data.filePath);
+    const keys = pathOnlyDeletionEvidence.get(spelling);
+    const pathOnlyKey = keys.has(closingOwner.pathKey)
+      ? closingOwner.pathKey
+      : keys.size === 1
+        ? keys.values().next().value
+        : null;
+    const siblingDependsOnDeletion =
+      !!pathOnlyKey &&
+      Array.from(ownerDocumentBaselines.values()).some((baseline) => {
+        const sibling = baseline.owner;
+        if (sibling.spelling === spelling &&
+            sibling.pathKey === pathOnlyKey) return true;
+        if (sibling.pathKey !== pathOnlyKey) return false;
+        try {
+          const stats = fs.statSync(sibling.spelling);
+          return (
+            resolveCanonicalFileKey(sibling.spelling) !== sibling.pathKey ||
+            (!!baseline.version &&
+              diskVersionChanged(
+                baseline.version,
+                diskVersionFromStats(stats),
+              )) ||
+            (Number.isFinite(baseline.modifiedTime) &&
+              stats.mtimeMs !== baseline.modifiedTime)
+          );
+        } catch (error) {
+          if (error.code === "ENOENT" || error.code === "ENOTDIR") {
+            return true;
+          }
+          console.error("Could not verify a closing deletion sibling:", error);
+          return true;
+        }
+      });
+    if (pathOnlyKey && !siblingDependsOnDeletion) {
+      retiredPathOnly = retirePathOnlyDeletion(data.filePath, pathOnlyKey);
+      for (const key of [pathOnlyKey]) {
+        if (
+          pathKeyHasDeletionEvidence(key) ||
+          Array.from(deletionOverflowEvidence.values()).some(
+            (candidate) => candidate.pathKey === key,
+          )
+        ) continue;
+        deletedDocuments.delete(key);
+        deleteDocumentUnadoptedChange(key);
+        if (!Array.from(ownerDocumentBaselines.values()).some(
+          (baseline) => baseline.owner.pathKey === key,
+        )) {
+          documentModifiedTimes.delete(key);
+          documentVersions.delete(key);
+        }
+      }
+      if (
+        !pathOnlyDeletionEvidence.has(spelling) &&
+        !deletionTombstonesBySpelling.has(spelling)
+      ) {
+        deletePathUnadoptedChange(spelling);
+      }
+    }
+  }
+  const remainingUnresolved =
+    describeDocumentDeletionState(closingOwner, data.filePath).unresolved;
+  // Retiring this tab is also the authenticated close boundary for its
+  // watcher, including when an earlier failed selection left it inactive.
+  if (sameDocumentOwner(closingOwner, watchedOwner)) {
+    watchingPaused = false;
+    stopFileWatching({ clearBaselines: false });
+  }
+  return Object.freeze({
+    retired: true,
+    why: record || retiredPathOnly ? "retired" : "no-evidence",
+    revision: deletionEvidenceRevision,
+    retiredEvidence: retiredEvidence || retiredPathOnly,
+    // Read back AFTER the retirement. Closing one owner does not resolve a
+    // path that another owner still has an open report for, and reporting a
+    // flat `false` here would claim otherwise.
+    unresolved: remainingUnresolved,
+  });
+}
+
+ipcMain.on("retire-deleted-document-owner", (event, data) => {
+  event.returnValue = retireDeletedDocumentOwner(event, data);
 });
 
 let reloadRequestEpoch = 0;
@@ -2407,6 +7489,21 @@ function safeSendReloadResult(scope, success, data) {
   const staleWhy = reloadReplyScopeState(scope);
   if (staleWhy) {
     recordStaleReloadReply(staleWhy);
+    return false;
+  }
+  if (shutdownCommitIngressBlocked) {
+    recordStaleReloadReply("shutdown-frozen");
+    log("Reload refused while a shutdown commit is frozen:", data.path);
+    try {
+      scope.sender.send(
+        "show-error",
+        `File reload was refused while closing: ${safeFileLabel(
+          path.basename(data.path || "unknown file"),
+        )}. Retry after closing is cancelled.`,
+      );
+    } catch (error) {
+      log("Could not report refused file reload:", error);
+    }
     return false;
   }
   try {
@@ -2457,7 +7554,35 @@ ipcMain.on("reload-file", (event, data) => {
     snapshot: data && data.reloadRequestSnapshot,
     session: data && data.reloadRequestSession,
     tabId: data && data.reloadRequestTabId,
+    documentGeneration:
+      data && data.reloadRequestDocumentGeneration,
+    pathKey: data && data.reloadRequestDocumentPathKey,
+    rendererGeneration:
+      data && data.reloadRequestRendererGeneration,
+    selectionGeneration:
+      data && data.reloadRequestSelectionGeneration,
   });
+  if (
+    !Number.isSafeInteger(reloadRequest.sequence) ||
+    reloadRequest.sequence <= 0 ||
+    typeof reloadRequest.path !== "string" ||
+    reloadRequest.path.length === 0 ||
+    typeof reloadRequest.snapshot !== "string" ||
+    typeof reloadRequest.session !== "string" ||
+    reloadRequest.session.length === 0 ||
+    !Number.isSafeInteger(reloadRequest.tabId) ||
+    reloadRequest.tabId <= 0 ||
+    !Number.isSafeInteger(reloadRequest.documentGeneration) ||
+    reloadRequest.documentGeneration <= 0 ||
+    typeof reloadRequest.pathKey !== "string" ||
+    reloadRequest.pathKey.length === 0
+  ) {
+    safeSendReloadResult(scope, false, {
+      error: "Invalid reload request identity",
+      reloadRequest,
+    });
+    return;
+  }
   if (typeof requestedPath !== "string" || requestedPath.includes("\0")) {
     safeSendReloadResult(scope, false, {
       error: "Invalid file path",
@@ -2471,6 +7596,9 @@ ipcMain.on("reload-file", (event, data) => {
   const filePath = path.resolve(requestedPath);
 
   if (!fs.existsSync(filePath)) {
+    if (sameFilePath(watchedFilePath, filePath) && watchedOwner) {
+      openDeletionDelivery(filePath, watchedOwner);
+    }
     safeSendReloadResult(scope, false, {
       error: "File not found",
       path: filePath,
@@ -2839,6 +7967,14 @@ ipcMain.on("open-mermaid-popup", (event, data) => {
   const mermaidPdfHandler = async (ev) => {
     if (BrowserWindow.fromWebContents(ev.sender) !== popupWindow) return;
     try {
+      // INGRESS. Refused before the render and before a destination is chosen.
+      if (deletionEvidenceCapacityLatched) {
+        popupWindow.webContents.send(
+          "mermaid-pdf-result",
+          deletionEvidenceCapacityWriteRefusal("ingress"),
+        );
+        return;
+      }
       const printOptions = {
         printBackground: true,
         landscape: true,
@@ -2855,6 +7991,15 @@ ipcMain.on("open-mermaid-popup", (event, data) => {
       });
 
       if (!result.canceled && result.filePath) {
+        // BEFORE THE WRITE. printToPDF and the dialog are both awaits, so the
+        // latch may have tripped since the ingress check above.
+        if (deletionEvidenceCapacityLatched) {
+          popupWindow.webContents.send(
+            "mermaid-pdf-result",
+            deletionEvidenceCapacityWriteRefusal("before-write"),
+          );
+          return;
+        }
         fs.writeFileSync(result.filePath, pdfData);
         openFileAfterExport(result.filePath);
         popupWindow.webContents.send("mermaid-pdf-result", { success: true });
@@ -3161,6 +8306,17 @@ ipcMain.on("image-popup-save", async (event, { dataUrl, format }) => {
   const filterName = format2 === "jpeg" ? "JPEG Image" : "PNG Image";
   const win = BrowserWindow.fromWebContents(event.sender);
 
+  // INGRESS, after the payload is judged and before any dialog. Ordered as the
+  // markdown Save orders it: an unreadable request is unreadable whatever the
+  // latch says, and a legible one is refused before it can choose a path.
+  if (deletionEvidenceCapacityLatched) {
+    event.reply(
+      "image-popup-save-result",
+      deletionEvidenceCapacityWriteRefusal("ingress"),
+    );
+    return;
+  }
+
   try {
     const result = await dialog.showSaveDialog(win, {
       defaultPath: `image.${ext}`,
@@ -3169,6 +8325,18 @@ ipcMain.on("image-popup-save", async (event, { dataUrl, format }) => {
 
     if (result.canceled) {
       event.reply("image-popup-save-result", { canceled: true });
+      return;
+    }
+
+    // BEFORE THE WRITE. The dialog is an await, and the destination in hand is
+    // a file that does not exist yet. The chosen path is NOT echoed back: this
+    // protocol has never carried one, and the image popup is not a surface to
+    // start disclosing filesystem paths to.
+    if (deletionEvidenceCapacityLatched) {
+      event.reply(
+        "image-popup-save-result",
+        deletionEvidenceCapacityWriteRefusal("before-write"),
+      );
       return;
     }
 
@@ -3910,6 +9078,26 @@ if (!gotTheLock) {
       if (!isDownloadAllowed(url)) {
         console.warn("Blocked download from document content:", url);
         event.preventDefault();
+        return;
+      }
+      // THE LATCH COVERS THE TABLE EXPORT TOO. This is the one allowed write
+      // that never passes through the Save handler, and it lands at a
+      // destination the reader has just chosen. A download has no result
+      // channel to settle - `will-download` can only cancel - so the refusal
+      // is made observable ONCE per latched session and counted thereafter.
+      // Neither the notice nor a log is emitted per download: the latch is a
+      // one-way door and a per-download message is an unbounded queue by
+      // another name.
+      if (deletionEvidenceCapacityLatched) {
+        noteDeletionEvidenceCapacityRefusal();
+        event.preventDefault();
+        if (!deletionEvidenceCapacityDownloadNoticeShown) {
+          deletionEvidenceCapacityDownloadNoticeShown = true;
+          console.error(
+            "Blocked a download: " + saveAuthorityLatchWriteError,
+          );
+          notifyDeletionEvidenceCapacityDownloadBlocked();
+        }
       }
     });
 
@@ -3988,7 +9176,13 @@ const QUIT_APPROVAL_RETRY = "quit-approval-retry";
 // renderer is asked to commit against it before anything acts on the answer.
 const QUIT_APPROVAL_COMMIT = "quit-approval-commit";
 const QUIT_APPROVAL_COMMITTED = "quit-approval-committed";
+const QUIT_APPROVAL_VERIFY = "quit-approval-verify";
+const QUIT_APPROVAL_VERIFIED = "quit-approval-verified";
 const QUIT_APPROVAL_THAW = "quit-approval-thaw";
+const NEWLINE_ALIGNMENT_DIAGNOSTICS_ENABLED =
+  "newline-alignment-diagnostics-enabled";
+const NEWLINE_ALIGNMENT_WITNESS = "newline-alignment-witness";
+const MAX_NEWLINE_ALIGNMENT_WITNESSES = 32;
 // A continuation can own an asynchronous hand-off without having failed or
 // completed. `false` means "nothing started" and thaws; this sentinel means
 // "the final revision-bound approval is committed, keep its freeze while the
@@ -4014,6 +9208,7 @@ let absorbedUserShutdownSeq = 0;
 let shutdownAuthorized = false;
 let shutdownAuthorizationOwnerId = 0;
 let shutdownAuthorizationGeneration = 0;
+let shutdownAuthorizationCapacityLatched = false;
 // "loading" - a renderer exists but has not announced itself yet, so a request
 //             waits for it rather than being answered without it.
 // "ready"   - the tab overlay is listening and can be asked.
@@ -4023,6 +9218,9 @@ let approvalRendererState = "loading";
 // dispatched to a renderer that has since been replaced can be recognised and
 // re-sent to its successor instead of waiting forever.
 let approvalRendererGeneration = 0;
+// Bound document IPC to the page instance that announced readiness. A
+// webContents survives navigation; its page session does not.
+let approvalRendererPageSession = null;
 // Why the renderer was last declared unusable. Diagnostic only: "the fallback
 // dialog appeared" is not a diagnosis on its own, and the four routes into it
 // are indistinguishable after the fact.
@@ -4043,6 +9241,7 @@ let staleOverlayProbeCompletionCount = 0;
 let shutdownSendFailureCount = 0;
 // The commit attempt in flight, if any. See commitThenRun().
 let pendingShutdownCommit = null;
+let shutdownCommitIngressBlocked = false;
 let shutdownCommitSeq = 0;
 let shutdownCommitRefusedCount = 0;
 let shutdownCommitTimeoutCount = 0;
@@ -4055,6 +9254,10 @@ let lastShutdownCommitRefusedWhy = null;
 let staleShutdownCommitCount = 0;
 let supersededContinuationCount = 0;
 let staleShutdownDialogCompletionCount = 0;
+let newlineAlignmentCallCount = 0;
+let newlineAlignmentRestoredSpanCount = 0;
+let newlineAlignmentBytesScanned = 0;
+const newlineAlignmentWitnesses = [];
 let navigationInvalidatedShutdownCount = 0;
 // A renderer becoming unusable invalidates continuations that have been
 // authorized but have not reached their setImmediate turn yet. It deliberately
@@ -4758,6 +9961,7 @@ function revokeShutdownAuthorization() {
   shutdownAuthorized = false;
   shutdownAuthorizationOwnerId = 0;
   shutdownAuthorizationGeneration = 0;
+  shutdownAuthorizationCapacityLatched = false;
 }
 
 function grantShutdownAuthorization() {
@@ -4765,15 +9969,20 @@ function grantShutdownAuthorization() {
   shutdownAuthorized = true;
   shutdownAuthorizationOwnerId = owner ? owner.webContents.id : 0;
   shutdownAuthorizationGeneration = owner ? approvalRendererGeneration : 0;
+  shutdownAuthorizationCapacityLatched = deletionEvidenceCapacityLatched;
 }
 
 function hasCurrentShutdownAuthorization() {
   if (!shutdownAuthorized) return false;
   const owner = shutdownOwnerWindow();
-  if (!owner) return true;
+  if (!owner && (!deletionEvidenceCapacityLatched ||
+      shutdownAuthorizationCapacityLatched)) return true;
   const current =
+    !!owner &&
     owner.webContents.id === shutdownAuthorizationOwnerId &&
-    approvalRendererGeneration === shutdownAuthorizationGeneration;
+    approvalRendererGeneration === shutdownAuthorizationGeneration &&
+    (!deletionEvidenceCapacityLatched ||
+      shutdownAuthorizationCapacityLatched);
   if (!current) revokeShutdownAuthorization();
   return current;
 }
@@ -4815,6 +10024,99 @@ function isApprovalSender(event) {
     return false;
   }
   return frame.parent === null;
+}
+
+function addDiagnosticCount(current, increment) {
+  return current > Number.MAX_SAFE_INTEGER - increment
+    ? Number.MAX_SAFE_INTEGER
+    : current + increment;
+}
+
+function newlineAlignmentWitnessSummaries() {
+  return Object.freeze(
+    newlineAlignmentWitnesses.map((witness) =>
+      Object.freeze({ ...witness }),
+    ),
+  );
+}
+
+if (!app.isPackaged) {
+  ipcMain.handle(
+    NEWLINE_ALIGNMENT_DIAGNOSTICS_ENABLED,
+    (event) => isApprovalSender(event),
+  );
+
+  ipcMain.on(NEWLINE_ALIGNMENT_WITNESS, (event, data) => {
+    if (!isApprovalSender(event) || !data || typeof data !== "object") {
+      return;
+    }
+    const {
+      callId,
+      callCount = 1,
+      restoredSpans,
+      bytesScanned,
+      degradedCount = 0,
+      ambiguousBoundaries = 0,
+      mode,
+    } = data;
+    if (
+      !Number.isSafeInteger(callId) ||
+      callId <= 0 ||
+      !Number.isSafeInteger(callCount) ||
+      callCount <= 0 ||
+      !Number.isSafeInteger(restoredSpans) ||
+      restoredSpans < 0 ||
+      !Number.isSafeInteger(bytesScanned) ||
+      bytesScanned <= 0 ||
+      !Number.isSafeInteger(degradedCount) ||
+      degradedCount < 0 ||
+      !Number.isSafeInteger(ambiguousBoundaries) ||
+      ambiguousBoundaries < 0 ||
+      ![
+        "uniform",
+        "positional",
+        "myers",
+        "trimmed-myers",
+        "content-consensus",
+        "mixed",
+        "mixed-degraded",
+      ].includes(mode) ||
+      !Number.isSafeInteger(approvalRendererGeneration) ||
+      approvalRendererGeneration <= 0 ||
+      typeof approvalRendererPageSession !== "string" ||
+      approvalRendererPageSession.length === 0
+    ) {
+      return;
+    }
+    newlineAlignmentCallCount = addDiagnosticCount(
+      newlineAlignmentCallCount,
+      callCount,
+    );
+    newlineAlignmentRestoredSpanCount = addDiagnosticCount(
+      newlineAlignmentRestoredSpanCount,
+      restoredSpans,
+    );
+    newlineAlignmentBytesScanned = addDiagnosticCount(
+      newlineAlignmentBytesScanned,
+      bytesScanned,
+    );
+    newlineAlignmentWitnesses.push(
+      Object.freeze({
+        callId,
+        callCount,
+        restoredSpans,
+        bytesScanned,
+        degradedCount,
+        ambiguousBoundaries,
+        mode,
+        rendererGeneration: approvalRendererGeneration,
+        pageSession: approvalRendererPageSession,
+      }),
+    );
+    if (newlineAlignmentWitnesses.length > MAX_NEWLINE_ALIGNMENT_WITNESSES) {
+      newlineAlignmentWitnesses.shift();
+    }
+  });
 }
 
 /**
@@ -5279,7 +10581,9 @@ function commitThenRun(record, continuations, approvedSession) {
     continuations,
     approvedSession,
     authorisedSeq,
+    deletionEvidenceRevision: record.deletionEvidenceRevision,
     settled: false,
+    awaitingVerification: false,
     deadlineTimer: null,
   };
   // ONE COMMIT AT A TIME. requestShutdown() already stands an in-flight commit
@@ -5328,6 +10632,7 @@ function commitThenRun(record, continuations, approvedSession) {
     attempt.deadlineTimer.unref();
   }
   try {
+    shutdownCommitIngressBlocked = true;
     wc.send(QUIT_APPROVAL_COMMIT, {
       id: record.id,
       gen: attempt.generation,
@@ -5371,6 +10676,13 @@ function finishShutdownCommit(attempt, committed, why, options = {}) {
   if (committed && shutdownRequestSeq > attempt.authorisedSeq) {
     committed = false;
     why = "superseded-during-commit";
+  }
+  if (
+    committed &&
+    deletionEvidenceRevision !== attempt.deletionEvidenceRevision
+  ) {
+    committed = false;
+    why = "deletion-evidence-changed-during-commit";
   }
   if (committed) {
     log(`Shutdown commit #${attempt.id} confirmed at revision ${attempt.revision}`);
@@ -5422,6 +10734,7 @@ function foliaUpdaterAttemptRetainsFreeze() {
 // launcher failure retires the attempt first, or the test seam forces reset.
 function releaseShutdownFreeze(options = {}) {
   if (!options.force && foliaUpdaterAttemptRetainsFreeze()) return;
+  shutdownCommitIngressBlocked = false;
   const win = shutdownOwnerWindow();
   const wc = win ? win.webContents : null;
   if (!wc || wc.isDestroyed()) return;
@@ -5441,6 +10754,10 @@ ipcMain.on(QUIT_APPROVAL_COMMITTED, (event, data) => {
   // indistinguishable from "the reply never arrived", and those are the two
   // halves a test of this race has to tell apart.
   if (!attempt) {
+    staleShutdownCommitCount += 1;
+    return;
+  }
+  if (attempt.awaitingVerification) {
     staleShutdownCommitCount += 1;
     return;
   }
@@ -5492,7 +10809,70 @@ ipcMain.on(QUIT_APPROVAL_COMMITTED, (event, data) => {
       return;
     }
   }
-  finishShutdownCommit(attempt, data.committed === true, data.why || "renderer");
+  if (data.committed !== true) {
+    finishShutdownCommit(attempt, false, data.why || "renderer");
+    return;
+  }
+  attempt.awaitingVerification = true;
+  const win = shutdownOwnerWindow();
+  try {
+    if (!win || win.webContents.isDestroyed()) {
+      throw new Error("approval window disappeared before verification");
+    }
+    win.webContents.send(QUIT_APPROVAL_VERIFY, {
+      id: attempt.id,
+      gen: attempt.generation,
+      revision: attempt.revision,
+    });
+  } catch (error) {
+    log("Shutdown verification could not be sent:", error);
+    finishShutdownCommit(attempt, false, "verification-send-failed", {
+      fallbackCause: "unresponsive",
+    });
+  }
+});
+
+ipcMain.on(QUIT_APPROVAL_VERIFIED, (event, data) => {
+  if (!isApprovalSender(event)) return;
+  const attempt = pendingShutdownCommit;
+  if (
+    !attempt ||
+    !attempt.awaitingVerification ||
+    !data ||
+    data.id !== attempt.id ||
+    data.gen !== attempt.generation ||
+    data.revision !== attempt.revision
+  ) {
+    staleShutdownCommitCount += 1;
+    return;
+  }
+  finishShutdownCommit(
+    attempt,
+    data.valid === true,
+    data.valid === true ? "renderer-verified" : "verification-refused",
+    data.valid === true ? {} : { fallbackCause: "unreadable" },
+  );
+});
+
+ipcMain.on("quit-approval-overflow", (event, data) => {
+  if (
+    !isApprovalSender(event) ||
+    !data ||
+    data.gen !== approvalRendererGeneration
+  ) return;
+  const attempt = pendingShutdownCommit;
+  if (attempt && attempt.id === data.id) {
+    finishShutdownCommit(attempt, false, "deferred-operation-overflow", {
+      fallbackCause: "unreadable",
+    });
+    return;
+  }
+  // An ACK alone is not authorization: a queued continuation checks this
+  // epoch before entering any irreversible callback.
+  shutdownContinuationEpoch += 1;
+  revokeShutdownAuthorization();
+  releaseShutdownFreeze();
+  log("Shutdown approval invalidated by deferred operation overflow");
 });
 
 // Continuations run on a fresh turn of the loop, never inside the lifecycle
@@ -5526,6 +10906,7 @@ function runApprovedContinuations(
   authorisedSeq = shutdownRequestSeq,
   continuationEpoch = shutdownContinuationEpoch,
   updaterEpoch = updaterContinuationEpoch,
+  approvedWithBlockedSaves = deletionEvidenceCapacityLatched,
 ) {
   setImmediate(() => {
     for (const intent of continuations) {
@@ -5535,6 +10916,15 @@ function runApprovedContinuations(
         if (intent && isUpdaterShutdownReason(intent.reason)) {
           replayAbsorbedUserShutdownAfterUpdaterCancel("no-continuation");
         }
+        continue;
+      }
+      if (!approvedWithBlockedSaves && deletionEvidenceCapacityLatched) {
+        revokeShutdownAuthorization();
+        releaseShutdownFreeze();
+        requestShutdown(intent.reason, continuation, {
+          forceFresh: true,
+          onDeclined: intent.onDeclined,
+        });
         continue;
       }
       if (
@@ -5670,6 +11060,7 @@ function askShutdownQuestion(record, options) {
     return;
   }
   record.asked = true;
+  const askedBeforeSavesBlocked = !deletionEvidenceCapacityLatched;
   const abortController = new AbortController();
   record.dialogAbortController = abortController;
   dialog
@@ -5692,6 +11083,20 @@ function askShutdownQuestion(record, options) {
       // native promise may settle later; identity makes either result inert.
       if (pendingShutdown !== record) {
         staleShutdownDialogCompletionCount += 1;
+        return;
+      }
+      if (
+        result.response === 0 &&
+        askedBeforeSavesBlocked &&
+        deletionEvidenceCapacityLatched
+      ) {
+        record.asked = false;
+        record.deletionEvidenceRevision = deletionEvidenceRevision;
+        askDeletionEvidenceCapacityApproval(
+          record,
+          deletionEvidenceTombstoneFileLabels(),
+          record.fallbackCause,
+        );
         return;
       }
       settleShutdown(record, result.response === 0, options.why);
@@ -5726,6 +11131,13 @@ function askDiscardApproval(record, files) {
 // here would reintroduce the whole defect for the one case where the app has
 // least idea what it is about to throw away, so it asks instead.
 function askFallbackApproval(record, cause) {
+  // RECORDED BEFORE THE DEFERRAL, not after the dialog. Both resumption routes
+  // - the save-queue drain and the renderer's explicit retry - decide which
+  // question to re-ask by reading this field, and a deferral that left it null
+  // resumed by dispatching an ORDINARY approval to a renderer that had already
+  // been found unreadable or unresponsive. The question a deferral defers is
+  // the question it must come back with.
+  record.fallbackCause = cause;
   if (saveQueuePendingCount > 0) {
     record.waitingForPendingSaves = true;
     log(
@@ -5734,6 +11146,23 @@ function askFallbackApproval(record, cause) {
     return;
   }
   if (!record.asked) markShutdownFallbackTiming(record.id, cause);
+  // THE LATCH OUTRANKS THIS QUESTION TOO. The response path already prefers
+  // the dedicated warning, but every route that never gets an answer -
+  // an unresponsive renderer, a renderer declared unusable, an invalid
+  // revision, a commit timeout - landed here instead and told the reader that
+  // Folia "cannot confirm whether anything is unsaved", when what it actually
+  // knows is far more specific: it stopped writing files. The cause is kept on
+  // the record (both resumption routes read it) and reported in `why`, so the
+  // deferral, timing and revision semantics above are unchanged - only the
+  // wording the reader sees is corrected.
+  if (deletionEvidenceCapacityLatched) {
+    askDeletionEvidenceCapacityApproval(
+      record,
+      deletionEvidenceTombstoneFileLabels(),
+      cause,
+    );
+    return;
+  }
   askShutdownQuestion(record, {
     confirmLabel: "Close anyway",
     title: "Unsaved changes cannot be checked",
@@ -5745,6 +11174,67 @@ function askFallbackApproval(record, cause) {
       "\n\nClosing now may discard unsaved changes.",
     why: "fallback-" + cause,
   });
+}
+
+// SAVING IS OFF, AND THE READER HAS NOT BEEN TOLD. This is a separate question
+// from "are there unsaved changes": the renderer can be perfectly clean and
+// still be sitting in front of a window whose every Save since the latch was
+// refused. Asked whatever the renderer answered, because what is at risk is
+// not only what the renderer calls dirty - a document whose Save was refused
+// may look settled to it and exist nowhere but here.
+//
+// THE LATCH IS SHARED, SO THE SENTENCE EXPLAINING IT HAS TO FOLLOW THE CAUSE.
+// Telling the reader their record of deleted documents filled up, when what
+// this process actually lost was which document a tab had moved on to, is the
+// same confidently-wrong answer the fallback wording above was corrected to
+// stop giving. The question, its deferral, its timing and its revision
+// semantics are identical either way - only the explanation and the recorded
+// `why` follow `saveAuthorityLatchReason`.
+const SAVE_AUTHORITY_LATCH_SHUTDOWN_DETAIL = Object.freeze({
+  "deletion-evidence-capacity":
+    "Its in-memory record of deleted documents filled up, so every Save " +
+    "since then has been refused rather than risk recreating a document " +
+    "you deleted.",
+  "document-owner-fence":
+    "Its in-memory record of replaced documents filled up, so every Save " +
+    "since then has been refused rather than risk writing an older version " +
+    "of a document over a newer one.",
+});
+
+function askDeletionEvidenceCapacityApproval(record, files, fallbackCause = null) {
+  askShutdownQuestion(record, {
+    confirmLabel: "Close anyway",
+    title: "Saving is blocked",
+    message: "Folia stopped writing files and cannot resume until it restarts.",
+    detail:
+      (SAVE_AUTHORITY_LATCH_SHUTDOWN_DETAIL[saveAuthorityLatchReason] ||
+        SAVE_AUTHORITY_LATCH_SHUTDOWN_DETAIL["deletion-evidence-capacity"]) +
+      " Anything written since exists only in this window and closing now " +
+      "discards it.\n\nCopy what you need somewhere else first." +
+      (fallbackCause
+        ? "\n\n" +
+          (fallbackCause === "unreadable"
+            ? "The document view could not check the open documents either."
+            : "The document view is not responding either.")
+        : "") +
+      (files.length ? "\n\n" + describeDirtyFiles(files) : ""),
+    why: fallbackCause
+      ? saveAuthorityLatchReason + "-fallback-" + fallbackCause
+      : saveAuthorityLatchReason,
+  });
+}
+
+// The deleted documents this process still holds evidence for, named the way
+// the reader sees them. Shared by both questions that have to list them.
+function deletionEvidenceTombstoneFileLabels() {
+  return Array.from(
+    new Set(
+      Array.from(
+        documentDeletionTombstones.values(),
+        (tombstone) => path.basename(tombstone.path),
+      ),
+    ),
+  );
 }
 
 ipcMain.handle(QUIT_APPROVAL_GENERATION, (event) => {
@@ -5759,11 +11249,23 @@ ipcMain.on(QUIT_APPROVAL_READY, (event, data) => {
   const generation = data && data.gen;
   if (
     !Number.isSafeInteger(generation) ||
+    generation <= 0 ||
     generation !== approvalRendererGeneration
   ) {
     staleShutdownReadyCount += 1;
     return;
   }
+  if (
+    typeof data.pageSession !== "string" ||
+    data.pageSession.length === 0 ||
+    data.pageSession.length > 128 ||
+    (approvalRendererPageSession &&
+      approvalRendererPageSession !== data.pageSession)
+  ) {
+    staleShutdownReadyCount += 1;
+    return;
+  }
+  approvalRendererPageSession = data.pageSession;
   approvalRendererState = "ready";
   if (
     overlayProbeOwner &&
@@ -5859,6 +11361,7 @@ ipcMain.on(QUIT_APPROVAL_RESPONSE, (event, data) => {
   // a main-process approval that may bypass the commit.
   record.revision = revision;
   record.responseGeneration = data.gen;
+  record.deletionEvidenceRevision = deletionEvidenceRevision;
   // EVERY entry must be a string, not merely the ones that happen to be. A
   // filter would turn a malformed answer - [null], [123] - into an empty list,
   // which reads as "nothing is unsaved" and closes the window. A malformed
@@ -5874,11 +11377,41 @@ ipcMain.on(QUIT_APPROVAL_RESPONSE, (event, data) => {
     askFallbackApproval(record, "unreadable");
     return;
   }
-  if (files.length === 0) {
+  const deletionFiles = deletionEvidenceTombstoneFileLabels();
+  const representedDeletionKeys = new Set(
+    Array.from(
+      documentDeletionTombstones.values(),
+      (tombstone) => tombstone.pathKey,
+    ),
+  );
+  // THE LATCH OUTRANKS EVERY OTHER READING OF THIS ANSWER, including the
+  // fallback below. It is the one fact the renderer cannot know and cannot
+  // report, it is true whether or not anything looks dirty, and it names the
+  // real risk - so it is asked with its own words rather than borrowing the
+  // "cannot be checked" question, which would tell the reader the wrong thing
+  // about why their window will not close quietly.
+  if (deletionEvidenceCapacityLatched) {
+    askDeletionEvidenceCapacityApproval(
+      record,
+      Array.from(new Set([...files, ...deletionFiles])),
+    );
+    return;
+  }
+  if (
+    deletionOverflowEvidence.size > 0 ||
+    Array.from(deletedDocuments).some(
+      (key) => !representedDeletionKeys.has(key),
+    )
+  ) {
+    askFallbackApproval(record, "unreadable");
+    return;
+  }
+  const blockingFiles = Array.from(new Set([...files, ...deletionFiles]));
+  if (blockingFiles.length === 0) {
     settleShutdown(record, true, "clean");
     return;
   }
-  askDiscardApproval(record, files);
+  askDiscardApproval(record, blockingFiles);
 });
 
 ipcMain.on(QUIT_APPROVAL_RETRY, (event, data) => {
@@ -5897,6 +11430,15 @@ ipcMain.on(QUIT_APPROVAL_RETRY, (event, data) => {
     return;
   }
   record.waitingForPendingSaves = false;
+  // Same rule as reconsiderShutdownAfterSaveSettlement: a record that reached
+  // the fallback path resumes with THE SAME QUESTION. The renderer telling us
+  // its own saves have settled does not make it readable again, so dispatching
+  // an ordinary approval here would ask a renderer that has already been found
+  // unable to answer.
+  if (record.fallbackCause) {
+    askFallbackApproval(record, record.fallbackCause);
+    return;
+  }
   dispatchShutdownRequest(record);
 });
 
@@ -5985,7 +11527,15 @@ function attachShutdownGuards(win) {
   });
   approvalRendererState = "loading";
   approvalRendererGeneration += 1;
+  approvalRendererPageSession = null;
+  knownDocumentOwners.clear();
+  latestAcceptedSaveSequenceByDocument.clear();
+  latestWatcherSelectionGeneration = 0;
   overlayProbeOwner = null;
+  // The tabs a deletion report was addressed to belong to the window being
+  // replaced, so nothing left open can ever be answered. The deletion evidence
+  // itself survives.
+  releaseDeletionDeliveriesForPage();
 
   const wc = win.webContents;
 
@@ -6000,16 +11550,23 @@ function attachShutdownGuards(win) {
   // block) records that a main-frame navigation the will-navigate deny above
   // CANCELS still fires did-start-navigation. The document survives, so
   // nothing afterwards announces readiness and nothing finishes loading - the
-  // state would sit in "loading" forever and every close would be held with no
-  // dialog and no way out but Task Manager. did-navigate fires on COMMIT, so a
-  // cancelled or failed navigation never reaches it, and it still lands before
-  // the new document's scripts run.
+  // state would sit in "loading" after a denied navigation and route the next
+  // close through an unnecessary main-process fallback question.
+  // did-navigate fires on COMMIT, so a cancelled or failed navigation never
+  // reaches it, and it still lands before the new document's scripts run.
   wc.on("did-navigate", () => {
     const pendingAtNavigation = pendingShutdown;
     revokeShutdownAuthorization();
     approvalRendererState = "loading";
     approvalRendererGeneration += 1;
+    approvalRendererPageSession = null;
+    knownDocumentOwners.clear();
+    latestAcceptedSaveSequenceByDocument.clear();
+    latestWatcherSelectionGeneration = 0;
     overlayProbeOwner = null;
+    // Same rule as window replacement above: a new document owns no tab the
+    // open reports were addressed to.
+    releaseDeletionDeliveriesForPage();
     // A committed Windows update freeze belonged to the document that was
     // just replaced. The replacement has not run scripts and cannot yet hold
     // edits, so quit now under that committed approval rather than exposing a
@@ -7559,6 +13116,7 @@ module.exports = {
               authorizationGeneration: shutdownAuthorizationGeneration,
               renderer: approvalRendererState,
               rendererGeneration: approvalRendererGeneration,
+              rendererPageSession: approvalRendererPageSession,
               rendererUnusableReason: lastRendererUnusableReason,
               probeOwnerGeneration: overlayProbeOwner
                 ? overlayProbeOwner.generation
@@ -7612,8 +13170,55 @@ module.exports = {
               saveQueuePendingCount,
               saveQueueOverlapCount,
               saveQueueMaxActiveForSinglePath,
+              saveLifecycleEpoch,
               saveQueueActivePathCount: activeSaveRunsByKey.size,
               saveVerificationCount: activeSaveVerifications.size,
+              saveCorrelationCount: activeSaveCorrelations.size,
+              saveCorrelationLimit: MAX_ACTIVE_SAVE_CORRELATIONS,
+              saveOutcomeDeliveryCount:
+                pendingSaveOutcomeDeliveries.size,
+              knownDocumentOwnerCount: knownDocumentOwners.size,
+              knownDocumentOwnerLimit: MAX_KNOWN_DOCUMENT_OWNERS,
+              supersededDocumentOwnerCount: supersededDocumentOwners.size,
+              documentOwnerFenceDropCount,
+              documentOwnerSealRegistrationRefusalCount,
+              documentOwnerSealNoticeShown,
+              documentOwnerSealAdmissionRefusalCount,
+              documentOwnerSealAdmissionRefusalLogged,
+              documentOwnerTablePinnedRefusalCount,
+              documentOwnerRegistrationTablePinnedRefusalLogged,
+              documentOwnerAdoptionTablePinnedRefusalLogged,
+              saveAuthorityLatchReason,
+              deletionTombstoneCount: documentDeletionTombstones.size,
+              deletionTombstoneLimit: null,
+              deletionEvidenceOverflowed:
+                deletionOverflowEvidence.size > 0,
+              deletionOverflowEvidenceCount:
+                deletionOverflowEvidence.size,
+              deletionOverflowEvidenceLimit: null,
+              deletionEvidenceLimit: MAX_DELETION_EVIDENCE,
+              deletionEvidenceFootprint: deletionEvidenceFootprint(),
+              deletionEvidenceCapacityLatched,
+              deletionEvidenceCapacityLatchWhy,
+              deletionEvidenceCapacityDropCount,
+              deletionEvidenceCapacityRefusalCount,
+              deletionEvidenceCapacityDownloadNoticeShown,
+              deletionEvidenceOverflowCount,
+              deletionEvidenceRevision,
+              deletionRetirementUnacknowledgedCount,
+              deletionRetirementEventDriftCount,
+              deletionDeliveryCount: deletionDeliveries.size,
+              deletionDeliveryLimit: MAX_DELETION_DELIVERIES,
+              deletionDeliverySummaries: deletionDeliverySummaries(),
+              newlineAlignmentCallCount,
+              newlineAlignmentRestoredSpanCount,
+              newlineAlignmentBytesScanned,
+              newlineAlignmentWitnessCount:
+                newlineAlignmentWitnesses.length,
+              newlineAlignmentWitnessLimit:
+                MAX_NEWLINE_ALIGNMENT_WITNESSES,
+              newlineAlignmentWitnesses:
+                newlineAlignmentWitnessSummaries(),
               settleWhy: lastShutdownSettleWhy,
               lastRequestId: shutdownRequestSeq,
               updateInstallStarted,
@@ -7676,7 +13281,21 @@ module.exports = {
             disable: disableShutdownTiming,
             state: shutdownTimingState,
           },
+          // Arm by path/pathKey, trigger the actual renderer Save, await the
+          // returned token's hold, then release it after authenticated
+          // quarantine. Await the Save result and its ACK before reset. An
+          // unclaimed expiry/reset needs a new ready page and retire(token):
+          // reset alone cannot prove an old Save IPC is no longer in flight.
+          saveGate: Object.freeze({
+            arm: liveSaveGate.arm,
+            waitForHold: liveSaveGate.waitForHold,
+            release: liveSaveGate.release,
+            cancel: liveSaveGate.cancel,
+            retire: liveSaveGate.retire,
+            state: liveSaveGate.state,
+          }),
           reset: () => {
+            liveSaveGate.dispose();
             // Declined, not merely dropped - the seam has to leave the machine
             // in a state production could actually be in, and a parked
             // asynchronous hand-off that is never told its intent died would
@@ -7738,6 +13357,96 @@ module.exports = {
             staleReloadReplyDropsByReason.clear();
             lastReloadRequestSession = null;
             backgroundReloadWatcherBaselineSkipCount = 0;
+            for (const record of deletionDeliveries.values()) {
+              clearDeletionDeliveryAttempt(record);
+            }
+            deletionDeliveries.clear();
+            documentDeletionTombstones.clear();
+            pathOnlyDeletionEvidence.clear();
+            pathOnlyDeletionByPathKey.clear();
+            ownerDocumentBaselines.clear();
+            quarantinedDocumentOwners.clear();
+            supersededDocumentOwners.clear();
+            notifiedExternalVersionsByOwner.clear();
+            pendingDiskAdoptions.clear();
+            committedDiskAdoptions.clear();
+            deletionTombstonesBySpelling.clear();
+            deletionTombstonesByPathKey.clear();
+            deletionTombstonesById.clear();
+            deletedDocuments.clear();
+            for (const overflowKey of Array.from(
+              deletionOverflowEvidence.keys(),
+            )) {
+              releaseDeletionOverflowEvidence(overflowKey);
+            }
+            deletionOverflowDocumentMarkerRefs.clear();
+            deletionOverflowPathMarkerRefs.clear();
+            nextDeletionDeliveryId = 0;
+            deletionEvidenceOverflowCount = 0;
+            deletionEvidenceRevision = 0;
+            deletionRetirementUnacknowledgedCount = 0;
+            deletionRetirementEventDriftCount = 0;
+            newlineAlignmentCallCount = 0;
+            newlineAlignmentRestoredSpanCount = 0;
+            newlineAlignmentBytesScanned = 0;
+            newlineAlignmentWitnesses.length = 0;
+            // BEFORE THE LATCH COMES OFF, AND BEFORE THE REFUSALS ARE
+            // RE-REGISTERED BELOW. Every save accepted in the scenario being
+            // torn down is now expired: `saveQueues` may still hold one parked
+            // behind a prior write, `knownDocumentOwners` is deliberately
+            // retained so its identity checks would still pass, and the latch
+            // that was refusing it is about to be cleared. The epoch is what
+            // makes those saves fail closed instead of waking up and writing
+            // into the next scenario. Silently clearing the latch with queued
+            // work outstanding is exactly the hole this closes.
+            saveLifecycleEpoch =
+              saveLifecycleEpoch === Number.MAX_SAFE_INTEGER
+                ? 1
+                : saveLifecycleEpoch + 1;
+            // Refused gated saves settle on the next microtask. Keep only
+            // their exact correlations until the renderer ACKs the failure.
+            const refused = liveSaveGate.correlatedRefusals();
+            const deliveries = new Set(refused.map((entry) => entry.delivery));
+            for (const record of pendingSaveOutcomeDeliveries.values()) {
+              if (!deliveries.has(record)) {
+                clearSaveOutcomeDeliveryAttempt(record);
+              }
+            }
+            pendingSaveOutcomeDeliveries.clear();
+            activeSaveCorrelations.clear();
+            latestAcceptedSaveSequenceByDocument.clear();
+            for (const entry of refused) {
+              activeSaveCorrelations.set(entry.key, entry.scope);
+              if (entry.delivery) {
+                pendingSaveOutcomeDeliveries.set(entry.key, entry.delivery);
+              }
+            }
+            // LAST, AND ONLY HERE. In production the latch is a one-way door;
+            // the test seam may re-open it, but not before the saves it was
+            // refusing and the evidence it was protecting have both been torn
+            // down above. Clearing it any earlier would let a scenario start
+            // saving again with the previous scenario's state still standing.
+            deletionEvidenceCapacityLatched = false;
+            deletionEvidenceCapacityLatchWhy = null;
+            deletionEvidenceCapacityDropCount = 0;
+            deletionEvidenceCapacityRefusalCount = 0;
+            deletionEvidenceCapacityDownloadNoticeShown = false;
+            documentOwnerFenceDropCount = 0;
+            documentOwnerSealRegistrationRefusalCount = 0;
+            documentOwnerSealNoticeShown = false;
+            // One-shot logs are per session, so a scenario that spent them
+            // would otherwise silence the next one.
+            documentOwnerSealAdmissionRefusalCount = 0;
+            documentOwnerSealAdmissionRefusalLogged = false;
+            documentOwnerTablePinnedRefusalCount = 0;
+            documentOwnerRegistrationTablePinnedRefusalLogged = false;
+            documentOwnerAdoptionTablePinnedRefusalLogged = false;
+            lastDocumentOwnerRefusalWasTablePinned = false;
+            saveAuthorityLatchReason = "deletion-evidence-capacity";
+            saveAuthorityLatchWriteError =
+              DELETION_EVIDENCE_CAPACITY_WRITE_ERROR;
+            saveAuthorityLatchSaveError =
+              DELETION_EVIDENCE_CAPACITY_SAVE_ERROR;
             resetShutdownTiming();
           },
         },

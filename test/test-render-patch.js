@@ -88,6 +88,38 @@ async function waitFor(exec, label, expression, timeoutMs = 30000) {
   throw new Error(`timed out after ${timeoutMs}ms waiting for ${label} (last: ${JSON.stringify(last)})`);
 }
 
+function holdSaveOpens(filePath, fail = false) {
+  const realOpen = fs.promises.open;
+  const waiting = [];
+  let observed = 0;
+  fs.promises.open = function (requestedPath, flags, ...args) {
+    if (requestedPath !== filePath || flags !== "r+") {
+      return realOpen.apply(this, arguments);
+    }
+    observed++;
+    return new Promise((resolve, reject) => {
+      waiting.push(() => {
+        if (fail) {
+          reject(Object.assign(new Error("EISDIR: injected save open failure"), { code: "EISDIR" }));
+        } else {
+          realOpen.call(this, requestedPath, flags, ...args).then(resolve, reject);
+        }
+      });
+    });
+  };
+  return {
+    observed: () => observed,
+    releaseNext: () => {
+      if (!waiting.length) throw new Error(`No save open is waiting for ${filePath}`);
+      waiting.shift()();
+    },
+    restore: () => {
+      fs.promises.open = realOpen;
+      while (waiting.length) waiting.shift()();
+    },
+  };
+}
+
 // A render is only finished once the idle callback that highlights code and
 // hides the loading overlay has run. Polling for that is what makes the
 // preservation counts below meaningful rather than racing the pipeline.
@@ -1798,6 +1830,7 @@ async function run(win) {
         exec,
         `${file} to become the open AND RENDERED document`,
         `(currentFilePath === ${JSON.stringify(p)} && originalMarkdown === ${JSON.stringify(body)}
+          && !!window.CustomTabs?.getActiveDocumentIdentity(${JSON.stringify(p)}, saveRequestSession)
           && viewer.querySelector('h1')
           && viewer.querySelector('h1').textContent.trim() === ${JSON.stringify(heading)}) ? 'ok' : false`,
         20000,
@@ -2009,43 +2042,37 @@ async function run(win) {
     // retry lives. alert/confirm are stubbed because a real modal here would
     // hang the harness forever.
     const failPath = await openFresh("note-failsave.md", "# Fail\n\nfail body\n");
-    // A deliberate negative test: the save is MEANT to fail, so the console
-    // error it produces is a result, not a finding. mute() is the harness's
-    // sanctioned way to say so, and it records the window for review rather
-    // than silently widening what the sentinel ignores.
+    const failedOpen = holdSaveOpens(failPath, true);
+    await exec(`window.__patchRealAlert = window.alert; null`);
     await sentinel.mute("view-mode auto-save failure recovery: EISDIR is provoked on purpose");
-    const failState = await exec(`
-      (async () => {
-        const realAlert = window.alert, realConfirm = window.confirm;
-        window.alert = () => {}; window.confirm = () => true;
-        const restore = () => { window.alert = realAlert; window.confirm = realConfirm; };
-        const good = currentFilePath;
-        // A directory is a real, reproducible write failure (EISDIR).
-        currentFilePath = ${JSON.stringify(dir)};
-        originalMarkdown = originalMarkdown + '\\n<span class="note-label" data-note-id="9" data-note-title="LOST" data-note-content="x" style="background-color:#f00">LOST</span>\\n';
-        hasUnsavedChanges = true;
-        updateUnsavedIndicator();
-        const wrote = autoSaveViewModeNote();
-        await new Promise(r => setTimeout(r, 2500));
-        const afterFail = {
-          wrote,
-          failed: saveFailedFor(currentFilePath),
-          dirty: hasUnsavedChanges,
-          guarded: hasUnsavedWork(),
-        };
-        toggleEditBtn.click();
-        for (let i = 0; i < 60 && !isEditMode; i++) await new Promise(r => setTimeout(r, 100));
-        const afterEnterEdit = { dirty: hasUnsavedChanges, mode: isEditMode };
-        isEditMode = false;
-        contentWrapper.classList.remove('split-view');
-        currentFilePath = good;
-        failedSaves.clear();
-        hasUnsavedChanges = false;
-        updateUnsavedIndicator();
-        restore();
-        return { afterFail, afterEnterEdit };
-      })()
-    `);
+    let failState;
+    try {
+      const started = await exec(`
+        (() => {
+          window.alert = () => {};
+          return commitViewModeNote(originalMarkdown + '\\nLOST NOTE\\n', 0);
+        })()
+      `);
+      await waitFor(() => failedOpen.observed(), "the failed save to reach the disk open", "");
+      failedOpen.releaseNext();
+      await waitFor(exec, "the failed save result to settle", `!hasPendingSaveFor(${JSON.stringify(failPath)})`);
+      const afterFail = await exec(`({
+        failed: saveFailedFor(currentFilePath),
+        dirty: hasUnsavedChanges,
+        guarded: hasUnsavedWork(),
+        note: originalMarkdown.includes('LOST NOTE'),
+      })`);
+      await exec(`toggleEditBtn.click(); null`);
+      await waitFor(exec, "entering edit mode after the failed save", `isEditMode`);
+      const afterEnterEdit = await exec(`({ dirty: hasUnsavedChanges, mode: isEditMode })`);
+      failState = {
+        afterFail: { ...afterFail, wrote: started, diskUnchanged: fs.readFileSync(failPath, "utf8") === "# Fail\n\nfail body\n" },
+        afterEnterEdit,
+      };
+    } finally {
+      failedOpen.restore();
+      await exec(`window.alert = window.__patchRealAlert; delete window.__patchRealAlert; null`);
+    }
     // The mute is asserted to have caught the failure it was opened for: a
     // mute that suppresses nothing is a mute that has stopped describing the
     // test, and would quietly hide a real regression later.
@@ -2053,13 +2080,15 @@ async function run(win) {
     await sentinel.unmute();
     check(
       "the provoked save failure really did reach the console, so the mute is not hiding a silent no-op",
-      !!failMute && (failMute.suppressed || []).some((s) => String(s.detail || "").includes("EISDIR")),
+      failedOpen.observed() === 1 && !!failMute &&
+        (failMute.suppressed || []).some((s) => String(s.detail || "").includes("EISDIR")),
       JSON.stringify(failMute && failMute.suppressed),
     );
     check(
       "a failed view-mode auto-save records the failure and keeps the document dirty",
       failState && failState.afterFail && failState.afterFail.wrote === true
-        && failState.afterFail.failed === true && failState.afterFail.dirty === true,
+        && failState.afterFail.failed === true && failState.afterFail.dirty === true
+        && failState.afterFail.note === true && failState.afterFail.diskUnchanged === true,
       JSON.stringify(failState),
     );
     check(
@@ -2073,6 +2102,15 @@ async function run(win) {
         && failState.afterEnterEdit.mode === true,
       JSON.stringify(failState && failState.afterEnterEdit),
     );
+    await exec(`saveMarkdownFile(); null`);
+    await waitFor(exec, "failed note retry to settle", `!hasPendingSaveFor(${JSON.stringify(failPath)}) && !saveFailedFor(${JSON.stringify(failPath)})`);
+    check(
+      "retrying the failed note from edit mode writes it to disk",
+      fs.readFileSync(failPath, "utf8").includes("LOST NOTE"),
+      fs.readFileSync(failPath, "utf8"),
+    );
+    await exec(`toggleEditBtn.click(); null`);
+    await waitFor(exec, "returning to view mode after failed note retry", `!isEditMode`);
 
     // ---- 7. A store that moves while a write is in flight ----
     // In view mode originalMarkdown IS the document, and a second note can be
@@ -2081,37 +2119,37 @@ async function run(win) {
     // still lands on disk, so store and file describe different documents and
     // the next note writes the stale one back out.
     //
-    // Driven deterministically by replaying a reply for a save whose payload
-    // is already stale, rather than by racing a real write - a timing race
-    // would be flaky and would not say what broke.
-    const inFlight = await exec(`
-      (() => {
-        const stale = originalMarkdown;
-        const fresher = originalMarkdown + '\\nSECOND NOTE\\n';
-        const rid = nextSaveRequestId++;
-        const entry = { path: currentFilePath, content: stale, resolve: () => {} };
-        entry.promise = Promise.resolve(true);
-        pendingSaves.set(rid, entry);
-        originalMarkdown = fresher;   // the second note lands first
-        ipcRenderer.emit('save-markdown-result', {}, {
-          success: true, path: currentFilePath, requestId: rid,
-        });
-        const kept = originalMarkdown === fresher;
-        // CAPTURED BEFORE THE RESET. Reading it after the cleanup below would
-        // report false unconditionally and the assertion would be decorative -
-        // the same "capture observations before perturbing the system" trap
-        // that has bitten this suite twice already.
-        const dirtyWhileNewerPending = hasUnsavedChanges;
-        originalMarkdown = stale;
-        hasUnsavedChanges = false;
-        failedSaves.clear();
-        updateUnsavedIndicator();
-        return { kept, dirtyWhileNewerPending };
-      })()
-    `);
+    const movingPath = await openFresh("note-moving.md", "# Moving\n\nbody\n");
+    const heldWrites = holdSaveOpens(movingPath);
+    let inFlight;
+    try {
+      const started = await exec(`
+        (() => ({
+          first: commitViewModeNote(originalMarkdown + '\\nFIRST NOTE\\n', 0),
+          second: commitViewModeNote(originalMarkdown + '\\nSECOND NOTE\\n', 0),
+        }))()
+      `);
+      await waitFor(exec, "both note saves to be pending", `pendingSaves.size === 2`);
+      await waitFor(() => heldWrites.observed(), "the first save to reach disk open", "");
+      heldWrites.releaseNext();
+      await waitFor(exec, "the older save reply while the newer save is pending",
+        `pendingSaves.size === 1 && originalMarkdown.includes('SECOND NOTE')`);
+      inFlight = await exec(`({
+        kept: originalMarkdown.includes('FIRST NOTE') && originalMarkdown.includes('SECOND NOTE'),
+        dirtyWhileNewerPending: hasUnsavedChanges,
+      })`);
+      inFlight.started = started.first && started.second;
+      inFlight.firstOnDisk = fs.readFileSync(movingPath, "utf8").includes("FIRST NOTE");
+      await waitFor(() => heldWrites.observed() === 2, "the second save to reach disk open", "");
+      heldWrites.releaseNext();
+      await waitFor(exec, "the newer save to settle", `pendingSaves.size === 0 && !hasUnsavedChanges`);
+      inFlight.secondOnDisk = fs.readFileSync(movingPath, "utf8").includes("SECOND NOTE");
+    } finally {
+      heldWrites.restore();
+    }
     check(
       "a save reply does not overwrite a view-mode store that moved while the write was in flight",
-      inFlight && inFlight.kept === true,
+      inFlight && inFlight.started === true && inFlight.kept === true && inFlight.firstOnDisk === true,
       JSON.stringify(inFlight),
     );
     // Not keeping the store is only half of it: the document is now genuinely
@@ -2119,11 +2157,203 @@ async function run(win) {
     // say so or the next reload discards it without a prompt.
     check(
       "a store that moved mid-write is left marked unsaved, not clean",
-      inFlight && inFlight.dirtyWhileNewerPending === true,
+      inFlight && inFlight.dirtyWhileNewerPending === true && inFlight.secondOnDisk === true,
       JSON.stringify(inFlight),
     );
 
-    // ---- 8. A failed save is PER DOCUMENT, not a global flag ----
+    // ---- 8. A local view-mode edit after one authorized save request ----
+    // The preceding two-save test proves ordering: the older reply must not
+    // adopt over the newer pending request. That deliberately makes its first
+    // reply stale, though, so it cannot enter applyRendererSaveResultDecision's
+    // authorized view-mode mismatch branch. Move this store through the normal
+    // view-edit and tab-switch paths instead: exactly one save remains latest,
+    // its first bytes reach disk, and the later local content must remain dirty.
+    const singleSaveControlPath = await openFresh(
+      "note-single-moving-control.md",
+      "# Single moving control\n\nbody\n",
+    );
+    const singleSavePath = await openFresh(
+      "note-single-moving.md",
+      "# Single moving\n\nbody\n",
+    );
+    const heldSingleSave = holdSaveOpens(singleSavePath);
+    let singleSave;
+    try {
+      const started = await exec(`
+        commitViewModeNote(originalMarkdown + '\\nFIRST SINGLE NOTE\\n', 0)
+      `);
+      await waitFor(
+        exec,
+        "the controlled save to be the only pending request",
+        `pendingSaves.size === 1 && hasPendingSaveFor(${JSON.stringify(singleSavePath)})`,
+      );
+      await waitFor(
+        () => heldSingleSave.observed() === 1,
+        "the controlled save to reach disk open",
+        "",
+      );
+      const moved = await exec(`
+        (async () => {
+          const expectedPath = ${JSON.stringify(singleSavePath)};
+          const controlPath = ${JSON.stringify(singleSaveControlPath)};
+          const before = CustomTabs.getActiveTab();
+          const localEdit = commitViewModeEdit(
+            originalMarkdown + '\\nSECOND LOCAL NOTE\\n',
+            contentWrapper.scrollTop,
+          );
+          const movedStore =
+            localEdit === true &&
+            originalMarkdown.includes('FIRST SINGLE NOTE') &&
+            originalMarkdown.includes('SECOND LOCAL NOTE') &&
+            hasUnsavedChanges === true;
+          const control = CustomTabs.findTabByPath(controlPath);
+          await CustomTabs.switchToTab(control.id);
+          const activeAfterControl = CustomTabs.getActiveTab();
+          const physicalTab = CustomTabs.findTabByPath(expectedPath);
+          const movedTab =
+            !!activeAfterControl &&
+            activeAfterControl.id === control.id &&
+            activeAfterControl.filePath === controlPath &&
+            !!physicalTab &&
+            physicalTab.content.includes('FIRST SINGLE NOTE') &&
+            physicalTab.content.includes('SECOND LOCAL NOTE') &&
+            physicalTab.hasUnsavedChanges === true;
+          await CustomTabs.switchToTab(before.id);
+          const activeAfterOwner = CustomTabs.getActiveTab();
+          return {
+            movedStore,
+            movedTab,
+            controlId: control.id,
+            ownerId: before.id,
+            control: activeAfterControl && {
+              id: activeAfterControl.id,
+              path: activeAfterControl.filePath,
+            },
+            owner: activeAfterOwner && {
+              id: activeAfterOwner.id,
+              path: activeAfterOwner.filePath,
+            },
+            pending: pendingSaves.size,
+            secondPending: hasPendingSaveFor(expectedPath),
+            content: originalMarkdown,
+            dirty: hasUnsavedChanges,
+          };
+        })()
+      `);
+      singleSave = {
+        started,
+        pendingBeforeMove: heldSingleSave.observed() === 1,
+        moved,
+      };
+      const realApply = await exec(`
+        window.__patchRealApplyRendererSaveResultDecision =
+          window.applyRendererSaveResultDecision;
+        window.__patchLatestSingleSaveDecision = null;
+        window.__patchLatestSingleSaveApplicationResult = null;
+        window.applyRendererSaveResultDecision = function (decision) {
+          const alreadyApplied =
+            !!decision && appliedRendererSaveDecisions.has(decision);
+          const result =
+            window.__patchRealApplyRendererSaveResultDecision.apply(this, arguments);
+          // A repeated delivery of the same immutable decision is intentionally
+          // rejected. Preserve the first (and only mutating) application result.
+          if (!alreadyApplied) {
+            window.__patchLatestSingleSaveDecision = decision && {
+              mayMutate: decision.mayMutate,
+              settlementOnly: decision.settlementOnly,
+              success: decision.success,
+              sequence: decision.sequence,
+              path: decision.path,
+            };
+            window.__patchLatestSingleSaveApplicationResult = result;
+          }
+          return result;
+        };
+        null
+      `);
+      heldSingleSave.releaseNext();
+      await waitFor(
+        exec,
+        "the authorized single save result to settle",
+        `pendingSaves.size === 0 && !hasPendingSaveFor(${JSON.stringify(singleSavePath)})`,
+      );
+      singleSave.after = await exec(`({
+        decision: window.__patchLatestSingleSaveDecision,
+        applied: window.__patchLatestSingleSaveApplicationResult,
+        content: originalMarkdown,
+        dirty: hasUnsavedChanges,
+        tab: (() => {
+          const tab = CustomTabs.findTabByPath(${JSON.stringify(singleSavePath)});
+          return tab && { content: tab.content, dirty: tab.hasUnsavedChanges };
+        })(),
+      })`);
+      singleSave.disk = fs.readFileSync(singleSavePath, "utf8");
+    } finally {
+      heldSingleSave.restore();
+      await exec(`
+        if (window.__patchRealApplyRendererSaveResultDecision) {
+          window.applyRendererSaveResultDecision =
+            window.__patchRealApplyRendererSaveResultDecision;
+        }
+        delete window.__patchRealApplyRendererSaveResultDecision;
+        delete window.__patchLatestSingleSaveDecision;
+        delete window.__patchLatestSingleSaveApplicationResult;
+        null
+      `);
+    }
+    check(
+      "the controlled view-mode save is exactly one observed pending disk request",
+      singleSave && singleSave.started === true &&
+        singleSave.pendingBeforeMove === true &&
+        singleSave.moved && singleSave.moved.pending === 1 &&
+        singleSave.moved.secondPending === true,
+      JSON.stringify(singleSave),
+    );
+    check(
+      "a local view-mode mutation moves the store and physical tab without a second save",
+      singleSave && singleSave.moved && singleSave.moved.movedStore === true &&
+        singleSave.moved.movedTab === true &&
+        singleSave.moved.control &&
+        singleSave.moved.control.id ===
+          singleSave.moved.controlId &&
+        singleSave.moved.control.path === singleSaveControlPath &&
+        singleSave.moved.owner &&
+        singleSave.moved.owner.id === singleSave.moved.ownerId &&
+        singleSave.moved.owner.path === singleSavePath &&
+        singleSave.moved.dirty === true &&
+        heldSingleSave.observed() === 1,
+      JSON.stringify(singleSave),
+    );
+    check(
+      "the held save result remains authorized and applies as the latest request",
+      singleSave && singleSave.after && singleSave.after.decision &&
+        singleSave.after.decision.mayMutate === true &&
+        singleSave.after.decision.settlementOnly === false &&
+        singleSave.after.decision.success === true &&
+        singleSave.after.decision.path === singleSavePath &&
+        singleSave.after.applied === true,
+      JSON.stringify(singleSave && singleSave.after),
+    );
+    check(
+      "an authorized latest save result keeps a locally moved view-mode store dirty",
+      singleSave && singleSave.after &&
+        singleSave.after.dirty === true &&
+        singleSave.after.tab,
+      JSON.stringify(singleSave),
+    );
+    check(
+      "an authorized latest save result does not replace a newer local view-mode edit",
+      singleSave && singleSave.after &&
+        singleSave.disk.includes("FIRST SINGLE NOTE") &&
+        !singleSave.disk.includes("SECOND LOCAL NOTE") &&
+        singleSave.after.content.includes("FIRST SINGLE NOTE") &&
+        singleSave.after.content.includes("SECOND LOCAL NOTE") &&
+        singleSave.after.tab &&
+        singleSave.after.tab.content.includes("SECOND LOCAL NOTE"),
+      JSON.stringify(singleSave),
+    );
+
+    // ---- 9. A failed save is PER DOCUMENT, not a global flag ----
     // Both independent reviewers found this one. Documents are per-tab and
     // custom-tabs.js restores `hasUnsavedChanges` per tab, but it has no hook
     // for a renderer-global. A single boolean therefore fails in both
@@ -2131,40 +2361,40 @@ async function run(win) {
     // tab A's unsaved note, and a failure on tab A makes clean tab B claim
     // unsaved changes it does not have.
     const tabAPath = await openFresh("fail-tab-a.md", "# A\n\nbody A\n");
-    const tabBPath = await openFresh("fail-tab-b.md", "# B\n\nbody B\n");
-    // The failure below is synthetic and deliberate, so its console.error is a
-    // result and not a finding. Muted rather than tolerated, and the mute is
-    // asserted to have caught it - a mute that suppresses nothing has stopped
-    // describing the test.
-    await sentinel.mute("cross-tab failure isolation: a save failure is injected on purpose");
-    const crossTab = await exec(`
-      (async () => {
-        const realAlert = window.alert, realConfirm = window.confirm;
-        window.alert = () => {}; window.confirm = () => true;
-        const A = ${JSON.stringify(tabAPath)}, B = ${JSON.stringify(tabBPath)};
-        // Record a failure against A while B is the document on screen. This is
-        // the shape a background write failure really has - the reply names the
-        // path, not the screen.
-        ipcRenderer.emit('save-markdown-result', {}, {
-          success: false, path: A, error: 'synthetic failure for tab A',
-        });
-        const bClean = { dirty: hasUnsavedChanges, guarded: hasUnsavedWork(), on: currentFilePath === B };
-        // A real, successful save of B must not clear A's failure.
-        originalMarkdown = originalMarkdown + '\\nB EDIT\\n';
-        saveMarkdownFile();
-        await new Promise(r => setTimeout(r, 2000));
-        const afterBSaved = { aStillFailed: saveFailedFor(A), bFailed: saveFailedFor(B) };
-        window.alert = realAlert; window.confirm = realConfirm;
-        return { bClean, afterBSaved };
-      })()
-    `);
-    const crossTabMute = sentinel.currentMute();
-    await sentinel.unmute();
+    const heldA = holdSaveOpens(tabAPath, true);
+    let crossTab;
+    let tabBPath;
+    try {
+      const startedA = await exec(`commitViewModeNote(originalMarkdown + '\\nA UNSAVED NOTE\\n', 0)`);
+      await waitFor(() => heldA.observed(), "tab A's save to reach disk open", "");
+      tabBPath = await openFresh("fail-tab-b.md", "# B\n\nbody B\n");
+      heldA.releaseNext();
+      await waitFor(exec, "tab A's background save result to settle", `!hasPendingSaveFor(${JSON.stringify(tabAPath)})`);
+      const bClean = await exec(`({
+        dirty: hasUnsavedChanges, guarded: hasUnsavedWork(),
+        on: currentFilePath === ${JSON.stringify(tabBPath)},
+      })`);
+      const startedB = await exec(`commitViewModeNote(originalMarkdown + '\\nB EDIT\\n', 0)`);
+      await waitFor(exec, "tab B's save to settle", `!hasPendingSaveFor(${JSON.stringify(tabBPath)}) && !hasUnsavedChanges`);
+      crossTab = {
+        bClean,
+        startedA,
+        startedB,
+        aDiskUnchanged: fs.readFileSync(tabAPath, "utf8") === "# A\n\nbody A\n",
+        bOnDisk: fs.readFileSync(tabBPath, "utf8").includes("B EDIT"),
+        afterBSaved: await exec(`({
+          aStillFailed: saveFailedFor(${JSON.stringify(tabAPath)}),
+          bFailed: saveFailedFor(${JSON.stringify(tabBPath)}),
+          aTabDirty: CustomTabs.findTabByPath(${JSON.stringify(tabAPath)})?.hasUnsavedChanges,
+        })`),
+      };
+    } finally {
+      heldA.restore();
+    }
     check(
-      "the injected cross-tab failure really did reach the console, so its mute is not vacuous",
-      !!crossTabMute && (crossTabMute.suppressed || []).some((s) =>
-        String(s.detail || "").includes("synthetic failure for tab A")),
-      JSON.stringify(crossTabMute && crossTabMute.suppressed),
+      "the injected cross-tab failure reached an owned save without writing tab A",
+      heldA.observed() === 1 && crossTab.startedA === true && crossTab.aDiskUnchanged === true,
+      JSON.stringify(crossTab),
     );
     check(
       "a failure recorded for another document does not make the on-screen document look unsaved",
@@ -2175,7 +2405,7 @@ async function run(win) {
     check(
       "a successful save of one document does not clear another document's recorded failure",
       crossTab && crossTab.afterBSaved && crossTab.afterBSaved.aStillFailed === true
-        && crossTab.afterBSaved.bFailed === false,
+        && crossTab.afterBSaved.bFailed === false && crossTab.startedB === true && crossTab.bOnDisk === true,
       JSON.stringify(crossTab && crossTab.afterBSaved),
     );
     // And the failure must still be ARMED when the user comes back to A.
@@ -2183,16 +2413,67 @@ async function run(win) {
       (async () => {
         const t = window.CustomTabs.findTabByPath(${JSON.stringify(tabAPath)});
         if (!t) return { found: false };
-        window.CustomTabs.switchToTab(t.id);
-        await new Promise(r => setTimeout(r, 1200));
-        hasUnsavedChanges = true;   // the note that never reached disk
-        return { found: true, on: currentFilePath === ${JSON.stringify(tabAPath)}, guarded: hasUnsavedWork() };
+        const failedBefore = saveFailedFor(${JSON.stringify(tabAPath)});
+        const tabDirtyBefore = t.hasUnsavedChanges;
+        const onOtherTabBefore = currentFilePath === ${JSON.stringify(tabBPath)};
+        const realBeginFileOpen = window.beginFileOpen;
+        let lifecycle = null;
+        try {
+          window.beginFileOpen = function (...args) {
+            const options = args.find((arg) =>
+              arg && typeof arg === 'object' &&
+              Object.prototype.hasOwnProperty.call(arg, 'clearFailedSave'));
+            lifecycle = {
+              clearFailedSaveIsFalse:
+                !!options && options.clearFailedSave === false,
+              clearFailedSaveType:
+                options ? typeof options.clearFailedSave : 'missing',
+              adoptsPathIdentity:
+                !!options && options.adoptPathIdentity === true,
+            };
+            return realBeginFileOpen.apply(this, args);
+          };
+          await window.CustomTabs.switchToTab(t.id);
+        } finally {
+          window.beginFileOpen = realBeginFileOpen;
+        }
+        return {
+          found: true, on: currentFilePath === ${JSON.stringify(tabAPath)},
+          guarded: hasUnsavedWork(), note: originalMarkdown.includes('A UNSAVED NOTE'),
+          failedBefore, failedAfter: saveFailedFor(${JSON.stringify(tabAPath)}),
+          tabDirtyBefore, tabDirtyAfter: t.hasUnsavedChanges,
+          rendererDirty: hasUnsavedChanges,
+          onOtherTabBefore,
+          lifecycleRan: lifecycle !== null,
+          clearFailedSaveIsFalse: lifecycle && lifecycle.clearFailedSaveIsFalse,
+          clearFailedSaveType: lifecycle && lifecycle.clearFailedSaveType,
+          adoptsPathIdentity: lifecycle && lifecycle.adoptsPathIdentity,
+        };
       })()
     `);
     check(
-      "returning to the document whose save failed finds its reload guard still armed",
-      backOnA && backOnA.found === true && backOnA.on === true && backOnA.guarded === true,
+      "the tab being switched back to really was armed and dirty before the switch",
+      backOnA && backOnA.found === true && backOnA.onOtherTabBefore === true &&
+        backOnA.failedBefore === true && backOnA.tabDirtyBefore === true,
       JSON.stringify(backOnA),
+    );
+    check(
+      "returning to the document whose save failed finds its reload guard still armed",
+      backOnA && backOnA.found === true && backOnA.on === true &&
+        backOnA.guarded === true && backOnA.note === true &&
+        backOnA.failedAfter === true && backOnA.tabDirtyAfter === true &&
+        backOnA.rendererDirty === true && backOnA.lifecycleRan === true &&
+        backOnA.clearFailedSaveIsFalse === true &&
+        backOnA.clearFailedSaveType === "boolean" &&
+        backOnA.adoptsPathIdentity === false,
+      JSON.stringify(backOnA),
+    );
+    await exec(`saveMarkdownFile(); null`);
+    await waitFor(exec, "tab A's retry to settle", `!hasPendingSaveFor(${JSON.stringify(tabAPath)}) && !saveFailedFor(${JSON.stringify(tabAPath)})`);
+    check(
+      "retrying tab A writes its previously unsaved note",
+      fs.readFileSync(tabAPath, "utf8").includes("A UNSAVED NOTE"),
+      fs.readFileSync(tabAPath, "utf8"),
     );
 
     // ---- 9. A failure that arrives after the user has entered edit mode ----
@@ -2204,43 +2485,36 @@ async function run(win) {
     // succeeded. Combined with entering edit mode zeroing the dirty flag, the
     // note ended up unsaved AND unmarked.
     // Same deliberate-failure treatment as the cross-tab probe above.
+    const heldLate = holdSaveOpens(tabAPath, true);
+    await exec(`window.__patchRealAlert = window.alert; window.alert = () => {}; null`);
     await sentinel.mute("late save failure: the reply is injected on purpose");
-    const lateFail = await exec(`
-      (async () => {
-        const realAlert = window.alert, realConfirm = window.confirm;
-        window.alert = () => {}; window.confirm = () => true;
-        failedSaves.clear();
-        const p = currentFilePath;
-        // A write that is out and unanswered - the state a just-added note is in.
-        const rid = nextSaveRequestId++;
-        const entry = { path: p, content: originalMarkdown + '\\nNOTE\\n', resolve: () => {} };
-        entry.promise = Promise.resolve(true);
-        pendingSaves.set(rid, entry);
-        hasUnsavedChanges = true;
-        updateUnsavedIndicator();
-        toggleEditBtn.click();
-        for (let i = 0; i < 60 && !isEditMode; i++) await new Promise(r => setTimeout(r, 100));
-        const carried = hasUnsavedChanges;
-        ipcRenderer.emit('save-markdown-result', {}, {
-          success: false, path: p, requestId: rid, error: 'synthetic late failure',
-        });
-        const after = { dirty: hasUnsavedChanges, recorded: saveFailedFor(p), guarded: hasUnsavedWork() };
-        isEditMode = false;
-        contentWrapper.classList.remove('split-view');
-        failedSaves.clear();
-        pendingSaves.clear();
-        hasUnsavedChanges = false;
-        updateUnsavedIndicator();
-        window.alert = realAlert; window.confirm = realConfirm;
-        return { carried, after };
-      })()
-    `);
+    let lateFail;
+    try {
+      await exec(`commitViewModeNote(originalMarkdown + '\\nLATE NOTE\\n', 0)`);
+      await waitFor(() => heldLate.observed(), "the late save to reach disk open", "");
+      await exec(`toggleEditBtn.click(); null`);
+      await waitFor(exec, "entering edit mode with a save pending", `isEditMode`);
+      const carried = await exec(`hasUnsavedChanges && markdownEditor.value.includes('LATE NOTE')`);
+      heldLate.releaseNext();
+      await waitFor(exec, "the late save result to settle", `!hasPendingSaveFor(${JSON.stringify(tabAPath)})`);
+      lateFail = {
+        carried,
+        after: await exec(`({
+          dirty: hasUnsavedChanges, recorded: saveFailedFor(currentFilePath),
+          guarded: hasUnsavedWork(),
+        })`),
+        diskUnchanged: !fs.readFileSync(tabAPath, "utf8").includes("LATE NOTE"),
+      };
+    } finally {
+      heldLate.restore();
+      await exec(`window.alert = window.__patchRealAlert; delete window.__patchRealAlert; null`);
+    }
     const lateMute = sentinel.currentMute();
     await sentinel.unmute();
     check(
       "the injected late failure really did reach the console, so its mute is not vacuous",
-      !!lateMute && (lateMute.suppressed || []).some((s) =>
-        String(s.detail || "").includes("synthetic late failure")),
+      heldLate.observed() === 1 && !!lateMute && (lateMute.suppressed || []).some((s) =>
+        String(s.detail || "").includes("EISDIR")),
       JSON.stringify(lateMute && lateMute.suppressed),
     );
     check(
@@ -2251,8 +2525,279 @@ async function run(win) {
     check(
       "a save failure arriving after the user entered edit mode is still recorded",
       lateFail && lateFail.after && lateFail.after.recorded === true
-        && lateFail.after.dirty === true && lateFail.after.guarded === true,
+        && lateFail.after.dirty === true && lateFail.after.guarded === true
+        && lateFail.diskUnchanged === true,
       JSON.stringify(lateFail && lateFail.after),
+    );
+    await exec(`saveMarkdownFile(); null`);
+    await waitFor(exec, "late note retry to settle", `!hasPendingSaveFor(${JSON.stringify(tabAPath)}) && !saveFailedFor(${JSON.stringify(tabAPath)})`);
+    await exec(`toggleEditBtn.click(); null`);
+    await waitFor(exec, "returning to view mode after retry", `!isEditMode`);
+
+    // ---- 10. A renderer-only delivery failure is stale after disk adoption ----
+    // A synchronous IPC throw happens after CustomTabs prepared a clean save
+    // request. It therefore belongs only to renderer.js's failedSaves set:
+    // an unchanged switch must preserve it, but a later verified disk adoption
+    // must replace its bytes and retire that stale failure.
+    const rendererOnlyPath = await openFresh(
+      "renderer-only-delivery.md",
+      "# Renderer delivery\n\nclean cached bytes\n",
+    );
+    const rendererOnlyChanged = "# Renderer delivery adopted\n\nchanged disk bytes\n";
+    let rendererOnlyFailure;
+    let rendererOnlyMute;
+    await sentinel.mute("renderer-only failed delivery: synchronous IPC throw is provoked on purpose");
+    try {
+      rendererOnlyFailure = await exec(`
+        (async () => {
+          const expectedPath = ${JSON.stringify(rendererOnlyPath)};
+          const realSend = ipcRenderer.send;
+          const realAlert = window.alert;
+          let attempts = 0;
+          let requestPath = null;
+          let requestId = null;
+          let saveResult = null;
+          const alertMessages = [];
+          let report = null;
+          try {
+            window.alert = (message) => { alertMessages.push(String(message)); };
+            ipcRenderer.send = function (channel, payload) {
+              if (
+                channel !== "save-markdown-file" ||
+                !payload ||
+                payload.filePath !== expectedPath
+              ) {
+                return realSend.apply(this, arguments);
+              }
+              attempts += 1;
+              requestPath = payload.filePath;
+              requestId = payload.requestId;
+              throw new Error("SYNC_RENDERER_DELIVERY_FAILURE");
+            };
+            saveResult = await saveMarkdownFile();
+            const tab = CustomTabs.findTabByPath(expectedPath);
+            const identity = CustomTabs.getActiveDocumentIdentity(
+              expectedPath, saveRequestSession,
+            );
+            report = {
+              attempts,
+              requestPath,
+              requestId,
+              saveResult,
+              alertMessages,
+              exactOwner:
+                currentFilePath === expectedPath &&
+                !!tab &&
+                tab.filePath === expectedPath &&
+                !!identity &&
+                identity.pathKey === fileTrackingPathKey(expectedPath),
+              customTabsClean:
+                !!tab &&
+                tab.hasUnsavedChanges === false &&
+                tab.content === originalMarkdown &&
+                originalMarkdown === "# Renderer delivery\\n\\nclean cached bytes\\n",
+              rendererOnlyFailure:
+                saveFailedFor(expectedPath) &&
+                hasUnsavedWork() &&
+                hasUnsavedChanges === false,
+            };
+          } finally {
+            ipcRenderer.send = realSend;
+            window.alert = realAlert;
+            if (report) {
+              report.sendIsOriginal = ipcRenderer.send === realSend;
+              report.alertIsOriginal = window.alert === realAlert;
+            }
+          }
+          return report;
+        })()
+      `);
+    } finally {
+      rendererOnlyMute = sentinel.currentMute();
+      await sentinel.unmute();
+    }
+    check(
+      "the synchronous delivery fault reached the exact clean tab owner",
+      rendererOnlyFailure &&
+        rendererOnlyFailure.attempts === 1 &&
+        rendererOnlyFailure.requestPath === rendererOnlyPath &&
+        Number.isSafeInteger(rendererOnlyFailure.requestId) &&
+        rendererOnlyFailure.requestId > 0 &&
+        rendererOnlyFailure.saveResult === false &&
+        rendererOnlyFailure.alertMessages.length === 1 &&
+        rendererOnlyFailure.alertMessages[0].includes("SYNC_RENDERER_DELIVERY_FAILURE") &&
+        rendererOnlyFailure.exactOwner === true &&
+        rendererOnlyFailure.sendIsOriginal === true &&
+        rendererOnlyFailure.alertIsOriginal === true,
+      JSON.stringify(rendererOnlyFailure),
+    );
+    check(
+      "the synchronous delivery fault really reached the console, so its mute is not vacuous",
+      !!rendererOnlyMute && (rendererOnlyMute.suppressed || []).some((s) =>
+        String(s.detail || "").includes("SYNC_RENDERER_DELIVERY_FAILURE")),
+      JSON.stringify(rendererOnlyMute && rendererOnlyMute.suppressed),
+    );
+    check(
+      "a synchronous delivery failure is renderer-only while CustomTabs remains clean",
+      rendererOnlyFailure &&
+        rendererOnlyFailure.customTabsClean === true &&
+        rendererOnlyFailure.rendererOnlyFailure === true,
+      JSON.stringify(rendererOnlyFailure),
+    );
+
+    const rendererOnlyOtherPath = await openFresh(
+      "renderer-only-other.md",
+      "# Renderer delivery other\n\nother tab\n",
+    );
+    const unchangedSwitch = await exec(`
+      (async () => {
+        const expectedPath = ${JSON.stringify(rendererOnlyPath)};
+        const tab = CustomTabs.findTabByPath(expectedPath);
+        const realBeginFileOpen = window.beginFileOpen;
+        let lifecycle = null;
+        try {
+          window.beginFileOpen = function (data, options) {
+            if (data && data.path === expectedPath) {
+              lifecycle = {
+                clearFailedSave: options && options.clearFailedSave,
+                adoptPathIdentity: options && options.adoptPathIdentity,
+              };
+            }
+            return realBeginFileOpen.apply(this, arguments);
+          };
+          await CustomTabs.switchToTab(tab.id);
+          return {
+            switched: currentFilePath === expectedPath,
+            failed: saveFailedFor(expectedPath),
+            guarded: hasUnsavedWork(),
+            customTabsClean: tab.hasUnsavedChanges === false,
+            lifecycle,
+          };
+        } finally {
+          window.beginFileOpen = realBeginFileOpen;
+        }
+      })()
+    `);
+    check(
+      "an unchanged-disk switch preserves a renderer-only failed-save record",
+      unchangedSwitch &&
+        unchangedSwitch.switched === true &&
+        unchangedSwitch.failed === true &&
+        unchangedSwitch.guarded === true &&
+        unchangedSwitch.customTabsClean === true &&
+        unchangedSwitch.lifecycle &&
+        unchangedSwitch.lifecycle.clearFailedSave === false &&
+        unchangedSwitch.lifecycle.adoptPathIdentity === false,
+      JSON.stringify(unchangedSwitch),
+    );
+
+    const movedToOther = await exec(`
+      (async () => {
+        const tab = CustomTabs.findTabByPath(${JSON.stringify(rendererOnlyOtherPath)});
+        await CustomTabs.switchToTab(tab.id);
+        return currentFilePath === ${JSON.stringify(rendererOnlyOtherPath)};
+      })()
+    `);
+    const beforeExternalChange = fs.statSync(rendererOnlyPath);
+    fs.writeFileSync(rendererOnlyPath, rendererOnlyChanged, "utf8");
+    const afterExternalChange = fs.statSync(rendererOnlyPath);
+    const diskVersionChanged = [
+      "dev", "ino", "size", "mtimeMs", "ctimeMs",
+    ].some((field) => beforeExternalChange[field] !== afterExternalChange[field]);
+    check(
+      "the external write changed the disk version before the auto-adopt switch",
+      movedToOther === true &&
+        fs.readFileSync(rendererOnlyPath, "utf8") === rendererOnlyChanged &&
+        diskVersionChanged,
+      JSON.stringify({
+        movedToOther,
+        before: {
+          dev: beforeExternalChange.dev,
+          ino: beforeExternalChange.ino,
+          size: beforeExternalChange.size,
+          mtimeMs: beforeExternalChange.mtimeMs,
+          ctimeMs: beforeExternalChange.ctimeMs,
+        },
+        after: {
+          dev: afterExternalChange.dev,
+          ino: afterExternalChange.ino,
+          size: afterExternalChange.size,
+          mtimeMs: afterExternalChange.mtimeMs,
+          ctimeMs: afterExternalChange.ctimeMs,
+        },
+      }),
+    );
+    const changedDiskSwitch = await exec(`
+      (async () => {
+        const expectedPath = ${JSON.stringify(rendererOnlyPath)};
+        const tab = CustomTabs.findTabByPath(expectedPath);
+        const realBeginFileOpen = window.beginFileOpen;
+        let lifecycle = null;
+        try {
+          window.beginFileOpen = function (data, options) {
+            if (data && data.path === expectedPath) {
+              lifecycle = {
+                clearFailedSave: options && options.clearFailedSave,
+                adoptPathIdentity: options && options.adoptPathIdentity,
+              };
+            }
+            return realBeginFileOpen.apply(this, arguments);
+          };
+          await CustomTabs.switchToTab(tab.id);
+          return {
+            switched: currentFilePath === expectedPath,
+            tabContent: tab.content,
+            rendererContent: originalMarkdown,
+            failed: saveFailedFor(expectedPath),
+            guarded: hasUnsavedWork(),
+            customTabsClean: tab.hasUnsavedChanges === false,
+            lifecycle,
+          };
+        } finally {
+          window.beginFileOpen = realBeginFileOpen;
+        }
+      })()
+    `);
+    await waitFor(
+      exec,
+      "the changed disk document to render after its auto-adopt",
+      `(currentFilePath === ${JSON.stringify(rendererOnlyPath)} &&
+        originalMarkdown === ${JSON.stringify(rendererOnlyChanged)} &&
+        viewer.querySelector('h1') &&
+        viewer.querySelector('h1').textContent.trim() === "Renderer delivery adopted") ? 'ok' : false`,
+    );
+    const afterChangedDiskSwitch = await exec(`(() => {
+      const visible = (id) => {
+        const element = document.getElementById(id);
+        return !!element && element.classList.contains("show");
+      };
+      return {
+        notificationVisible: visible("notificationToast"),
+        notificationMessage: document.getElementById("notificationMessage")?.textContent ?? null,
+        updateVisible: visible("fileUpdateToast"),
+      };
+    })()`);
+    check(
+      "a changed-disk auto-adopt clears the stale renderer-only failed-save record",
+      changedDiskSwitch &&
+        changedDiskSwitch.switched === true &&
+        changedDiskSwitch.tabContent === rendererOnlyChanged &&
+        changedDiskSwitch.rendererContent === rendererOnlyChanged &&
+        changedDiskSwitch.failed === false &&
+        changedDiskSwitch.guarded === false &&
+        changedDiskSwitch.customTabsClean === true &&
+        changedDiskSwitch.lifecycle &&
+        changedDiskSwitch.lifecycle.clearFailedSave === true &&
+        changedDiskSwitch.lifecycle.adoptPathIdentity === true,
+      JSON.stringify(changedDiskSwitch),
+    );
+    check(
+      "the changed-disk auto-adopt shows its success notification, not a save error",
+      afterChangedDiskSwitch &&
+        afterChangedDiskSwitch.notificationVisible === true &&
+        afterChangedDiskSwitch.updateVisible === false &&
+        afterChangedDiskSwitch.notificationMessage === "File reloaded successfully",
+      JSON.stringify(afterChangedDiskSwitch),
     );
   }
 
@@ -2515,7 +3060,11 @@ async function run(win) {
             ? Object.keys(h).sort().map((k) => k + '=' + JSON.stringify(h[k])).join('&')
             : String(h)),
         idx: navigationIndex,
-        navigating: isNavigating,
+        pending: pendingNavigationRequest
+          ? Object.keys(pendingNavigationRequest).sort().map(k => k + '=' + JSON.stringify(pendingNavigationRequest[k])).join('&')
+          : null,
+        navSequence: navigationRequestSequence,
+        navResult: lastNavigationRequestResult,
         dirty: hasUnsavedChanges,
         edit: isEditMode,
         sendStubbed: ipcRenderer.send.__navProbeStub === true,
@@ -2540,7 +3089,9 @@ async function run(win) {
         window.__navProbeEvidence = { before: before, dirty: null, restored: null };
         const histBefore = navigationHistory.slice();
         const idxBefore = navigationIndex;
-        const navBefore = isNavigating;
+        const pendingBefore = pendingNavigationRequest;
+        const sequenceBefore = navigationRequestSequence;
+        const resultBefore = lastNavigationRequestResult;
         const dirtyBefore = hasUnsavedChanges;
         const editBefore = isEditMode;
         const realSend = ipcRenderer.send;
@@ -2558,7 +3109,9 @@ async function run(win) {
           navigationHistory.length = 0;
           for (const h of histBefore) navigationHistory.push(h);
           navigationIndex = idxBefore;
-          isNavigating = navBefore;
+          pendingNavigationRequest = pendingBefore;
+          navigationRequestSequence = sequenceBefore;
+          lastNavigationRequestResult = resultBefore;
           hasUnsavedChanges = dirtyBefore;
           isEditMode = editBefore;
           updateUnsavedIndicator();
@@ -2609,7 +3162,7 @@ async function run(win) {
             navigationHistory.push({ filePath: currentFilePath, scrollPosition: 0 });
             navigationHistory.push({ filePath: currentFilePath, scrollPosition: 0 });
             navigationIndex = idx;
-            isNavigating = false;
+            pendingNavigationRequest = null;
             isEditMode = false;
             hasUnsavedChanges = false;
             sent.length = 0;

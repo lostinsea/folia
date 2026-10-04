@@ -483,9 +483,12 @@ async function main() {
       "the revert cataloguer refuses to convict a regex on a suite that did not finish",
       /function runSuiteChecked/.test(harness) &&
         /SUITE UNUSABLE/.test(harness) &&
-        // The health signals themselves: a non-zero exit, and a missing
-        // `=== N/M passed ===` footer, which is what a crashed run leaves out.
-        /if \(exitCode !== 0\) reasons\.push/.test(harness) &&
+        // The normal-run exit gate must bind the captured run status directly
+        // to its diagnostic; a generic exitCode grep could match dead logic.
+        /\} else if \(run\.exitCode !== 0\) \{\r?\n {4}reasons\.push\(`exit code \$\{run\.exitCode\}`\);\r?\n {2}\}/.test(
+          harness,
+        ) &&
+        // A missing `=== N/M passed ===` footer is what a crashed run leaves out.
         /the run did not finish/.test(harness) &&
         // AND THE GATE IS ACTUALLY APPLIED. A health check that is computed and
         // then ignored is the same as no health check at all. Anchored to a
@@ -3779,11 +3782,16 @@ async function main() {
             );
           }
         } else {
+          const asarUnavailableReason = fs.existsSync(asarPath)
+            ? "dist build is older than package-lock.json - run `npm run build`"
+            : "no dist build present - run `npm run build`";
           skip(
-            "built app.asar oracles",
-            fs.existsSync(asarPath)
-              ? "dist build is older than package-lock.json - run `npm run build`"
-              : "no dist build present - run `npm run build`",
+            "every package inside the built app.asar has a notice",
+            asarUnavailableReason,
+          );
+          skip(
+            "the notices document nothing that is absent from the built app.asar",
+            asarUnavailableReason,
           );
         }
 

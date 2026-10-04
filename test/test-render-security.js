@@ -1686,32 +1686,138 @@ async function run(win) {
   // the actual menu item. Nothing is asserted about source text alone.
   // ==========================================================================
   const normSrc = "# Doc\n\n![space](<shots/my pic.png>)\n";
-
-  await exec(
-    `window.currentFilePath = ${JSON.stringify(relDoc)};` +
-      `window.originalMarkdown = ${JSON.stringify(normSrc)}; true`,
-  );
-  await render(normSrc, "full", 1500);
-  await exec(`
-    (() => {
-      const img = document.querySelector('#viewer img[alt="space"]');
-      if (!img) return false;
-      img.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
-      document.getElementById('ctxAddNote').click();
-      document.getElementById('noteTitle').value = 'a note';
-      document.getElementById('noteSaveBtn').click();
-      return true;
-    })()
-  `);
-  await sleep(1500);
-  const noteSrc = await exec(`window.originalMarkdown`);
+  fs.writeFileSync(relDoc, normSrc, "utf8");
+  await exec(`window.ipcRenderer.send('open-file-path', { filePath: ${JSON.stringify(relDoc)} }); null`);
+  let noteOwner = null;
+  for (let i = 0; i < 100; i++) {
+    noteOwner = await exec(`(() => {
+      const tab = window.CustomTabs.getActiveTab();
+      return {
+        id: tab && tab.id,
+        path: tab && tab.filePath,
+        content: tab && tab.content,
+        original: tab && tab.originalContent,
+        live: window.originalMarkdown,
+      };
+    })()`);
+    if (noteOwner.path === relDoc &&
+        noteOwner.content === normSrc &&
+        noteOwner.original === normSrc &&
+        noteOwner.live === normSrc) break;
+    await sleep(50);
+  }
   check(
-    "FEATURE add-note-to-image finds an image whose markdown destination marked normalised",
-    typeof noteSrc === "string" &&
-      noteSrc.includes("noted-image") &&
-      !noteSrc.includes("![space]("),
-    JSON.stringify(noteSrc),
+    "the note fixture owns its real disk document before auto-save",
+    noteOwner.path === relDoc &&
+      noteOwner.content === normSrc &&
+      noteOwner.original === normSrc &&
+      noteOwner.live === normSrc,
+    JSON.stringify(noteOwner),
   );
+  if (noteOwner.path !== relDoc || noteOwner.original !== normSrc ||
+      noteOwner.content !== normSrc || noteOwner.live !== normSrc) {
+    throw new Error("Note fixture did not acquire a disk-backed tab owner");
+  }
+  await exec(`(() => {
+    window.__noteFixture = {
+      alerts: [], confirmations: [],
+      alert: window.alert, confirm: window.confirm,
+    };
+    window.alert = message => window.__noteFixture.alerts.push(String(message));
+    window.confirm = message => {
+      window.__noteFixture.confirmations.push(String(message));
+      return false;
+    };
+  })()`);
+  try {
+    await render(normSrc, "full", 1500);
+    await exec(`
+      (() => {
+        const img = document.querySelector('#viewer img[alt="space"]');
+        if (!img) return false;
+        img.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }));
+        document.getElementById('ctxAddNote').click();
+        document.getElementById('noteTitle').value = 'a note';
+        document.getElementById('noteSaveBtn').click();
+        return true;
+      })()
+    `);
+    await sleep(1500);
+    const noteSrc = await exec(`window.originalMarkdown`);
+    check(
+      "FEATURE add-note-to-image finds an image whose markdown destination marked normalised",
+      typeof noteSrc === "string" &&
+        noteSrc.includes("noted-image") &&
+        !noteSrc.includes("![space]("),
+      JSON.stringify(noteSrc),
+    );
+    let noteSaved = null;
+    for (let i = 0; i < 100; i++) {
+      const disk = fs.readFileSync(relDoc, "utf8");
+      noteSaved = await exec(`(() => {
+        const tab = window.CustomTabs.getActiveTab();
+        const state = tab && window.CustomTabs.__documentState(tab);
+        return {
+          id: tab && tab.id,
+          path: tab && tab.filePath,
+          content: tab && tab.content,
+          original: tab && tab.originalContent,
+          live: window.originalMarkdown,
+          dirty: state && state.dirty,
+          markedDirty: tab && tab.hasUnsavedChanges,
+          pending: window.getPendingSaveStatus([${JSON.stringify(relDoc)}]).pending,
+          alerts: window.__noteFixture.alerts.slice(),
+        };
+      })()`);
+      noteSaved.diskMatches = disk === noteSrc;
+      if (noteSaved.id === noteOwner.id &&
+          noteSaved.path === relDoc &&
+          noteSaved.diskMatches &&
+          noteSaved.content === noteSrc &&
+          noteSaved.original === noteSrc &&
+          noteSaved.live === noteSrc &&
+          noteSaved.dirty === false &&
+          noteSaved.markedDirty === false &&
+          noteSaved.pending === false &&
+          noteSaved.alerts.length === 0) break;
+      if (noteSaved.alerts.length) break;
+      await sleep(50);
+    }
+    const settled = noteSaved &&
+      noteSaved.id === noteOwner.id &&
+      noteSaved.path === relDoc &&
+      noteSaved.diskMatches &&
+      noteSaved.content === noteSrc &&
+      noteSaved.original === noteSrc &&
+      noteSaved.live === noteSrc &&
+      noteSaved.dirty === false &&
+      noteSaved.markedDirty === false &&
+      noteSaved.pending === false &&
+      noteSaved.alerts.length === 0;
+    check("the note auto-save settles on its disk-backed tab", settled, JSON.stringify(noteSaved));
+    if (!settled) throw new Error("Note auto-save did not settle on its clean owner");
+    const closed = await exec(`(async () => {
+      await window.CustomTabs.closeTab(${noteOwner.id});
+      return {
+        removed: !window.CustomTabs.getTabs().some(tab => tab.id === ${noteOwner.id}),
+        confirmations: window.__noteFixture.confirmations.slice(),
+      };
+    })()`);
+    check(
+      "the saved note tab closes without an unsaved-work confirmation",
+      closed.removed && closed.confirmations.length === 0,
+      JSON.stringify(closed),
+    );
+    if (!closed.removed || closed.confirmations.length) {
+      throw new Error("Note fixture tab could not close cleanly");
+    }
+  } finally {
+    await exec(`(() => {
+      window.alert = window.__noteFixture.alert;
+      window.confirm = window.__noteFixture.confirm;
+      delete window.__noteFixture;
+    })()`);
+  }
   await exec(`window.currentFilePath = null; true`);
 
   // ==========================================================================

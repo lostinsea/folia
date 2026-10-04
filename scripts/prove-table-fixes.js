@@ -7,7 +7,8 @@
 // Anything that stays green under its own revert is vacuous.
 //
 // Usage: node scripts/prove-table-fixes.js [id ...]
-const { execFileSync } = require("child_process");
+const { spawnSync } = require("child_process");
+const { createHash } = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
@@ -88,6 +89,49 @@ const BENCH_WORKER = path.join(ROOT, "bench", "bench-f22-shutdown.js");
 // This file. The revert audit's own guards are controls like any other, and the
 // harness restoring itself from its pre-run snapshot is what makes that safe.
 const HARNESS = path.join(ROOT, "scripts", "prove-table-fixes.js");
+// F22's full tab suite currently has unrelated scenario failures before the
+// active-editor evidence runs. This harness-owned virtual suite executes its
+// isolated real-Electron path instead, so its reverts do not mistake those
+// failures for proof.
+const F22_NEWLINE_EVIDENCE_SUITE = "test:f22-newline-evidence";
+const F22_ACK_EVIDENCE_SUITE = "test:f22-ack-evidence";
+const F22_CTIME_R660_EVIDENCE_SUITE = "test:f22-ctime-r660-evidence";
+const F22_QUEUE_EVIDENCE_SUITE = "test:f22-queue-evidence";
+const R660_PROOF_ONLY_SHUTDOWN_TAIL = Object.freeze([
+  "Shutdown approval renderer unusable: webContents destroyed",
+]);
+// Clean suites can emit this one teardown diagnostic after their all-pass
+// parent footer. It is deliberately separate from the proof-only mutation
+// tails below: mutation transcripts remain record-specific and fail closed.
+const CLEAN_PASSING_SHUTDOWN_TAIL = Object.freeze([
+  "Shutdown approval renderer unusable: webContents destroyed",
+]);
+// Footer completion is certified from the parent stdout stream. The popup
+// navigation warnings are diagnostic-stream output, not footer tail records.
+const R454_POPUP_POLICY_WIRING_TAIL = Object.freeze([
+  "Shutdown approval renderer unusable: webContents destroyed",
+]);
+const VIRTUAL_SUITES = Object.freeze({
+  [F22_NEWLINE_EVIDENCE_SUITE]: Object.freeze({
+    npmScript: "test:tabs",
+    environment: Object.freeze({ F22_NEWLINE_FOCUSED_HARNESS: "1" }),
+  }),
+  [F22_ACK_EVIDENCE_SUITE]: Object.freeze({
+    npmScript: "test:tabs",
+    environment: Object.freeze({ F22_FOCUSED_HARNESS: "1" }),
+  }),
+  [F22_CTIME_R660_EVIDENCE_SUITE]: Object.freeze({
+    npmScript: "test:tabs",
+    environment: Object.freeze({
+      F22_FOCUSED_HARNESS: "1",
+      F22_CTIME_R660_PROOF_HARNESS: "1",
+    }),
+  }),
+  [F22_QUEUE_EVIDENCE_SUITE]: Object.freeze({
+    npmScript: "test:tabs",
+    environment: Object.freeze({ F22_QUEUE_FOCUSED_HARNESS: "1" }),
+  }),
+});
 
 const REVERTS = [
   {
@@ -343,7 +387,7 @@ const REVERTS = [
     what:
       "infer the split-view scroller from a class name again, then move the scroller " +
       "to .content-wrapper (the pairing drifts and every tab's reading position is lost)",
-    file: MAIN,
+    file: TABS,
     from:
       "    if (typeof getViewerScroller === \"function\") return getViewerScroller();\n" +
       "    const wrapper = document.querySelector(\".content-wrapper\");\n" +
@@ -367,7 +411,18 @@ const REVERTS = [
       from: "  overflow-y: auto;\n}\n\n/* Editor Panel */",
       to: "  overflow: visible;\n}\n\n.content-wrapper.split-view { overflow-y: auto; }\n\n/* Editor Panel */",
     },
-    expect: [/really entered split view on a scrollable pane/],
+    // 5c2 locates the physical scroller through renderer.js, which this
+    // record does not mutate. It must remain green while the tab helper is
+    // made stale; otherwise a setup failure could be mistaken for proof.
+    expect: [
+      /reading position survives a tab switch in split view$/,
+      // The paired CSS shift leaves the zoomed test's stale helper pointed at
+      // #viewer, so its explicit zoomed-scroller setup is an honest collateral.
+      /the zoomed split-view scroll test really ran on the zoomed scroller/,
+    ],
+    mustPass: [
+      /the split-view scroll test really found and parked the physical scroller/,
+    ],
   },
   {
     id: "R64",
@@ -710,11 +765,31 @@ const REVERTS = [
   {
     id: "R86",
     suite: "test:tabs",
-    what: "send the textarea on save regardless of mode (in view mode it is stale, so a view-mode edit plus Ctrl+Z plus Ctrl+S writes the undone content to disk)",
+    what: "take save bytes from the textarea in view mode after an undo, when that buffer is stale, while retaining the prepared tab-owned content in edit mode",
     file: RENDERER,
-    from: "    alert(i18n('alert.noFileOpen'));\n    return;\n  }\n\n  const content = isEditMode ? markdownEditor.value : originalMarkdown;",
-    to: "    alert(i18n('alert.noFileOpen'));\n    return;\n  }\n\n  const content = markdownEditor.value;",
-    expect: [/saving in view mode writes the content on screen/],
+    from: "  const content = prepared.content;",
+    to: "  const content = isEditMode ? prepared.content : markdownEditor.value;",
+    expect: [
+      /^saving in view mode writes the content on screen, not a stale editor buffer$/,
+      /^F22 saveMarkdownFile preserves its real request identity and content through a main path-race rejection$/,
+      /^F22 shutdown defers its approval until a pending save settles instead of prompting concurrently$/,
+      /^F22 close waits for its first and later pending save before removing the tab or allowing a safe reopen$/,
+      /^F22 view-mode CRLF fold saves raw bytes instead of the stale LF textarea$/,
+      /^F22 view-mode CRLF save makes the folded tab clean with raw baseline bytes$/,
+    ],
+    mustPass: [
+      /^a view-mode undo really does leave the editor holding different content$/,
+      /^a successful view-mode save does not overwrite the in-memory document$/,
+      /^the Scenario 7 synthetic saved document starts clean in the renderer and active tab$/,
+      /^exiting edit mode discards the unsaved edit from every store$/,
+      /^F22 producer path-race view-mode save starts with an owned document and stale textarea$/,
+      /^F22 pending-close deferral view-mode save starts with an owned document and stale textarea$/,
+      /^F22 pending-close first view-mode save starts with an owned document and stale textarea$/,
+      /^F22 pending-close second view-mode save starts with an owned document and stale textarea$/,
+      /^F22 edit-mode CRLF save sends and persists raw CRLF bytes, then is clean$/,
+    ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     // The other half of the same defect, and separately reachable: even with
@@ -722,11 +797,25 @@ const REVERTS = [
     // originalMarkdown discards the saved document in memory.
     id: "R87",
     suite: "test:tabs",
-    what: "resync originalMarkdown from the textarea after every successful save, including view-mode saves",
+    what: "resync originalMarkdown from the stale textarea after a successful view-mode save",
     file: RENDERER,
-    from: "      if (entry && !storeMovedDuringWrite) {\n        originalMarkdown = entry.content;\n      } else if (!entry && isEditMode) {",
-    to: "      if (false) {\n        originalMarkdown = entry.content;\n      } else if (true) {",
-    expect: [/a successful view-mode save does not overwrite the in-memory document/],
+    from: "    } else if (sameReloadDocument(originalMarkdown, decision.savedContent)) {\n      originalMarkdown = decision.savedContent;\n      setDocumentDirtyState(false);",
+    to: "    } else if (sameReloadDocument(originalMarkdown, decision.savedContent)) {\n      originalMarkdown = markdownEditor.value;\n      setDocumentDirtyState(false);",
+    expect: [
+      /a successful view-mode save does not overwrite the in-memory document/,
+      /F22 shutdown defers its approval until a pending save settles instead of prompting concurrently/,
+      /F22 close waits for its first and later pending save before removing the tab or allowing a safe reopen/,
+    ],
+    mustPass: [
+      /^a view-mode undo really does leave the editor holding different content$/,
+      /^saving in view mode writes the content on screen, not a stale editor buffer$/,
+      /^F22 pending-close deferral view-mode save starts with an owned document and stale textarea$/,
+      /^F22 pending-close first view-mode save starts with an owned document and stale textarea$/,
+      /^F22 pending-close second view-mode save starts with an owned document and stale textarea$/,
+      /^F22 edit-mode CRLF save sends and persists raw CRLF bytes, then is clean$/,
+    ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     // Exiting edit mode used to promise a discard and not perform one, leaving
@@ -781,9 +870,17 @@ const REVERTS = [
     suite: "test:tabs",
     what: "restore the discard from originalMarkdown instead of the baseline captured when the session started",
     file: RENDERER,
-    from: "        historyRestore(baseline.history);\n        originalMarkdown = baseline.document;\n        hasUnsavedChanges = baseline.dirty;",
-    to: "        historyRestore(baseline.history);\n        hasUnsavedChanges = baseline.dirty;",
-    expect: [/discarding after a tab round trip does not restore the discarded text/],
+    from: "        historyRestore(baseline.history);\n        originalMarkdown = baseline.document;\n        setDocumentDirtyState(baseline.dirty);",
+    to: "        historyRestore(baseline.history);\n        setDocumentDirtyState(baseline.dirty);",
+    expect: [
+      /^discarding after a tab round trip does not restore the discarded text$/,
+      /^a later tab switch cannot replay the discarded text from the tab record$/,
+    ],
+    mustPass: [
+      /^a tab round trip in edit mode really does put the session's text into the document store$/,
+    ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     // Fixing only the renderer's globals is not enough: the tab record keeps
@@ -801,11 +898,18 @@ const REVERTS = [
     // discarding on any other tab degrades to "keep the text, mark it clean".
     id: "R94",
     suite: "test:tabs",
-    what: "skip re-baselining when the active document changes while edit mode stays on",
-    file: TABS,
-    from: "    if (inEditMode() && window.rebaseEditSession) {\n      window.rebaseEditSession();\n    }",
-    to: "    /* baseline not rebased on tab switch */",
+    what: "skip the arriving document's edit baseline in the active beginFileOpen tab-switch path",
+    file: RENDERER,
+    from: "      captureEditSessionBaseline(options.preserveEditBaseline ? false : true);",
+    to: "      /* reverted for proof: arriving document baseline not captured */",
     expect: [/undo cannot resurrect content discarded on a tab the session did not start on/],
+    mustPass: [
+      /^the second tab arrives clean after a dirty first tab before its edit baseline is captured$/,
+      /^the edit really diverged on the second tab, so the discard there can fail$/,
+      /^discarding after a tab round trip does not restore the discarded text$/,
+    ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     // Raised by GPT-5.4 while reviewing the discard, then measured: Save
@@ -832,11 +936,25 @@ const REVERTS = [
     suite: "test:tabs",
     what: "resync the document store from the textarea after a save instead of from the bytes that were written",
     file: RENDERER,
-    from: "      if (entry && !storeMovedDuringWrite) {\n        originalMarkdown = entry.content;",
-    to: "      if (false) {\n        originalMarkdown = entry.content;",
+    from:
+      "    if (isEditMode) {\n" +
+      "      originalMarkdown = decision.savedContent;\n" +
+      "      setDocumentDirtyState(",
+    to:
+      "    if (isEditMode) {\n" +
+      "      originalMarkdown = markdownEditor.value;\n" +
+      "      setDocumentDirtyState(",
     expect: [
       /after a save the document store holds the bytes that were written, not later keystrokes/,
     ],
+    mustPass: [
+      /^the type-during-save fixture starts from beta\.md's real clean disk baseline$/,
+      /^the type-during-save race really was set up: the write and the buffer diverged$/,
+      /^the tab keeps the later unsaved edit while its saved baseline follows disk$/,
+      /^the type-during-save reply leaves every other tab unchanged$/,
+    ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     // Declaring the document clean when keystrokes arrived during the write
@@ -846,9 +964,26 @@ const REVERTS = [
     suite: "test:tabs",
     what: "declare the document clean after a save even if it was typed into while the write was in flight",
     file: RENDERER,
-    from: "      hasUnsavedChanges = isEditMode\n        ? markdownEditor.value !== originalMarkdown\n        : storeMovedDuringWrite;",
-    to: "      hasUnsavedChanges = false;",
+    from:
+      "    if (isEditMode) {\n" +
+      "      originalMarkdown = decision.savedContent;\n" +
+      "      setDocumentDirtyState(\n" +
+      "        !sameReloadDocument(markdownEditor.value, decision.savedContent)\n" +
+      "      );",
+    to:
+      "    if (isEditMode) {\n" +
+      "      originalMarkdown = decision.savedContent;\n" +
+      "      setDocumentDirtyState(false);",
     expect: [/keystrokes made during a save are still reported as unsaved/],
+    mustPass: [
+      /^the type-during-save fixture starts from beta\.md's real clean disk baseline$/,
+      /^the type-during-save race really was set up: the write and the buffer diverged$/,
+      /^after a save the document store holds the bytes that were written, not later keystrokes$/,
+      /^the tab keeps the later unsaved edit while its saved baseline follows disk$/,
+      /^the type-during-save reply leaves every other tab unchanged$/,
+    ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     // Both reviewers found this independently. custom-tabs.js owns the
@@ -858,11 +993,22 @@ const REVERTS = [
     suite: "test:tabs",
     what: "swallow save results for background documents instead of passing every result to the renderer",
     file: TABS,
-    from: "      if (!isForCurrent) {\n        console.log(\"[CustomTabs] Save result is for a background tab:\", data.path);\n      }\n      rendererSaveHandlers.forEach((fn) => {",
-    to: "      if (!isForCurrent) return;\n      rendererSaveHandlers.forEach((fn) => {",
+    from: "      let decision = null;\n      if (rendererSaveHandler) {",
+    to:
+      "      const savedTab = data && typeof data.path === \"string\" ? findTabByPath(data.path) : null;\n" +
+      "      if (savedTab && savedTab !== getActiveTab()) return; /* reverted for proof: background reply dropped */\n" +
+      "      let decision = null;\n      if (rendererSaveHandler) {",
     expect: [
-      /a save whose reply arrived on another tab is not offered for discard on return/,
+      /the first successful save result is delivered while the other physical tab remains active and settles the saved tab/,
     ],
+    mustPass: [
+      /^the background-save case really was set up: the write reached disk from a tab left in the background$/,
+      /^a save whose reply arrived on another tab is not offered for discard on return$/,
+      /^returning to a tab saved in the background shows the saved document, not the pre-save text$/,
+      /^a save that completes for a background document is not applied to the document on screen$/,
+    ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     // The renderer's own half of the same problem: a reply that describes a
@@ -872,11 +1018,21 @@ const REVERTS = [
     suite: "test:tabs",
     what: "apply every save result to the document currently on screen, whichever document was written",
     file: RENDERER,
-    from: "  const isForCurrent = !savedPath || savedPath === currentFilePath;",
+    from:
+      "  const isForCurrent =\n" +
+      "    !!currentIdentity &&\n" +
+      "    saveDocumentIdentityKey(currentIdentity) === decision.identityKey;",
     to: "  const isForCurrent = true;",
     expect: [
       /a save that completes for a background document is not applied to the document on screen/,
     ],
+    mustPass: [
+      /^the background-save case really was set up: the write reached disk from a tab left in the background$/,
+      /^the first successful save result is delivered while the other physical tab remains active and settles the saved tab$/,
+      /^returning to a tab saved in the background shows the saved document, not the pre-save text$/,
+    ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     // Opus found this one alone: the baseline records the dirty flag, and
@@ -885,12 +1041,21 @@ const REVERTS = [
     id: "R100",
     suite: "test:tabs",
     what: "capture the arriving tab's edit baseline before its unsaved state has been restored",
-    file: TABS,
-    from: "    if (window.setUnsavedState) {\n      window.setUnsavedState(tab.hasUnsavedChanges);\n    }\n\n    if (inEditMode() && window.rebaseEditSession) {\n      window.rebaseEditSession();\n    }",
-    to: "    if (inEditMode() && window.rebaseEditSession) {\n      window.rebaseEditSession();\n    }\n\n    if (window.setUnsavedState) {\n      window.setUnsavedState(tab.hasUnsavedChanges);\n    }",
+    file: RENDERER,
+    from: "      markdownEditor.value = originalMarkdown;\n      setDocumentDirtyState(dirty);",
+    to:
+      "      markdownEditor.value = originalMarkdown;\n" +
+      "      captureEditSessionBaseline(options.preserveEditBaseline ? false : true);\n" +
+      "      setDocumentDirtyState(dirty);",
     expect: [
       /discarding on a clean tab does not inherit the previous tab's unsaved state/,
     ],
+    mustPass: [
+      /^the second tab arrives clean after a dirty first tab before its edit baseline is captured$/,
+      /^discarding on a tab the session did not start on restores that tab's own content$/,
+    ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     // Both reviewers, again independently: a reload replaces the document
@@ -900,29 +1065,33 @@ const REVERTS = [
     suite: "test:tabs",
     what: "leave the edit-session baseline on the pre-reload document when a file is reloaded mid-session",
     file: RENDERER,
-    from: "      // The reload replaced the document underneath an open edit session, so\n      // the session's baseline now describes content that is no longer on\n      // disk. Without moving it, exiting with a discard would restore the\n      // PRE-reload text and silently undo the reload as well.\n      captureEditSessionBaseline(true);",
-    to: "      /* baseline not moved on reload */",
+    from: "        // the session's baseline must move with it.\n        captureEditSessionBaseline(true);",
+    to: "        // the session's baseline must move with it.\n        /* reverted for proof: reload baseline not moved */",
     expect: [
-      /discarding after a reload restores the reloaded document, not the pre-reload text/,
+      /^discarding after a reload restores the reloaded document, not the pre-reload text$/,
     ],
+    mustPass: [
+      /^the reload case really was set up: the reload brought in content the session had not seen$/,
+    ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
-    // Found by a test written for a different reason: two concurrent writes to
-    // one path are ordered by the OS, and the older content won.
     id: "R102",
-    suite: "test:tabs",
-    what: "write concurrent saves to the same file without serialising them",
+    suite: F22_QUEUE_EVIDENCE_SUITE,
+    what: "run concurrent same-path Save operations without serialising them",
     file: MAIN,
-    from: "    queueSave(filePath, () => new Promise((done) => {",
-    to: "    Promise.resolve().then(() => new Promise((done) => {",
-    expect: [
-      // NOT the disk outcome. Which write lands last without queueSave is
-      // decided by the OS, so an outcome-based expectation reports VACUOUS
-      // whenever the scheduler happens to cooperate - which is exactly what
-      // this entry did. Overlap is a property of the code: with the fix
-      // removed both writes are open at once, every time.
-      /two saves to one path are serialised: their writes never overlap/,
+    from: "  const next = prior.then(execute, execute);",
+    to: "  const next = Promise.resolve().then(execute);",
+    expect: [/^focused queue serialises two same-path Save operations$/],
+    mustPass: [
+      /^focused queue alert capture was proven live before two Saves$/,
+      /^focused queue two same-path Save operations reached main-process settlement$/,
+      /^focused queue uncaught JS error listener was proven live$/,
+      /^focused queue had no uncaught JavaScript errors$/,
     ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     // The warning has to name the consequence; "Exit edit mode anyway?" reads
@@ -2084,20 +2253,15 @@ const REVERTS = [
     // connected protects nothing, and only the wiring check can tell.
     what: "unhook the will-download guard from the default session",
     file: MAIN,
-    from:
-      '    session.defaultSession.on("will-download", (event, item) => {\n' +
-      "      const url = item.getURL();\n" +
-      "      if (!isDownloadAllowed(url)) {\n" +
-      '        console.warn("Blocked download from document content:", url);\n' +
-      "        event.preventDefault();\n" +
-      "      }\n" +
-      "    });",
-    to: "    // will-download guard removed",
+    from: '    session.defaultSession.on("will-download", (event, item) => {',
+    to: '    if (false) session.defaultSession.on("will-download", (event, item) => {',
     suite: "test:popups",
     expect: [/^SEC-30 the download policy is wired to the default session$/],
     mustPass: [
       /^SEC-30 the download policy admits the app's blob: exports and nothing else$/,
     ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     id: "R455",
@@ -5849,16 +6013,24 @@ const REVERTS = [
     what: "clear the dirty flag when entering edit mode, discarding a note whose auto-save failed",
     file: RENDERER,
     from:
-      "    hasUnsavedChanges =\n      hasUnsavedChanges &&\n      (saveFailedFor(currentFilePath) || hasPendingSaveFor(currentFilePath));",
-    to: "    hasUnsavedChanges = false;",
+      "    setDocumentDirtyState(\n" +
+      "      hasUnsavedChanges &&\n" +
+      "        (saveFailedFor(currentFilePath) ||\n" +
+      "          hasPendingSaveFor(currentFilePath) ||\n" +
+      "          reloadConflictFor(currentFilePath))\n" +
+      "    );",
+    to: "    setDocumentDirtyState(false);",
     expect: [
       /entering edit mode after a failed auto-save preserves the unsaved state/,
       /entering edit mode with a write still unanswered keeps the document marked unsaved/,
+      /a save failure arriving after the user entered edit mode is still recorded/,
     ],
     mustPass: [
       /a failed view-mode auto-save records the failure and keeps the document dirty/,
       /the provoked save failure really did reach the console/,
     ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     id: "R209",
@@ -5870,35 +6042,47 @@ const REVERTS = [
     from:
       "function hasUnsavedWork() {\n" +
       "  return (\n" +
-      "    hasUnsavedChanges &&\n" +
-      "    (isEditMode ||\n" +
-      "      saveFailedFor(currentFilePath) ||\n" +
-      "      reloadConflictFor(currentFilePath))\n" +
+      "    hasPendingSaveFor(currentFilePath) ||\n" +
+      "    saveFailedFor(currentFilePath) ||\n" +
+      "    reloadConflictFor(currentFilePath) ||\n" +
+      "    (hasUnsavedChanges && isEditMode)\n" +
       "  );\n" +
       "}",
     to:
       "function hasUnsavedWork() {\n" +
       "  return hasUnsavedChanges && isEditMode;\n" +
       "}",
-    expect: [/a failed view-mode auto-save arms the reload\/open guards/],
-    mustPass: [/a failed view-mode auto-save records the failure and keeps the document dirty/],
+    expect: [
+      /^a failed view-mode auto-save arms the reload\/open guards$/,
+      // These follow the same failed-save state through separate reload,
+      // delivery, and tab-switch paths, so they are causal guard witnesses.
+      /^returning to the document whose save failed finds its reload guard still armed$/,
+      /^a synchronous delivery failure is renderer-only while CustomTabs remains clean$/,
+      /^an unchanged-disk switch preserves a renderer-only failed-save record$/,
+    ],
+    mustPass: [/^a failed view-mode auto-save records the failure and keeps the document dirty$/],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     id: "R210",
     suite: "test:patch",
     what: "stop recording a failed view-mode write, so nothing downstream knows the note is only in memory",
     file: RENDERER,
-    from: "    if (savedPath) failedSaves.add(savedPath);\n    if (isForCurrent) {\n      hasUnsavedChanges = true;",
-    to: "    if (savedPath) failedSaves.delete(savedPath);\n    if (isForCurrent) {\n      hasUnsavedChanges = false;",
+    from: "      failedSaves.add(stateKey);",
+    to: "      failedSaves.delete(stateKey);",
     expect: [
       /a failed view-mode auto-save records the failure and keeps the document dirty/,
       /a failed view-mode auto-save arms the reload\/open guards/,
       /entering edit mode after a failed auto-save preserves the unsaved state/,
       /a save failure arriving after the user entered edit mode is still recorded/,
       /a successful save of one document does not clear another document's recorded failure/,
+      /the tab being switched back to really was armed and dirty before the switch/,
       /returning to the document whose save failed finds its reload guard still armed/,
     ],
     mustPass: [/the provoked save failure really did reach the console/],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     id: "R212",
@@ -5910,24 +6094,23 @@ const REVERTS = [
     what: "make the failed-save record a single global flag again instead of a per-path set",
     file: RENDERER,
     from:
-      "    if (data.success && savedPath) {\n" +
-      "      failedSaves.delete(savedPath);\n" +
-      "      const canonicalSavedPath = canonicalReloadPath(savedPath);\n" +
-      "      if (canonicalSavedPath) reloadConflicts.delete(canonicalSavedPath);\n" +
-      "    }",
+      "    failedSaves.delete(stateKey);\n" +
+      "    reloadConflicts.delete(stateKey);",
     to:
-      "    if (data.success) {\n" +
-      "      failedSaves.clear();\n" +
-      "      reloadConflicts.clear();\n" +
-      "    }",
+      "    failedSaves.clear();\n" +
+      "    reloadConflicts.clear();",
     expect: [
       /a successful save of one document does not clear another document's recorded failure/,
+      /the tab being switched back to really was armed and dirty before the switch/,
       /returning to the document whose save failed finds its reload guard still armed/,
     ],
     mustPass: [
       /a failed view-mode auto-save records the failure and keeps the document dirty/,
+      /the injected cross-tab failure reached an owned save without writing tab A/,
       /a failure recorded for another document does not make the on-screen document look unsaved/,
     ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     id: "R213",
@@ -5937,44 +6120,71 @@ const REVERTS = [
     // them to do while the note's own write is still unanswered.
     what: "ignore a save failure that arrives once the user has entered edit mode",
     file: RENDERER,
-    from: "    if (savedPath) failedSaves.add(savedPath);\n    if (isForCurrent) {",
-    to: "    if (savedPath && !isEditMode) failedSaves.add(savedPath);\n    if (isForCurrent && !isEditMode) {",
+    from: "      failedSaves.add(stateKey);",
+    to: "      if (!isEditMode) failedSaves.add(stateKey);",
     expect: [/a save failure arriving after the user entered edit mode is still recorded/],
     mustPass: [
       /a failed view-mode auto-save records the failure and keeps the document dirty/,
+      /the injected late failure really did reach the console, so its mute is not vacuous/,
       /entering edit mode with a write still unanswered keeps the document marked unsaved/,
     ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     id: "R214",
     suite: "test:patch",
-    // Not keeping the moved store is only half the fix: the newer note has no
-    // write of its own yet, so declaring the document clean loses it at the
-    // next reload with no prompt.
-    what: "declare the document clean after a reply whose store had already moved on",
+    // The existing two-save ordering case makes its first reply stale. This
+    // separate one-save case moves the store locally, so its reply is latest
+    // and authorized but its saved bytes are no longer the current document.
+    what: "declare a locally moved view-mode document clean after its authorized latest save result",
     file: RENDERER,
-    from: "        : storeMovedDuringWrite;",
-    to: "        : false;",
-    expect: [/a store that moved mid-write is left marked unsaved, not clean/],
-    mustPass: [
-      /a save reply does not overwrite a view-mode store that moved while the write was in flight/,
+    from:
+      "    } else if (sameReloadDocument(originalMarkdown, decision.savedContent)) {\n      originalMarkdown = decision.savedContent;\n      setDocumentDirtyState(false);\n    } else {\n      setDocumentDirtyState(true);\n    }",
+    to:
+      "    } else if (sameReloadDocument(originalMarkdown, decision.savedContent)) {\n      originalMarkdown = decision.savedContent;\n      setDocumentDirtyState(false);\n    } else {\n      setDocumentDirtyState(false);\n    }",
+    expect: [
+      /^an authorized latest save result keeps a locally moved view-mode store dirty$/,
     ],
+    mustPass: [
+      /^the controlled view-mode save is exactly one observed pending disk request$/,
+      /^a local view-mode mutation moves the store and physical tab without a second save$/,
+      /^the held save result remains authorized and applies as the latest request$/,
+      /^an authorized latest save result does not replace a newer local view-mode edit$/,
+    ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     id: "R211",
     suite: "test:patch",
-    // Unreachable before this phase - view mode never wrote - and reachable on
-    // every note now. The store is the document in view mode, so adopting a
-    // stale in-flight payload silently drops the newer note.
-    what: "adopt the in-flight payload unconditionally, dropping a note confirmed while the write was still out",
+    // A latest request is still stale with respect to a later local edit.
+    // Preserve the dirty reporting to isolate adoption of the saved bytes.
+    what: "adopt an authorized latest payload over a newer local view-mode edit",
     file: RENDERER,
-    from: "      if (entry && !storeMovedDuringWrite) {",
-    to: "      if (entry) {",
-    expect: [/a save reply does not overwrite a view-mode store that moved while the write was in flight/],
-    mustPass: [
-      /a note added in view mode is written to disk without any save action/,
-      /the document is not left looking unsaved after a note auto-save/,
+    from:
+      "    } else {\n" +
+      "      setDocumentDirtyState(true);\n" +
+      "    }\n" +
+      "    if (\n" +
+      "      hasPendingSaveFor(decision.path)",
+    to:
+      "    } else {\n" +
+      "      originalMarkdown = decision.savedContent;\n" +
+      "      setDocumentDirtyState(true);\n" +
+      "    }\n" +
+      "    if (\n" +
+      "      hasPendingSaveFor(decision.path)",
+    expect: [
+      /^an authorized latest save result does not replace a newer local view-mode edit$/,
     ],
+    mustPass: [
+      /^the controlled view-mode save is exactly one observed pending disk request$/,
+      /^a local view-mode mutation moves the store and physical tab without a second save$/,
+      /^the held save result remains authorized and applies as the latest request$/,
+    ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     id: "R217",
@@ -6443,23 +6653,29 @@ const REVERTS = [
     // The decline path. A guard that always proceeds still ASKS, so an oracle
     // that only counted dialogs would call this fixed; what breaks is that the
     // answer is ignored, and the reader is dragged onto a document they
-    // declined. Note it also stops asking on the second and third visits,
-    // because the memo records an acceptance that never happened.
+    // declined. The refused confirmation remains a refusal, so it cannot
+    // populate the acceptance memo.
     what: "ignore the reader's answer and switch to the expensive tab anyway",
     file: TABS,
-    from: "    if (tabId !== activeTabId && !confirmLargeTab(tab, options && options.silent)) {",
-    to: "    if (false) {",
+    from: "    if (tabId !== activeTabId && !confirmLargeTab(tab, opts.silent)) {",
+    to: "    if (tabId !== activeTabId && !confirmLargeTab(tab, opts.silent) && false) {",
     expect: [
       /opening an expensive file asks, and declining leaves the reader put/,
       /switching to an expensive tab asks first/,
       /declining leaves the reader on the tab they were viewing/,
       /declining leaves the document they were reading on screen/,
       /accepting switches to the expensive tab/,
+      /a cost already accepted is not asked about again/,
+      /a restored-but-unvisited expensive tab still asks when it is clicked/,
     ],
     mustPass: [
       /the guard sample really is scored as expensive and the control is not/,
       /an ordinary document is never asked about/,
+      /a session restore renders its active ordinary document only before any declined click/,
+      /restoring an expensive document says so passively, naming the file/,
     ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     id: "R235",
@@ -6627,13 +6843,54 @@ const REVERTS = [
     // both render N documents and ask N questions.
     what: "make a session restore switch to every tab it creates",
     file: TABS,
-    from: "                const tab = createTab(tabData.filePath, content, {\n                  activate: false,\n                });",
-    to: "                const tab = createTab(tabData.filePath, content);",
+    from:
+      "                const tab = createTab(tabData.filePath, snapshot.content, {\n" +
+      "                  activate: false,\n" +
+      "                  modifiedTime: snapshot.modifiedTime,\n" +
+      "                  diskVersion: snapshot.diskVersion,\n" +
+      "                });",
+    to:
+      "                const tab = createTab(tabData.filePath, snapshot.content, {\n" +
+      "                  activate: true,\n" +
+      "                  modifiedTime: snapshot.modifiedTime,\n" +
+      "                  diskVersion: snapshot.diskVersion,\n" +
+      "                });",
     expect: [
       /a session restore asks nothing, however many expensive tabs it holds/,
-      /a session restore renders the active document only, not every tab/,
+      /a session restore renders its active ordinary document only before any declined click/,
+      /a restored-but-unvisited expensive tab still asks when it is clicked/,
+      /restoring an expensive active document asks nothing and still renders it/,
+      /a restore renders one document even when that document is expensive/,
+      /^nothing rendered a visible error at any point during the suite$/,
     ],
-    mustPass: [/a session restore really did restore every tab/],
+    mustPass: [
+      /^the error sentinel was demonstrably watching both channels$/,
+      /the restore samples really are scored expensive and the control is not/,
+      /a session restore really did restore every tab/,
+    ],
+    // Forced activation reaches the two disk-adoption refusal paths. The global
+    // sentinel has one assertion name for every console error. Its upstream
+    // collector de-duplicates identical kind/detail pairs, so constrain the
+    // distinct reported hits rather than claiming to observe raw repetitions.
+    expectedFailureEvidence: {
+      assertion: /^nothing rendered a visible error at any point during the suite$/,
+      min: 0,
+      requireParentAssertionOutcome: true,
+      hits: [
+        {
+          kind: "console-error",
+          detail:
+            /^\[CustomTabs\] Disk adoption attestation refused: \[object Object\] @ file:\/\/\/.*\/src\/custom-tabs\.js:\d+$/,
+        },
+        {
+          kind: "console-error",
+          detail:
+            /^\[CustomTabs\] Disk adoption was refused: \[object Object\] @ file:\/\/\/.*\/src\/custom-tabs\.js:\d+$/,
+        },
+      ],
+    },
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     id: "R251",
@@ -6643,15 +6900,32 @@ const REVERTS = [
     // usable - and the scenario answers "no", so the restore loses it.
     what: "make the one switch a restore performs raise the modal",
     file: TABS,
-    from: "          switchToTab(restored.id, { silent: true });",
-    to: "          switchToTab(restored.id);",
+    from:
+      "            switchToTab(restored.id, {\n" +
+      "              silent: true,\n" +
+      "              fileOpenOptions: { adoptPathIdentity: true },\n" +
+      "            }).catch((error) => {\n" +
+      '              console.error("[CustomTabs] Could not restore active tab:", error);\n' +
+      "            });",
+    to:
+      "            switchToTab(restored.id, {\n" +
+      "              fileOpenOptions: { adoptPathIdentity: true },\n" +
+      "            }).catch((error) => {\n" +
+      '              console.error("[CustomTabs] Could not restore active tab:", error);\n' +
+      "            });",
     expect: [
       /restoring an expensive active document asks nothing and still renders it/,
       /restoring an expensive document says so passively, naming the file/,
+      /a restore renders one document even when that document is expensive/,
+      /a document restored and already on screen is never asked about later/,
     ],
     mustPass: [
       /a session restore asks nothing, however many expensive tabs it holds/,
+      /a session restore really did restore every tab/,
+      /the restore samples really are scored expensive and the control is not/,
     ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     id: "R252",
@@ -6660,12 +6934,33 @@ const REVERTS = [
     // anything the tab layer asks is the SECOND identical dialog for one open.
     what: "ask again about a document main.js has already asked about",
     file: TABS,
-    from: "      createTab(filePath, content, { confirmed: true });",
-    to: "      createTab(filePath, content);",
+    from:
+      "          targetTab = createTab(filePath, content, {\n" +
+      "            activate: false,\n" +
+      "            confirmed: true,\n" +
+      "            modifiedTime: openData.modifiedTime,\n" +
+      "            diskVersion: verifiedVersion,\n" +
+      "            verifiedDiskAdoption: adoptionApproval,\n" +
+      "            deferOwnerRegistration: true,\n" +
+      "            reservedIdentity: targetReservation,\n" +
+      "          });",
+    to:
+      "          targetTab = createTab(filePath, content, {\n" +
+      "            activate: false,\n" +
+      "            confirmed: false,\n" +
+      "            modifiedTime: openData.modifiedTime,\n" +
+      "            diskVersion: verifiedVersion,\n" +
+      "            verifiedDiskAdoption: adoptionApproval,\n" +
+      "            deferOwnerRegistration: true,\n" +
+      "            reservedIdentity: targetReservation,\n" +
+      "          });",
     expect: [/a file main.js already asked about is not asked about again/],
     mustPass: [
       /a multi-select opens every file but renders only the chosen one/,
+      /main confirms each large file before sending its authenticated open/,
     ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     id: "R253",
@@ -6675,13 +6970,34 @@ const REVERTS = [
     // leaves the reader on the last file rather than the one they chose.
     what: "make a multi-select switch to every extra file it opens",
     file: TABS,
-    from: "              createTab(extraPath, readFromDisk(extraPath), {\n                activate: false,\n              });",
-    to: "              createTab(extraPath, readFromDisk(extraPath));",
+    from:
+      "            extraTab = createTab(extraPath, snapshot.content, {\n" +
+      "              activate: false,\n" +
+      "              modifiedTime: snapshot.modifiedTime,\n" +
+      "              diskVersion: extraVersion,\n" +
+      "              verifiedDiskAdoption: extraApproval,\n" +
+      "              deferOwnerRegistration: true,\n" +
+      "              reservedIdentity: extraReservation,\n" +
+      "            });",
+    to:
+      "            extraTab = createTab(extraPath, snapshot.content, {\n" +
+      "              activate: true,\n" +
+      "              modifiedTime: snapshot.modifiedTime,\n" +
+      "              diskVersion: extraVersion,\n" +
+      "              verifiedDiskAdoption: extraApproval,\n" +
+      "              deferOwnerRegistration: true,\n" +
+      "              reservedIdentity: extraReservation,\n" +
+      "            });",
     expect: [
       /a multi-select opens every file but renders only the chosen one/,
       /a file main.js already asked about is not asked about again/,
     ],
-    mustPass: [/a session restore really did restore every tab/],
+    mustPass: [
+      /main confirms each large file before sending its authenticated open/,
+      /a session restore really did restore every tab/,
+    ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     id: "R254",
@@ -6691,12 +7007,15 @@ const REVERTS = [
     // separately.
     what: "ask again when a link re-opens a file that is already open",
     file: TABS,
-    from: "        largeConfirmed.add(existingTab.id);",
-    to: "        /* acceptance not carried over */",
+    from: "          largeConfirmed.add(targetTab.id);",
+    to: "          /* acceptance not carried over */",
     expect: [/re-opening a file that is already open does not ask a second time/],
     mustPass: [
+      /main confirms each large file before sending its authenticated open/,
       /a multi-select opens every file but renders only the chosen one/,
     ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     id: "R255",
@@ -12793,21 +13112,16 @@ const REVERTS = [
         },
         {
           id: "R526",
-          // F23, the GUARD half. navigateBack/navigateForward send
-          // `open-file-path`, which replaces the document outright. Every other
-          // route to that channel asks hasUnsavedWork() first (the drag-drop
-          // handler at renderer.js is the idiom this copied); these two did
-          // not, so a back/forward silently discarded unsaved bytes.
+          // F23, the GUARD half. requestHistoryNavigation now supplies one
+          // hasUnsavedWork() guard shared by navigateBack and navigateForward.
           //
-          // Only navigateBack is reverted, not both. The two functions are
-          // byte-identical in this respect, so breaking one is sufficient to
-          // prove the property while leaving navigateForward as a live control
-          // that the probe's send-recording oracle still works at all.
+          // This mutation removes only that shared guard. The keyboard route's
+          // independent binding and boundary controls remain in mustPass.
           what: "let arrow-key back navigation discard unsaved work without asking",
           file: RENDERER,
           from:
-            "  if (navigationIndex <= 0) return false;\n  if (hasUnsavedWork() && !confirm(i18n('confirm.unsavedOpen'))) return false;",
-          to: "  if (navigationIndex <= 0) return false;",
+            "  if (!entry) return false;\n  if (hasUnsavedWork() && !confirm(i18n('confirm.unsavedOpen'))) return false;",
+          to: "  if (!entry) return false;",
           suite: "test:patch",
           expect: [
             // Both halves of the guard live in one assertion because they are
@@ -12831,6 +13145,7 @@ const REVERTS = [
             /^an arrow key at the end of the history is left alone, not swallowed$/,
             /^the arrow keys really are bound: a possible navigation is consumed and sent$/,
           ],
+          requireMustPassAssertions: true,
         },
         {
           id: "R527",
@@ -13732,7 +14047,7 @@ const REVERTS = [
       /^an installed updater error cancels its commit watcher and leaves the next dirty close unauthorized$/,
       /^an updater commit arriving behind another question remains a required fresh question$/,
       /^a close raised while the renderer is loading is held, then answered by the renderer that arrives$/,
-      /^a navigation the main process denies leaves the window closable$/,
+      /^a denied navigation keeps the renderer ready and avoids a fallback question on close$/,
       /^a page that loads without the tab overlay falls through to the main-process question$/,
       /^a pre-release portable child error is handled but cannot clear its retry latch before close$/,
       /^the isolated portable updater companion completed every live hand-off check$/,
@@ -13754,13 +14069,32 @@ const REVERTS = [
     file: TABS,
     from:
       "    snapshotActiveTab({ capturePosition: false });\n" +
-      "    return tabs.filter(isDirty).map((tab) => tab.filename);",
+      "    return tabs\n" +
+      "      .filter((tab) => {\n" +
+      "        if (isDirty(tab)) return true;\n" +
+      "        if (!includeDeletionConflicts) return false;\n" +
+      "        const state = documentState.get(tab);\n" +
+      "        return !!(state && state.deletionTombstone);\n" +
+      "      })\n" +
+      "      .map((tab) => tab.filename);",
     to:
       "    const activeOnly = snapshotActiveTab({ capturePosition: false });\n" +
-      "    return activeOnly && isDirty(activeOnly) ? [activeOnly.filename] : [];",
+      "    return (activeOnly ? [activeOnly] : [])\n" +
+      "      .filter((tab) => {\n" +
+      "        if (isDirty(tab)) return true;\n" +
+      "        if (!includeDeletionConflicts) return false;\n" +
+      "        const state = documentState.get(tab);\n" +
+      "        return !!(state && state.deletionTombstone);\n" +
+      "      })\n" +
+      "      .map((tab) => tab.filename);",
     expect: [
       /^an unsaved BACKGROUND tab is found once the active tab has been snapshotted$/,
+      /^a renderer that recovers answers the next question itself$/,
       /^two unsaved documents are counted in the message and both named in the detail$/,
+      /^the maintained dirty state follows direct assignments and returns clean after the original value is restored$/,
+      /^the maintained state follows clean-dirty-clean-dirty alternation and isolates equal-valued tabs$/,
+      /^a 2MB dirty background tab is found while its active tab is clean despite a false dirty flag$/,
+      /^the shutdown scan reads no document bytes for tabs whose text has not moved since it was set$/,
     ],
     mustPass: [
       // The ACTIVE document is still found, which is what separates "scans the
@@ -13768,6 +14102,8 @@ const REVERTS = [
       /^an unsaved edit that exists only in the renderer stops the native close$/,
       /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
     ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     id: "R545",
@@ -13776,8 +14112,8 @@ const REVERTS = [
     file: TABS,
     from:
       "    snapshotActiveTab({ capturePosition: false });\n" +
-      "    return tabs.filter(isDirty).map((tab) => tab.filename);",
-    to: "    return tabs.filter(isDirty).map((tab) => tab.filename);",
+      "    return tabs",
+    to: "    return tabs",
     expect: [
       /^an unsaved edit that exists only in the renderer stops the native close$/,
       /^two unsaved documents are counted in the message and both named in the detail$/,
@@ -13789,6 +14125,8 @@ const REVERTS = [
       /^an unsaved BACKGROUND tab is found once the active tab has been snapshotted$/,
       /^the reader's newest edit really is live-only, absent from the tab's own cache$/,
     ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     id: "R546",
@@ -13857,20 +14195,26 @@ const REVERTS = [
       "accept a stale lower request id after the same-id response cache has had its first right of refusal",
     file: TABS,
     from:
-      "    if (id <= highestShutdownRequestId) {\n" +
-      '      console.log("[CustomTabs] Ignoring stale shutdown request:", id);\n' +
-      "      return;\n" +
-      "    }",
+      "    if (\n" +
+      "      id < highestShutdownRequestId ||\n" +
+      "      (id === highestShutdownRequestId && !retryingPendingSave)\n" +
+      "    ) {",
     to:
-      "    if (false) { /* reverted for proof: stale lower request accepted */\n" +
-      "    }",
+      "    if (\n" +
+      "      false || /* reverted for proof: stale lower id accepted */\n" +
+      "      (id === highestShutdownRequestId && !retryingPendingSave)\n" +
+      "    ) {",
     expect: [
       /^the renderer answers a fresh shutdown request and ignores a stale one$/,
+      /^fifty cancelled shutdowns retain one replayable answer, and only the newest id replays$/,
     ],
     mustPass: [
+      /^the same-id response cache starts from the selected clean physical owner$/,
+      /^the renderer replays its cached response for a duplicate same-id request$/,
       /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
-      /^an unsaved BACKGROUND tab is found once the active tab has been snapshotted$/,
     ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     id: "R550",
@@ -13925,28 +14269,34 @@ const REVERTS = [
   {
     id: "R552",
     suite: "test:tabs",
-    what: "approve silently when the renderer cannot answer, instead of asking in the main process",
+    what: "decline a live unusable renderer instead of asking at the dispatch fallback",
     file: MAIN,
     from:
-      "function askFallbackApproval(record, cause) {\n" +
-      "  if (!record.asked) markShutdownFallbackTiming(record.id, cause);\n" +
-      "  askShutdownQuestion(record, {",
+      '  if (approvalRendererState === "loading") {\n' +
+      "    if (!wc.isLoading()) probeForApprovalOverlay(wc);\n" +
+      "    return;\n" +
+      "  }\n" +
+      '  askFallbackApproval(record, "unresponsive");',
     to:
-      "function askFallbackApproval(record, cause) {\n" +
-      "  if (!record.asked) markShutdownFallbackTiming(record.id, cause);\n" +
-      '  if (cause) return settleShutdown(record, true, "reverted-silent-approval");\n' +
-      "  askShutdownQuestion(record, {",
+      '  if (approvalRendererState === "loading") {\n' +
+      "    if (!wc.isLoading()) probeForApprovalOverlay(wc);\n" +
+      "    return;\n" +
+      "  }\n" +
+      '  return settleShutdown(record, false, "reverted-unasked-decline");',
+    requireExactFailures: true,
+    requireMustPassAssertions: true,
     expect: [
-      /^a lost renderer is asked about in the main process rather than approved silently$/,
-      /^approving the main-process fallback quits exactly once$/,
       /^a page that loads without the tab overlay falls through to the main-process question$/,
-      /^an unreadable answer raises the main-process question instead of closing$/,
+      /^a synchronous overlay probe throw clears its token and routes the held close to fallback$/,
+      /^a renderer-confirmed commit lost before its deferred continuation re-requests fail-closed and thaws$/,
     ],
     mustPass: [
-      // The ordinary path never reaches the fallback, so it must be untouched.
+      // The ordinary and loading routes must bypass this fallback; the probe
+      // setup itself must still reach it through a live, unusable webContents.
       /^Ctrl\+Q asks through the shared guard instead of quitting outright$/,
       /^an unsaved edit that exists only in the renderer stops the native close$/,
       /^a close raised while the renderer is loading is held, then answered by the renderer that arrives$/,
+      /^the synchronous overlay probe close reaches the live unusable dispatch fallback$/,
     ],
   },
   {
@@ -13997,30 +14347,24 @@ const REVERTS = [
     id: "R555",
     suite: "test:tabs",
     what:
-      "key the renderer's readiness off the START of a navigation again - which this repo has MEASURED " +
-      "still fires for a navigation the main process denies, so document content can make the app unclosable",
+      "key renderer readiness off the START of a navigation the main process denies, " +
+      "routing the next close to a needless fallback question",
     file: MAIN,
-    from:
-      '  wc.on("did-navigate", () => {\n' +
-      "    const pendingAtNavigation = pendingShutdown;\n" +
-      "    revokeShutdownAuthorization();\n" +
-      '    approvalRendererState = "loading";\n' +
-      "    approvalRendererGeneration += 1;\n" +
-      "    overlayProbeOwner = null;",
+    from: '  wc.on("did-navigate", () => {',
     to:
       '  wc.on("did-start-navigation", (details) => {\n' +
-      "    if (!details || !details.isMainFrame || details.isSameDocument) return;\n" +
-      '    approvalRendererState = "loading";\n' +
-      "    approvalRendererGeneration += 1;\n" +
-      "    overlayProbeOwner = null;",
-    expect: [/^a navigation the main process denies leaves the window closable$/],
+      "    if (!details || !details.isMainFrame || details.isSameDocument) return;",
+    expect: [/^a denied navigation keeps the renderer ready and avoids a fallback question on close$/],
     mustPass: [
+      /^the denied-navigation fixture reaches the main-frame guard without replacing its document$/,
       // Everything before the denied navigation is unaffected: the state only
       // goes wrong once a navigation is CANCELLED.
       /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
       /^an unsaved edit that exists only in the renderer stops the native close$/,
       /^a close raised while the renderer is loading is held, then answered by the renderer that arrives$/,
     ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     id: "R556",
@@ -14295,8 +14639,12 @@ const REVERTS = [
       "remove the sameDocument identity fast path, forcing equal clean tab values " +
       "through newline inspection instead of the zero-scan path",
     file: TABS,
-    from: "    if (a === b) return true;",
-    to: "    if (false) return true; /* reverted for proof: no identity fast path */",
+    from:
+      "    const sameBytes = a === b;\n" +
+      "    if (sameBytes) return true;",
+    to:
+      "    const sameBytes = false; /* reverted for proof: no identity fast path */\n" +
+      "    if (sameBytes) return true;",
     expect: [
       /^sameDocument treats independently constructed equal LF content as clean, then finds a one-character edit$/,
     ],
@@ -14335,13 +14683,13 @@ const REVERTS = [
       '        if (!mayMutateDocument("tab:content-setter")) return;\n' +
       "        state.content = value;\n" +
       "        state.dirty = !sameDocument(value, state.originalContent);\n" +
-      "        bumpDocumentRevision();\n" +
+      "        bumpDocumentRevision(tab);\n" +
       "      },",
     to:
       "      set(value) {\n" +
       '        if (!mayMutateDocument("tab:content-setter")) return;\n' +
-      "        state.content = value; /* reverted for proof: the answer goes stale */\n" +
-      "        bumpDocumentRevision();\n" +
+      "        state.content = value;\n" +
+      "        bumpDocumentRevision(tab);\n" +
       "      },",
     expect: [
       /^the maintained dirty state follows direct assignments and returns clean after the original value is restored$/,
@@ -14356,20 +14704,25 @@ const REVERTS = [
       /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
       /^the renderer answers a fresh shutdown request and ignores a stale one$/,
     ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     id: "R569",
     suite: "test:tabs",
     what: "make shutdown scanning capture and overwrite the current reading anchor",
     file: TABS,
-    from: "    snapshotActiveTab({ capturePosition: false });",
-    to: "    snapshotActiveTab(); /* reverted for proof: shutdown captures position */",
+    from:
+      "    snapshotActiveTab({ capturePosition: false });\n    return tabs",
+    to:
+      "    snapshotActiveTab(); /* reverted for proof: shutdown captures position */\n    return tabs",
     expect: [
       /^a shutdown snapshot folds content without replacing its saved reading anchor$/,
     ],
     mustPass: [
       /^the active view state is snapshotted before the all-tab scan$/,
     ],
+    requireMustPassAssertions: true,
   },
   {
     id: "R570",
@@ -14379,6 +14732,7 @@ const REVERTS = [
     from:
       "  if (\n" +
       "    !Number.isSafeInteger(generation) ||\n" +
+      "    generation <= 0 ||\n" +
       "    generation !== approvalRendererGeneration\n" +
       "  ) {",
     to: "  if (false) { /* reverted for proof: stale READY accepted */",
@@ -14386,8 +14740,14 @@ const REVERTS = [
       /^a forged wrong-generation READY is ignored without changing the open request$/,
     ],
     mustPass: [
+      /^the forged READY setup has an observed open request, a real renderer session, and a distinct safe generation$/,
       /^a native close with nothing unsaved is held, checked with the renderer and then completed$/,
     ],
+    // This mutation has twice reached its expected assertion alongside a
+    // different updater failure. That is contaminated evidence, not a wider
+    // claim for this record.
+    requireExactFailures: true,
+    requireMustPassAssertions: true,
   },
   {
     id: "R571",
@@ -15057,12 +15417,16 @@ const REVERTS = [
     file: TABS,
     from:
       "    if (!state) return !sameDocument(tab.content, tab.originalContent);\n" +
-      "    return state.dirty || state.reloadConflict;",
+      "    return state.dirty || state.reloadConflict || state.saveFailure;",
     to:
-      "    return !sameDocument(tab.content, tab.originalContent); /* reverted for proof: recomputed on every scan */",
+      "    if (!state) return !sameDocument(tab.content, tab.originalContent);\n" +
+      "    return !sameDocument(tab.content, tab.originalContent) || state.reloadConflict || state.saveFailure; /* reverted for proof: recomputed on every scan */",
     expect: [
+      /^the maintained dirty state follows direct assignments and returns clean after the original value is restored$/,
+      /^sameDocument normalizes CRLF and LF in both directions but preserves a real edit$/,
       /^the shutdown scan reads no document bytes for tabs whose text has not moved since it was set$/,
       /^a 2MB dirty background tab is found while its active tab is clean despite a false dirty flag$/,
+      /^F22 active-editor fold proves dirty once without a duplicate full-document comparison$/,
     ],
     mustPass: [
       // The ANSWERS are identical either way - that is what makes this a
@@ -15071,6 +15435,8 @@ const REVERTS = [
       /^sameDocument detects same-length and final-byte edits through the direct path$/,
       /^an unsaved edit that exists only in the renderer stops the native close$/,
     ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     id: "R605",
@@ -15474,11 +15840,13 @@ const REVERTS = [
       "        pendingShutdownCommit,\n" +
       "        false,\n" +
       '        "unresponsive-during-commit",\n' +
+      '        { fallbackCause: "unresponsive" },\n' +
       "      );\n" +
       "    }",
     to: "    /* reverted for proof: a wedged renderer leaves its commit outstanding */",
     expect: [
       /^an unresponsive renderer settles the commit it can no longer answer and asks in the main process$/,
+      /^a commit settled by an unresponsive renderer does not leave the document frozen$/,
     ],
     mustPass: [
       // The QUESTION half of the unresponsive handler is a separate control.
@@ -16026,25 +16394,22 @@ const REVERTS = [
   {
     id: "R645",
     suite: "test:tabs",
-    what: "accept a reload result after the request-time document snapshot has changed, overwriting a concurrent edit",
+    what: "skip the early changed-snapshot conflict classification, forcing a later guard to reject the reload instead",
     file: TABS,
-    from:
-      "      if (\n" +
-      "        typeof currentSnapshot !== \"string\" ||\n" +
-      "        !sameDocument(currentSnapshot, request.snapshot)\n" +
-      "      ) {\n" +
-      '        return "document-moved-after-request";\n' +
-      "      }",
-    to:
-      "      if (false) { /* reverted for proof: changed request snapshot is accepted */\n" +
-      '        return "document-moved-after-request";\n' +
-      "      }",
+    from: "          !sameDocument(currentSnapshot, request.snapshot)",
+    to: "          false /* reverted for proof: changed request snapshot is accepted */",
     expect: [
-      /^edits made during a reload render are not silently marked saved$/,
+      /^the held reload labels its changed request snapshot as a document conflict$/,
+      /^reload ownership drops foreign sender, sequence, path, and page-session replies without inventing a conflict, while a moved live snapshot conflicts$/,
     ],
     mustPass: [
-      /^a CRLF file is not falsely marked edited by its own reload$/,
+      /^the held reload conflict fixture has a newer live edit on the same physical owner$/,
+      /^the held reload retains the newer note after its conflicting reply settles$/,
+      /^the held reload still names the clean live owner and settles before foreign replies$/,
+      /^the second held reload reserves the next document generation for the same active path$/,
     ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
   },
   {
     id: "R646",
@@ -16146,8 +16511,318 @@ const REVERTS = [
       /^the retained freeze refuses public setters, tab operations, keyboard commands, and IPC completion paths without advancing the document$/,
     ],
   },
+  {
+    id: "R652",
+    suite: F22_NEWLINE_EVIDENCE_SUITE,
+    what:
+      "route uniform newline documents through mixed-line alignment, restoring " +
+      "each character instead of using the bounded uniform spelling shortcut",
+    file: TABS,
+    from: "    if (uniformEnding) {",
+    to:
+      "    if (false) { /* reverted for proof: uniform documents take the per-character path */",
+    expect: [
+      /^F22 uniform line-ending folds take the uniform shortcut instead of per-character restoration$/,
+    ],
+    mustPass: [
+      /^F22 LF, CRLF, bare-CR, and mixed spelling survive real edit, undo, fold, and Save$/,
+    ],
+  },
+  {
+    id: "R653",
+    suite: F22_NEWLINE_EVIDENCE_SUITE,
+    what:
+      "route an already-proven active-editor edit through the content accessor, " +
+      "performing a second full comparison against the same baseline",
+    file: TABS,
+    from:
+      "    state.content = cached;\n" +
+      "    state.dirty = true;\n" +
+      "    bumpDocumentRevision(tab);",
+    to:
+      "    tab.content = cached; /* reverted for proof: the accessor compares the baseline again */",
+    expect: [
+      /^F22 active-editor fold proves dirty once without a duplicate full-document comparison$/,
+    ],
+    mustPass: [
+      /^F22 uniform line-ending folds take the uniform shortcut instead of per-character restoration$/,
+      /^F22 LF, CRLF, bare-CR, and mixed spelling survive real edit, undo, fold, and Save$/,
+    ],
+  },
+  {
+    id: "R654",
+    suite: "test:patch",
+    what:
+      "let an ordinary direct tab switch pass clearFailedSave as undefined, " +
+      "so renderer's default clears the failed-save record it must preserve",
+    file: TABS,
+    from:
+      "        clearFailedSave:\n" +
+      "          (!!autoReloaded ||\n" +
+      "            !!opts.fileOpenData ||\n" +
+      "            !!(opts.fileOpenOptions &&\n" +
+      "              opts.fileOpenOptions.adoptPathIdentity === true)) &&\n" +
+      "          !protectedState,",
+    to:
+      "        clearFailedSave:\n" +
+      "          (!!autoReloaded ||\n" +
+      "            !!opts.fileOpenData ||\n" +
+      "            (opts.fileOpenOptions &&\n" +
+      "              opts.fileOpenOptions.adoptPathIdentity === true)) &&\n" +
+      "          !protectedState,",
+    expect: [
+      /^returning to the document whose save failed finds its reload guard still armed$/,
+      /^an unchanged-disk switch preserves a renderer-only failed-save record$/,
+    ],
+    mustPass: [
+      /^the tab being switched back to really was armed and dirty before the switch$/,
+      /^a successful save of one document does not clear another document's recorded failure$/,
+      /^retrying tab A writes its previously unsaved note$/,
+    ],
+  },
+  {
+    id: "R655",
+    suite: "test:tabs",
+    what:
+      "replay the prior accepted reload reply instead of the second held reply " +
+      "that reserves the current document generation",
+    file: path.join(ROOT, "test", "test-tab-refresh.js"),
+    from: "    const base2ForForeignReplies = base2;",
+    to:
+      "    const base2ForForeignReplies = trusted; /* reverted for proof: prior generation is replayed */",
+    expect: [
+      /^reload ownership drops foreign sender, sequence, path, and page-session replies without inventing a conflict, while a moved live snapshot conflicts$/,
+    ],
+    mustPass: [
+      /^the held reload still names the clean live owner and settles before foreign replies$/,
+      /^the second held reload reserves the next document generation for the same active path$/,
+    ],
+  },
+  {
+    id: "R656",
+    suite: "test:patch",
+    what:
+      "stop a changed-disk auto-adopt from clearing the renderer-only failed-save " +
+      "record that belongs to the adopted document",
+    file: TABS,
+    from: "          (!!autoReloaded ||\n",
+    to: "          (false ||\n",
+    expect: [
+      /^a changed-disk auto-adopt clears the stale renderer-only failed-save record$/,
+    ],
+    mustPass: [
+      /^an unchanged-disk switch preserves a renderer-only failed-save record$/,
+      /^the external write changed the disk version before the auto-adopt switch$/,
+      /^a synchronous delivery failure is renderer-only while CustomTabs remains clean$/,
+    ],
+  },
+  {
+    id: "R657",
+    suite: F22_ACK_EVIDENCE_SUITE,
+    what:
+      "let a missing-file poll send while the production retry callback owns " +
+      "the next deletion attempt; the older lost-ACK retry assertion is an " +
+      "honest collateral consequence and is intentionally not a must-pass",
+    why:
+      "Removing the sender guard permits both this controlled poll and the " +
+      "independent natural lost-ACK poll to consume the retry early.",
+    file: MAIN,
+    from: "  if (!record || record.consumed || record.inFlight || record.retryTimeout) return false;",
+    to: "  if (!record || record.consumed || record.inFlight) return false;",
+    expect: [
+      /^F22 missing-file poll cannot send while the production retry callback owns attempt two$/,
+    ],
+    mustPass: [
+      /^F22 retry-guard fixture captures one production retry callback and invokes one live missing-file poll$/,
+      /^F22 production ACK listener rejects one-field top-level canonical ACK variants without mutating its held record$/,
+    ],
+  },
+  {
+    id: "R658",
+    suite: F22_ACK_EVIDENCE_SUITE,
+    what:
+      "remove the renderer-side path-identity check before Save IPC; the main " +
+      "process's dangling-link refusal must not mask the earlier renderer guard",
+    why:
+      "The focused scenario establishes a live prepared owner whose remembered " +
+      "target key differs from the renderer state key. It must then stop in " +
+      "saveMarkdownFile(), rather than reaching the main-process fallback.",
+    file: RENDERER,
+    from: "    stateKey !== identity.pathKey ||\n",
+    to: "    false || /* reverted for proof: path-identity guard removed */\n",
+    expect: [
+      /^F22 dangling symlink refusal reaches one exact native console error before its boundary completes$/,
+    ],
+    mustPass: [
+      /^F22 an existing symlink with a valid target still saves successfully$/,
+    ],
+  },
+  {
+    id: "R659",
+    suite: "test:tabs",
+    what:
+      "let the phase-two reload gate settle on any tracking selection instead of " +
+      "the accepted selection whose owner is the restored physical active document",
+    why:
+      "The unchanged assertion still verifies the selected owner's accepted " +
+      "identity against the restored physical document, so this test-only " +
+      "mutation makes absent owner evidence observable without turning the " +
+      "wait timeout into a harness crash.",
+    file: path.join(ROOT, "test", "test-tab-refresh.js"),
+    from:
+      "            restoredOwner = await captureRestoredOwner();\n" +
+      "            return trackingSelections.some(isCurrentTrackingSelection);\n",
+    to:
+      "            return trackingSelections.length > 0; /* reverted for proof: any selection settles the wait */\n",
+    expect: [
+      /^the valid-revision phase-two reload selects a restored physical owner before reset$/,
+    ],
+    mustPass: [
+      /^the valid-revision reload fixture starts with restored physical paths to select$/,
+      /^the valid-dirty reload fixture starts with restored physical paths to select$/,
+      /^the sender-gate reload fixture starts with restored physical paths to select$/,
+    ],
+  },
+  {
+    id: "R660",
+    suite: F22_CTIME_R660_EVIDENCE_SUITE,
+    what:
+      "treat a ctime-only disk-version drift as a main-process selection conflict",
+    why:
+      "The controlled metadata-only transition reaches a real stale-version " +
+      "selection. The proof-only checkpoint stops before later intentional " +
+      "Save errors can write after the terminal footer, and keeps independent " +
+      "CustomTabs and renderer version controls alive. The rejected selection " +
+      "also prevents the same owner's Save.",
+    file: MAIN,
+    from:
+      "    !Number.isFinite(left.ctimeMs) ||\n" +
+      "    !Number.isFinite(right.ctimeMs) ||\n" +
+      "    left.dev !== right.dev ||\n",
+    to:
+      "    !Number.isFinite(left.ctimeMs) ||\n" +
+      "    !Number.isFinite(right.ctimeMs) ||\n" +
+      "    left.ctimeMs !== right.ctimeMs ||\n" +
+      "    left.dev !== right.dev ||\n",
+    expect: [
+      /^F22 ctime-only metadata drift preserves a real tab reselection with accepted main and renderer owners$/,
+      /^F22 ctime-only metadata drift permits a real selected-owner Save with exact raw bytes$/,
+    ],
+    mustPass: [
+      /^F22 ctime-only metadata drift leaves CustomTabs cached disk version unchanged$/,
+      /^F22 renderer diskVersionsEqual rejects a changed mtime version$/,
+      /^F22 renderer diskVersionsEqual rejects an invalid ctime version$/,
+      /^F22 R660 proof-only checkpoint reaches the ctime mutation and all collateral controls$/,
+    ],
+    requireMustPassAssertions: true,
+    proofOnly: {
+      marker: "PROOF-ONLY  F22 R660 ctime checkpoint completed after cleanup",
+      checkpoint:
+        /^F22 R660 proof-only checkpoint reaches the ctime mutation and all collateral controls$/,
+      exactShutdownTail: R660_PROOF_ONLY_SHUTDOWN_TAIL,
+    },
+  },
+  {
+    id: "R661",
+    suite: F22_ACK_EVIDENCE_SUITE,
+    what:
+      "treat ctime-only metadata drift as changed content in CustomTabs' " +
+      "per-tab disk cache",
+    why:
+      "The controlled reselection separately witnesses that no byte-identical " +
+      "ctime transition silently reloads the tab and replaces its cached disk " +
+      "version. Main still accepts the real selection and the save safety " +
+      "controls remain live.",
+    file: TABS,
+    from:
+      "  function sameDiskVersion(left, right) {\n" +
+      "    // Windows ctime-only drift is not a content change. A same-size edit\n" +
+      "    // with restored mtime remains a deferred risk (ctime-byte-witness).\n" +
+      "    return !!(\n" +
+      "      left &&\n" +
+      "      right &&\n" +
+      "      Number.isFinite(left.ctimeMs) &&\n" +
+      "      Number.isFinite(right.ctimeMs) &&\n" +
+      "      left.dev === right.dev &&\n" +
+      "      left.ino === right.ino &&\n" +
+      "      left.size === right.size &&\n" +
+      "      left.mtimeMs === right.mtimeMs\n" +
+      "    );\n" +
+      "  }\n",
+    to:
+      "  function sameDiskVersion(left, right) {\n" +
+      "    // Windows ctime-only drift is not a content change. A same-size edit\n" +
+      "    // with restored mtime remains a deferred risk (ctime-byte-witness).\n" +
+      "    return !!(\n" +
+      "      left &&\n" +
+      "      right &&\n" +
+      "      Number.isFinite(left.ctimeMs) &&\n" +
+      "      Number.isFinite(right.ctimeMs) &&\n" +
+      "      left.dev === right.dev &&\n" +
+      "      left.ino === right.ino &&\n" +
+      "      left.size === right.size &&\n" +
+      "      left.mtimeMs === right.mtimeMs &&\n" +
+      "      left.ctimeMs === right.ctimeMs\n" +
+      "    );\n" +
+      "  }\n",
+    expect: [
+      /^F22 ctime-only metadata drift leaves CustomTabs cached disk version unchanged$/,
+    ],
+    mustPass: [
+      /^F22 ctime-only metadata drift preserves a real tab reselection with accepted main and renderer owners$/,
+      /^F22 ctime-only metadata drift permits a real selected-owner Save with exact raw bytes$/,
+      /^F22 saveMarkdownFile preserves its real request identity and content through a main path-race rejection$/,
+      /^F22 a regular file which appears after ENOENT conflicts before opening it for writing$/,
+    ],
+    requireMustPassAssertions: true,
+  },
+  {
+    id: "R662",
+    suite: F22_ACK_EVIDENCE_SUITE,
+    what:
+      "treat ctime-only metadata drift as unequal in renderer diskVersionsEqual",
+    why:
+      "The controlled fixture invokes the renderer's production comparator with " +
+      "frozen real ctime-only snapshots, while changed-mtime and invalid-ctime " +
+      "controls attribute the direct contract without claiming reload-path coverage.",
+    file: RENDERER,
+    from:
+      "  return validDiskVersion(left) && validDiskVersion(right) &&\n" +
+      "    left.dev === right.dev && left.ino === right.ino &&\n" +
+      "    left.size === right.size && left.mtimeMs === right.mtimeMs;\n",
+    to:
+      "  return validDiskVersion(left) && validDiskVersion(right) &&\n" +
+      "    left.dev === right.dev && left.ino === right.ino &&\n" +
+      "    left.size === right.size && left.mtimeMs === right.mtimeMs &&\n" +
+      "    left.ctimeMs === right.ctimeMs;\n",
+    expect: [
+      /^F22 renderer diskVersionsEqual accepts an observed ctime-only version$/,
+    ],
+    mustPass: [
+      /^F22 ctime-only metadata drift preserves a real tab reselection with accepted main and renderer owners$/,
+      /^F22 ctime-only metadata drift permits a real selected-owner Save with exact raw bytes$/,
+      /^F22 renderer diskVersionsEqual rejects a changed mtime version$/,
+      /^F22 renderer diskVersionsEqual rejects an invalid ctime version$/,
+    ],
+    requireMustPassAssertions: true,
+  },
 
       ];
+
+// These are release exceptions, not passing or withdrawn proofs. An explicit
+// ID run still applies the mutation so either record can be reproven later.
+const APPROVED_FULL_HARNESS_DEFERRALS = Object.freeze({
+  R545: Object.freeze({
+    reason:
+      "The active-tab snapshot mutant still bites, but its two target failures are currently inseparable from six later shutdown-lifecycle failures (COLLATERAL); deferred for independent Wave 2 reproving.",
+    recordFingerprint: "9966f6981896b234c1499a6f2fee4c39ff86e28feb563c7d2987b3983c18f439",
+  }),
+  R568: Object.freeze({
+    reason:
+      "The maintained-dirty-state mutant still bites, but its semantic run has a post-footer shutdown teardown line (UNUSABLE); deferred for independent Wave 2 reproving.",
+    recordFingerprint: "52d51b2f5bb6afb4c306d0d0f625b634e27683bf4219d1a7b28b4fc7a9ededb3",
+  }),
+});
 
 const argv = process.argv.slice(2);
 // A refactor cannot break a revert's ASSERTIONS without also running its suite,
@@ -16180,6 +16855,10 @@ const anchorsOnly = argv.includes("--anchors");
 const expectsOnly = argv.includes("--expects");
 const only = argv.filter((a) => a !== "--anchors" && a !== "--expects");
 const chosen = only.length ? REVERTS.filter((r) => only.includes(r.id)) : REVERTS;
+// An exception belongs only to the no-argument release run. `--anchors` and
+// `--expects` are audits, not release certification; explicit IDs are how a
+// deferred proof is retried without weakening any of its normal gates.
+const fullHarnessReleaseRun = isFullHarnessReleaseInvocation(argv);
 // Fail loud rather than silently reporting success on an empty set. A typo in
 // an id (or a `--only R1,R2` that this script does not accept) otherwise ends
 // with "ALL REVERTS PROVEN" having proven nothing at all - which is exactly the
@@ -16195,17 +16874,288 @@ if (only.length && chosen.length !== only.length) {
 }
 
 function runSuite(suite) {
-  try {
-    const out = execFileSync("npm", ["run", suite || "test:tables"], {
-      cwd: ROOT,
-      encoding: "utf8",
-      shell: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    return out;
-  } catch (e) {
-    return String(e.stdout || "") + String(e.stderr || "");
+  const virtual = VIRTUAL_SUITES[suite];
+  const npmScript = virtual ? virtual.npmScript : suite || "test:tables";
+  const result = spawnSync("npm", ["run", npmScript], {
+    cwd: ROOT,
+    encoding: "utf8",
+    shell: true,
+    stdio: ["ignore", "pipe", "pipe"],
+    env: virtual
+      ? { ...process.env, ...virtual.environment }
+      : process.env,
+  });
+  const stdout = String(result.stdout || "");
+  const stderr = String(result.stderr || "");
+  // npm appends its own nonzero-exit epilogue on stderr after the suite has
+  // finished. Only stdout can establish whether the suite itself ended at its
+  // footer; retain stderr separately so an unterminated stdout record cannot
+  // fuse with and hide a fatal stderr record.
+  return {
+    stdout,
+    stderr,
+    exitCode: typeof result.status === "number" ? result.status : 1,
+    signal: typeof result.signal === "string" ? result.signal : null,
+    executionError: result.error ? String(result.error) : null,
+  };
+}
+
+const COMPANION_RELAY_LINE =
+  /^\[companion (?:stdout|stderr)(?: (?:diagnostic|partial))?\] /;
+const COMPANION_STDOUT_PROTOCOL_LINE = /^\[companion stdout\] /;
+const COMPANION_TRANSCRIPT_UNUSABLE_MARKER = "=== COMPANION TRANSCRIPT UNUSABLE ===";
+const LEGITIMATE_SHUTDOWN_TEARDOWN_LINES = Object.freeze([
+  "Stopped file watching",
+  "Shutdown approval renderer unusable: webContents destroyed",
+]);
+
+function transcriptLines(out) {
+  return String(out || "").split(/\r\n|\r|\n/);
+}
+
+function transcriptRecords(out) {
+  const text = String(out || "");
+  const records = [];
+  const newline = /\r\n|\r|\n/g;
+  let start = 0;
+  let match;
+  while ((match = newline.exec(text))) {
+    records.push({ line: text.slice(start, match.index), terminated: true });
+    start = match.index + match[0].length;
   }
+  if (start < text.length) {
+    records.push({ line: text.slice(start), terminated: false });
+  }
+  return records;
+}
+
+function transcriptStreams(out) {
+  return Array.isArray(out) ? out : [out];
+}
+
+function isCompanionRelayLine(line) {
+  return COMPANION_RELAY_LINE.test(line);
+}
+
+function isCompanionStdoutProtocolLine(line) {
+  return COMPANION_STDOUT_PROTOCOL_LINE.test(line);
+}
+
+function untagCompanionRelayLine(line) {
+  return line.replace(COMPANION_RELAY_LINE, "");
+}
+
+function isLegitimateShutdownTeardown(lines) {
+  return (
+    lines.length === LEGITIMATE_SHUTDOWN_TEARDOWN_LINES.length &&
+    lines.every((line, index) => line === LEGITIMATE_SHUTDOWN_TEARDOWN_LINES[index])
+  );
+}
+
+function isExactShutdownTail(lines, expectedTail) {
+  return (
+    Array.isArray(expectedTail) &&
+    lines.length === expectedTail.length &&
+    lines.every((line, index) => line === expectedTail[index])
+  );
+}
+
+// Only the top-level suite can complete its own run. A relayed child footer
+// describes the child, not the parent whose exit and accounting this harness
+// is certifying.
+function topLevelTranscriptLines(out) {
+  return transcriptLines(out).filter((line) => !isCompanionRelayLine(line));
+}
+
+// Revert records can name checks performed inside a companion. Keep those
+// complete stdout protocol records in the assertion inventory and mutation
+// matching, but remove the transport tag before comparing their assertion
+// names. stderr and all diagnostic or partial tags are readable evidence, not
+// assertions: accepting them would let interleaved diagnostics synthesize a
+// false mutation result.
+function assertionTranscriptLines(out) {
+  return transcriptRecords(out)
+    .filter(
+      ({ line, terminated }) =>
+        !isCompanionRelayLine(line) ||
+        (terminated && isCompanionStdoutProtocolLine(line)),
+    )
+    .map(({ line }) => untagCompanionRelayLine(line));
+}
+
+function completedSuiteFooter(line) {
+  const fraction = /^===\s*(\d+)\/(\d+)\s+passed(?:;\s*(\d+)\s+unavailable)?\s*===$/.exec(
+    line,
+  );
+  if (fraction) {
+    const passed = Number(fraction[1]);
+    const total = Number(fraction[2]);
+    return {
+      kind: "fraction",
+      passed,
+      total,
+      unavailable: Number(fraction[3] || 0),
+      failures: total - passed,
+    };
+  }
+  const summary =
+    /^===\s*(\d+)\s+passed,\s*(\d+)\s+failed(?:,\s*(\d+)\s+SKIPPED(?::.*)?)?\s*===$/.exec(
+      line,
+    );
+  if (!summary) return null;
+  return {
+    kind: "summary",
+    passed: Number(summary[1]),
+    total: null,
+    unavailable: Number(summary[3] || 0),
+    failures: Number(summary[2]),
+  };
+}
+
+function isFatalSuiteTranscriptLine(line) {
+  return (
+    line === COMPANION_TRANSCRIPT_UNUSABLE_MARKER ||
+    /^\s*FAIL\s+(?:harness threw|harness timed out|(?:additional )?uncaught main-process exception|no BrowserWindow was created)\b/i.test(
+      line,
+    ) || /^=== TIMED OUT\b.* ===$/.test(line)
+  );
+}
+
+// A completed suite can intentionally exit non-zero when a revert makes an
+// assertion fail. Its PARENT transcript still has to reach exactly one
+// terminal footer, account for its own failures, and stay clear of fatal
+// harness signals before that assertion can prove anything.
+function suiteTranscriptHealth(
+  out,
+  {
+    requirePassingFooter,
+    requireTaggedCompanionTranscript = false,
+    diagnosticOut = out,
+    exactShutdownTail,
+    allowCleanLoneShutdownTail = false,
+  },
+) {
+  const reasons = [];
+  const diagnosticStreams = transcriptStreams(diagnosticOut);
+  const companionLines = diagnosticStreams
+    .flatMap(transcriptLines)
+    .filter((line) => isCompanionRelayLine(line));
+  const parentLines = topLevelTranscriptLines(out);
+  const footers = parentLines
+    .map((line, index) => {
+      const footer = completedSuiteFooter(line);
+      return footer ? { ...footer, index, text: line } : null;
+    })
+    .filter(Boolean);
+  let footer = null;
+  let parentFailures = [];
+
+  if (footers.length === 0) {
+    reasons.push("no completed unprefixed parent-suite footer, so the run did not finish");
+  } else if (footers.length !== 1) {
+    reasons.push(`ambiguous unprefixed parent-suite footers (${footers.length})`);
+  } else {
+    footer = footers[0];
+    const trailing = parentLines
+      .slice(footer.index + 1)
+      .filter((line) => line.trim().length > 0);
+    const isAllowedCleanLoneShutdownTail =
+      allowCleanLoneShutdownTail &&
+      requirePassingFooter &&
+      footer.failures === 0 &&
+      isExactShutdownTail(trailing, CLEAN_PASSING_SHUTDOWN_TAIL);
+    if (
+      trailing.length &&
+      !isLegitimateShutdownTeardown(trailing) &&
+      !isExactShutdownTail(trailing, exactShutdownTail) &&
+      !isAllowedCleanLoneShutdownTail
+    ) {
+      reasons.push("unprefixed transcript followed its terminal parent-suite footer");
+    }
+    if (!Number.isSafeInteger(footer.failures) || footer.failures < 0) {
+      reasons.push("parent-suite footer has impossible assertion accounting");
+    }
+    parentFailures = parentLines
+      .slice(0, footer.index)
+      .filter((line) => line.trim().startsWith("FAIL"));
+    if (footer.failures !== parentFailures.length) {
+      reasons.push(
+        `parent-suite footer reports ${footer.failures} failure(s), but its unprefixed transcript has ${parentFailures.length}`,
+      );
+    }
+    if (requirePassingFooter && footer.failures !== 0) {
+      reasons.push(`${footer.passed} passed, ${footer.failures} failed`);
+    }
+  }
+  if (requireTaggedCompanionTranscript && companionLines.length === 0) {
+    reasons.push("no tagged companion transcript; a companion footer cannot certify its parent");
+  }
+  const fatalLines = diagnosticStreams
+    .flatMap(topLevelTranscriptLines)
+    .filter(isFatalSuiteTranscriptLine);
+  for (const line of fatalLines) {
+    reasons.push(`fatal suite marker: ${line.trim()}`);
+  }
+  return {
+    healthy: reasons.length === 0,
+    reasons,
+    footer,
+    parentLines,
+    parentFailures,
+    companionLines,
+  };
+}
+
+function boundedTranscriptDiagnostics(out, limit = 6, width = 240) {
+  const streams = transcriptStreams(out);
+  const lines = streams
+    .flatMap(transcriptLines)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const signals = streams
+    .flatMap(topLevelTranscriptLines)
+    .map((line) => line.trim())
+    .filter(isFatalSuiteTranscriptLine);
+  const selected = (signals.length ? signals : lines.slice(-limit)).slice(0, limit);
+  const label = signals.length ? "fatal" : "tail";
+  const diagnostics = selected.map((line) => ({
+    label,
+    text: line.length <= width ? line : line.slice(0, width - 1) + "…",
+  }));
+  return diagnostics.length ? diagnostics : ["<no transcript captured>"];
+}
+
+function suiteRunHealth(run, suite, { mutationRun, exactShutdownTail }) {
+  const transcript = suiteTranscriptHealth(run.stdout, {
+    requirePassingFooter: !mutationRun,
+    requireTaggedCompanionTranscript: suite === "test:tabs",
+    diagnosticOut: [run.stdout, run.stderr],
+    exactShutdownTail: mutationRun ? exactShutdownTail : undefined,
+    allowCleanLoneShutdownTail: !mutationRun,
+  });
+  const reasons = [...transcript.reasons];
+  if (run.signal) reasons.push(`terminated by signal ${run.signal}`);
+  if (run.executionError) reasons.push(`could not execute suite: ${run.executionError}`);
+  if (mutationRun) {
+    // A green run is VACUOUS, not unusable. A nonzero result is proof evidence
+    // only for the suite's ordinary assertion-failure exit and only when the
+    // parent footer accounts for those failures.
+    if (run.exitCode === 0) {
+      if (transcript.footer && transcript.footer.failures !== 0) {
+        reasons.push("suite exited zero despite a parent footer that reports failures");
+      }
+    } else {
+      if (run.exitCode !== 1) {
+        reasons.push(`exit code ${run.exitCode} is not the suite's assertion-failure status`);
+      }
+      if (!transcript.footer || transcript.footer.failures <= 0) {
+        reasons.push("nonzero exit lacks a parent footer that accounts for test assertion failures");
+      }
+    }
+  } else if (run.exitCode !== 0) {
+    reasons.push(`exit code ${run.exitCode}`);
+  }
+  return { ...run, transcript, healthy: reasons.length === 0, reasons };
 }
 
 // THE CATALOGUE RUN IS THE ONE RUN THAT HAS TO BE HEALTHY.
@@ -16223,43 +17173,7 @@ function runSuite(suite) {
 // unaudited rather than as findings, and the exit code still fails - loudly,
 // and about the right thing.
 function runSuiteChecked(suite) {
-  let out = "";
-  let exitCode = 0;
-  try {
-    out = execFileSync("npm", ["run", suite], {
-      cwd: ROOT,
-      encoding: "utf8",
-      shell: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-  } catch (e) {
-    out = String(e.stdout || "") + String(e.stderr || "");
-    exitCode = typeof e.status === "number" ? e.status : 1;
-  }
-  const reasons = [];
-  if (exitCode !== 0) reasons.push(`exit code ${exitCode}`);
-  // Most suites use N/M; packaging also reports its intentional SKIPs in a
-  // pass/fail/skip footer. Both are definitive end markers, so accepting only
-  // the first falsely calls a completed packaging catalogue truncated.
-  const fractionFooter = /===\s*(\d+)\/(\d+)\s+passed\s*===/.exec(out);
-  const summaryFooter =
-    /===\s*(\d+)\s+passed,\s*(\d+)\s+failed,\s*(\d+)\s+SKIPPED\b/.exec(out);
-  if (fractionFooter) {
-    if (fractionFooter[1] !== fractionFooter[2]) {
-      reasons.push(`${fractionFooter[1]}/${fractionFooter[2]} passed`);
-    }
-  } else if (summaryFooter) {
-    if (summaryFooter[2] !== "0") {
-      reasons.push(
-        `${summaryFooter[1]} passed, ${summaryFooter[2]} failed, ${summaryFooter[3]} skipped`,
-      );
-    }
-  } else {
-    reasons.push("no completed-suite footer, so the run did not finish");
-  }
-  if (/harness threw/.test(out)) reasons.push("the harness threw");
-  if (/TIMED OUT/.test(out)) reasons.push("the harness timed out");
-  return { out, exitCode, healthy: reasons.length === 0, reasons };
+  return suiteRunHealth(runSuite(suite), suite, { mutationRun: false });
 }
 
 // THE MATCHING SUBJECT IS THE ASSERTION NAME, NOT THE WHOLE FAIL LINE, and both
@@ -16279,10 +17193,15 @@ function assertionNameOf(line) {
 }
 
 function failedNames(out) {
-  return out
-    .split(/\r?\n/)
+  return assertionTranscriptLines(out)
     .filter((l) => l.trim().startsWith("FAIL"))
     .map((l) => l.trim());
+}
+
+// Mutation proof is a suite protocol, so only its stdout may establish a
+// failure. stderr remains available as separate health diagnostic evidence.
+function mutationFailureNames(run) {
+  return failedNames(run.stdout);
 }
 
 // ONE PRINTER FOR EVERY NON-GREEN VERDICT. WRONG-GUARD, COLLATERAL and PROVEN
@@ -16302,15 +17221,260 @@ function printFailures(r, fails) {
   }
 }
 
+function unlistedFailures(r, fails) {
+  return fails.filter((f) => !(r.expect || []).some((re) => re.test(assertionNameOf(f))));
+}
+
+function hasExactFailureViolation(r, unlisted) {
+  return r.requireExactFailures === true && unlisted.length > 0;
+}
+
+function regexFingerprint(list) {
+  return (list || []).map((re) => [re.source, re.flags]);
+}
+
+function revertFingerprint(r) {
+  const evidence = r.expectedFailureEvidence;
+  const payload = {
+    id: r.id,
+    suite: r.suite || null,
+    what: r.what || null,
+    file: path.relative(ROOT, r.file),
+    from: r.from,
+    to: r.to,
+    also: r.also
+      ? {
+          file: path.relative(ROOT, r.also.file || r.file),
+          from: r.also.from,
+          to: r.also.to,
+        }
+      : null,
+    expect: regexFingerprint(r.expect),
+    mustPass: regexFingerprint(r.mustPass),
+    requireMustPassAssertions: r.requireMustPassAssertions === true,
+    requireExactFailures: r.requireExactFailures === true,
+    expectedFailureEvidence: evidence
+      ? {
+          assertion: [evidence.assertion.source, evidence.assertion.flags],
+          min: evidence.min,
+          requireParentAssertionOutcome: evidence.requireParentAssertionOutcome,
+          hits: evidence.hits.map((hit) => [hit.kind, hit.detail.source, hit.detail.flags]),
+        }
+      : null,
+    nameVariesWithState: r.nameVariesWithState,
+    skip: r.skip || null,
+  };
+  return createHash("sha256").update(JSON.stringify(payload)).digest("hex");
+}
+
+function approvalValidationProblems(deferrals) {
+  const approvedIds = Object.keys(deferrals).sort();
+  const requiredIds = ["R545", "R568"];
+  const problems = [];
+  if (JSON.stringify(approvedIds) !== JSON.stringify(requiredIds)) {
+    problems.push(
+      `approved IDs must be exactly ${requiredIds.join(", ")}, found ${approvedIds.join(", ") || "<none>"}`,
+    );
+  }
+  for (const id of requiredIds) {
+    const approval = deferrals[id];
+    const record = REVERTS.find((r) => r.id === id);
+    if (!approval || !record) {
+      problems.push(`${id} is missing from the approved-exception table or revert records`);
+      continue;
+    }
+    if (typeof approval.reason !== "string" || approval.reason.trim().length === 0) {
+      problems.push(`${id} has no auditable deferral reason`);
+    }
+    if (!/^[0-9a-f]{64}$/.test(approval.recordFingerprint || "")) {
+      problems.push(`${id} has a malformed record fingerprint`);
+    } else {
+      const actual = revertFingerprint(record);
+      if (approval.recordFingerprint !== actual) {
+        problems.push(
+          `${id} record fingerprint is stale (expected ${approval.recordFingerprint}, actual ${actual})`,
+        );
+      }
+    }
+    if (record.skip) {
+      problems.push(`${id} is a withdrawn SKIPPED record, not an eligible deferred proof`);
+    }
+  }
+  return problems;
+}
+
+function isFullHarnessReleaseInvocation(args) {
+  return Array.isArray(args) && args.length === 0;
+}
+
+function isApprovedFullHarnessDeferral(r, args) {
+  return isFullHarnessReleaseInvocation(args) &&
+    Object.prototype.hasOwnProperty.call(APPROVED_FULL_HARNESS_DEFERRALS, r.id);
+}
+
+function parseExpectedFailureEvidence(line) {
+  const separator = "  ->";
+  const separatorIndex = line.indexOf(separator);
+  if (separatorIndex === -1) {
+    return { error: 'the failure has no "  -> " evidence separator' };
+  }
+  let hits;
+  try {
+    hits = JSON.parse(line.slice(separatorIndex + separator.length).trim());
+  } catch (error) {
+    return { error: `the sentinel evidence is not JSON: ${error.message}` };
+  }
+  if (
+    !Array.isArray(hits) ||
+    hits.some(
+      (hit) =>
+        !hit ||
+        typeof hit !== "object" ||
+        Array.isArray(hit) ||
+        typeof hit.kind !== "string" ||
+        typeof hit.detail !== "string" ||
+        (hit.shot !== null && typeof hit.shot !== "string"),
+    )
+  ) {
+    return { error: "the sentinel evidence is not an array of { kind, detail, shot } hits" };
+  }
+  return { hits };
+}
+
+function expectedFailureEvidenceProblems(r, fails, parentLines = []) {
+  const expected = r.expectedFailureEvidence;
+  if (!expected) return [];
+  const parentMatching = parentLines
+    .map((line) => line.trim())
+    .filter(
+      (line) =>
+        /^(PASS|FAIL)\s/.test(line) &&
+        expected.assertion.test(assertionNameOf(line)),
+    );
+  if (expected.requireParentAssertionOutcome === true) {
+    if (parentMatching.length !== 1) {
+      return [
+        `expected exactly one parent assertion outcome for ${expected.assertion}, found ${parentMatching.length}`,
+      ];
+    }
+    if (parentMatching[0].startsWith("PASS")) return [];
+  }
+  const matching =
+    expected.requireParentAssertionOutcome === true
+      ? parentMatching
+      : fails.filter((line) => expected.assertion.test(assertionNameOf(line)));
+  if (matching.length === 0 && expected.min === 0) return [];
+  if (matching.length !== 1) {
+    return [
+      `expected exactly one evidence-bearing failure for ${expected.assertion}, found ${matching.length}`,
+    ];
+  }
+  const parsed = parseExpectedFailureEvidence(matching[0]);
+  if (parsed.error) return [parsed.error];
+  if (parsed.hits.length === 0) {
+    return ["the sentinel failed without reporting any evidence hits"];
+  }
+  if (parsed.hits.length < expected.min) {
+    return [
+      `the sentinel reported ${parsed.hits.length} hit(s), fewer than the required ${expected.min}`,
+    ];
+  }
+  const remaining = [...expected.hits];
+  const problems = [];
+  for (const hit of parsed.hits) {
+    const allowedIndex = remaining.findIndex(
+      (allowed) => allowed.kind === hit.kind && allowed.detail.test(hit.detail),
+    );
+    if (allowedIndex === -1) {
+      problems.push(`unrecognized sentinel hit: ${JSON.stringify(hit)}`);
+    } else {
+      remaining.splice(allowedIndex, 1);
+    }
+  }
+  return problems;
+}
+
 // Every assertion the suite emitted, reduced to the same NAME the verdict logic
 // matches against, so the audit tests each regex against exactly the string the
 // real matching would see rather than against a hand-normalised approximation.
 function assertionNames(out) {
-  return out
-    .split(/\r?\n/)
+  return assertionTranscriptLines(out)
     .map((l) => l.trim())
     .filter((l) => /^(PASS|FAIL)\s/.test(l))
     .map(assertionNameOf);
+}
+
+function passingAssertionNames(out) {
+  return assertionTranscriptLines(out)
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith("PASS"))
+    .map(assertionNameOf);
+}
+
+function requiredPassingAssertionProblems(r, out) {
+  if (r.requireMustPassAssertions !== true) return [];
+  const passed = passingAssertionNames(out);
+  return (r.mustPass || [])
+    .filter((re) => !passed.some((name) => re.test(name)))
+    .map((re) => `required mustPass assertion did not PASS: ${re}`);
+}
+
+function proofOnlyProtocolProblems(r, checkedRun) {
+  if (!r.proofOnly) return [];
+  const problems = [];
+  const parentLines = checkedRun.transcript.parentLines;
+  const footer = checkedRun.transcript.footer;
+  const markerIndices = parentLines
+    .map((line, index) => (line === r.proofOnly.marker ? index : -1))
+    .filter((index) => index >= 0);
+  if (markerIndices.length !== 1) {
+    problems.push(`proof-only marker count was ${markerIndices.length}, expected exactly one`);
+  }
+  const names = assertionNames(checkedRun.stdout);
+  for (const re of r.expect || []) {
+    if (!names.some((name) => re.test(name))) {
+      problems.push(`proof-only run never reached expected assertion: ${re}`);
+    }
+  }
+  const unexpectedFailures = [...new Set(
+    failedNames(checkedRun.stdout)
+      .map(assertionNameOf)
+      .filter((name) => !(r.expect || []).some((re) => re.test(name))),
+  )];
+  if (unexpectedFailures.length) {
+    const shown = unexpectedFailures
+      .slice(0, 3)
+      .map((name) => JSON.stringify(name))
+      .join(", ");
+    const omitted = unexpectedFailures.length - 3;
+    problems.push(
+      `proof-only run had ${unexpectedFailures.length} failed assertion name(s) outside expect: ` +
+      `${shown}${omitted > 0 ? `; ${omitted} more omitted` : ""}`,
+    );
+  }
+  const passed = passingAssertionNames(checkedRun.stdout);
+  if (!passed.some((name) => r.proofOnly.checkpoint.test(name))) {
+    problems.push(`proof-only checkpoint did not PASS: ${r.proofOnly.checkpoint}`);
+  }
+  if (markerIndices.length === 1 && footer) {
+    const afterMarker = parentLines
+      .slice(markerIndices[0] + 1, footer.index)
+      .filter((line) => line.trim().length > 0);
+    if (afterMarker.length) {
+      problems.push("proof-only marker was not the terminal record before the suite footer");
+    }
+  }
+  return problems;
+}
+
+function exactShutdownTailForMutation(r) {
+  // These are mutation-only transcripts. Clean runs, every other record, any
+  // reordered or added line, and every fatal marker remain health failures.
+  if (r.id === "R454") return R454_POPUP_POLICY_WIRING_TAIL;
+  return r.id === "R660" &&
+    r.proofOnly?.exactShutdownTail === R660_PROOF_ONLY_SHUTDOWN_TAIL
+    ? R660_PROOF_ONLY_SHUTDOWN_TAIL
+    : undefined;
 }
 
 // A SKIPPED BLOCK EMITS NO NAMES, AND THE AUDIT USED TO CALL THAT ROT.
@@ -16327,11 +17491,334 @@ function assertionNames(out) {
 // the skipped blocks are named, so the reader can tell the two apart in
 // seconds instead of concluding the record is broken.
 function skippedNames(out) {
-  return out
-    .split(/\r?\n/)
+  return assertionTranscriptLines(out)
     .map((l) => l.trim())
     .filter((l) => /^SKIP\s/.test(l))
     .map((l) => l.replace(/^SKIP\s+/, "").split(" - ")[0].trim());
+}
+
+// The top-level footer is the completion contract, while companion assertion
+// names are proof evidence. Exercise both roles in one synthetic transcript:
+// a child footer must not complete the parent, but its PASS/FAIL/SKIP records
+// must remain available to catalogue and mutation matching.
+function proveCompanionTranscriptRoles() {
+  const transcript =
+    "[companion stdout] PASS  companion live assertion\n" +
+    "[companion stdout] FAIL  companion expected failure  -> detail\n" +
+    "[companion stderr] FAIL  stderr diagnostic failure  -> detail\n" +
+    "[companion stdout partial] FAIL  partial stdout diagnostic failure  -> detail\n" +
+    "[companion stdout] SKIP  companion skipped assertion - unavailable\n" +
+    "[companion stdout] === 1/1 passed ===\n" +
+    "FAIL  parent mutation failure  -> detail\n" +
+    "=== 0 passed, 1 failed ===\n";
+  const timedOutAssertionDetail =
+    "FAIL  parent mutation failure  -> a companion detail says TIMED OUT\n" +
+    "=== 0 passed, 1 failed ===\n";
+  const unusableCompanion =
+    COMPANION_TRANSCRIPT_UNUSABLE_MARKER + "\n" +
+    "FAIL  parent mutation failure  -> detail\n" +
+    "=== 0 passed, 1 failed ===\n";
+  const timedOutFooter = "=== TIMED OUT after 1/2 checks ===\n";
+  const legitimateShutdownTeardown =
+    "=== 1/1 passed ===\n" +
+    "Stopped file watching\n" +
+    "Shutdown approval renderer unusable: webContents destroyed\n";
+  const r660OnlyShutdownTail =
+    "=== 1/1 passed ===\n" +
+    "Shutdown approval renderer unusable: webContents destroyed\n";
+  const untaggedCompanionImpostor =
+    legitimateShutdownTeardown + "PASS  untagged companion assertion\n";
+  const fatalAfterFooter =
+    legitimateShutdownTeardown + "FAIL  harness threw after footer\n";
+  const r660TailWithArbitraryLine =
+    r660OnlyShutdownTail + "unexpected diagnostic after footer\n";
+  const r660TailWithFatalLine =
+    r660OnlyShutdownTail + "FAIL  harness threw after footer\n";
+  const r454PopupPolicyTail =
+    "FAIL  SEC-30 the download policy is wired to the default session  -> detail\n" +
+    "=== 92/93 passed ===\n" +
+    "Shutdown approval renderer unusable: webContents destroyed\n";
+  const r454PopupPolicyTailReordered =
+    "FAIL  SEC-30 the download policy is wired to the default session  -> detail\n" +
+    "=== 92/93 passed ===\n" +
+    "unexpected diagnostic before shutdown\n" +
+    "Shutdown approval renderer unusable: webContents destroyed\n";
+  const r454CleanPopupPolicyTail =
+    "=== 93/93 passed ===\n" +
+    "Shutdown approval renderer unusable: webContents destroyed\n";
+  const r454TailWithArbitraryLine =
+    r454PopupPolicyTail + "unexpected diagnostic after footer\n";
+  const r454TailWithFatalLine =
+    r454PopupPolicyTail + "FAIL  harness threw after footer\n";
+  const unterminatedCompanionNames = assertionNames(
+    "[companion stdout] FAIL  unterminated companion record  -> detail",
+  );
+  const health = suiteTranscriptHealth(transcript, {
+    requirePassingFooter: false,
+    requireTaggedCompanionTranscript: true,
+    diagnosticOut: transcript,
+  });
+  const timedOutDetailHealth = suiteTranscriptHealth(timedOutAssertionDetail, {
+    requirePassingFooter: false,
+  });
+  const unusableCompanionHealth = suiteTranscriptHealth(unusableCompanion, {
+    requirePassingFooter: false,
+  });
+  const timedOutFooterHealth = suiteTranscriptHealth(timedOutFooter, {
+    requirePassingFooter: false,
+  });
+  const legitimateShutdownTeardownHealth = suiteTranscriptHealth(
+    legitimateShutdownTeardown,
+    { requirePassingFooter: true },
+  );
+  const unconfiguredR660ShutdownTailHealth = suiteTranscriptHealth(
+    r660OnlyShutdownTail,
+    { requirePassingFooter: true },
+  );
+  const cleanLoneShutdownTailHealth = suiteTranscriptHealth(
+    r660OnlyShutdownTail,
+    {
+      requirePassingFooter: true,
+      allowCleanLoneShutdownTail: true,
+    },
+  );
+  const cleanLoneShutdownTailWithArbitraryLineHealth = suiteTranscriptHealth(
+    r660TailWithArbitraryLine,
+    {
+      requirePassingFooter: true,
+      allowCleanLoneShutdownTail: true,
+    },
+  );
+  const cleanLoneShutdownTailWithFatalLineHealth = suiteTranscriptHealth(
+    r660TailWithFatalLine,
+    {
+      requirePassingFooter: true,
+      allowCleanLoneShutdownTail: true,
+    },
+  );
+  const configuredR660ShutdownTailHealth = suiteTranscriptHealth(
+    r660OnlyShutdownTail,
+    {
+      requirePassingFooter: true,
+      exactShutdownTail: R660_PROOF_ONLY_SHUTDOWN_TAIL,
+    },
+  );
+  const r660TailWithArbitraryLineHealth = suiteTranscriptHealth(
+    r660TailWithArbitraryLine,
+    {
+      requirePassingFooter: true,
+      exactShutdownTail: R660_PROOF_ONLY_SHUTDOWN_TAIL,
+    },
+  );
+  const r660TailWithFatalLineHealth = suiteTranscriptHealth(
+    r660TailWithFatalLine,
+    {
+      requirePassingFooter: true,
+      exactShutdownTail: R660_PROOF_ONLY_SHUTDOWN_TAIL,
+    },
+  );
+  const configuredR454ShutdownTailHealth = suiteTranscriptHealth(
+    r454PopupPolicyTail,
+    {
+      requirePassingFooter: false,
+      exactShutdownTail: R454_POPUP_POLICY_WIRING_TAIL,
+    },
+  );
+  const r454TailWithArbitraryLineHealth = suiteTranscriptHealth(
+    r454TailWithArbitraryLine,
+    {
+      requirePassingFooter: false,
+      exactShutdownTail: R454_POPUP_POLICY_WIRING_TAIL,
+    },
+  );
+  const r454TailWithFatalLineHealth = suiteTranscriptHealth(
+    r454TailWithFatalLine,
+    {
+      requirePassingFooter: false,
+      exactShutdownTail: R454_POPUP_POLICY_WIRING_TAIL,
+    },
+  );
+  const r454ReorderedTailHealth = suiteTranscriptHealth(
+    r454PopupPolicyTailReordered,
+    {
+      requirePassingFooter: false,
+      exactShutdownTail: R454_POPUP_POLICY_WIRING_TAIL,
+    },
+  );
+  const untaggedCompanionImpostorHealth = suiteTranscriptHealth(
+    untaggedCompanionImpostor,
+    { requirePassingFooter: true },
+  );
+  const fatalAfterFooterHealth = suiteTranscriptHealth(fatalAfterFooter, {
+    requirePassingFooter: true,
+  });
+  const unterminatedStdoutFatalStderrHealth = suiteTranscriptHealth(
+    "=== 1/1 passed ===",
+    {
+      requirePassingFooter: true,
+      diagnosticOut: [
+        "=== 1/1 passed ===",
+        "FAIL  harness threw from stderr after unterminated stdout\n",
+      ],
+    },
+  );
+  const names = assertionNames(transcript);
+  const skips = skippedNames(transcript);
+  const failures = failedNames(transcript).map(assertionNameOf);
+  const stderrOnlyMutationFailures = mutationFailureNames({
+    stdout: "=== 1/1 passed ===\n",
+    stderr: "FAIL  stderr-only mutation impostor  -> detail\n",
+  });
+  const mutation = suiteRunHealth(
+    {
+      stdout: transcript,
+      stderr: "",
+      exitCode: 1,
+      signal: null,
+      executionError: null,
+    },
+    "test:tabs",
+    { mutationRun: true },
+  );
+  const configuredR660Mutation = suiteRunHealth(
+    {
+      stdout: r660OnlyShutdownTail,
+      stderr: "",
+      exitCode: 0,
+      signal: null,
+      executionError: null,
+    },
+    F22_CTIME_R660_EVIDENCE_SUITE,
+    { mutationRun: true, exactShutdownTail: R660_PROOF_ONLY_SHUTDOWN_TAIL },
+  );
+  const mutationAllowsLegitimateShutdownTeardown = suiteRunHealth(
+    {
+      stdout: legitimateShutdownTeardown,
+      stderr: "",
+      exitCode: 0,
+      signal: null,
+      executionError: null,
+    },
+    F22_CTIME_R660_EVIDENCE_SUITE,
+    { mutationRun: true },
+  );
+  const mutationCannotUseCleanLoneShutdownTail = suiteRunHealth(
+    {
+      stdout: r660OnlyShutdownTail,
+      stderr: "",
+      exitCode: 0,
+      signal: null,
+      executionError: null,
+    },
+    F22_CTIME_R660_EVIDENCE_SUITE,
+    { mutationRun: true },
+  );
+  const configuredR454Mutation = suiteRunHealth(
+    {
+      stdout: r454CleanPopupPolicyTail,
+      stderr: "",
+      exitCode: 0,
+      signal: null,
+      executionError: null,
+    },
+    "test:popups",
+    { mutationRun: true, exactShutdownTail: R454_POPUP_POLICY_WIRING_TAIL },
+  );
+  const cleanRunAllowsLoneShutdownTail = suiteRunHealth(
+    {
+      stdout: r660OnlyShutdownTail,
+      stderr: "",
+      exitCode: 0,
+      signal: null,
+      executionError: null,
+    },
+    "test:popups",
+    { mutationRun: false },
+  );
+  const expected = (name) => names.includes(name);
+  const failed = (name) => failures.includes(name);
+  if (
+    !health.healthy ||
+    !health.footer ||
+    health.footer.text !== "=== 0 passed, 1 failed ===" ||
+    health.parentFailures.length !== 1 ||
+    health.companionLines.length !== 6 ||
+    !expected("companion live assertion") ||
+    !expected("companion expected failure") ||
+    !expected("parent mutation failure") ||
+    expected("stderr diagnostic failure") ||
+    expected("partial stdout diagnostic failure") ||
+    unterminatedCompanionNames.includes("unterminated companion record") ||
+    !skips.includes("companion skipped assertion") ||
+    !failed("companion expected failure") ||
+    !failed("parent mutation failure") ||
+    failed("stderr diagnostic failure") ||
+    failed("partial stdout diagnostic failure") ||
+    stderrOnlyMutationFailures.length !== 0 ||
+    !mutation.healthy ||
+    !timedOutDetailHealth.healthy ||
+    !legitimateShutdownTeardownHealth.healthy ||
+    unconfiguredR660ShutdownTailHealth.healthy ||
+    !cleanLoneShutdownTailHealth.healthy ||
+    cleanLoneShutdownTailWithArbitraryLineHealth.healthy ||
+    !cleanLoneShutdownTailWithArbitraryLineHealth.reasons.includes(
+      "unprefixed transcript followed its terminal parent-suite footer",
+    ) ||
+    cleanLoneShutdownTailWithFatalLineHealth.healthy ||
+    !cleanLoneShutdownTailWithFatalLineHealth.reasons.includes(
+      "fatal suite marker: FAIL  harness threw after footer",
+    ) ||
+    !configuredR660ShutdownTailHealth.healthy ||
+    r660TailWithArbitraryLineHealth.healthy ||
+    !r660TailWithArbitraryLineHealth.reasons.includes(
+      "unprefixed transcript followed its terminal parent-suite footer",
+    ) ||
+    r660TailWithFatalLineHealth.healthy ||
+    !r660TailWithFatalLineHealth.reasons.includes(
+      "fatal suite marker: FAIL  harness threw after footer",
+    ) ||
+    !configuredR454ShutdownTailHealth.healthy ||
+    r454TailWithArbitraryLineHealth.healthy ||
+    !r454TailWithArbitraryLineHealth.reasons.includes(
+      "unprefixed transcript followed its terminal parent-suite footer",
+    ) ||
+    r454TailWithFatalLineHealth.healthy ||
+    !r454TailWithFatalLineHealth.reasons.includes(
+      "fatal suite marker: FAIL  harness threw after footer",
+    ) ||
+    r454ReorderedTailHealth.healthy ||
+    !r454ReorderedTailHealth.reasons.includes(
+      "unprefixed transcript followed its terminal parent-suite footer",
+    ) ||
+    !configuredR660Mutation.healthy ||
+    !mutationAllowsLegitimateShutdownTeardown.healthy ||
+    mutationCannotUseCleanLoneShutdownTail.healthy ||
+    !configuredR454Mutation.healthy ||
+    !cleanRunAllowsLoneShutdownTail.healthy ||
+    untaggedCompanionImpostorHealth.healthy ||
+    !untaggedCompanionImpostorHealth.reasons.includes(
+      "unprefixed transcript followed its terminal parent-suite footer",
+    ) ||
+    fatalAfterFooterHealth.healthy ||
+    !fatalAfterFooterHealth.reasons.includes(
+      "fatal suite marker: FAIL  harness threw after footer",
+    ) ||
+    unterminatedStdoutFatalStderrHealth.healthy ||
+    !unterminatedStdoutFatalStderrHealth.reasons.includes(
+      "fatal suite marker: FAIL  harness threw from stderr after unterminated stdout",
+    ) ||
+    unusableCompanionHealth.healthy ||
+    !unusableCompanionHealth.reasons.some((reason) =>
+      reason === `fatal suite marker: ${COMPANION_TRANSCRIPT_UNUSABLE_MARKER}`) ||
+    timedOutFooterHealth.healthy ||
+    !timedOutFooterHealth.reasons.some((reason) =>
+      reason === "fatal suite marker: === TIMED OUT after 1/2 checks ===")
+  ) {
+    console.error(
+      "SELF-CHECK FAILED: companion assertion evidence or parent transcript health lost its role separation.",
+    );
+    process.exit(2);
+  }
 }
 
 // A POSITIVE CONTROL FOR THE ANCHORING ITSELF. An absence check fails open: if
@@ -16445,6 +17932,108 @@ function proveNameAnchoring() {
   );
 }
 
+function proveExactFailurePolicy() {
+  const exact = {
+    expect: [/^expected assertion$/],
+    requireExactFailures: true,
+  };
+  const ordinary = {
+    expect: [/^expected assertion$/],
+  };
+  const expectedOnly = ["FAIL  expected assertion  -> expected detail"];
+  const withUnrelated = [
+    ...expectedOnly,
+    "FAIL  unrelated updater assertion  -> unrelated detail",
+  ];
+  if (
+    hasExactFailureViolation(exact, unlistedFailures(exact, expectedOnly)) ||
+    !hasExactFailureViolation(exact, unlistedFailures(exact, withUnrelated)) ||
+    hasExactFailureViolation(ordinary, unlistedFailures(ordinary, withUnrelated))
+  ) {
+    console.error(
+      "SELF-CHECK FAILED: requireExactFailures must reject only unlisted failures in opt-in records.",
+    );
+    process.exit(2);
+  }
+}
+
+function proveExpectedFailureEvidencePolicy() {
+  const assertion = /^nothing rendered a visible error at any point during the suite$/;
+  const record = {
+    expectedFailureEvidence: {
+      assertion,
+      min: 0,
+      requireParentAssertionOutcome: true,
+      hits: [
+        {
+          kind: "console-error",
+          detail:
+            /^\[CustomTabs\] Disk adoption attestation refused: \[object Object\] @ file:\/\/\/.*\/src\/custom-tabs\.js:\d+$/,
+        },
+        {
+          kind: "console-error",
+          detail:
+            /^\[CustomTabs\] Disk adoption was refused: \[object Object\] @ file:\/\/\/.*\/src\/custom-tabs\.js:\d+$/,
+        },
+      ],
+    },
+  };
+  const name = "nothing rendered a visible error at any point during the suite";
+  const allowedHit = {
+    kind: "console-error",
+    detail:
+      "[CustomTabs] Disk adoption attestation refused: [object Object] @ file:///C:/test/src/custom-tabs.js:1879",
+    shot: null,
+  };
+  const otherAllowedHit = {
+    kind: "console-error",
+    detail:
+      "[CustomTabs] Disk adoption was refused: [object Object] @ file:///C:/test/src/custom-tabs.js:1928",
+    shot: null,
+  };
+  const unrelatedHit = {
+    kind: "console-error",
+    detail: "[CustomTabs] unrelated updater error @ file:///C:/test/src/main.js:1",
+    shot: null,
+  };
+  const line = (hits) => `FAIL  ${name}  -> ${JSON.stringify(hits)}`;
+  const pass = `PASS  ${name}`;
+  if (
+    expectedFailureEvidenceProblems(record, [], []).length === 0 ||
+    expectedFailureEvidenceProblems(record, [], [pass]).length !== 0 ||
+    expectedFailureEvidenceProblems(record, [line([allowedHit])], [line([allowedHit])]).length !== 0 ||
+    expectedFailureEvidenceProblems(
+      record,
+      [line([allowedHit, otherAllowedHit])],
+      [line([allowedHit, otherAllowedHit])],
+    ).length !== 0 ||
+    expectedFailureEvidenceProblems(record, [line([])], [line([])]).length === 0 ||
+    expectedFailureEvidenceProblems(record, [line([unrelatedHit])], [line([unrelatedHit])]).length === 0 ||
+    expectedFailureEvidenceProblems(
+      record,
+      [line([allowedHit, unrelatedHit])],
+      [line([allowedHit, unrelatedHit])],
+    ).length === 0 ||
+    expectedFailureEvidenceProblems(record, [line([allowedHit, allowedHit])], [line([allowedHit, allowedHit])])
+      .length === 0 ||
+    expectedFailureEvidenceProblems(record, [line([allowedHit])], [pass, line([allowedHit])]).length === 0 ||
+    expectedFailureEvidenceProblems(record, [], [pass, pass]).length === 0 ||
+    expectedFailureEvidenceProblems(
+      record,
+      [line([allowedHit]), line([otherAllowedHit])],
+      [line([allowedHit]), line([otherAllowedHit])],
+    ).length === 0
+  ) {
+    console.error(
+      "SELF-CHECK FAILED: optional expectedFailureEvidence must require exactly one parent sentinel outcome, accept its PASS or distinct allowed FAIL evidence, and reject missing, empty, unrelated, repeated, or mixed outcomes.",
+    );
+    process.exit(2);
+  }
+  console.log(
+    "expected-failure-evidence self-check OK: the parent sentinel appears exactly once as PASS or constrained distinct adoption-refusal evidence",
+  );
+}
+
 // A `suite:` NAME THAT IS NOT A DECLARED SCRIPT IS INDISTINGUISHABLE FROM A
 // FIX THAT IS NOT LOAD-BEARING, and that cost a full diagnosis on R518.
 //
@@ -16472,9 +18061,28 @@ function proveSuiteNames() {
     );
     process.exit(2);
   }
+  const virtualProblems = Object.entries(VIRTUAL_SUITES)
+    .filter(([, virtual]) =>
+      !virtual ||
+      typeof virtual.npmScript !== "string" ||
+      !declared.has(virtual.npmScript) ||
+      !virtual.environment ||
+      typeof virtual.environment !== "object",
+    )
+    .map(([suite]) => suite);
+  if (virtualProblems.length) {
+    console.error(
+      `SELF-CHECK FAILED: ${virtualProblems.length} virtual suite(s) do not resolve to ` +
+        `a declared npm script with an environment:\n  ${virtualProblems.join("\n  ")}`,
+    );
+    process.exit(2);
+  }
   const bogus = [
     ...new Set(
-      REVERTS.filter((r) => r.suite && !declared.has(r.suite)).map((r) => `${r.id} -> ${r.suite}`),
+      REVERTS.filter((r) => {
+        if (!r.suite) return false;
+        return !declared.has(r.suite) && !VIRTUAL_SUITES[r.suite];
+      }).map((r) => `${r.id} -> ${r.suite}`),
     ),
   ];
   // A record with no `what` prints its verdict as "PROVEN ... <- undefined".
@@ -16489,6 +18097,38 @@ function proveSuiteNames() {
     );
     process.exit(2);
   }
+  const malformedEvidence = REVERTS.flatMap((r) => {
+    const expected = r.expectedFailureEvidence;
+    if (!expected) return [];
+    if (
+      !expected ||
+      typeof expected !== "object" ||
+      !(expected.assertion instanceof RegExp) ||
+      !Number.isInteger(expected.min) ||
+      expected.min < 0 ||
+      typeof expected.requireParentAssertionOutcome !== "boolean" ||
+      !Array.isArray(expected.hits) ||
+      expected.hits.length < expected.min ||
+      expected.hits.some(
+        (hit) =>
+          !hit ||
+          typeof hit !== "object" ||
+          typeof hit.kind !== "string" ||
+          !(hit.detail instanceof RegExp),
+      ) ||
+      !(r.expect || []).some((re) => re.source === expected.assertion.source && re.flags === expected.assertion.flags)
+    ) {
+      return [r.id];
+    }
+    return [];
+  });
+  if (malformedEvidence.length) {
+    console.error(
+      `SELF-CHECK FAILED: ${malformedEvidence.length} revert(s) declare malformed expectedFailureEvidence: ` +
+        malformedEvidence.join(", "),
+    );
+    process.exit(2);
+  }
   if (bogus.length) {
     console.error(
       `SELF-CHECK FAILED: ${bogus.length} revert(s) name a suite that is not a declared ` +
@@ -16499,20 +18139,89 @@ function proveSuiteNames() {
   }
 }
 
+function proveReleaseDeferralPolicy() {
+  const problems = approvalValidationProblems(APPROVED_FULL_HARNESS_DEFERRALS);
+  const r545 = REVERTS.find((r) => r.id === "R545");
+  const r568 = REVERTS.find((r) => r.id === "R568");
+  const malformed = JSON.parse(JSON.stringify(APPROVED_FULL_HARNESS_DEFERRALS));
+  malformed.R545.reason = "";
+  const stale = JSON.parse(JSON.stringify(APPROVED_FULL_HARNESS_DEFERRALS));
+  stale.R568.recordFingerprint = "0".repeat(64);
+  const unapproved = JSON.parse(JSON.stringify(APPROVED_FULL_HARNESS_DEFERRALS));
+  unapproved.R999 = unapproved.R545;
+
+  if (
+    problems.length ||
+    approvalValidationProblems(malformed).length === 0 ||
+    approvalValidationProblems(stale).length === 0 ||
+    approvalValidationProblems(unapproved).length === 0 ||
+    !isFullHarnessReleaseInvocation([]) ||
+    isFullHarnessReleaseInvocation(["--anchors"]) ||
+    isFullHarnessReleaseInvocation(["--expects"]) ||
+    isFullHarnessReleaseInvocation(["R545"]) ||
+    !isApprovedFullHarnessDeferral(r545, []) ||
+    !isApprovedFullHarnessDeferral(r568, []) ||
+    isApprovedFullHarnessDeferral(r545, ["R545"]) ||
+    isApprovedFullHarnessDeferral(r568, ["R568"]) ||
+    REVERTS.filter((r) => isApprovedFullHarnessDeferral(r, [])).length !== 2
+  ) {
+    console.error(
+      "SELF-CHECK FAILED: full-harness deferrals require exactly two fingerprinted, " +
+        "non-withdrawn records and cannot apply to audit or explicit-ID runs.",
+    );
+    for (const problem of problems) console.error(`  ${problem}`);
+    process.exit(2);
+  }
+  console.log(
+    "release-deferral self-check OK: only fingerprinted R545/R568 may remain " +
+      "UNPROVEN in a no-argument full harness run",
+  );
+}
+
 // Runs on EVERY invocation - audit, anchors and full run alike - because the
 // verdict logic below depends on it just as much as the audit does.
 proveNameAnchoring();
+proveExactFailurePolicy();
+proveExpectedFailureEvidencePolicy();
 proveSuiteNames();
+proveCompanionTranscriptRoles();
+proveReleaseDeferralPolicy();
 
-if (expectsOnly) {
+if (fullHarnessReleaseRun) {
+  const status = spawnSync("git", ["status", "--porcelain", "--untracked-files=all"], {
+    cwd: ROOT,
+    encoding: "utf8",
+  });
+  if (status.error || status.status !== 0 || status.stdout.trim()) {
+    console.error(
+      "RELEASE PRECONDITION FAILED: the full revert inventory requires a clean working tree.\n" +
+        (status.error || status.stderr || status.stdout),
+    );
+    process.exit(2);
+  }
+  const anchors = spawnSync(process.execPath, [__filename, "--anchors"], {
+    cwd: ROOT,
+    encoding: "utf8",
+  });
+  if (anchors.error || anchors.status !== 0) {
+    console.error(
+      "RELEASE PRECONDITION FAILED: the full anchor audit did not resolve.\n" +
+        (anchors.error || anchors.stderr || anchors.stdout),
+    );
+    process.exit(2);
+  }
+  console.log(anchors.stdout.trim().split(/\r?\n/).at(-1));
+}
+
+if (expectsOnly || fullHarnessReleaseRun) {
   const suites = [...new Set(chosen.map((r) => r.suite || "test:tables"))].sort();
   const catalogue = new Map();
   const skipsBySuite = new Map();
   const unusableSuites = new Map();
   for (const s of suites) {
     const run = runSuiteChecked(s);
-    const names = assertionNames(run.out);
-    const skips = skippedNames(run.out);
+    const names = assertionNames(run.stdout);
+    const skips = skippedNames(run.stdout);
     catalogue.set(s, names);
     skipsBySuite.set(s, skips);
     if (!run.healthy) {
@@ -16528,8 +18237,8 @@ if (expectsOnly) {
     console.log(`${s}  ${names.length} assertion(s)`);
     if (skips.length) {
       console.log(
-        `  ^ ${skips.length} block(s) SKIPPED, so any assertion inside them is ` +
-          `unobservable in this run: ${skips.join("; ")}`,
+        `  ^ ${skips.length} item(s) SKIPPED and therefore unobservable in this run: ` +
+          `${skips.join("; ")}`,
       );
     }
     // A suite that emitted nothing would make every regex under it look like an
@@ -16542,6 +18251,7 @@ if (expectsOnly) {
   let orphans = 0;
   let excused = 0;
   let unobservable = 0;
+  let unobservableDeferred = 0;
   let unaudited = 0;
   for (const r of chosen) {
     const suiteKey = r.suite || "test:tables";
@@ -16585,6 +18295,7 @@ if (expectsOnly) {
         const skippedMatch = skippedHere.find((n) => re.test(n));
         if (skippedMatch) {
           unobservable += 1;
+          if (isApprovedFullHarnessDeferral(r, argv)) unobservableDeferred += 1;
           console.log(
             `${r.id}  SKIPPED  ${label}  ${re} names "${skippedMatch}", which this run ` +
               `announced as SKIPPED in ${suiteKey} - the name is live, but it did not run, ` +
@@ -16618,7 +18329,7 @@ if (expectsOnly) {
         console.log(
           `${r.id}  ORPHANED ${label}  ${re} names no assertion in ${suiteKey}` +
             (hid.length
-              ? ` (NOTE: ${hid.length} block(s) skipped in this run - "${hid.join('", "')}" - ` +
+            ? ` (NOTE: ${hid.length} item(s) skipped in this run - "${hid.join('", "')}" - ` +
                 `rule those out before concluding the regex is dead)`
               : ""),
         );
@@ -16662,7 +18373,15 @@ if (expectsOnly) {
   // A distinct code for "could not audit" so a caller can tell it from
   // "audited, and found dead regexes".
   if (unusableSuites.size) process.exit(2);
-  process.exit(orphans === 0 ? 0 : 1);
+  if (orphans) process.exit(1);
+  if (unobservableDeferred) {
+    console.error(
+      `RELEASE PRECONDITION FAILED: ${unobservableDeferred} deferred-proof assertion(s) ` +
+        "were only SKIPPED, not observed on a healthy baseline.",
+    );
+    process.exit(2);
+  }
+  if (expectsOnly) process.exit(0);
 }
 
 // The CSS in this repo is CRLF and the JS is LF. Matching a literal multi-line
@@ -16677,11 +18396,14 @@ let bad = 0;
 // Counted separately from `bad` and from the proven total, so a withdrawn
 // proof can never be mistaken for a passing one in the summary line.
 let skipped = 0;
+// Deferred proofs remain unproven; neither enters the release mutation loop.
+const deferred = new Map();
 // Edits made to a touched file WHILE a revert was applied. Separate from
 // `bad` because it is not a verdict about any revert - it is a warning that
 // work outside this run was about to be silently overwritten. It still fails
 // the exit code, because the rescued copy needs a human before it is dropped.
 let midRunEdits = 0;
+
 // A revert harness that leaves the tree dirty is worse than none at all: the
 // next run would measure a file it had itself corrupted. Snapshot every file
 // any chosen revert can touch, and compare at the end. (The previous version of
@@ -16767,6 +18489,12 @@ for (const r of chosen) {
     console.log(`${r.id}  anchor OK  (${path.relative(ROOT, r.file)})`);
     continue;
   }
+  if (isApprovedFullHarnessDeferral(r, argv)) {
+    const approval = APPROVED_FULL_HARNESS_DEFERRALS[r.id];
+    deferred.set(r.id, approval);
+    console.log(`${r.id}  DEFERRED/UNPROVEN  ${approval.reason}`);
+    continue;
+  }
   // A WITHDRAWN PROOF, NOT A DISABLED ONE. `skip` is for a revert that has been
   // MEASURED not to bite and whose reason is a property of the product rather
   // than of the fixture - see R419. It deliberately runs everything above this
@@ -16788,14 +18516,14 @@ for (const r of chosen) {
   // the incident is the reason `--anchors` is now the mandatory post-mortem
   // check. `written` records what actually landed so the verify step below can
   // tell "someone else edited this" apart from "the harness never wrote it".
-  let out;
+  let run;
   const written = new Set();
   try {
     for (const [file, text] of working) {
       fs.writeFileSync(file, text);
       written.add(file);
     }
-    out = runSuite(r.suite);
+    run = runSuite(r.suite);
   } finally {
     // VERIFY BEFORE RESTORE. The restore below is a blind overwrite from a
     // snapshot taken before the run, so anything written to one of these files
@@ -16844,16 +18572,68 @@ for (const r of chosen) {
     }
     if (restoreErrors.length) throw restoreErrors[0];
   }
-  const fails = failedNames(out);
+  const checkedRun = suiteRunHealth(run, r.suite, {
+    mutationRun: true,
+    exactShutdownTail: exactShutdownTailForMutation(r),
+  });
+  const proofProblems = checkedRun.healthy
+    ? proofOnlyProtocolProblems(r, checkedRun)
+    : [];
+  const requiredPassProblems = checkedRun.healthy
+    ? requiredPassingAssertionProblems(r, run.stdout)
+    : [];
+  if (!checkedRun.healthy || proofProblems.length || requiredPassProblems.length) {
+    const reasons = [
+      ...checkedRun.reasons,
+      ...proofProblems,
+      ...requiredPassProblems,
+    ];
+    console.log(
+      `${r.id}  UNUSABLE      suite transcript cannot prove this revert: ` +
+        reasons.join("; "),
+    );
+    for (const evidence of boundedTranscriptDiagnostics([run.stdout, run.stderr])) {
+      if (typeof evidence === "string") {
+        console.log(`      tail transcript | ${evidence}`);
+      } else {
+        console.log(`      ${evidence.label} transcript | ${evidence.text}`);
+      }
+    }
+    bad += 1;
+    continue;
+  }
+  const fails = mutationFailureNames(run);
   const failNames = fails.map(assertionNameOf);
-  const missing = r.expect.filter((re) => !failNames.some((f) => re.test(f)));
+  const optionalEvidenceAssertion =
+    r.expectedFailureEvidence?.min === 0 ? r.expectedFailureEvidence.assertion : null;
+  const missing = r.expect.filter(
+    (re) =>
+      !(
+        optionalEvidenceAssertion &&
+        re.source === optionalEvidenceAssertion.source &&
+        re.flags === optionalEvidenceAssertion.flags
+      ) &&
+      !failNames.some((f) => re.test(f)),
+  );
   // A revert can "prove" itself by coincidence: if the setup assertion that
   // makes the real assertion meaningful ALSO fails, the expected name still
   // appears in the failure list while nothing has actually been demonstrated.
   // mustPass names the assertions that have to survive the revert for its
   // proof to mean what it claims.
   const collateral = (r.mustPass || []).filter((re) => failNames.some((f) => re.test(f)));
-  if (fails.length === 0) {
+  const unlisted = unlistedFailures(r, fails);
+  const evidenceProblems = expectedFailureEvidenceProblems(
+    r,
+    fails,
+    checkedRun.transcript.parentLines,
+  );
+  if (evidenceProblems.length) {
+    console.log(
+      `${r.id}  COLLATERAL    the sentinel evidence policy was not satisfied: ${evidenceProblems.join("; ")}, so this exact record proves nothing.`,
+    );
+    printFailures(r, fails);
+    bad += 1;
+  } else if (fails.length === 0) {
     console.log(`${r.id}  VACUOUS       suite stayed green with the fix removed  (${r.what})`);
     bad += 1;
   } else if (missing.length) {
@@ -16884,6 +18664,12 @@ for (const r of chosen) {
     // the PROVEN branch below: the verdict is the summary, not the record.
     printFailures(r, fails);
     bad += 1;
+  } else if (hasExactFailureViolation(r, unlisted)) {
+    console.log(
+      `${r.id}  COLLATERAL    the expected assertion failed, but ${unlisted.length} failure(s) fell outside expect, so this exact record proves nothing.`,
+    );
+    printFailures(r, fails);
+    bad += 1;
   } else {
     console.log(`${r.id}  PROVEN        ${fails.length} assertion(s) failed  <- ${r.what}`);
     // THE `expect` LIST IS THE RECORD OF WHAT THIS REVERT CLAIMS TO BREAK, and
@@ -16893,12 +18679,11 @@ for (const r of chosen) {
     // diagnoses in this project. Worse, the printed set was capped at four, so
     // the unlisted ones were often not even on screen to be read.
     //
-    // Verdicts are DELIBERATELY UNCHANGED: an unlisted failure is frequently an
-    // honest consequence of the revert (R348 breaks three assertions for one
-    // edit) rather than a defect, so turning it into a failure would punish
-    // accuracy. It is surfaced instead, so the author decides whether to widen
-    // `expect` or leave it - but can no longer do so by not noticing.
-    const unlisted = fails.filter((f) => !(r.expect || []).some((re) => re.test(assertionNameOf(f))));
+    // DEFAULT VERDICTS ARE DELIBERATELY UNCHANGED: an unlisted failure is
+    // frequently an honest consequence of the revert (R348 breaks three
+    // assertions for one edit), so ordinary records surface it without failing.
+    // A record may opt in to requireExactFailures only when an extra failure
+    // specifically contaminates its evidence, as R570's updater failures do.
     // ONE PRINTER, INCLUDING HERE. This branch used to hand-roll its own
     // output, and got three things wrong at once: it capped the expected set
     // at `slice(0, 4)` - the very cap the paragraph above names as the defect
@@ -16939,13 +18724,30 @@ for (const [f, before] of snapshots) {
   }
 }
 
+if (fullHarnessReleaseRun) {
+  if (deferred.size !== Object.keys(APPROVED_FULL_HARNESS_DEFERRALS).length) {
+    console.error("\nRELEASE DEFERRAL MISMATCH: both approved proofs must be separately accounted for.");
+    bad += 1;
+  }
+}
+
+const deferredSummary = [...deferred.entries()]
+  .sort(([left], [right]) => left.localeCompare(right))
+  .map(([id, approval]) => `${id}: ${approval.reason}`);
+const cleanResult = bad === 0 && dirty === 0 && midRunEdits === 0;
+
 console.log(
   anchorsOnly
-    ? bad === 0
+    ? cleanResult
       ? `\nALL ${chosen.length} ANCHORS RESOLVE - nothing is proven; run without --anchors for that`
       : `\n${bad} revert(s) can no longer find what they perturb`
-    : bad === 0
-      ? `\nALL REVERTS PROVEN${skipped ? ` (${skipped} withdrawn, see SKIPPED above)` : ""}`
-      : `\n${bad} revert(s) did not prove their fix`,
+    : cleanResult
+      ? fullHarnessReleaseRun
+        ? `\nALL REQUIRED NONDEFERRED REVERTS PROVEN; APPROVED UNPROVEN DEFERRALS:\n` +
+          deferredSummary.map((line) => `  ${line}`).join("\n") +
+          (skipped ? `\n${skipped} withdrawn, see SKIPPED above` : "")
+        : `\nALL REVERTS PROVEN${skipped ? ` (${skipped} withdrawn, see SKIPPED above)` : ""}`
+      : `\n${bad} revert(s) did not prove their fix; ${dirty} file(s) left modified; ` +
+        `${midRunEdits} mid-run edit(s) detected`,
 );
-process.exit(bad === 0 && dirty === 0 && midRunEdits === 0 ? 0 : 1);
+process.exit(cleanResult ? 0 : 1);

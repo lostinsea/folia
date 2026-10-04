@@ -715,21 +715,27 @@ function startErrorSentinel(win, opts) {
     }
   };
 
-  // Electron changed this event's signature; accept both forms rather than
-  // pinning to one and silently receiving `undefined` after an upgrade.
-  const onConsole = (event, level, message, line, sourceId) => {
-    const lvl = event && typeof event === "object" && "level" in event ? event.level : level;
-    const msg = event && typeof event === "object" && "message" in event ? event.message : message;
-    const src =
-      event && typeof event === "object" && "sourceId" in event ? event.sourceId : sourceId;
-    const text = String(msg || "");
-    const isError = lvl === "error" || lvl === 3 || /^\s*Uncaught\b/.test(text);
+  // Electron delivers the console event as one details object. Reject an
+  // incomplete event so a contract change cannot be reported as a clean run.
+  const onConsole = (details) => {
+    if (
+      !details ||
+      typeof details !== "object" ||
+      typeof details.level !== "string" ||
+      typeof details.message !== "string" ||
+      typeof details.sourceId !== "string" ||
+      !Number.isFinite(details.lineNumber)
+    ) {
+      throw new Error("console-message details omitted level, message, source, or line");
+    }
+    const text = details.message;
+    const isError = details.level === "error" || /^\s*Uncaught\b/.test(text);
     if (!isError) return;
     if (ignore.some((re) => re.test(text))) return;
     // Tracked so stop() and drain() can wait for it. record() is async because
     // of the screenshot, and an unawaited one could otherwise land in `hits`
     // after the suite had already read its supposedly final report.
-    track(record("console-error", `${text} @ ${src || "?"}:${line || 0}`));
+    track(record("console-error", `${text} @ ${details.sourceId}:${details.lineNumber}`));
   };
   win.webContents.on("console-message", onConsole);
 

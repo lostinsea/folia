@@ -7,6 +7,17 @@ const path = require('path');
 const crypto = require('crypto');
 const { pathToFileURL } = require('url');
 
+// Navigation can be cancelled by the first tab activation. Keep its state
+// initialized before any startup callback or overlay can reach that path.
+let navigationHistory = [];
+let navigationIndex = -1;
+let navigationRequestSequence = 0;
+let pendingNavigationRequest = null;
+let acceptedNavigationRequestCount = 0;
+let rejectedNavigationRequestCount = 0;
+let failedNavigationRequestCount = 0;
+let lastNavigationRequestResult = null;
+
 // Helper modules
 const { removeBOM, getFileName, getDirectory, escapeRegex, formatBytes } = require('./utils');
 const { getMermaidConfig } = require('./mermaid-config');
@@ -1169,6 +1180,7 @@ function historyUndo() {
     });
   } else {
     originalMarkdown = prevContent;
+    noteActiveContentMutation();
     renderMarkdown(prevContent).then(() => {
       contentWrapper.scrollTop = scrollPos;
       undoRedoRendering = false;
@@ -1195,6 +1207,7 @@ function historyRedo() {
     });
   } else {
     originalMarkdown = nextContent;
+    noteActiveContentMutation();
     renderMarkdown(nextContent).then(() => {
       contentWrapper.scrollTop = scrollPos;
       undoRedoRendering = false;
@@ -1212,6 +1225,8 @@ function historyClear() {
 let isFileTrackingActive = false;
 let fileTrackingPauseOwner = null;
 let fileTrackingResumeHold = 0;
+let fileSelectionGeneration = 0;
+let activeFileSelectionGeneration = 0;
 let fileUpdateNotificationShown = false;
 let fileUpdateDismissTimeout = null;
 
@@ -1233,15 +1248,32 @@ let hasUnsavedChanges = false;
 // set and clean tab B starts claiming unsaved changes it does not have.
 const failedSaves = new Set();
 const reloadConflicts = new Set();
+// Deletions the main process has delivered to this page and this page has
+// consumed. A delivery is replayed until its owner acknowledges consuming it,
+// so the consumed set is what keeps a replay from warning twice about one
+// deletion.
+const consumedDeletionDeliveries = new Set();
+const MAX_CONSUMED_DELETION_DELIVERIES = 256;
+
+function rememberConsumedDeletionDelivery(eventId) {
+  consumedDeletionDeliveries.add(eventId);
+  while (
+    consumedDeletionDeliveries.size > MAX_CONSUMED_DELETION_DELIVERIES
+  ) {
+    consumedDeletionDeliveries.delete(
+      consumedDeletionDeliveries.values().next().value
+    );
+  }
+}
 
 function saveFailedFor(p) {
-  const canonical = canonicalReloadPath(p);
-  return !!canonical && failedSaves.has(canonical);
+  const key = fileTrackingPathKey(p);
+  return !!key && failedSaves.has(key);
 }
 
 function reloadConflictFor(p) {
-  const canonical = canonicalReloadPath(p);
-  return !!canonical && reloadConflicts.has(canonical);
+  const key = fileTrackingPathKey(p);
+  return !!key && reloadConflicts.has(key);
 }
 
 // The guards on open/refresh/close asked `isEditMode && hasUnsavedChanges`,
@@ -1252,11 +1284,10 @@ function reloadConflictFor(p) {
 // said it had not been written.
 function hasUnsavedWork() {
   return (
-    hasUnsavedChanges &&
-    (isEditMode ||
-      hasPendingSaveFor(currentFilePath) ||
-      saveFailedFor(currentFilePath) ||
-      reloadConflictFor(currentFilePath))
+    hasPendingSaveFor(currentFilePath) ||
+    saveFailedFor(currentFilePath) ||
+    reloadConflictFor(currentFilePath) ||
+    (hasUnsavedChanges && isEditMode)
   );
 }
 let originalMarkdown = '';
@@ -1277,6 +1308,19 @@ function mayMutateRendererDocument(source) {
   return !tabs || typeof tabs.mayMutateDocument !== 'function'
     ? true
     : tabs.mayMutateDocument(source);
+}
+
+// True while a phase-two shutdown freeze is standing. Distinct from
+// mayMutateRendererDocument(): that one ASKS PERMISSION to move the document
+// and records the refusal, this one only observes the state, for decisions that
+// adopt nothing.
+function frozenForShutdown() {
+  const tabs = window.CustomTabs;
+  return (
+    !!tabs &&
+    typeof tabs.isDocumentFrozen === 'function' &&
+    tabs.isDocumentFrozen()
+  );
 }
 
 const reloadPathAliases = new Map();
@@ -1311,6 +1355,54 @@ function rebindReloadPath(filePath) {
   return canonical;
 }
 
+function currentReloadPhysicalKey(filePath) {
+  if (typeof filePath !== 'string' || filePath.length === 0) return null;
+  try {
+    const real = fs.realpathSync.native(path.normalize(path.resolve(filePath)));
+    return process.platform === 'win32' ? real.toLowerCase() : real;
+  } catch (error) {
+    if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') {
+      console.error('Could not verify the adopted document path:', error);
+    }
+    return null;
+  }
+}
+
+function bindApprovedReloadPath(filePath, approvedPathKey) {
+  const spelling = fileTrackingPathKey(filePath);
+  if (!spelling || typeof approvedPathKey !== 'string' ||
+      currentReloadPhysicalKey(filePath) !== approvedPathKey) return false;
+  reloadPathAliases.set(spelling, approvedPathKey);
+  return true;
+}
+
+function validDiskVersion(value) {
+  return !!value &&
+    Number.isFinite(value.dev) && Number.isFinite(value.ino) &&
+    Number.isFinite(value.size) && Number.isFinite(value.mtimeMs) &&
+    Number.isFinite(value.ctimeMs);
+}
+
+function diskVersionsEqual(left, right) {
+  // Match main and tabs: Windows ctime can drift without changed bytes.
+  // Restored-mtime, same-size edits are deferred (ctime-byte-witness).
+  return validDiskVersion(left) && validDiskVersion(right) &&
+    left.dev === right.dev && left.ino === right.ino &&
+    left.size === right.size && left.mtimeMs === right.mtimeMs;
+}
+
+function approvedReloadSnapshotMatches(filePath, pathKey, version) {
+  if (currentReloadPhysicalKey(filePath) !== pathKey) return false;
+  try {
+    return diskVersionsEqual(fs.statSync(filePath), version);
+  } catch (error) {
+    if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') {
+      console.error('Could not verify the adopted disk version:', error);
+    }
+    return false;
+  }
+}
+
 function normaliseReloadSnapshot(value) {
   return typeof value === 'string' ? value.replace(/\r\n?/g, '\n') : value;
 }
@@ -1331,6 +1423,10 @@ function setDocumentDirtyState(value) {
   return hasUnsavedChanges;
 }
 
+function noteActiveContentMutation() {
+  window.CustomTabs?.noteActiveContentMutation?.();
+}
+
 function withFileTrackingResumeHeld(run) {
   fileTrackingResumeHold += 1;
   try {
@@ -1341,6 +1437,7 @@ function withFileTrackingResumeHeld(run) {
 }
 
 function setDocumentDirtyFromContent(content) {
+  noteActiveContentMutation();
   let baseline = originalMarkdown;
   if (!isEditMode) {
     const tabs = window.CustomTabs;
@@ -1379,6 +1476,13 @@ function validateReloadResultForCurrentPage(data, checkSnapshot = true) {
   if (
     !request ||
     !Number.isSafeInteger(request.sequence) ||
+    request.sequence <= 0 ||
+    !Number.isSafeInteger(request.tabId) ||
+    request.tabId <= 0 ||
+    !Number.isSafeInteger(request.documentGeneration) ||
+    request.documentGeneration <= 0 ||
+    typeof request.pathKey !== 'string' ||
+    request.pathKey.length === 0 ||
     typeof request.path !== 'string' ||
     typeof request.snapshot !== 'string' ||
     request.session !== reloadRequestSession ||
@@ -1388,11 +1492,23 @@ function validateReloadResultForCurrentPage(data, checkSnapshot = true) {
   ) {
     return 'foreign';
   }
-  if (customTabs) {
+  if (
+    !customTabs ||
+    typeof customTabs.getActiveTabId !== 'function' ||
+    typeof customTabs.getActiveDocumentIdentity !== 'function' ||
+    request.tabId !== customTabs.getActiveTabId()
+  ) {
+    return 'foreign';
+  }
+  if (!window.customTabsOwnsReloadResults) {
+    const identity = customTabs.getActiveDocumentIdentity(
+      currentFilePath,
+      reloadRequestSession
+    );
     if (
-      typeof customTabs.getActiveTabId !== 'function' ||
-      !Number.isSafeInteger(request.tabId) ||
-      request.tabId !== customTabs.getActiveTabId()
+      !identity ||
+      request.documentGeneration !== identity.documentGeneration ||
+      request.pathKey !== identity.pathKey
     ) {
       return 'foreign';
     }
@@ -1421,31 +1537,24 @@ function validateReloadResultForCurrentPage(data, checkSnapshot = true) {
 
 function markReloadConflict(filePath) {
   if (!mayMutateRendererDocument('reload-conflict-set')) return false;
-  const canonical = canonicalReloadPath(filePath);
-  if (!canonical) return false;
-  reloadConflicts.add(canonical);
-  if (canonical === canonicalReloadPath(currentFilePath)) {
+  const key = fileTrackingPathKey(filePath);
+  if (!key) return false;
+  reloadConflicts.add(key);
+  if (key === fileTrackingPathKey(currentFilePath)) {
     setDocumentDirtyState(true);
   }
   return true;
 }
 
-function clearReloadConflict(filePath) {
+function clearReloadConflict(filePath, { preserveCurrent = false } = {}) {
   if (!mayMutateRendererDocument('reload-conflict-clear')) return false;
-  const canonical = canonicalReloadPath(filePath);
-  if (!canonical) return false;
-  return reloadConflicts.delete(canonical);
+  const key = fileTrackingPathKey(filePath);
+  if (!key) return false;
+  if (preserveCurrent && key === fileTrackingPathKey(currentFilePath)) {
+    return false;
+  }
+  return reloadConflicts.delete(key);
 }
-
-// Navigation history (for back/forward)
-let navigationHistory = [];
-let navigationIndex = -1;
-let navigationRequestSequence = 0;
-let pendingNavigationRequest = null;
-let acceptedNavigationRequestCount = 0;
-let rejectedNavigationRequestCount = 0;
-let failedNavigationRequestCount = 0;
-let lastNavigationRequestResult = null;
 
 // Update the current document path.
 //
@@ -1530,10 +1639,37 @@ function navigationRequestMatches(openRequest, resultPath = null) {
   );
 }
 
-function preflightFileOpen(data) {
+function captureFileOpenNavigation() {
+  return Object.freeze({
+    navigationIndex,
+    pendingNavigationRequest,
+    acceptedNavigationRequestCount,
+    rejectedNavigationRequestCount,
+    lastNavigationRequestResult,
+  });
+}
+
+function restoreFileOpenNavigation(prior) {
+  if (!prior ||
+      (pendingNavigationRequest &&
+        pendingNavigationRequest !== prior.pendingNavigationRequest)) {
+    return false;
+  }
+  navigationIndex = prior.navigationIndex;
+  pendingNavigationRequest = prior.pendingNavigationRequest;
+  acceptedNavigationRequestCount =
+    prior.acceptedNavigationRequestCount;
+  rejectedNavigationRequestCount =
+    prior.rejectedNavigationRequestCount;
+  lastNavigationRequestResult = prior.lastNavigationRequestResult;
+  updateNavButtons();
+  return true;
+}
+
+function preflightFileOpen(data, { commit = true } = {}) {
   const openRequest = data && data.openRequest;
   if (!openRequest) {
-    cancelPendingNavigation('superseded-by-non-navigation-open');
+    if (commit) cancelPendingNavigation('superseded-by-non-navigation-open');
     return Object.freeze({
       accepted: true,
       navigation: false,
@@ -1543,9 +1679,11 @@ function preflightFileOpen(data) {
     });
   }
   if (!navigationRequestMatches(openRequest, data && data.path)) {
-    rejectedNavigationRequestCount += 1;
-    lastNavigationRequestResult = 'stale-navigation-success';
-    reassertCurrentWatcherIntent();
+    if (commit) {
+      rejectedNavigationRequestCount += 1;
+      lastNavigationRequestResult = 'stale-navigation-success';
+      reassertCurrentWatcherIntent();
+    }
     return Object.freeze({
       accepted: false,
       navigation: true,
@@ -1554,11 +1692,13 @@ function preflightFileOpen(data) {
   }
 
   const pending = pendingNavigationRequest;
-  navigationIndex = pending.targetIndex;
-  pendingNavigationRequest = null;
-  acceptedNavigationRequestCount += 1;
-  lastNavigationRequestResult = 'accepted';
-  updateNavButtons();
+  if (commit) {
+    navigationIndex = pending.targetIndex;
+    pendingNavigationRequest = null;
+    acceptedNavigationRequestCount += 1;
+    lastNavigationRequestResult = 'accepted';
+    updateNavButtons();
+  }
   return Object.freeze({
     accepted: true,
     navigation: true,
@@ -3355,6 +3495,10 @@ refreshBtn.addEventListener('click', () => {
   if (!currentFilePath) {
     return;
   }
+  if (typeof window.CustomTabs?.requestReloadWithConfirmation === 'function') {
+    window.CustomTabs.requestReloadWithConfirmation();
+    return;
+  }
 
   // Check for unsaved changes before refreshing
   if (hasUnsavedWork()) {
@@ -3564,11 +3708,38 @@ function reloadCurrentFile() {
 
   const customTabs = window.CustomTabs;
   let tabId = null;
-  if (customTabs) {
-    if (typeof customTabs.getActiveTabId !== 'function') return false;
-    tabId = customTabs.getActiveTabId();
-    if (!Number.isSafeInteger(tabId)) return false;
+  let documentGeneration = null;
+  let documentPathKey = null;
+  if (
+    !customTabs ||
+    typeof customTabs.getActiveTabId !== 'function' ||
+    typeof customTabs.getActiveDocumentIdentity !== 'function'
+  ) {
+    return false;
   }
+  const identity = customTabs.getActiveDocumentIdentity(
+    currentFilePath,
+    reloadRequestSession
+  );
+  tabId = customTabs.getActiveTabId();
+  if (
+    !identity ||
+    !Number.isSafeInteger(tabId) ||
+    tabId <= 0 ||
+    identity.tabId !== tabId ||
+    !Number.isSafeInteger(identity.documentGeneration) ||
+    identity.documentGeneration <= 0 ||
+    !Number.isSafeInteger(identity.rendererGeneration) ||
+    identity.rendererGeneration <= 0 ||
+    !Number.isSafeInteger(activeFileSelectionGeneration) ||
+    activeFileSelectionGeneration <= 0 ||
+    typeof identity.pathKey !== 'string' ||
+    identity.pathKey.length === 0
+  ) {
+    return false;
+  }
+  documentGeneration = identity.documentGeneration;
+  documentPathKey = identity.pathKey;
   const requestPath = canonicalReloadPath(currentFilePath);
   if (!requestPath) return false;
   const sequence = ++reloadRequestSequence;
@@ -3582,6 +3753,10 @@ function reloadCurrentFile() {
     reloadRequestSnapshot: snapshot,
     reloadRequestSession,
     reloadRequestTabId: tabId,
+    reloadRequestDocumentGeneration: documentGeneration,
+    reloadRequestDocumentPathKey: documentPathKey,
+    reloadRequestRendererGeneration: identity.rendererGeneration,
+    reloadRequestSelectionGeneration: activeFileSelectionGeneration,
   });
   return true;
 }
@@ -3659,6 +3834,14 @@ function captureEditSessionBaseline(force) {
     document: originalMarkdown,
     dirty: hasUnsavedChanges,
   });
+}
+function invalidateBackgroundEditSessionBaseline(filePath) {
+  if (typeof filePath !== 'string' || !filePath) {
+    console.error('Cannot invalidate an edit baseline without a document path');
+    return false;
+  }
+  editSessionBaselines.delete(filePath);
+  return true;
 }
 // Called by custom-tabs.js when the active document changes while edit mode
 // stays on, so a discard restores THIS tab and never the previous tab's text.
@@ -3760,6 +3943,7 @@ toggleEditBtn.addEventListener('click', async () => {
     toggleEditBtn.style.background = 'var(--primary-color)';
     toggleEditBtn.style.color = '#ffffff';
   } else {
+    try {
     // Exit edit mode
     contentWrapper.classList.remove('split-view');
     // Leaving edit mode gives the width back; tables widened against the narrow
@@ -3812,9 +3996,10 @@ toggleEditBtn.addEventListener('click', async () => {
         adoptBaseline: false,
       });
     }
-    // The session is over either way; nothing may outlive it and be mistaken
-    // for the baseline of a later one.
-    editSessionBaselines.clear();
+    } finally {
+      // Even a failed discard render has ended this edit session.
+      editSessionBaselines.clear();
+    }
   }
 });
 
@@ -4050,12 +4235,98 @@ function skipPastCodeBlock(content, insertPos) {
 // is the only reliable way to answer "is this document now on disk?".
 const pendingSaves = new Map();
 let nextSaveRequestId = 1;
-const saveRequestSession = crypto.randomUUID();
+let nextSaveSequence = 1;
+const saveRequestSession = reloadRequestSession;
+const MAX_PENDING_SAVE_CORRELATIONS = 128;
 let pendingSaveStatusRevision = 0;
 const PENDING_SAVE_STATUS_EVENT = 'folia-pending-save-status-changed';
-// Guards against an out-of-order pair of replies for the SAME document leaving
-// the store describing the older write.
-const lastAdoptedSaveByPath = new Map();
+const latestSaveSequenceByDocument = new Map();
+const lastSettledSaveSequenceByDocument = new Map();
+const saveResultDecisions = new WeakMap();
+const appliedRendererSaveDecisions = new WeakSet();
+const pendingSaveTrackingReconciliations = new Set();
+const settledSaveResultAcknowledgements = new Map();
+
+function saveDocumentIdentityKey(identity) {
+  if (
+    !identity ||
+    identity.pageSession !== saveRequestSession ||
+    !Number.isSafeInteger(identity.rendererGeneration) ||
+    identity.rendererGeneration <= 0 ||
+    !Number.isSafeInteger(identity.tabId) ||
+    identity.tabId <= 0 ||
+    !Number.isSafeInteger(identity.documentGeneration) ||
+    identity.documentGeneration <= 0 ||
+    typeof identity.pathKey !== 'string' ||
+    identity.pathKey.length === 0
+  ) {
+    return null;
+  }
+  return [
+    identity.pageSession,
+    identity.rendererGeneration,
+    identity.tabId,
+    identity.documentGeneration,
+    identity.pathKey,
+  ].join('\u0000');
+}
+
+function allocatePositiveSafeInteger(counterName) {
+  if (counterName === 'request') {
+    if (!Number.isSafeInteger(nextSaveRequestId) || nextSaveRequestId <= 0) {
+      nextSaveRequestId = 1;
+    }
+    for (
+      let attempts = 0;
+      attempts <= MAX_PENDING_SAVE_CORRELATIONS;
+      attempts += 1
+    ) {
+      const value = nextSaveRequestId;
+      nextSaveRequestId =
+        value === Number.MAX_SAFE_INTEGER ? 1 : value + 1;
+      if (!pendingSaves.has(value)) return value;
+    }
+    return null;
+  }
+  if (!Number.isSafeInteger(nextSaveSequence) || nextSaveSequence <= 0) {
+    return null;
+  }
+  const value = nextSaveSequence;
+  nextSaveSequence =
+    nextSaveSequence === Number.MAX_SAFE_INTEGER
+      ? null
+      : nextSaveSequence + 1;
+  return value;
+}
+
+function settleUndeliveredSave(entry, error) {
+  if (!entry || !pendingSaves.has(entry.requestId)) return false;
+  pendingSaves.delete(entry.requestId);
+  if (entry.settled) return false;
+  entry.settled = true;
+  failedSaves.add(fileTrackingPathKey(entry.path));
+  publishPendingSaveStatusChange({ settlement: true });
+  entry.resolve(false);
+  releaseSaveOrderingState(entry.identityKey);
+  console.error('Save request was not delivered:', error);
+  alert(i18n('alert.saveFailed') + error);
+  return true;
+}
+
+function pendingSaveCapacityAvailable() {
+  return pendingSaves.size < MAX_PENDING_SAVE_CORRELATIONS;
+}
+
+function currentSaveDocumentIdentity(filePath = currentFilePath) {
+  const tabs = window.CustomTabs;
+  return tabs && typeof tabs.getActiveDocumentIdentity === 'function'
+    ? tabs.getActiveDocumentIdentity(filePath, saveRequestSession)
+    : null;
+}
+
+function rendererDocumentStateKey(filePath) {
+  return canonicalReloadPath(filePath);
+}
 
 function pendingSaveMatchesPath(entry, filePath) {
   if (!entry || typeof filePath !== 'string' || filePath.length === 0) {
@@ -4090,19 +4361,14 @@ function getPendingSaveStatus(paths) {
   });
 }
 
-function publishPendingSaveStatusChange() {
+function publishPendingSaveStatusChange({ settlement = false } = {}) {
   pendingSaveStatusRevision += 1;
-  updateUnsavedIndicator();
+  updateUnsavedIndicator(!settlement);
   window.dispatchEvent(new Event(PENDING_SAVE_STATUS_EVENT));
 }
 
 function isExpectedSaveResult(data) {
-  return !!(
-    data &&
-    data.saveRequestSession === saveRequestSession &&
-    Number.isSafeInteger(data.requestId) &&
-    pendingSaves.has(data.requestId)
-  );
+  return !!settleSaveResult(data, false);
 }
 
 // A promise that settles once every write currently in flight for `path` has
@@ -4138,27 +4404,111 @@ function saveMarkdownFile() {
     alert(i18n('alert.noFileOpen'));
     return;
   }
+  if (!pendingSaveCapacityAvailable()) {
+    alert(
+      i18n('alert.saveFailed') +
+        'Too many saves are still awaiting an authoritative result.'
+    );
+    return null;
+  }
 
-  const content = isEditMode ? markdownEditor.value : originalMarkdown;
-  const requestId = nextSaveRequestId++;
+  const tabs = window.CustomTabs;
+  const sequence = allocatePositiveSafeInteger('sequence');
+  if (!Number.isSafeInteger(sequence) || sequence <= 0) {
+    console.error('Refusing save after sequence space was exhausted');
+    alert(i18n('alert.saveFailed') + 'Save sequence space is exhausted.');
+    return null;
+  }
+  let prepared;
+  try {
+    prepared =
+      tabs && typeof tabs.prepareSaveRequest === 'function'
+        ? tabs.prepareSaveRequest(
+            currentFilePath,
+            saveRequestSession,
+            sequence
+          )
+        : null;
+  } catch (error) {
+    console.error('Refusing save without provable document bytes:', error);
+    alert(
+      i18n('alert.saveFailed') +
+        (error && error.message ? error.message : String(error))
+    );
+    return null;
+  }
+  if (!prepared) {
+    console.error('Refusing save without exact tab document ownership');
+    alert(
+      i18n('alert.saveFailed') +
+      (reloadConflictFor(currentFilePath)
+        ? 'File conflict: copy any edits to a safe place before reloading or reopening.'
+        : 'Document ownership changed before save.')
+    );
+    return null;
+  }
+  const content = prepared.content;
+  const identity = prepared.identity;
+  const identityKey = saveDocumentIdentityKey(identity);
+  const stateKey = rendererDocumentStateKey(currentFilePath);
+  if (
+    !identityKey ||
+    !stateKey ||
+    stateKey !== identity.pathKey ||
+    !Number.isSafeInteger(identity.selectionGeneration) ||
+    identity.selectionGeneration <= 0 ||
+    identity.selectionGeneration !== activeFileSelectionGeneration
+  ) {
+    console.error('Refusing save with invalid document identity');
+    alert(i18n('alert.saveFailed') + 'Document identity is unavailable.');
+    return null;
+  }
+  const requestId = allocatePositiveSafeInteger('request');
+  if (!Number.isSafeInteger(requestId) || requestId <= 0) {
+    console.error('Refusing save without a correlation identifier');
+    alert(i18n('alert.saveFailed') + 'Save correlation is unavailable.');
+    return null;
+  }
+  const requestIdentity = Object.freeze({
+    ...identity,
+    requestId,
+  });
   const entry = {
+    requestId,
     path: currentFilePath,
-    pathKey: canonicalReloadPath(currentFilePath),
+    pathKey: identity.pathKey,
+    stateKey,
     spellingKey: fileTrackingPathKey(currentFilePath),
     content: content,
+    identity: requestIdentity,
+    identityKey,
+    sequence,
     resolve: null,
+    settled: false,
   };
   entry.promise = new Promise((resolve) => {
     entry.resolve = resolve;
   });
   pendingSaves.set(requestId, entry);
+  latestSaveSequenceByDocument.set(identityKey, sequence);
   publishPendingSaveStatusChange();
-  ipcRenderer.send('save-markdown-file', {
-    filePath: currentFilePath,
-    content: content,
-    requestId: requestId,
-    saveRequestSession
-  });
+  try {
+    ipcRenderer.send('save-markdown-file', {
+      filePath: currentFilePath,
+      content: content,
+      requestId: requestId,
+      saveRequestSession,
+      saveRequest: requestIdentity,
+    });
+  } catch (error) {
+    settleUndeliveredSave(
+      entry,
+      `Save request delivery failed: ${
+        error && error.message ? error.message : String(error)
+      }`
+    );
+  }
+  return entry.promise;
 }
 
 // Save button click
@@ -4229,6 +4579,10 @@ document.addEventListener('keydown', (e) => {
     e.preventDefault();
     if (!mayMutateRendererDocument('shortcut-reload')) return;
     if (currentFilePath) {
+      if (typeof window.CustomTabs?.requestReloadWithConfirmation === 'function') {
+        window.CustomTabs.requestReloadWithConfirmation();
+        return;
+      }
       // Check for unsaved changes
       if (hasUnsavedWork()) {
         if (confirm(i18n('confirm.unsavedRefresh'))) {
@@ -4241,132 +4595,327 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// Handle save result
-ipcRenderer.on('save-markdown-result', (event, data) => {
-  if (!isExpectedSaveResult(data)) {
-    console.log('Ignoring save result from another renderer session');
-    return;
-  }
-  const requestId = data && data.requestId;
-  const entry = requestId != null ? pendingSaves.get(requestId) : null;
-  if (entry) {
-    pendingSaves.delete(requestId);
-    publishPendingSaveStatusChange();
-  }
-  if (!mayMutateRendererDocument('ipc-save-result')) {
-    if (entry) entry.resolve(data && data.success === true);
-    if (!data || !data.success) {
-      showNotification(
-        i18n('alert.saveFailed') + ((data && data.error) || ''),
-        5000
-      );
-    }
-    return;
-  }
-  const savedPath = (data && data.path) || (entry && entry.path) || null;
-  // A reply for a BACKGROUND document must never touch the stores, which
-  // describe the document on screen. The tab layer owns that tab's own cache.
-  const savedDocumentKey =
-    (entry && entry.pathKey) || canonicalReloadPath(savedPath);
-  const currentDocumentKey = canonicalReloadPath(currentFilePath);
-  const isForCurrent =
-    !savedDocumentKey ||
-    savedDocumentKey === currentDocumentKey;
+function saveRequestAuthorizesEntry(data, entry) {
+  const request = data && data.saveRequest;
+  const originalPathIdentityMatches =
+    entry &&
+    data &&
+    data.success === false &&
+    data.conflict === true &&
+    data.pathReplaced === true &&
+    typeof data.originalPathKey === 'string' &&
+    data.originalPathKey === entry.stateKey;
+  return !!(
+    entry &&
+    request &&
+    data.saveRequestSession === saveRequestSession &&
+    request.pageSession === saveRequestSession &&
+    Number.isSafeInteger(data.requestId) &&
+    data.requestId > 0 &&
+    request.requestId === data.requestId &&
+    request.requestId === entry.requestId &&
+    Number.isSafeInteger(request.sequence) &&
+    request.sequence > 0 &&
+    request.sequence === entry.sequence &&
+    Number.isSafeInteger(request.rendererGeneration) &&
+    request.rendererGeneration > 0 &&
+    request.rendererGeneration === entry.identity.rendererGeneration &&
+    Number.isSafeInteger(request.tabId) &&
+    request.tabId > 0 &&
+    request.tabId === entry.identity.tabId &&
+    Number.isSafeInteger(request.documentGeneration) &&
+    request.documentGeneration > 0 &&
+    request.documentGeneration === entry.identity.documentGeneration &&
+    typeof request.pathKey === 'string' &&
+    request.pathKey.length > 0 &&
+    request.pathKey === entry.identity.pathKey &&
+    request.pageSession === entry.identity.pageSession &&
+    Number.isSafeInteger(request.selectionGeneration) &&
+    request.selectionGeneration > 0 &&
+    request.selectionGeneration === entry.identity.selectionGeneration &&
+    typeof data.path === 'string' &&
+    fileTrackingPathKey(data.path) === entry.spellingKey &&
+    (
+      canonicalReloadPath(data.path) === entry.stateKey ||
+      originalPathIdentityMatches
+    ) &&
+    (data.success !== true || data.savedContent === entry.content)
+  );
+}
 
-  if (data.success) {
-    // Clear persistence failures before applying the clean transition below.
-    // The dirty-state choke point deliberately refuses to resume tracking
-    // while either witness remains.
-    if (savedPath) {
-      const savedKeys = new Set([savedDocumentKey]);
-      if (!entry) savedKeys.add(canonicalReloadPath(savedPath));
-      for (const savedKey of savedKeys) {
-        if (savedKey) {
-          failedSaves.delete(savedKey);
-          reloadConflicts.delete(savedKey);
-        }
-      }
-    }
-    const lastAdoptedSaveId = savedDocumentKey
-      ? lastAdoptedSaveByPath.get(savedDocumentKey) || 0
-      : 0;
-    if (isForCurrent && requestId > lastAdoptedSaveId) {
-      if (savedDocumentKey) {
-        lastAdoptedSaveByPath.set(savedDocumentKey, requestId);
-      }
-      // The other half of the same defect as in saveMarkdownFile(): copying the
-      // textarea back over originalMarkdown after a VIEW-mode save discarded
-      // the document that was actually just written, so the undone content
-      // returned on the next render. In view mode originalMarkdown is already
-      // what was saved and needs no resync.
-      //
-      // Prefer the content that was actually handed to the main process over
-      // re-reading the textarea. They differ whenever the user typed while the
-      // write was in flight, and in that case the textarea is NOT what is on
-      // disk - adopting it would leave `originalMarkdown` describing a document
-      // that was never written.
-      // In VIEW mode the store IS the document, and it can move while a write
-      // is in flight - a second note confirmed before the first note's reply
-      // arrives. Adopting the in-flight payload then would drop the newer note
-      // from the store while the newer note's own write still lands on disk,
-      // leaving store and file describing different documents; the next note
-      // would write the stale one back out. If the store has moved, leave it
-      // alone and let the newer write's own reply reconcile it.
-      const storeMovedDuringWrite =
-        !isEditMode && !!entry && originalMarkdown !== entry.content;
-      if (entry && !storeMovedDuringWrite) {
-        originalMarkdown = entry.content;
-      } else if (!entry && isEditMode) {
-        originalMarkdown = markdownEditor.value;
-      }
-      // Typing during the write leaves genuinely unsaved bytes behind;
-      // declaring the document clean would lose them at the next exit without
-      // a warning.
-      setDocumentDirtyState(
-        isEditMode
-          ? !sameReloadDocument(markdownEditor.value, originalMarkdown)
-          : storeMovedDuringWrite
+function settledSaveResultMatches(data, remembered) {
+  const request = data && data.saveRequest;
+  return !!(
+    remembered &&
+    request &&
+    data.saveRequestSession === remembered.saveRequestSession &&
+    data.requestId === remembered.requestId &&
+    data.path === remembered.path &&
+    request.pageSession === remembered.pageSession &&
+    request.rendererGeneration === remembered.rendererGeneration &&
+    request.tabId === remembered.tabId &&
+    request.documentGeneration === remembered.documentGeneration &&
+    request.pathKey === remembered.pathKey &&
+    request.selectionGeneration === remembered.selectionGeneration &&
+    request.sequence === remembered.sequence &&
+    request.requestId === remembered.requestId
+  );
+}
+
+function acknowledgeSaveResult(data, remember = false) {
+  const request = data && data.saveRequest;
+  if (
+    !request ||
+    data.saveRequestSession !== saveRequestSession ||
+    !Number.isSafeInteger(data.requestId) ||
+    data.requestId <= 0 ||
+    !Number.isSafeInteger(data.saveResultAttempt) ||
+    data.saveResultAttempt <= 0
+  ) {
+    return false;
+  }
+  let remembered = settledSaveResultAcknowledgements.get(data.requestId);
+  if (remember) {
+    remembered = Object.freeze({
+      saveRequestSession: data.saveRequestSession,
+      requestId: data.requestId,
+      path: data.path,
+      pageSession: request.pageSession,
+      rendererGeneration: request.rendererGeneration,
+      tabId: request.tabId,
+      documentGeneration: request.documentGeneration,
+      pathKey: request.pathKey,
+      selectionGeneration: request.selectionGeneration,
+      sequence: request.sequence,
+    });
+    settledSaveResultAcknowledgements.set(data.requestId, remembered);
+    while (
+      settledSaveResultAcknowledgements.size >
+      MAX_PENDING_SAVE_CORRELATIONS
+    ) {
+      settledSaveResultAcknowledgements.delete(
+        settledSaveResultAcknowledgements.keys().next().value
       );
+    }
+  }
+  if (!settledSaveResultMatches(data, remembered)) return false;
+  ipcRenderer
+    .invoke('save-markdown-result-ack', {
+      saveRequestSession: data.saveRequestSession,
+      requestId: data.requestId,
+      path: data.path,
+      saveRequest: request,
+      saveResultAttempt: data.saveResultAttempt,
+    })
+    .then((accepted) => {
+      if (
+        accepted === true &&
+        settledSaveResultAcknowledgements.get(data.requestId) === remembered
+      ) {
+        settledSaveResultAcknowledgements.delete(data.requestId);
+      }
+    })
+    .catch((error) => {
+      console.error('Failed to acknowledge save outcome:', error);
+    });
+  return true;
+}
+
+function hasPendingSaveForDocument(identityKey) {
+  for (const entry of pendingSaves.values()) {
+    if (entry.identityKey === identityKey) return true;
+  }
+  return false;
+}
+
+function releaseSaveOrderingState(identityKey) {
+  if (hasPendingSaveForDocument(identityKey)) return;
+  latestSaveSequenceByDocument.delete(identityKey);
+  lastSettledSaveSequenceByDocument.delete(identityKey);
+}
+
+function settleSaveResult(data, consume = true) {
+  if (!data || typeof data !== 'object') return null;
+  if (saveResultDecisions.has(data)) return saveResultDecisions.get(data);
+  const requestId = data.requestId;
+  const request = data.saveRequest;
+  if (
+    data.saveRequestSession !== saveRequestSession ||
+    !request ||
+    request.pageSession !== saveRequestSession ||
+    request.requestId !== requestId
+  ) {
+    return null;
+  }
+  const entry =
+    Number.isSafeInteger(requestId) && requestId > 0
+    ? pendingSaves.get(requestId)
+    : null;
+  if (!entry) return null;
+  if (!consume) return Object.freeze({ expected: true });
+
+  pendingSaves.delete(requestId);
+  if (entry.settled) return null;
+  entry.settled = true;
+  publishPendingSaveStatusChange({ settlement: true });
+  const authorized = saveRequestAuthorizesEntry(data, entry);
+  const latestSequence =
+    latestSaveSequenceByDocument.get(entry.identityKey) || 0;
+  const lastSettledSequence =
+    lastSettledSaveSequenceByDocument.get(entry.identityKey) || 0;
+  const mayMutate =
+    authorized &&
+    data.settlementOnly !== true &&
+    entry.sequence === latestSequence &&
+    entry.sequence > lastSettledSequence;
+  const conflictAfterRequest = data.success === true &&
+    reloadConflictFor(entry.path);
+  if (entry.sequence > lastSettledSequence) {
+    lastSettledSaveSequenceByDocument.set(
+      entry.identityKey,
+      entry.sequence
+    );
+  }
+
+  const decision = Object.freeze({
+    requestId,
+    sequence: entry.sequence,
+    identity: entry.identity,
+    identityKey: entry.identityKey,
+    stateKey: entry.stateKey,
+    mayMutate,
+    settlementOnly: data.settlementOnly === true || !authorized,
+    success:
+      authorized &&
+      data.settlementOnly !== true &&
+      data.success === true &&
+      !conflictAfterRequest,
+    conflict: data.conflict === true || conflictAfterRequest,
+    deleted: data.deleted === true,
+    error:
+      conflictAfterRequest
+        ? 'The document became conflicted during Save. Its in-memory copy was kept; review before saving.'
+        : typeof data.error === 'string'
+        ? data.error
+        : authorized
+          ? ''
+          : 'Save result identity did not match its request.',
+    savedContent:
+      data.success === true && typeof data.savedContent === 'string'
+        ? data.savedContent
+        : entry.content,
+    modifiedTime: data.modifiedTime,
+    diskVersion: data.diskVersion || null,
+    path: typeof data.path === 'string' ? data.path : null,
+  });
+  saveResultDecisions.set(data, decision);
+  entry.resolve(decision.success);
+  releaseSaveOrderingState(entry.identityKey);
+  return decision;
+}
+
+function applyRendererSaveResultDecision(decision) {
+  if (
+    !decision ||
+    decision.mayMutate !== true ||
+    appliedRendererSaveDecisions.has(decision)
+  ) {
+    return false;
+  }
+  const tabs = window.CustomTabs;
+  if (
+    !tabs ||
+    typeof tabs.ownsDocumentIdentity !== 'function' ||
+    !tabs.ownsDocumentIdentity(decision.identity)
+  ) {
+    return false;
+  }
+  const currentIdentity = currentSaveDocumentIdentity();
+  if (!mayMutateRendererDocument('ipc-save-result')) return false;
+  appliedRendererSaveDecisions.add(decision);
+  const stateKey = fileTrackingPathKey(decision.path);
+  if (!stateKey) return false;
+  const isForCurrent =
+    !!currentIdentity &&
+    saveDocumentIdentityKey(currentIdentity) === decision.identityKey;
+
+  if (decision.success) {
+    failedSaves.delete(stateKey);
+    reloadConflicts.delete(stateKey);
+    if (!isForCurrent) return true;
+    if (isEditMode) {
+      originalMarkdown = decision.savedContent;
+      setDocumentDirtyState(
+        !sameReloadDocument(markdownEditor.value, decision.savedContent)
+      );
+    } else if (sameReloadDocument(originalMarkdown, decision.savedContent)) {
+      originalMarkdown = decision.savedContent;
+      setDocumentDirtyState(false);
+    } else {
+      setDocumentDirtyState(true);
+    }
+    if (
+      hasPendingSaveFor(decision.path) &&
+      !pendingSaveTrackingReconciliations.has(decision.identityKey)
+    ) {
+      pendingSaveTrackingReconciliations.add(decision.identityKey);
+      waitForPendingSaves(decision.path).then(() => {
+        pendingSaveTrackingReconciliations.delete(decision.identityKey);
+        const currentIdentity = currentSaveDocumentIdentity();
+        if (
+          currentIdentity &&
+          saveDocumentIdentityKey(currentIdentity) === decision.identityKey &&
+          !hasPendingSaveFor(decision.path) &&
+          !saveFailedFor(decision.path) &&
+          !reloadConflictFor(decision.path)
+        ) {
+          updateUnsavedIndicator();
+        }
+      });
     }
     console.log('File saved successfully');
   } else {
-    console.error('Save failed:', data.error);
-    // A failed write means that document's latest bytes live only in memory.
-    // Recording the PATH keeps the dirty flag alive through hasUnsavedWork(),
-    // so the reload/open guards prompt instead of discarding, and toggling into
-    // edit mode preserves rather than clears the flag - which is where the user
-    // can actually retry, since view mode has no Save affordance at all
-    // (Ctrl+S is gated on edit mode; the Save button lives in the editor panel).
-    //
-    // Recorded regardless of the CURRENT mode. Gating this on !isEditMode was a
-    // real hole: a view-mode note's write can still be in flight when the user
-    // enters edit mode to retry a previous failure, and the reply that then
-    // arrives describes bytes that never reached disk. Which mode the user
-    // happens to be in when the reply lands says nothing about whether the
-    // write succeeded.
-    if (savedPath) {
-      const failedKeys = new Set([savedDocumentKey]);
-      if (!entry) failedKeys.add(canonicalReloadPath(savedPath));
-      for (const failedKey of failedKeys) {
-        if (failedKey) failedSaves.add(failedKey);
-      }
-      if (data.conflict && savedDocumentKey) {
-        reloadConflicts.add(savedDocumentKey);
-      }
+    if (!decision.deleted) {
+      failedSaves.add(stateKey);
+      if (decision.conflict) reloadConflicts.add(stateKey);
     }
-    if (isForCurrent) {
-      setDocumentDirtyState(true);
+    if (!isForCurrent) {
+      showNotification(
+        i18n('alert.saveFailed') +
+          `${path.basename(decision.path)}: ${decision.error}`,
+        5000
+      );
+      return true;
     }
-    alert(i18n('alert.saveFailed') + data.error);
+    // Typing or a view-mode mutation established dirtiness before Save. The
+    // failed write is a separate witness and cannot invent an edit when the
+    // immutable request contained the clean baseline.
+    updateUnsavedIndicator();
+    console.error('Save failed:', decision.error);
+    alert(i18n('alert.saveFailed') + decision.error);
   }
-  // Always settle, including for background documents and failures: something
-  // may be parked on this promise, and leaving it pending would hang that
-  // caller until its timeout instead of letting it act on the real outcome.
-  if (entry) entry.resolve(data.success === true);
-});
+  return true;
+}
+
+function handleSaveMarkdownResult(event, data) {
+  const decision = settleSaveResult(data);
+  if (!decision) {
+    if (acknowledgeSaveResult(data, false)) {
+      console.log('Acknowledged duplicate save result');
+      return null;
+    }
+    console.log('Ignoring save result with foreign or stale identity');
+    return null;
+  }
+  acknowledgeSaveResult(data, true);
+  if (!frozenForShutdown()) applyRendererSaveResultDecision(decision);
+  return decision;
+}
+
+ipcRenderer.on('save-markdown-result', handleSaveMarkdownResult);
 
 // Update unsaved indicator
-function updateUnsavedIndicator() {
+function updateUnsavedIndicator(allowTrackingTransition = true) {
   const trackingBlocked =
     hasUnsavedChanges ||
     hasPendingSaveFor(currentFilePath) ||
@@ -4379,16 +4928,15 @@ function updateUnsavedIndicator() {
     // write, advance the path baseline, and send a notification that this
     // renderer deliberately drops because the document is dirty.
     fileTrackingPauseOwner = fileTrackingPathKey(currentFilePath);
-    if (isFileTrackingActive) setFileTrackingIntent(false);
+    if (allowTrackingTransition && isFileTrackingActive) {
+      setFileTrackingIntent(false);
+    }
   } else {
     unsavedIndicator.style.display = 'none';
-    const tabs = window.CustomTabs;
-    const frozen =
-      !!tabs &&
-      typeof tabs.isDocumentFrozen === 'function' &&
-      tabs.isDocumentFrozen();
+    const frozen = frozenForShutdown();
     const currentOwner = fileTrackingPathKey(currentFilePath);
     if (
+      allowTrackingTransition &&
       !frozen &&
       fileTrackingResumeHold === 0 &&
       currentOwner &&
@@ -6894,11 +7442,112 @@ function setFileTrackingIntent(active, send = true) {
     ? null
     : fileTrackingPathKey(currentFilePath);
   if (send) {
+    const owner = documentOwnerFor(currentFilePath);
+    const envelope = watcherControlEnvelope(currentFilePath, owner);
+    if (!envelope) {
+      isFileTrackingActive = false;
+      return false;
+    }
     ipcRenderer.send(
-      isFileTrackingActive ? 'resume-file-watching' : 'pause-file-watching'
+      isFileTrackingActive ? 'resume-file-watching' : 'pause-file-watching',
+      envelope
     );
   }
   return isFileTrackingActive;
+}
+
+// WHO OWNS A DOCUMENT SELECTION. The main process reports an external deletion
+// to the document that owned the watcher when it observed it, and only that
+// document may consume the report: a notification that lands while another tab
+// is on screen is not this document's news, and a tab that was closed - or
+// replaced by a new tab on the same path - is not the tab that was reading it.
+// A path spelling alone cannot express any of that, so every selection names
+// the page session and the tab that asked for it.
+//
+// The tab id is passed in by the caller wherever a switch is in progress: the
+// tab layer asserts ownership for the tab it is switching TO, from inside
+// beginFileOpen, before that tab becomes the active one.
+function documentOwnerFor(
+  filePath,
+  ownerTabId = null,
+  selectionGeneration = activeFileSelectionGeneration,
+) {
+  const tabs = window.CustomTabs;
+  const identity =
+    tabs && typeof tabs.getDocumentIdentityForTab === 'function'
+      ? tabs.getDocumentIdentityForTab(
+          Number.isSafeInteger(ownerTabId)
+            ? ownerTabId
+            : tabs.getActiveTabId(),
+          filePath,
+          reloadRequestSession
+        )
+      : null;
+  const tabId = Number.isSafeInteger(ownerTabId)
+    ? ownerTabId
+    : identity && identity.tabId;
+  const selectedIdentity =
+    identity && identity.tabId === tabId ? identity : null;
+  if (
+    !selectedIdentity ||
+    !Number.isSafeInteger(selectionGeneration) ||
+    selectionGeneration <= 0
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    pageSession: reloadRequestSession,
+    rendererGeneration: selectedIdentity.rendererGeneration,
+    tabId: selectedIdentity.tabId,
+    documentGeneration: selectedIdentity.documentGeneration,
+    pathKey: selectedIdentity.pathKey,
+    selectionGeneration,
+  });
+}
+
+function watcherControlEnvelope(filePath, owner) {
+  if (
+    typeof filePath !== 'string' ||
+    filePath.length === 0 ||
+    !owner ||
+    owner.pageSession !== reloadRequestSession ||
+    !Number.isSafeInteger(owner.rendererGeneration) ||
+    owner.rendererGeneration <= 0
+  ) {
+    return null;
+  }
+  return Object.freeze({
+    filePath,
+    pageSession: reloadRequestSession,
+    rendererGeneration: owner.rendererGeneration,
+    owner,
+  });
+}
+
+function registerDocumentOwner(filePath, identity, diskVersion, modifiedTime) {
+  if (
+    !identity ||
+    identity.pageSession !== reloadRequestSession ||
+    !Number.isSafeInteger(identity.rendererGeneration) ||
+    !Number.isSafeInteger(identity.tabId) ||
+    !Number.isSafeInteger(identity.documentGeneration) ||
+    !diskVersion ||
+    diskVersion.mtimeMs !== modifiedTime
+  ) return false;
+  try {
+    ipcRenderer.send('register-document-owner', {
+      filePath,
+      pageSession: identity.pageSession,
+      rendererGeneration: identity.rendererGeneration,
+      owner: { ...identity, selectionGeneration: 1 },
+      diskVersion,
+      modifiedTime,
+    });
+    return true;
+  } catch (error) {
+    console.error('Could not register background document owner:', error);
+    return false;
+  }
 }
 
 function assertFileTrackingOwnership(
@@ -6906,88 +7555,482 @@ function assertFileTrackingOwnership(
   active,
   {
     adoptBaseline = false,
+    adoptPathIdentity = false,
     modifiedTime = null,
     diskVersion = null,
+    ownerTabId = null,
+    expectedDocumentGeneration = null,
+    expectedPathKey = null,
+    deletionAdoptionApproval = null,
+    expectedContentDigest = null,
+    sourceFilePath = filePath,
+    returnDecision = false,
+    stagedReloadOwner = null,
   } = {},
 ) {
+  const previousSelection = {
+    generation: fileSelectionGeneration,
+    activeGeneration: activeFileSelectionGeneration,
+    active: isFileTrackingActive,
+    pauseOwner: fileTrackingPauseOwner,
+  };
+  const refused = (mayHaveMoved = false) => {
+    if (returnDecision) {
+      fileSelectionGeneration = previousSelection.generation;
+      activeFileSelectionGeneration = previousSelection.activeGeneration;
+      isFileTrackingActive = previousSelection.active;
+      fileTrackingPauseOwner = previousSelection.pauseOwner;
+    }
+    return returnDecision ? Object.freeze({
+        accepted: false, trackingActive: false, mayHaveMoved,
+      }) : false;
+  };
   if (!filePath) {
     stopFileTrackingIntent();
-    return false;
+    return refused();
   }
 
   const requestedOwner = fileTrackingPathKey(filePath);
   const currentOwner = fileTrackingPathKey(currentFilePath);
   if (!requestedOwner || !currentOwner || requestedOwner !== currentOwner) {
-    return false;
+    return refused();
   }
 
-  const tabs = window.CustomTabs;
-  const retainedFreeze =
-    !!tabs &&
-    typeof tabs.isDocumentFrozen === 'function' &&
-    tabs.isDocumentFrozen();
-  const trackingActive =
-    active !== false &&
-    !hasUnsavedChanges &&
-    !hasPendingSaveFor(filePath) &&
-    !saveFailedFor(filePath) &&
-    !reloadConflictFor(filePath) &&
-    !retainedFreeze;
+  const stagedReload = stagedReloadOwner !== null;
+  if (
+    stagedReload &&
+    (!returnDecision ||
+      !adoptBaseline ||
+      !adoptPathIdentity ||
+      !deletionAdoptionApproval ||
+      hasPendingSaveFor(filePath))
+  ) return refused();
+  const trackingActive = stagedReload
+    ? active !== false
+    : active !== false &&
+      !hasUnsavedChanges &&
+      !hasPendingSaveFor(filePath) &&
+      !saveFailedFor(filePath) &&
+      !reloadConflictFor(filePath);
   const wasTrackingActive = isFileTrackingActive;
+  const selectionGeneration = ++fileSelectionGeneration;
+  const previousOwner = documentOwnerFor(
+    filePath, ownerTabId, selectionGeneration,
+  );
+  const owner = stagedReload && previousOwner && stagedReloadOwner &&
+    stagedReloadOwner.tabId === previousOwner.tabId &&
+    Number.isSafeInteger(stagedReloadOwner.documentGeneration) &&
+    stagedReloadOwner.documentGeneration >
+      previousOwner.documentGeneration &&
+    stagedReloadOwner.pathKey === deletionAdoptionApproval.pathKey
+    ? Object.freeze({
+        ...previousOwner,
+        documentGeneration: stagedReloadOwner.documentGeneration,
+        pathKey: stagedReloadOwner.pathKey,
+      })
+    : stagedReload ? null : previousOwner;
+  if (
+    !owner ||
+    (Number.isSafeInteger(expectedDocumentGeneration) &&
+      owner.documentGeneration !== expectedDocumentGeneration) ||
+    (typeof expectedPathKey === 'string' &&
+      owner.pathKey !== expectedPathKey)
+  ) {
+    isFileTrackingActive = false;
+    fileTrackingPauseOwner = fileTrackingPathKey(filePath);
+    return refused();
+  }
+  activeFileSelectionGeneration = selectionGeneration;
+  let refusedDeletionAdoption = false;
+  if (adoptBaseline && adoptPathIdentity) {
+    if (!stagedReload) {
+      const deletionState = queryDocumentDiskAdoptionState(
+        filePath, owner, modifiedTime, diskVersion
+      );
+      if (
+        !deletionState ||
+        deletionState.known !== true ||
+        deletionState.versionMatches !== true ||
+        deletionState.pathKey !== owner.pathKey
+      ) {
+        console.error('Refusing disk adoption without a verified disk version');
+        refusedDeletionAdoption = true;
+      } else if (
+        deletionState.ownDeletion ||
+        deletionState.orphaned ||
+        deletionState.pathOnly ||
+        deletionState.overflow
+      ) {
+        // Main checks the exact capability and evidence revision in the same
+        // synchronous selection that retires this episode.
+        refusedDeletionAdoption = !deletionAdoptionApproval;
+      }
+    }
+    if (
+      deletionAdoptionApproval &&
+      (deletionAdoptionApproval.committed !== true ||
+       deletionAdoptionApproval.incomingSpelling !==
+         fileTrackingPathKey(sourceFilePath) ||
+       deletionAdoptionApproval.ownerSpelling !==
+         fileTrackingPathKey(filePath) ||
+       deletionAdoptionApproval.tabId !== owner.tabId ||
+       deletionAdoptionApproval.documentGeneration !==
+         owner.documentGeneration ||
+       deletionAdoptionApproval.pathKey !== owner.pathKey ||
+       deletionAdoptionApproval.contentDigest !== expectedContentDigest)
+    ) {
+      refusedDeletionAdoption = true;
+    }
+    if (refusedDeletionAdoption) {
+      showNotification(
+        'Disk adoption was declined or could not be verified. ' +
+          'The deletion conflict remains open.',
+        6000
+      );
+      if (returnDecision) return refused();
+    }
+  }
   const selection = {
     filePath,
-    adoptBaseline: adoptBaseline === true,
+    adoptBaseline: adoptBaseline === true && !refusedDeletionAdoption,
+    adoptPathIdentity:
+      adoptPathIdentity === true && !refusedDeletionAdoption,
     modifiedTime: Number.isFinite(modifiedTime) ? modifiedTime : null,
     diskVersion,
+    trackingActive: trackingActive && !refusedDeletionAdoption,
+    owner,
   };
+  if (deletionAdoptionApproval && adoptBaseline && adoptPathIdentity &&
+      !refusedDeletionAdoption) {
+    selection.adoption = {
+      capability: deletionAdoptionApproval.capability,
+      revision: deletionAdoptionApproval.revision,
+      contentDigest: deletionAdoptionApproval.contentDigest,
+      sourceFilePath,
+      ownerFilePath: filePath,
+    };
+  }
+  const envelope = watcherControlEnvelope(filePath, selection.owner);
+  if (!envelope) {
+    isFileTrackingActive = false;
+    fileTrackingPauseOwner = fileTrackingPathKey(filePath);
+    return refused();
+  }
+  Object.assign(selection, envelope);
 
-  isFileTrackingActive = trackingActive;
-  fileTrackingPauseOwner = trackingActive
+  isFileTrackingActive = selection.trackingActive;
+  fileTrackingPauseOwner = selection.trackingActive
     ? null
     : fileTrackingPathKey(filePath);
-  if (trackingActive) {
+  if (returnDecision) {
+    try {
+      const decision = ipcRenderer.sendSync(
+        'select-file-tracking', selection,
+      );
+      if (!decision || decision.accepted !== true) {
+        console.error('File tracking selection refused:', decision);
+        return refused(decision && decision.mayHaveMoved === true);
+      }
+      if (selection.adoption &&
+          decision.completedAdoption !== selection.adoption.capability) {
+        console.error('File tracking did not complete its disk adoption:', decision);
+        return refused(true);
+      }
+      if (selection.adoption && (
+        !decision.approvedOwner ||
+        decision.approvedOwner.pageSession !== owner.pageSession ||
+        decision.approvedOwner.rendererGeneration !== owner.rendererGeneration ||
+        decision.approvedOwner.tabId !== owner.tabId ||
+        decision.approvedOwner.documentGeneration !== owner.documentGeneration ||
+        decision.approvedOwner.selectionGeneration !== owner.selectionGeneration ||
+        decision.approvedOwner.pathKey !== owner.pathKey ||
+        decision.approvedPathKey !== owner.pathKey ||
+        decision.approvedSourceFilePath !== sourceFilePath ||
+        decision.approvedOwnerFilePath !== filePath ||
+        !diskVersionsEqual(decision.approvedDiskVersion, diskVersion)
+      )) {
+        console.error('File tracking returned an inconsistent adopted owner:', decision);
+        markReloadConflict(filePath);
+        reportAdoptionTrackingConflict(filePath, owner);
+        return refused(true);
+      }
+      isFileTrackingActive = decision.trackingActive === true;
+      if (decision.unresolvedEvidence === true) {
+        console.error('Disk adoption retained unresolved deletion evidence');
+        markReloadConflict(filePath);
+        showNotification(
+          'The file was opened, but deletion evidence remains unresolved. Do not discard the earlier copy.',
+          8000
+        );
+      }
+      if (decision.trackingConflict === true) {
+        console.error('Disk moved after selecting its tracking owner');
+        markReloadConflict(filePath);
+        showNotification(
+          'The file changed again during tracking selection. Its current disk version was not adopted.',
+          8000
+        );
+      }
+      return Object.freeze({
+        accepted: true,
+        trackingActive: isFileTrackingActive,
+        owner: selection.adoption ? decision.approvedOwner : owner,
+        pathKey: selection.adoption ? decision.approvedPathKey : owner.pathKey,
+        diskVersion: selection.adoption
+          ? decision.approvedDiskVersion : diskVersion,
+        unresolvedEvidence: decision.unresolvedEvidence === true,
+        trackingConflict: decision.trackingConflict === true,
+      });
+    } catch (error) {
+      console.error('Could not confirm file tracking selection:', error);
+      return refused(true);
+    }
+  }
+  let sentAny = false;
+  try {
+  if (selection.trackingActive) {
     // A clean document may be selected while the previous dirty document left
     // main paused. Name the new owner before resuming so no watcher is ever
     // armed against the old path.
     ipcRenderer.send('set-active-file', selection);
-    ipcRenderer.send('resume-file-watching');
+    sentAny = true;
+    ipcRenderer.send('resume-file-watching', envelope);
+    sentAny = true;
   } else {
     // A dirty document must be paused before selection. Otherwise selecting it
     // can transiently arm a watcher and adopt current disk state before the
     // renderer has asserted that its in-memory bytes own the document.
-    if (wasTrackingActive) ipcRenderer.send('pause-file-watching');
+    if (wasTrackingActive) {
+      ipcRenderer.send('pause-file-watching', envelope);
+      sentAny = true;
+    }
     ipcRenderer.send('set-active-file', selection);
+    sentAny = true;
   }
-  return trackingActive;
+  } catch (error) {
+    console.error('Failed to assert file tracking ownership:', error);
+    return refused(sentAny);
+  }
+  return selection.trackingActive;
 }
 
-function adoptFileTrackingBaseline(filePath, modifiedTime, diskVersion = null) {
-  if (!filePath || !Number.isFinite(modifiedTime)) return false;
-  ipcRenderer.send('adopt-file-baseline', {
-    filePath,
-    modifiedTime,
-    diskVersion,
+function selectStagedFileReload(
+  data, ownerFilePath, tabId, oldGeneration, approval, reservedIdentity,
+) {
+  const filePath = data && data.path;
+  const tabs = window.CustomTabs;
+  const current = tabs &&
+    tabs.getActiveDocumentIdentity(ownerFilePath, reloadRequestSession);
+  if (
+    !data ||
+    validateReloadResultForCurrentPage(data) !== null ||
+    !current ||
+    current.tabId !== tabId ||
+    current.documentGeneration !== oldGeneration ||
+    !reservedIdentity ||
+    reservedIdentity.tabId !== tabId ||
+    !approval ||
+    approval.committed !== true ||
+    approval.documentGeneration !== reservedIdentity.documentGeneration ||
+    fileTrackingPathKey(currentFilePath) !==
+      fileTrackingPathKey(ownerFilePath) ||
+    hasPendingSaveFor(ownerFilePath)
+  ) {
+    return Object.freeze({
+      accepted: false, trackingActive: false, mayHaveMoved: false,
+    });
+  }
+  return assertFileTrackingOwnership(ownerFilePath, true, {
+    adoptBaseline: true,
+    adoptPathIdentity: true,
+    modifiedTime: data.modifiedTime,
+    diskVersion: data.diskVersion,
+    ownerTabId: tabId,
+    expectedDocumentGeneration: reservedIdentity.documentGeneration,
+    expectedPathKey: approval.pathKey,
+    deletionAdoptionApproval: approval,
+    expectedContentDigest: approval.contentDigest,
+    sourceFilePath: filePath,
+    stagedReloadOwner: {
+      ...reservedIdentity,
+      pathKey: approval.pathKey,
+    },
+    returnDecision: true,
   });
-  return true;
+}
+
+function quarantineSelectedFileReload(data, ownerFilePath, selection) {
+  const owner = selection && selection.owner;
+  if (
+    !mayMutateRendererDocument('reload-quarantine') ||
+    !data ||
+    typeof data.path !== 'string' ||
+    !owner ||
+    selection.accepted !== true ||
+    owner.pageSession !== reloadRequestSession ||
+    owner.pathKey !== selection.pathKey ||
+    !diskVersionsEqual(selection.diskVersion, data.diskVersion) ||
+    fileTrackingPathKey(ownerFilePath) !==
+      fileTrackingPathKey(currentFilePath)
+  ) return false;
+  let reply;
+  try {
+    reply = ipcRenderer.sendSync('quarantine-selected-file-tracking', {
+      filePath: ownerFilePath,
+      pageSession: reloadRequestSession,
+      rendererGeneration: owner.rendererGeneration,
+      owner,
+      approvedPathKey: selection.pathKey,
+      approvedDiskVersion: selection.diskVersion,
+    });
+  } catch (error) {
+    console.error('Could not quarantine approved tracking owner:', error);
+    return false;
+  }
+  if (
+    !reply ||
+    reply.quarantined !== true ||
+    !reply.owner ||
+    reply.owner.pageSession !== owner.pageSession ||
+    reply.owner.rendererGeneration !== owner.rendererGeneration ||
+    reply.owner.tabId !== owner.tabId ||
+    reply.owner.documentGeneration !== owner.documentGeneration ||
+    reply.owner.selectionGeneration !== owner.selectionGeneration ||
+    reply.owner.pathKey !== owner.pathKey ||
+    reply.pathKey !== selection.pathKey ||
+    !diskVersionsEqual(reply.diskVersion, selection.diskVersion)
+  ) {
+    console.error('Approved tracking owner quarantine refused:', reply);
+    return false;
+  }
+  for (const spelling of [
+    fileTrackingPathKey(data.path),
+    fileTrackingPathKey(ownerFilePath),
+  ]) {
+    if (spelling) reloadPathAliases.set(spelling, reply.pathKey);
+  }
+  isFileTrackingActive = false;
+  fileTrackingPauseOwner = fileTrackingPathKey(ownerFilePath);
+  return markReloadConflict(ownerFilePath);
+}
+
+function quarantineBackgroundDocumentOwner(filePath, identity, diskVersion) {
+  if (
+    !identity ||
+    identity.pageSession !== reloadRequestSession ||
+    !Number.isSafeInteger(identity.tabId) ||
+    !Number.isSafeInteger(identity.documentGeneration) ||
+    typeof identity.pathKey !== 'string' ||
+    !validDiskVersion(diskVersion)
+  ) return false;
+  const owner = { ...identity, selectionGeneration: 1 };
+  try {
+    const reply = ipcRenderer.sendSync('quarantine-selected-file-tracking', {
+      filePath,
+      pageSession: reloadRequestSession,
+      rendererGeneration: identity.rendererGeneration,
+      owner,
+      approvedPathKey: identity.pathKey,
+      approvedDiskVersion: diskVersion,
+      background: true,
+    });
+    if (
+      !reply ||
+      reply.quarantined !== true ||
+      !reply.owner ||
+      reply.owner.tabId !== identity.tabId ||
+      reply.owner.documentGeneration !== identity.documentGeneration ||
+      reply.owner.pathKey !== identity.pathKey ||
+      reply.pathKey !== identity.pathKey ||
+      !diskVersionsEqual(reply.diskVersion, diskVersion)
+    ) {
+      console.error('Could not quarantine background document owner:', reply);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.error('Background document owner quarantine failed:', error);
+    return false;
+  }
 }
 
 function stopFileTrackingIntent() {
+  const owner = documentOwnerFor(currentFilePath);
+  const envelope = watcherControlEnvelope(currentFilePath, owner);
   isFileTrackingActive = false;
   fileTrackingPauseOwner = null;
-  ipcRenderer.send('stop-file-watching');
+  if (!envelope) return false;
+  ipcRenderer.send('stop-file-watching', envelope);
+  return true;
 }
 
 function beginFileOpen(data, options = {}) {
   if (!mayMutateRendererDocument(options.source || 'ipc-file-opened')) {
     return null;
   }
-  const openSequence = ++fileOpenSequence;
   const openedPath = data && data.path;
   const openedContent = data && data.content;
   const dirty = options.hasUnsavedChanges === true;
-  const previousOpenedPath = canonicalReloadPath(openedPath);
+  const incomingSpelling = fileTrackingPathKey(openedPath);
+  const prior = {
+    filePath: currentFilePath,
+    markdown: originalMarkdown,
+    editorValue: isEditMode ? markdownEditor.value : null,
+    dirty: hasUnsavedChanges,
+    renderedContent: _lastRenderedContent,
+    history: historySnapshot(),
+    failures: new Set(failedSaves),
+    conflicts: new Set(reloadConflicts),
+    editBaselines: new Map(editSessionBaselines),
+    trackingActive: isFileTrackingActive,
+    pauseOwner: fileTrackingPauseOwner,
+    selectionGeneration: fileSelectionGeneration,
+    activeSelectionGeneration: activeFileSelectionGeneration,
+    sequence: fileOpenSequence,
+    hadAlias: !!incomingSpelling &&
+      reloadPathAliases.has(incomingSpelling),
+    alias: incomingSpelling
+      ? reloadPathAliases.get(incomingSpelling)
+      : null,
+  };
+  const openSequence = ++fileOpenSequence;
   if (options.adoptPathIdentity === true && openedPath) {
-    rebindReloadPath(openedPath);
+    if (options.deletionAdoptionApproval) {
+      if (!bindApprovedReloadPath(
+        openedPath, options.deletionAdoptionApproval.pathKey
+      ) || !approvedReloadSnapshotMatches(
+        openedPath, options.deletionAdoptionApproval.pathKey,
+        options.deletionAdoptionApproval.version
+      )) {
+        console.error('File target moved before approved open');
+        fileOpenSequence = prior.sequence;
+        if (incomingSpelling) {
+          if (prior.hadAlias) {
+            reloadPathAliases.set(incomingSpelling, prior.alias);
+          } else {
+            reloadPathAliases.delete(incomingSpelling);
+          }
+        }
+        if (typeof options.onTrackingRefused === 'function') {
+          try {
+            options.onTrackingRefused();
+          } catch (error) {
+            console.error('Could not restore the prior tab after open refusal:', error);
+            showNotification(
+              'The earlier copy could not be restored automatically. Keep the in-memory document.',
+              8000
+            );
+          }
+        }
+        showNotification(
+          'The file target moved after approval. The earlier copy was kept.',
+          8000
+        );
+        return null;
+      }
+    } else {
+      rebindReloadPath(openedPath);
+    }
   }
   // Clear undo/redo history on new file
   historyClear();
@@ -6999,17 +8042,17 @@ function beginFileOpen(data, options = {}) {
   updateFileInfo(openedPath);
   // Store original markdown for editor
   originalMarkdown = openedContent;
+  let trackingDecision;
+  try {
   withFileTrackingResumeHeld(() => {
     // This document has just been re-read from disk, so any earlier failed
     // write against THIS path describes content that no longer exists. Scoped
     // to the path: a failure for another tab must survive.
     if (options.clearFailedSave !== false && openedPath) {
-      const canonicalOpenedPath = canonicalReloadPath(openedPath);
-      if (canonicalOpenedPath) failedSaves.delete(canonicalOpenedPath);
-      if (previousOpenedPath) failedSaves.delete(previousOpenedPath);
-      if (options.adoptPathIdentity === true) {
-        if (canonicalOpenedPath) reloadConflicts.delete(canonicalOpenedPath);
-        if (previousOpenedPath) reloadConflicts.delete(previousOpenedPath);
+      const openedStateKey = fileTrackingPathKey(openedPath);
+      if (openedStateKey) failedSaves.delete(openedStateKey);
+      if (options.adoptPathIdentity === true && openedStateKey) {
+        reloadConflicts.delete(openedStateKey);
       }
     }
     if (!isEditMode) {
@@ -7024,16 +8067,121 @@ function beginFileOpen(data, options = {}) {
       captureEditSessionBaseline(options.preserveEditBaseline ? false : true);
     }
 
-    assertFileTrackingOwnership(
+    trackingDecision = assertFileTrackingOwnership(
       openedPath,
       !dirty && options.trackingActive !== false,
       {
         adoptBaseline: !dirty && options.adoptDiskBaseline !== false,
+        adoptPathIdentity: options.adoptPathIdentity === true,
+        deletionAdoptionApproval:
+          options.deletionAdoptionApproval || null,
+        expectedContentDigest:
+          options.deletionAdoptionApproval
+            ? options.deletionAdoptionApproval.contentDigest
+            : null,
+        sourceFilePath: options.fileOpenSourcePath || openedPath,
         modifiedTime: data && data.modifiedTime,
         diskVersion: data && data.diskVersion,
+        // The tab this open belongs to, named by the tab layer: it is not the
+        // active tab yet, and a selection that named the outgoing tab would
+        // hand this document's watcher ownership to the wrong document.
+        ownerTabId: Number.isSafeInteger(options.ownerTabId)
+          ? options.ownerTabId
+          : null,
+        returnDecision: true,
       },
     );
   });
+  } catch (error) {
+    console.error('File-open tracking transition failed:', error);
+    trackingDecision = null;
+  }
+  if (!trackingDecision || trackingDecision.accepted !== true) {
+    fileOpenSequence = prior.sequence;
+    historyRestore(prior.history);
+    _lastRenderedContent = prior.renderedContent;
+    updateFileInfo(prior.filePath);
+    originalMarkdown = prior.markdown;
+    if (isEditMode && markdownEditor) {
+      markdownEditor.value = prior.editorValue;
+    }
+    failedSaves.clear();
+    for (const key of prior.failures) failedSaves.add(key);
+    reloadConflicts.clear();
+    for (const key of prior.conflicts) reloadConflicts.add(key);
+    editSessionBaselines.clear();
+    for (const [key, value] of prior.editBaselines) {
+      editSessionBaselines.set(key, value);
+    }
+    hasUnsavedChanges = prior.dirty;
+    isFileTrackingActive = prior.trackingActive;
+    fileSelectionGeneration = prior.selectionGeneration;
+    activeFileSelectionGeneration = prior.activeSelectionGeneration;
+    if (incomingSpelling) {
+      if (prior.hadAlias) {
+        reloadPathAliases.set(incomingSpelling, prior.alias);
+      } else {
+        reloadPathAliases.delete(incomingSpelling);
+      }
+    }
+    updateUnsavedIndicator(false);
+    fileTrackingPauseOwner = prior.pauseOwner;
+    let priorOwnerRestored = true;
+    if (typeof options.onTrackingRefused === 'function') {
+      try {
+        options.onTrackingRefused();
+      } catch (error) {
+        priorOwnerRestored = false;
+        console.error('Could not restore the tab owner after file-open refusal:', error);
+        showNotification(
+          'The previous document owner could not be restored. Retry selecting the file.',
+          6000
+        );
+      }
+    }
+    if (prior.filePath && priorOwnerRestored) {
+      const restoredSelection = assertFileTrackingOwnership(
+        prior.filePath, prior.trackingActive, {
+          adoptBaseline: false,
+          returnDecision: true,
+        },
+      );
+      if (!restoredSelection || restoredSelection.accepted !== true) {
+        console.error('Could not reassert the previous file tracking owner:', restoredSelection);
+        showNotification(
+          'The previous document is still open, but its watcher could not be confirmed.',
+          6000
+        );
+      }
+    }
+    showNotification(
+      'The file changed before its tracking owner could be confirmed. The earlier document was kept.',
+      6000,
+    );
+    return null;
+  }
+
+  const postSelectionPathConflict = !!options.deletionAdoptionApproval &&
+    (!approvedReloadSnapshotMatches(
+      openedPath, options.deletionAdoptionApproval.pathKey,
+      options.deletionAdoptionApproval.version
+    ) || !approvedReloadSnapshotMatches(
+      options.fileOpenSourcePath || openedPath,
+      options.deletionAdoptionApproval.pathKey,
+      options.deletionAdoptionApproval.version
+    ));
+  if (postSelectionPathConflict) {
+    markReloadConflict(openedPath);
+    reportAdoptionTrackingConflict(openedPath, trackingDecision.owner);
+    showNotification(
+      'The file target moved after open approval. Its approved copy is shown with a conflict; review before saving.',
+      8000
+    );
+  }
+
+  if (typeof options.onTrackingCommitted === 'function') {
+    options.onTrackingCommitted();
+  }
 
   // Own every non-visual part of the open synchronously. A render may take
   // seconds; phase-two freeze or a newer open can arrive during that await, so
@@ -7044,26 +8192,43 @@ function beginFileOpen(data, options = {}) {
     (options.normalScroll === 'caller'
       ? { type: 'caller', top: 0 }
       : { type: 'top', top: 0 });
-  if (options.recordNavigation !== false) {
-    addToNavigationHistory(openedPath, 0);
-  }
-  if (
-    options.recordRecents !== false &&
-    data &&
-    data.allPaths &&
-    data.allPaths.length > 0
-  ) {
-    data.allPaths.forEach(filePath => {
-      saveRecentFile(filePath);
-    });
-  } else if (options.recordRecents !== false) {
-    saveRecentFile(openedPath);
+  try {
+    if (options.recordNavigation !== false) {
+      addToNavigationHistory(openedPath, 0);
+    }
+    if (
+      options.recordRecents !== false &&
+      data &&
+      data.allPaths &&
+      data.allPaths.length > 0
+    ) {
+      data.allPaths.forEach(filePath => {
+        saveRecentFile(filePath);
+      });
+    } else if (options.recordRecents !== false) {
+      saveRecentFile(openedPath);
+    }
+  } catch (error) {
+    console.error('File opened, but navigation or recents could not be updated:', error);
+    showNotification(
+      'The document opened, but navigation history could not be updated.',
+      6000
+    );
   }
 
   return Object.freeze({
     sequence: openSequence,
     path: openedPath,
     postRenderScroll,
+    unresolvedEvidence:
+      trackingDecision.unresolvedEvidence === true,
+    postSelectionPathConflict,
+    approvedPathKey: options.deletionAdoptionApproval
+      ? options.deletionAdoptionApproval.pathKey : null,
+    approvedDiskVersion: options.deletionAdoptionApproval
+      ? options.deletionAdoptionApproval.version : null,
+    approvedSourcePath: options.fileOpenSourcePath || openedPath,
+    approvedOwner: trackingDecision.owner,
   });
 }
 
@@ -7081,6 +8246,21 @@ function completeFileOpen(context, visualCompletion = null) {
   // frozen; visual position must not move after that final approval.
   if (!mayMutateRendererDocument('ipc-file-opened-after-render')) {
     frozenFileOpenCompletionCount += 1;
+    return false;
+  }
+  if (context.approvedPathKey &&
+      (!approvedReloadSnapshotMatches(
+        context.path, context.approvedPathKey, context.approvedDiskVersion
+      ) || !approvedReloadSnapshotMatches(
+        context.approvedSourcePath, context.approvedPathKey,
+        context.approvedDiskVersion
+      ))) {
+    markReloadConflict(context.path);
+    reportAdoptionTrackingConflict(context.path, context.approvedOwner);
+    showNotification(
+      'The file target moved during display. Its approved copy is kept with a conflict; review before saving.',
+      8000
+    );
     return false;
   }
 
@@ -7125,7 +8305,63 @@ async function handleFileOpened(event, data) {
 ipcRenderer.on('file-opened', handleFileOpened);
 
 // Handle file changed externally
+function authorisesCurrentWatcherEvent(data) {
+  const watcher = data && data.watcher;
+  const owner = watcher && watcher.owner;
+  if (
+    !watcher ||
+    !owner ||
+    typeof data.path !== 'string' ||
+    data.path.length === 0 ||
+    watcher.pageSession !== reloadRequestSession ||
+    owner.pageSession !== reloadRequestSession ||
+    !Number.isSafeInteger(watcher.rendererGeneration) ||
+    watcher.rendererGeneration <= 0 ||
+    owner.rendererGeneration !== watcher.rendererGeneration ||
+    !Number.isSafeInteger(owner.tabId) ||
+    owner.tabId <= 0 ||
+    !Number.isSafeInteger(owner.documentGeneration) ||
+    owner.documentGeneration <= 0 ||
+    typeof owner.pathKey !== 'string' ||
+    owner.pathKey.length === 0 ||
+    !Number.isSafeInteger(watcher.selectionGeneration) ||
+    watcher.selectionGeneration <= 0 ||
+    !Number.isSafeInteger(watcher.watcherGeneration) ||
+    watcher.watcherGeneration <= 0
+  ) {
+    return false;
+  }
+  if (
+    fileTrackingPathKey(data.path) !==
+    fileTrackingPathKey(currentFilePath)
+  ) {
+    return false;
+  }
+  const tabs = window.CustomTabs;
+  const currentIdentity =
+    tabs && typeof tabs.getActiveDocumentIdentity === 'function'
+      ? tabs.getActiveDocumentIdentity(currentFilePath, reloadRequestSession)
+      : null;
+  const changedPath = canonicalReloadPath(data && data.path);
+  const currentPath = canonicalReloadPath(currentFilePath);
+  return !!(
+    currentIdentity &&
+    currentIdentity.rendererGeneration === watcher.rendererGeneration &&
+    owner.tabId === currentIdentity.tabId &&
+    owner.documentGeneration === currentIdentity.documentGeneration &&
+    owner.pathKey === currentIdentity.pathKey &&
+    watcher.selectionGeneration === activeFileSelectionGeneration &&
+    changedPath &&
+    changedPath === currentPath &&
+    changedPath === owner.pathKey
+  );
+}
+
 ipcRenderer.on('file-changed-externally', (event, data) => {
+  if (!authorisesCurrentWatcherEvent(data)) {
+    console.log('Ignoring unauthorized watcher change event');
+    return;
+  }
   console.log('File changed externally:', data.path);
 
   // Don't show notification if we have unsaved changes (tracking should be paused anyway)
@@ -7139,15 +8375,441 @@ ipcRenderer.on('file-changed-externally', (event, data) => {
 });
 
 // Handle file deleted
-ipcRenderer.on('file-deleted', (event, data) => {
-  const deletedPath = canonicalReloadPath(data && data.path);
+//
+// A DELIVERY, NOT A NOTIFICATION. The main process reports a deletion to the
+// document that owned the watcher when it saw the file go, and it holds that
+// report open until this page says it consumed it. So every arrival is
+// answered - consumed, or refused with the reason - and a refusal leaves the
+// report pending in main so that reactivating the owning tab replays it.
+// Dropping it silently here is what used to make a background tab's deletion
+// vanish: main had already marked it reported, and returning to that tab
+// warned about nothing.
+function currentDocumentRendererGeneration() {
+  const tabs = window.CustomTabs;
+  const identity =
+    tabs && typeof tabs.getActiveDocumentIdentity === 'function'
+      ? tabs.getActiveDocumentIdentity(
+          currentFilePath,
+          reloadRequestSession
+        )
+      : null;
+  return identity &&
+    Number.isSafeInteger(identity.rendererGeneration) &&
+    identity.rendererGeneration > 0
+    ? identity.rendererGeneration
+    : null;
+}
+
+function acknowledgeDeletionDelivery(delivery, consumed, why) {
+  const eventId = delivery && delivery.eventId;
+  if (!Number.isSafeInteger(eventId) || eventId <= 0) return false;
+  const rendererGeneration =
+    Number.isSafeInteger(delivery.rendererGeneration)
+      ? delivery.rendererGeneration
+      : delivery.owner &&
+          Number.isSafeInteger(delivery.owner.rendererGeneration)
+        ? delivery.owner.rendererGeneration
+        : currentDocumentRendererGeneration();
+  ipcRenderer.send('file-deleted-ack', {
+    eventId,
+    consumed: consumed === true,
+    why,
+    pageSession: delivery.pageSession,
+    rendererGeneration,
+    tabId: delivery.owner && delivery.owner.tabId,
+    documentGeneration:
+      delivery.owner && delivery.owner.documentGeneration,
+    pathKey: delivery.owner && delivery.owner.pathKey,
+    selectionGeneration: delivery.selectionGeneration,
+    watcherGeneration: delivery.watcherGeneration,
+    attempt: delivery.attempt,
+  });
+  return consumed;
+}
+
+// The authoritative answer to "is this document's deletion unresolved?" lives
+// in main, in the records that refuse the save. The renderer's own tombstone
+// only exists once a report was DELIVERED and CONSUMED, so a report that was
+// parked behind a freeze, compacted out of the delivery table, refused, or
+// still in flight is invisible here. Closing on that partial view is how a
+// deleted document gets closed with no warning at all.
+function queryDocumentDeletionState(filePath, identity) {
+  if (
+    typeof filePath !== 'string' ||
+    filePath.length === 0 ||
+    !identity ||
+    identity.pageSession !== reloadRequestSession
+  ) {
+    return null;
+  }
+  try {
+    const state = ipcRenderer.sendSync('query-document-deletion-state', {
+      filePath,
+      ...identity,
+    });
+    return state && typeof state === 'object' ? state : null;
+  } catch (error) {
+    console.error('Failed to read authoritative deletion state:', error);
+    return null;
+  }
+}
+
+function queryDocumentDiskAdoptionState(
+  filePath,
+  identity,
+  modifiedTime,
+  diskVersion,
+  ownerFilePath = filePath
+) {
+  if (
+    typeof filePath !== 'string' ||
+    !filePath ||
+    typeof reloadRequestSession !== 'string' ||
+    !identity ||
+    identity.pageSession !== reloadRequestSession
+  ) return null;
+  try {
+    const state = ipcRenderer.sendSync('query-document-disk-adoption-state', {
+      filePath,
+      ownerFilePath,
+      pageSession: reloadRequestSession,
+      rendererGeneration: identity.rendererGeneration,
+      tabId: identity.tabId,
+      documentGeneration: identity.documentGeneration,
+      pathKey: identity.pathKey,
+      modifiedTime,
+      diskVersion,
+    });
+    return state && typeof state === 'object' ? state : null;
+  } catch (error) {
+    console.error('Failed to verify disk adoption:', error);
+    return null;
+  }
+}
+
+function commitDocumentDiskAdoption(request) {
+  if (
+    !request ||
+    typeof request.filePath !== 'string' ||
+    request.pageSession !== reloadRequestSession
+  ) return null;
+  try {
+    const result = ipcRenderer.sendSync(
+      'commit-document-disk-adoption',
+      request,
+    );
+    return result && typeof result === 'object' ? result : null;
+  } catch (error) {
+    console.error('Could not commit verified disk adoption:', error);
+    return null;
+  }
+}
+
+async function prepareDocumentDiskAdoption(request) {
+  if (
+    !request ||
+    typeof request.filePath !== 'string' ||
+    request.pageSession !== reloadRequestSession
+  ) return null;
+  try {
+    const result = await ipcRenderer.invoke(
+      'prepare-document-disk-adoption',
+      request,
+    );
+    return result && typeof result === 'object' ? result : null;
+  } catch (error) {
+    console.error('Could not attest document bytes:', error);
+    return null;
+  }
+}
+
+function completeDocumentDiskAdoption(request) {
+  if (!request || request.pageSession !== reloadRequestSession) return null;
+  try {
+    const result = ipcRenderer.sendSync(
+      'complete-document-disk-adoption', request,
+    );
+    return result && typeof result === 'object' ? result : null;
+  } catch (error) {
+    console.error('Could not complete disk adoption:', error);
+    return null;
+  }
+}
+
+function abandonDocumentDiskAdoption(capability, rendererGeneration) {
+  if (typeof capability !== 'string') return false;
+  try {
+    ipcRenderer.send('abandon-document-disk-adoption', {
+      capability,
+      pageSession: reloadRequestSession,
+      rendererGeneration,
+    });
+    return true;
+  } catch (error) {
+    console.error('Could not release unused disk approval:', error);
+    return false;
+  }
+}
+
+function reportAdoptionTrackingConflict(filePath, identity) {
+  if (!identity || identity.pageSession !== reloadRequestSession) {
+    return false;
+  }
+  try {
+    ipcRenderer.send('report-adoption-tracking-conflict', {
+      filePath,
+      pageSession: reloadRequestSession,
+      rendererGeneration: identity.rendererGeneration,
+      owner: identity,
+    });
+    return true;
+  } catch (error) {
+    console.error('Could not report rejected file tracking:', error);
+    return false;
+  }
+}
+
+function retireDeletionTombstone(
+  filePath,
+  identity,
+  tombstone = null,
+  options = {}
+) {
+  const refused = (why) => Object.freeze({ retired: false, why });
+  if (
+    typeof filePath !== 'string' ||
+    filePath.length === 0 ||
+    !identity ||
+    identity.pageSession !== reloadRequestSession ||
+    !Number.isSafeInteger(identity.rendererGeneration) ||
+    identity.rendererGeneration <= 0 ||
+    !Number.isSafeInteger(identity.tabId) ||
+    identity.tabId <= 0 ||
+    !Number.isSafeInteger(identity.documentGeneration) ||
+    identity.documentGeneration <= 0 ||
+    typeof identity.pathKey !== 'string' ||
+    identity.pathKey.length === 0
+  ) {
+    return refused('invalid-identity');
+  }
+  if (
+    tombstone &&
+    (
+      !Number.isSafeInteger(tombstone.eventId) ||
+      tombstone.eventId <= 0 ||
+      tombstone.pageSession !== identity.pageSession ||
+      tombstone.rendererGeneration !== identity.rendererGeneration ||
+      tombstone.tabId !== identity.tabId ||
+      tombstone.documentGeneration !== identity.documentGeneration ||
+      tombstone.pathKey !== identity.pathKey ||
+      !Number.isSafeInteger(tombstone.selectionGeneration) ||
+      tombstone.selectionGeneration <= 0 ||
+      !Number.isSafeInteger(tombstone.watcherGeneration) ||
+      tombstone.watcherGeneration <= 0 ||
+      !Number.isSafeInteger(tombstone.attempt) ||
+      tombstone.attempt <= 0
+    )
+  ) {
+    return refused('invalid-tombstone');
+  }
+  try {
+    const outcome = ipcRenderer.sendSync('retire-deleted-document-owner', {
+      filePath,
+      ...identity,
+      ...(tombstone || {}),
+      // Explicit reader confirmation that a deletion warning was shown and
+      // accepted for THIS document. Main refuses to erase evidence nobody was
+      // shown, and this is the only thing that says they were. Deliberately
+      // the ONLY new input: the revision the caller consulted is not sent,
+      // because main re-evaluates live state at this call, and a snapshot
+      // token would only reintroduce the stale-token refusals this replaces.
+      acknowledgedDeletion: options.acknowledgedDeletion === true,
+    });
+    return outcome && typeof outcome === 'object'
+      ? outcome
+      : refused('unreadable-result');
+  } catch (error) {
+    console.error('Failed to retire deleted document ownership:', error);
+    return refused('ipc-failed');
+  }
+}
+
+function classifyDeletionDelivery(data) {
+  const delivery = data && data.delivery;
+  const owner = delivery && delivery.owner ? delivery.owner : null;
+  if (
+    typeof (data && data.path) !== 'string' ||
+    data.path.length === 0 ||
+    !delivery ||
+    !Number.isSafeInteger(delivery.eventId) ||
+    delivery.eventId <= 0 ||
+    typeof delivery.pageSession !== 'string' ||
+    delivery.pageSession.length === 0 ||
+    !Number.isSafeInteger(delivery.selectionGeneration) ||
+    delivery.selectionGeneration <= 0 ||
+    !Number.isSafeInteger(delivery.watcherGeneration) ||
+    delivery.watcherGeneration <= 0 ||
+    (delivery.attempt !== undefined &&
+      (!Number.isSafeInteger(delivery.attempt) || delivery.attempt <= 0))
+  ) {
+    return 'malformed-delivery';
+  }
+  if (delivery.pageSession !== reloadRequestSession) {
+    return 'foreign-session';
+  }
+  if (
+    !owner ||
+    typeof owner.pageSession !== 'string' ||
+    owner.pageSession.length === 0 ||
+    !Number.isSafeInteger(owner.tabId) ||
+    owner.tabId <= 0 ||
+    !Number.isSafeInteger(owner.documentGeneration) ||
+    owner.documentGeneration <= 0 ||
+    typeof owner.pathKey !== 'string' ||
+    owner.pathKey.length === 0
+  ) {
+    return 'malformed-owner';
+  }
+  if (owner.pageSession !== delivery.pageSession) {
+    return 'malformed-owner';
+  }
+  const currentRendererGeneration =
+    currentDocumentRendererGeneration();
+  if (
+    (delivery.rendererGeneration !== undefined &&
+      delivery.rendererGeneration !== currentRendererGeneration) ||
+    (owner.rendererGeneration !== undefined &&
+      owner.rendererGeneration !== currentRendererGeneration) ||
+    (delivery.rendererGeneration !== undefined &&
+      owner.rendererGeneration !== undefined &&
+      owner.rendererGeneration !== delivery.rendererGeneration)
+  ) {
+    return 'malformed-owner';
+  }
+  if (
+    typeof window.getReloadRequestSession !== 'function' ||
+    window.getReloadRequestSession() !== reloadRequestSession
+  ) {
+    return 'unverifiable-session';
+  }
+  const tabs = window.CustomTabs;
+  if (
+    !tabs ||
+    typeof tabs.getTabs !== 'function' ||
+    typeof tabs.getActiveTabId !== 'function' ||
+    typeof tabs.getActiveDocumentIdentity !== 'function'
+  ) {
+    return 'unverifiable-owner';
+  }
+  const openTabs = tabs.getTabs();
+  const ownerTab = Array.isArray(openTabs)
+    ? openTabs.find(tab => tab.id === owner.tabId)
+    : null;
+  // A closed tab cannot be warned, and a NEW tab on the same path is a
+  // different document that never read the file that was deleted - path
+  // identity alone would let it consume another tab's report.
+  if (!ownerTab) return 'owner-closed';
+  const activeTabId = tabs.getActiveTabId();
+  if (activeTabId !== owner.tabId) return 'owner-inactive';
+  const deletedPath = canonicalReloadPath(data.path);
+  if (!deletedPath) return 'unusable-path';
+  if (canonicalReloadPath(ownerTab.filePath) !== deletedPath) {
+    return 'owner-path-moved';
+  }
+  const currentIdentity = tabs.getActiveDocumentIdentity(
+    currentFilePath,
+    reloadRequestSession
+  );
+  if (
+    !currentIdentity ||
+    currentIdentity.tabId !== owner.tabId ||
+    currentIdentity.documentGeneration !== owner.documentGeneration ||
+    currentIdentity.pathKey !== owner.pathKey
+  ) {
+    return 'replacement-owner';
+  }
+  if (delivery.selectionGeneration !== activeFileSelectionGeneration) {
+    return 'stale-selection';
+  }
   const activePath = canonicalReloadPath(currentFilePath);
-  if (!deletedPath || !activePath || deletedPath !== activePath) {
-    console.log('Ignoring stale file deletion:', data && data.path);
+  if (!activePath || activePath !== deletedPath) return 'not-active';
+  // Phase-two shutdown freeze: the reader has consented to leaving and the
+  // document is on its way out, so a warning shown now may never be read.
+  // Observed rather than refused through mayMutateRendererDocument, because
+  // consuming a report adopts nothing - it is left pending, and the ownership
+  // reassertion that follows a thaw replays it.
+  if (frozenForShutdown()) return 'frozen';
+  return null;
+}
+
+ipcRenderer.on('file-deleted', (event, data) => {
+  const delivery = data && data.delivery;
+  const tabs = window.CustomTabs;
+  const currentRendererGeneration = currentDocumentRendererGeneration();
+  const tombstoneOwner =
+    delivery && delivery.owner
+      ? {
+          ...delivery.owner,
+          rendererGeneration:
+            delivery.owner.rendererGeneration ??
+            delivery.rendererGeneration ??
+            currentRendererGeneration,
+        }
+      : null;
+  const why = classifyDeletionDelivery(data);
+  if (
+    !frozenForShutdown() &&
+    (
+      why === null ||
+      why === 'owner-inactive' ||
+      why === 'stale-selection' ||
+      why === 'not-active'
+    ) &&
+    tabs &&
+    typeof tabs.retainDeletionTombstone === 'function'
+  ) {
+    tabs.retainDeletionTombstone(
+      tombstoneOwner,
+      data && data.path,
+      delivery
+    );
+  }
+  if (why) {
+    console.log('Deferring file deletion report:', why, data && data.path);
+    if (
+      why === 'malformed-delivery' ||
+      why === 'malformed-owner' ||
+      why === 'unverifiable-session' ||
+      why === 'unverifiable-owner'
+    ) {
+      return;
+    }
+    acknowledgeDeletionDelivery(delivery, false, why);
     return;
   }
+  const eventId = delivery.eventId;
+  if (Number.isSafeInteger(eventId)) {
+    if (consumedDeletionDeliveries.has(eventId)) {
+      // A replay of something this page has already acted on. Re-answer it so
+      // main can close the report, but warn once per deletion, not once per
+      // send.
+      acknowledgeDeletionDelivery(delivery, true, 'already-consumed');
+      return;
+    }
+    rememberConsumedDeletionDelivery(eventId);
+  }
   console.log('File deleted:', data.path);
+  // WARN, AND LEAVE THE CONFLICT WHERE IT IS OWNED. The document's bytes now
+  // exist only in this window, and the main process keeps that deletion as an
+  // unresolved conflict against the path: the next write is refused rather than
+  // silently recreating the file. Reloading or reopening is the only adoption.
+  //
+  // Deliberately NOT marked dirty here. Nothing in the document has changed, and
+  // a tab that reports unsaved changes it does not have asks the reader to
+  // confirm discarding work that does not exist on every close - while pausing
+  // the watcher, which is what would otherwise notice the file coming back.
   showNotification(i18n('notif.fileDeleted'), 5000);
+  acknowledgeDeletionDelivery(delivery, true, 'consumed');
 });
 
 // Handle file not found (from recent files or links)
@@ -7177,9 +8839,9 @@ ipcRenderer.on('file-reload-result', async (event, data) => {
     if (reloadValidation === 'conflict') {
       reloadConflictResultCount += 1;
       const conflictPath =
-        canonicalReloadPath(
-          data.reloadRequest && data.reloadRequest.path
-        ) || canonicalReloadPath(currentFilePath);
+        data.reloadRequest && data.reloadRequest.path
+          ? data.reloadRequest.path
+          : currentFilePath;
       markReloadConflict(conflictPath);
       showNotification(
         i18n('notif.reloadFailed') +
@@ -7188,46 +8850,101 @@ ipcRenderer.on('file-reload-result', async (event, data) => {
       );
       return;
     }
-    const previousReloadPath = canonicalReloadPath(data.path);
-    const acceptedReloadPath = rebindReloadPath(data.path);
-    if (previousReloadPath) reloadConflicts.delete(previousReloadPath);
-    if (acceptedReloadPath) reloadConflicts.delete(acceptedReloadPath);
+    if (!window.customTabsOwnsReloadResults ||
+        !data.trackingSelection ||
+        data.trackingSelection.accepted !== true ||
+        data.trackingSelection.pathKey !==
+          data.trackingSelection.owner?.pathKey ||
+        !diskVersionsEqual(
+          data.trackingSelection.diskVersion, data.diskVersion
+        )) {
+      console.error('Refusing reload without confirmed tab-owned tracking');
+      markReloadConflict(data.path);
+      showNotification(
+        'Reload tracking was not confirmed. The current copy was kept; retry after tracking is ready.',
+        6000
+      );
+      return;
+    }
+    const approvedPathKey = data.trackingSelection.pathKey;
+    const acceptedOwnerPath = currentFilePath;
+    if (!bindApprovedReloadPath(data.path, approvedPathKey) ||
+        !bindApprovedReloadPath(acceptedOwnerPath, approvedPathKey) ||
+        !approvedReloadSnapshotMatches(
+          data.path, approvedPathKey, data.trackingSelection.diskVersion
+        ) ||
+        !approvedReloadSnapshotMatches(
+          acceptedOwnerPath, approvedPathKey,
+          data.trackingSelection.diskVersion
+        )) {
+      for (const spelling of [
+        fileTrackingPathKey(data.path),
+        fileTrackingPathKey(acceptedOwnerPath),
+      ]) {
+        if (spelling) reloadPathAliases.set(spelling, approvedPathKey);
+      }
+      markReloadConflict(acceptedOwnerPath);
+      reportAdoptionTrackingConflict(
+        acceptedOwnerPath, data.trackingSelection.owner
+      );
+      showNotification(
+        'The file target moved after reload approval. The in-memory copy was kept; review the conflict before saving.',
+        8000
+      );
+      const error = new Error('Reload target or disk version moved before display');
+      error.code = 'RELOAD_PATH_RETARGETED';
+      throw error;
+    }
+    const acceptedStateKey = fileTrackingPathKey(acceptedOwnerPath);
+    const selectedReload = window.customTabsOwnsReloadResults &&
+      data.trackingSelection &&
+      data.trackingSelection.accepted === true;
+    const unresolvedEvidence = selectedReload &&
+      data.trackingSelection.unresolvedEvidence === true;
+    const trackingConflict = selectedReload &&
+      data.trackingSelection.trackingConflict === true;
+    if (!unresolvedEvidence && !trackingConflict) {
+      reloadConflicts.delete(acceptedStateKey);
+    }
     originalMarkdown = data.content;
     withFileTrackingResumeHeld(() => {
       // The document was just re-read from disk, so whatever the last write
       // did or failed to do is no longer what is on screen - for this path.
       if (currentFilePath) {
-        const canonicalCurrentPath = canonicalReloadPath(currentFilePath);
-        if (canonicalCurrentPath) failedSaves.delete(canonicalCurrentPath);
+        failedSaves.delete(acceptedStateKey);
       }
       if (!isEditMode) {
-        setDocumentDirtyState(false);
+        setDocumentDirtyState(unresolvedEvidence || trackingConflict);
       }
       // If in edit mode, update editor content
       if (isEditMode) {
         markdownEditor.value = originalMarkdown;
-        setDocumentDirtyState(false);
+        setDocumentDirtyState(unresolvedEvidence || trackingConflict);
         // The reload replaced the document underneath an open edit session, so
         // the session's baseline must move with it.
         captureEditSessionBaseline(true);
       }
-      assertFileTrackingOwnership(data.path, true, {
-        adoptBaseline: true,
-        modifiedTime: data.modifiedTime,
-        diskVersion: data.diskVersion,
-      });
     });
 
     // Re-render the markdown
     await renderMarkdown(data.content);
-
-    // CustomTabs owns acceptance once the shared file-open lifecycle is
-    // available. It shows success only after the same tab and render
-    // generation still own this completion; notifying here would announce a
-    // superseded reload over whichever tab is visible now.
-    if (!window.customTabsOwnsReloadResults) {
-      showNotification(i18n('notif.fileReloaded'), 2000);
+    if (!approvedReloadSnapshotMatches(
+      data.path, approvedPathKey, data.trackingSelection.diskVersion
+    ) || !approvedReloadSnapshotMatches(
+      acceptedOwnerPath, approvedPathKey,
+      data.trackingSelection.diskVersion
+    )) {
+      markReloadConflict(acceptedOwnerPath);
+      reportAdoptionTrackingConflict(
+        acceptedOwnerPath, data.trackingSelection.owner
+      );
+      const error = new Error('Reload target moved during rendering');
+      error.code = 'RELOAD_PATH_MOVED_DURING_RENDER';
+      throw error;
     }
+
+    // CustomTabs owns the success notification after its render-generation
+    // check, so a superseded reload cannot notify over a different tab.
   } else {
     if (validateReloadResultForCurrentPage(data, false) === 'foreign') {
       foreignReloadFailureCount += 1;
@@ -10998,6 +12715,8 @@ window.dismissFileUpdateNotification = dismissFileUpdateNotification;
 window.requestCurrentFileReload = reloadCurrentFile;
 window.beginFileOpen = beginFileOpen;
 window.completeFileOpen = completeFileOpen;
+window.invalidateBackgroundEditSessionBaseline =
+  invalidateBackgroundEditSessionBaseline;
 window.preflightFileOpen = preflightFileOpen;
 window.cancelPendingNavigation = cancelPendingNavigation;
 // Read-only product API used by shutdown approval and tab ownership. Callers
@@ -11005,9 +12724,23 @@ window.cancelPendingNavigation = cancelPendingNavigation;
 window.getPendingSaveStatus = getPendingSaveStatus;
 window.waitForPendingSaves = waitForPendingSaves;
 window.isExpectedSaveResult = isExpectedSaveResult;
+window.applyRendererSaveResultDecision = applyRendererSaveResultDecision;
+window.retireDeletionTombstone = retireDeletionTombstone;
+window.queryDocumentDeletionState = queryDocumentDeletionState;
+window.queryDocumentDiskAdoptionState = queryDocumentDiskAdoptionState;
+window.commitDocumentDiskAdoption = commitDocumentDiskAdoption;
+window.prepareDocumentDiskAdoption = prepareDocumentDiskAdoption;
+window.completeDocumentDiskAdoption = completeDocumentDiskAdoption;
+window.abandonDocumentDiskAdoption = abandonDocumentDiskAdoption;
+window.reportAdoptionTrackingConflict = reportAdoptionTrackingConflict;
+window.captureFileOpenNavigation = captureFileOpenNavigation;
+window.restoreFileOpenNavigation = restoreFileOpenNavigation;
+window.registerDocumentOwner = registerDocumentOwner;
 window.setFileTrackingIntent = setFileTrackingIntent;
 window.assertFileTrackingOwnership = assertFileTrackingOwnership;
-window.adoptFileTrackingBaseline = adoptFileTrackingBaseline;
+window.selectStagedFileReload = selectStagedFileReload;
+window.quarantineSelectedFileReload = quarantineSelectedFileReload;
+window.quarantineBackgroundDocumentOwner = quarantineBackgroundDocumentOwner;
 window.stopFileTrackingIntent = stopFileTrackingIntent;
 window.rendererFileOpenHandler = handleFileOpened;
 window.getFileOpenDiagnostics = function () {
@@ -11040,9 +12773,13 @@ window.getLatestReloadRequestSequence = function (filePath) {
   const canonical = canonicalReloadPath(filePath);
   return canonical ? latestReloadRequestByPath.get(canonical) || 0 : 0;
 };
+window.getActiveFileSelectionGeneration = function () {
+  return activeFileSelectionGeneration;
+};
 window.getReloadRequestSession = function () {
   return reloadRequestSession;
 };
+window.hasUnsavedWorkForReload = hasUnsavedWork;
 window.markReloadConflict = markReloadConflict;
 window.clearReloadConflict = clearReloadConflict;
 window.getReloadRequestDiagnostics = function () {
@@ -11096,6 +12833,7 @@ Object.defineProperty(window, 'originalMarkdown', {
   get() { return originalMarkdown; },
   set(v) {
     if (!mayMutateRendererDocument('original-markdown-setter')) return;
+    if (originalMarkdown !== v) noteActiveContentMutation();
     originalMarkdown = v;
   },
   enumerable: true, configurable: true
