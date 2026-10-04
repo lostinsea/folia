@@ -16881,6 +16881,109 @@ const REVERTS = [
             /^only create-release grants contents write$/,
           ],
         },
+        {
+          id: "R604",
+          suite: "test:packaging",
+          what: "document an attestation verifier command for a different repository",
+          file: path.join(ROOT, "README.md"),
+          from: "  --repo lostinsea/folia",
+          to: "  --repo example/other-repository",
+          expect: [
+            /^every documented attestation verification example binds this release repository, attest workflow, and tag ref$/,
+          ],
+          mustPass: [
+            /^README\.md and docs\/BUILD\.md both contain attestation verification examples$/,
+          ],
+        },
+        {
+          id: "R605",
+          suite: "test:packaging",
+          what: "document a Linux attestation subject that the release workflow does not produce",
+          file: BUILD_DOC,
+          from: "| `linux-builds/*.deb` | Debian package |",
+          to: "| `linux-builds/*.rpm` | Debian package |",
+          expect: [
+            /^docs\/BUILD\.md's attested-subject table matches every release-derived artifact class and excludes updater metadata$/,
+          ],
+          mustPass: [
+            /^the attestation subjects cover every user-facing package built for release$/,
+          ],
+        },
+        {
+          id: "R606",
+          suite: "test:packaging",
+          what: "claim SLSA Build Level 3 for the documented README provenance design",
+          file: path.join(ROOT, "README.md"),
+          from: "SLSA Build Level\n2",
+          to: "SLSA Build Level\n3",
+          expect: [
+            /^README\.md and docs\/BUILD\.md describe the current top-level actions\/attest design as SLSA Build Level 2, not Level 3$/,
+          ],
+          mustPass: [
+            /^the attest job runs only the download and attestation actions, not repository code$/,
+          ],
+        },
+        {
+          id: "R607",
+          suite: "test:packaging",
+          what: "claim a measured attestation release-run latency in provenance guidance",
+          file: BUILD_DOC,
+          from:
+            "  extra job lengthens the release run; no measured figure is claimed for that.",
+          to: "  extra job lengthens the release run; measured 12 minutes.",
+          expect: [
+            /^provenance guidance claims no measured attestation or release-run latency$/,
+          ],
+          mustPass: [
+            /^README\.md and docs\/BUILD\.md describe the current top-level actions\/attest design as SLSA Build Level 2, not Level 3$/,
+          ],
+        },
+        {
+          id: "R608",
+          suite: "test:packaging",
+          what: "omit the Linux update-manifest check while still uploading the remaining Linux artifacts",
+          file: path.join(ROOT, ".github", "workflows", "release.yml"),
+          from: ", ['Linux update manifest', f => f === 'latest-linux.yml']",
+          to: "",
+          expect: [
+            /^every required release artifact class is independently validated before upload$/,
+          ],
+          mustPass: [
+            /^the release completeness parser found every platform validation$/,
+            /^the configured release targets resolve to known user-facing artifact globs$/,
+          ],
+        },
+        {
+          id: "R609",
+          suite: "test:packaging",
+          what: "omit the Windows artifact directory from final release publication",
+          file: path.join(ROOT, ".github", "workflows", "release.yml"),
+          from: "            windows-builds/*",
+          to: "",
+          expect: [
+            /^the final release publishes exactly the validated upload artifact directories$/,
+          ],
+          mustPass: [
+            /^the release publication parser found the Create Release action after downloading artifacts$/,
+            /^the attestation subjects cover every user-facing package built for release$/,
+          ],
+        },
+        {
+          id: "R610",
+          suite: "test:packaging",
+          what: "omit the Windows updater manifest from the uploaded release artifacts",
+          file: path.join(ROOT, ".github", "workflows", "release.yml"),
+          from: "            dist/latest.yml",
+          to: "",
+          expect: [
+            /^every configured release artifact and updater file is uploaded on its platform$/,
+          ],
+          mustPass: [
+            /^the release upload-path parser found every platform upload$/,
+            /^every required release artifact class is independently validated before upload$/,
+            /^the final release publishes exactly the validated upload artifact directories$/,
+          ],
+        },
       ];
 
 // These are release exceptions, not passing or withdrawn proofs. An explicit

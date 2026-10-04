@@ -272,6 +272,17 @@ warnings:
 > Azure Trusted Signing is the other option, under `win.azureSignOptions`;
 > it cannot be combined with `signtoolOptions`.
 
+**Signing and provenance are different things, and only one of them is free.**
+The GitHub artifact attestations described under "Build provenance" below cost
+nothing and prove *where* a binary came from when the attestation-enabled tag
+workflow publishes it. Earlier releases predate this support. Attestations do
+not sign binaries, and they change nothing about what the operating system
+shows the user: that is what a certificate is for, and on macOS notarization
+besides. Azure Trusted Signing / Artifact Signing is a paid Azure subscription
+bound to a validated publisher identity, so adopting it is a maintainer billing
+and identity decision rather than a code change. It is not adopted here, and
+nothing in the release workflow depends on it.
+
 ## Auto-update
 
 `build.publish` targets this fork's own GitHub releases:
@@ -311,7 +322,78 @@ electron-builder logging a `signing with signtool.exe` line for every artifact,
 which it prints whether or not a certificate was supplied. So SmartScreen warns
 on Windows, Gatekeeper warns on macOS, and macOS auto-update will fail signature
 validation until an identity is configured. Release notes must say so; a user
-who is told nothing reasonably concludes the download is corrupt.
+who is told nothing reasonably concludes the download is corrupt. The build
+provenance below does not change any of this — it is not a code signature.
+
+## Build provenance
+
+For releases published by the attestation-enabled tag workflow, every runnable
+artifact has a GitHub artifact attestation: a signed statement naming the
+repository, the workflow file and the commit the artifact was built from, bound
+to that artifact's digest. Previously published releases have no such
+attestation; verification failure for one of them does not imply tampering. The
+attestation is produced by `actions/attest` in a dedicated `attest` job whose
+permissions are exactly `contents: read`, `id-token: write` and
+`attestations: write`. The build matrix is granted neither `id-token` nor
+`attestations`, and `contents: write` still belongs to `create-release` alone,
+so the job that can mint an identity token cannot publish and the job that can
+publish cannot mint one.
+
+**The subjects are exactly what a user runs or installs**, one attestation step
+per artifact class:
+
+| Attested subject | What it covers |
+|---|---|
+| `windows-builds/*.exe` | Windows portable exe **and** NSIS installer |
+| `mac-builds/*.dmg` | macOS disk image |
+| `linux-builds/*.AppImage` | Linux AppImage |
+| `linux-builds/*.deb` | Debian package |
+
+`latest.yml`, `latest-linux.yml` and `latest-mac.yml` are still published as
+release assets, because an installed build discovers a release through them; the
+`.blockmap` files ride along to support differential updates. Neither the
+manifests nor the blockmaps are **attestation subjects**, deliberately: they are
+updater metadata rather than something a user executes. `test-packaging.js`
+asserts both halves — that every user-facing build target is attested, and that
+no update manifest or blockmap has crept into the subject list.
+
+**The binaries themselves are untouched.** An attestation is detached and
+digest-bound: GitHub stores it against the artifact's digest rather than
+embedding anything in the file, so the bytes a user downloads are the bytes the
+build produced.
+
+### Verifying a download
+
+Needs a GitHub CLI recent enough to carry the `gh attestation` command group —
+`gh attestation verify --help` is the check; no minimum version is asserted here
+because none has been measured.
+
+```bash
+gh attestation verify Folia-Setup-X.X.X.exe \
+  --repo lostinsea/folia \
+  --signer-workflow lostinsea/folia/.github/workflows/release.yml \
+  --source-ref refs/tags/vX.X.X
+```
+
+`--repo` on its own proves only that *something* in this repository attested the
+file; `--signer-workflow` pins which workflow did, and `--source-ref` pins the
+tag it ran from. Substitute the tag and filename being checked.
+
+### What this proves, and what it does not
+
+- It proves **association**: the artifact came out of this repository, from this
+  workflow, at that commit, and has not changed since. It is not a statement
+  that the software is correct, safe or free of vulnerabilities.
+- It is **SLSA Build Level 2**, not Level 3.
+- It is **not Authenticode or Apple signing**. The artifacts stay unsigned, so
+  SmartScreen and Gatekeeper still warn exactly as before. See "Code Signing"
+  above.
+- It covers only what **the workflow built**. A local `npm run build`, or a
+  release cut from a workstation with `scripts/release.js`, produces no
+  attestation at all, and `gh attestation verify` on those files fails —
+  correctly, because nothing signed them.
+- Runtime cost is **zero**: nothing is added to the shipped application. The
+  extra job lengthens the release run; no measured figure is claimed for that.
 
 ## Cutting a release
 
@@ -335,10 +417,15 @@ gh workflow run release.yml --repo lostinsea/folia --ref v0.1.0
 gh run watch <id> --repo lostinsea/folia --exit-status
 ```
 
-The `--ref v0.1.0` is load-bearing. `create-release` is gated on
-`startsWith(github.ref, 'refs/tags/')`, so a dispatch against `main` builds all
-three platforms, uploads the artifacts to the run, and then publishes nothing —
-a green run with no release at the end of it.
+The `--ref v0.1.0` is load-bearing. Both `attest` and `create-release` are gated
+on `startsWith(github.ref, 'refs/tags/')`, so a dispatch against `main` builds
+all three platforms, uploads the artifacts to the run, and then attests and
+publishes nothing — a green run with no release and no provenance at the end of
+it.
+
+`create-release` `needs: [release, attest]`, so publication cannot outrun the
+attestations: if the attest job fails, the release is never created rather than
+being published unattested.
 
 Bump `version` in **both** `package.json` and `package-lock.json` before
 tagging. The workflow installs with `npm ci`, which fails outright when the two
@@ -350,8 +437,19 @@ After the run, verify the update manifest actually describes the artifact that
 was uploaded — the two are produced by different jobs on different machines:
 
 ```bash
-gh release download <tag> --pattern "latest.yml" --pattern "Folia-Setup-<v>.exe"
+gh release download <tag> --repo lostinsea/folia \
+  --pattern "latest.yml" --pattern "Folia-Setup-<v>.exe"
 # the base64 sha512 in latest.yml must equal the installer's own
+```
+
+Then verify the published artifact's provenance, from the download rather than
+from the run page — an attestation nobody checks is a claim, not a control:
+
+```bash
+gh attestation verify Folia-Setup-<v>.exe \
+  --repo lostinsea/folia \
+  --signer-workflow lostinsea/folia/.github/workflows/release.yml \
+  --source-ref refs/tags/<tag>
 ```
 
 ## Clean Build

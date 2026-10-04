@@ -2026,6 +2026,29 @@ async function main() {
       }
       return paths;
     };
+    const stepBlocksOf = (block) =>
+      block
+        .join("\n")
+        .split(/^ {6}- /m)
+        .filter((step) => step.trim());
+    const actionOf = (step) => {
+      const match = step.match(/^ {8}uses\s*:\s*([^@\s]+)@/m);
+      return match ? match[1] : "";
+    };
+    const literalListInputOf = (step, key) => {
+      const lines = step.split(/\r?\n/);
+      const at = lines.findIndex((line) =>
+        new RegExp(`^ {10}${escapeRe(key)}\\s*:\\s*\\|\\s*$`).test(line),
+      );
+      if (at === -1) return [];
+      const values = [];
+      for (let i = at + 1; i < lines.length; i++) {
+        if (lines[i] !== "" && !/^ {12}/.test(lines[i])) break;
+        const value = lines[i].trim();
+        if (value) values.push(value);
+      }
+      return values;
+    };
 
     const attest = jobBlock("attest");
     const release = jobBlock("release");
@@ -2152,6 +2175,16 @@ async function main() {
     }
     const expectedSubjects = [...new Set(targetRecords.map((record) => record.glob))].sort();
     const subjectPaths = subjectPathsOf(attest).sort();
+    const expectedReleaseFiles = [...new Set(Object.values(uploadArtifactNames).map((name) => `${name}/*`))].sort();
+    const createReleaseSteps = stepBlocksOf(createRelease);
+    const downloadArtifactSteps = createReleaseSteps.filter(
+      (step) => actionOf(step) === "actions/download-artifact",
+    );
+    const releasePublicationSteps = createReleaseSteps.filter(
+      (step) => actionOf(step) === "softprops/action-gh-release",
+    );
+    const releaseFiles =
+      releasePublicationSteps.length === 1 ? literalListInputOf(releasePublicationSteps[0], "files").sort() : [];
     const badArtifactNames = targetRecords
       .filter(({ artifactName, glob }) => {
         const extension = glob.slice(glob.lastIndexOf(".") + 1);
@@ -2165,6 +2198,148 @@ async function main() {
           ["win", "mac", "linux"].flatMap((platform) => (pkg.build[platform] || {}).target || []).length &&
         badArtifactNames.length === 0,
       JSON.stringify({ targets: targetRecords, uploadArtifactNames, badArtifactNames }),
+    );
+    const targetClassName = {
+      "win:portable": "Windows portable executable",
+      "win:nsis": "Windows NSIS setup executable",
+      "mac:dmg": "macOS disk image",
+      "linux:AppImage": "Linux AppImage",
+      "linux:deb": "Linux Debian package",
+    };
+    const classMatcher = {
+      "Windows portable executable": /f\s*=>\s*f\s*===\s*portable/,
+      "Windows NSIS setup executable": /f\s*=>\s*f\s*===\s*installer/,
+      "Windows update manifest": /f\s*=>\s*f\s*===\s*['"]latest\.yml['"]/,
+      "Windows blockmap": /f\s*=>\s*\/\\\.blockmap\$\/i\.test\(f\)/,
+      "macOS disk image": /f\s*=>\s*\/\\\.dmg\$\/i\.test\(f\)/,
+      "macOS update manifest": /f\s*=>\s*f\s*===\s*['"]latest-mac\.yml['"]/,
+      "Linux AppImage": /f\s*=>\s*\/\\\.AppImage\$\/i\.test\(f\)/,
+      "Linux Debian package": /f\s*=>\s*\/\\\.deb\$\/i\.test\(f\)/,
+      "Linux update manifest": /f\s*=>\s*f\s*===\s*['"]latest-linux\.yml['"]/,
+    };
+    const completenessByPlatform = {
+      win: {
+        os: "windows-latest",
+        verify: "Verify Windows release artifact completeness",
+        upload: "Upload Windows artifacts",
+        extra: ["Windows update manifest", "Windows blockmap"],
+      },
+      mac: {
+        os: "macos-latest",
+        verify: "Verify macOS release artifact completeness",
+        upload: "Upload macOS artifacts",
+        extra: ["macOS update manifest"],
+      },
+      linux: {
+        os: "ubuntu-latest",
+        verify: "Verify Linux release artifact completeness",
+        upload: "Upload Linux artifacts",
+        extra: ["Linux update manifest"],
+      },
+    };
+    const requiredClasses = targetRecords
+      .map(({ platform, target }) => ({
+        platform,
+        name: targetClassName[`${platform}:${target}`],
+      }))
+      .concat(
+        Object.entries(completenessByPlatform).flatMap(([platform, { extra }]) =>
+          extra.map((name) => ({ platform, name })),
+        ),
+      );
+    const expectedClassNames = Object.keys(classMatcher).sort();
+    const actualClassNames = [...new Set(requiredClasses.map(({ name }) => name))].sort();
+    const releaseSteps = release.join("\n").split(/^ {6}- name: /m);
+    const releaseStep = (name) =>
+      releaseSteps.find((step) => step.startsWith(`${name}\n`) || step === name) || "";
+    const updaterUploadPaths = {
+      win: ["dist/latest.yml", "dist/*.blockmap"],
+      mac: ["dist/latest-mac.yml"],
+      linux: ["dist/latest-linux.yml"],
+    };
+    const expectedUploadPathsByPlatform = Object.fromEntries(
+      Object.keys(completenessByPlatform).map((platform) => {
+        const packagePaths = ((pkg.build[platform] || {}).target || [])
+          .map((configured) => (typeof configured === "string" ? configured : configured.target))
+          .map((target) => targetExtension[platform] && targetExtension[platform][target])
+          .filter(Boolean)
+          .map((extension) => `dist/*.${extension}`);
+        return [platform, [...new Set(packagePaths.concat(updaterUploadPaths[platform]))].sort()];
+      }),
+    );
+    const uploadPathsByPlatform = Object.fromEntries(
+      Object.entries(completenessByPlatform).map(([platform, { upload }]) => [
+        platform,
+        literalListInputOf(releaseStep(upload), "path").sort(),
+      ]),
+    );
+    const missingUploadPaths = Object.entries(expectedUploadPathsByPlatform).flatMap(
+      ([platform, expectedPaths]) =>
+        expectedPaths
+          .filter((uploadPath) => !uploadPathsByPlatform[platform].includes(uploadPath))
+          .map((uploadPath) => `${platform}:${uploadPath}`),
+    );
+    const missingCompletenessValidators = [];
+    const badlyOrderedValidators = [];
+    for (const [platform, { os, verify, upload }] of Object.entries(completenessByPlatform)) {
+      const step = releaseStep(verify);
+      const expectedIf = `if: matrix.os == '${os}'`;
+      const required = requiredClasses.filter((entry) => entry.platform === platform);
+      if (
+        !step ||
+        !step.includes(expectedIf) ||
+        !/node\s+-e\s+["']/.test(step) ||
+        !/readdirSync\(\s*['"]dist['"]\s*\)/.test(step) ||
+        !/required\s*\.filter\(\(\[,\s*matches\]\)\s*=>\s*!files\.some\(matches\)\)/.test(step) ||
+        !/if\s*\(\s*missing\.length\s*\)\s*throw\s+new\s+Error\(/.test(step)
+      ) {
+        missingCompletenessValidators.push(`${platform}: step`);
+      }
+      if (
+        platform === "win" &&
+        (!step.includes("pkg.build.portable") ||
+          !step.includes("pkg.build.nsis") ||
+          !step.includes("pkg.build.win.artifactName") ||
+          !step.includes("pkg.build.artifactName"))
+      ) {
+        missingCompletenessValidators.push("win: artifact-name derivation");
+      }
+      for (const { name } of required) {
+        if (
+          !new RegExp(`\\[\\s*['"]${escapeRe(name)}['"]\\s*,\\s*f\\s*=>`).test(step) ||
+          !classMatcher[name] ||
+          !classMatcher[name].test(step)
+        ) {
+          missingCompletenessValidators.push(`${platform}: ${name}`);
+        }
+      }
+      const verifyAt = release.findIndex((line) => line === `      - name: ${verify}`);
+      const uploadAt = release.findIndex((line) => line === `      - name: ${upload}`);
+      if (verifyAt === -1 || uploadAt === -1 || verifyAt >= uploadAt) {
+        badlyOrderedValidators.push(`${platform}: ${verifyAt}/${uploadAt}`);
+      }
+    }
+    check(
+      "the release completeness parser found every platform validation",
+      actualClassNames.length === expectedClassNames.length &&
+        actualClassNames.every((name, index) => name === expectedClassNames[index]) &&
+        Object.values(completenessByPlatform).every(({ verify }) => releaseStep(verify) !== ""),
+      JSON.stringify({ requiredClasses, actualClassNames, validators: Object.values(completenessByPlatform).map(({ verify }) => verify) }),
+    );
+    check(
+      "every required release artifact class is independently validated before upload",
+      missingCompletenessValidators.length === 0 && badlyOrderedValidators.length === 0,
+      JSON.stringify({ missingCompletenessValidators, badlyOrderedValidators }),
+    );
+    check(
+      "the release upload-path parser found every platform upload",
+      Object.values(uploadPathsByPlatform).every((paths) => paths.length > 0),
+      JSON.stringify(uploadPathsByPlatform),
+    );
+    check(
+      "every configured release artifact and updater file is uploaded on its platform",
+      missingUploadPaths.length === 0,
+      JSON.stringify({ expectedUploadPathsByPlatform, uploadPathsByPlatform, missingUploadPaths }),
     );
     check(
       "artifact-name derivation prefers target settings over platform and global settings",
@@ -2207,6 +2382,27 @@ async function main() {
         expectedSubjects.every((glob, index) => glob === subjectPaths[index]),
       JSON.stringify({ expectedSubjects, subjectPaths }),
     );
+    check(
+      "the release publication parser found the Create Release action after downloading artifacts",
+      downloadArtifactSteps.length === 1 &&
+        releasePublicationSteps.length === 1 &&
+        createReleaseSteps.indexOf(downloadArtifactSteps[0]) <
+          createReleaseSteps.indexOf(releasePublicationSteps[0]) &&
+        releaseFiles.length > 0,
+      JSON.stringify({
+        steps: createReleaseSteps.map(actionOf),
+        downloadArtifactSteps: downloadArtifactSteps.length,
+        releasePublicationSteps: releasePublicationSteps.length,
+        releaseFiles,
+      }),
+    );
+    check(
+      "the final release publishes exactly the validated upload artifact directories",
+      expectedReleaseFiles.length > 0 &&
+        expectedReleaseFiles.length === releaseFiles.length &&
+        expectedReleaseFiles.every((glob, index) => glob === releaseFiles[index]),
+      JSON.stringify({ expectedReleaseFiles, releaseFiles }),
+    );
     const excludedUpdateFiles = subjectPaths.filter((subject) => /\.blockmap$|(?:^|\/)latest[^/]*\.ya?ml$/i.test(subject));
     check(
       "the attestation deliberately excludes updater metadata and blockmaps",
@@ -2235,6 +2431,188 @@ async function main() {
         attestStepUses[0] === "actions/download-artifact" &&
         attestStepUses.slice(1).every((action) => action === "actions/attest"),
       JSON.stringify(attestStepUses),
+    );
+
+    // Provenance guidance is a security boundary too: an example with a
+    // different repository, workflow or ref can successfully verify a file
+    // without establishing the provenance this release process promises.
+    const documentedRepository = (() => {
+      const publishes = [].concat((pkg.build && pkg.build.publish) || []);
+      const githubPublishes = publishes.filter(
+        (publish) =>
+          publish &&
+          typeof publish === "object" &&
+          publish.provider === "github" &&
+          typeof publish.owner === "string" &&
+          typeof publish.repo === "string",
+      );
+      return githubPublishes.length === 1
+        ? `${githubPublishes[0].owner}/${githubPublishes[0].repo}`
+        : "";
+    })();
+    const documentedAttestationExamples = ["README.md", "docs/BUILD.md"].flatMap((file) => {
+      const text = read(file);
+      const examples = [];
+      let fencedLines = null;
+      for (const line of text.split(/\r?\n/)) {
+        if (/^```[A-Za-z0-9_-]*\s*$/.test(line)) {
+          if (fencedLines !== null) {
+            const lines = fencedLines;
+            fencedLines = null;
+            for (let i = 0; i < lines.length; i++) {
+              if (!/^\s*gh\s+attestation\s+verify\b/.test(lines[i])) continue;
+              let command = lines[i].trim();
+              while (/\\\s*$/.test(command) && i + 1 < lines.length) {
+                command = command.replace(/\\\s*$/, "").trimEnd() + " " + lines[++i].trim();
+              }
+              examples.push({ file, command });
+            }
+          } else {
+            fencedLines = [];
+          }
+          continue;
+        }
+        if (fencedLines !== null) fencedLines.push(line);
+      }
+      return examples;
+    });
+    const documentedExamplesByFile = new Map(
+      ["README.md", "docs/BUILD.md"].map((file) => [
+        file,
+        documentedAttestationExamples.filter((example) => example.file === file),
+      ]),
+    );
+    const optionValue = (command, option) => {
+      const match = command.match(
+        new RegExp(`(?:^|\\s)${escapeRe(option)}\\s+(?:"([^"]+)"|'([^']+)'|(\\S+))`),
+      );
+      return match && (match[1] || match[2] || match[3]);
+    };
+    const verifiedExamples = documentedAttestationExamples.filter((example) => {
+      const repository = optionValue(example.command, "--repo");
+      const signerWorkflow = optionValue(example.command, "--signer-workflow");
+      const sourceRef = optionValue(example.command, "--source-ref");
+      const workflowPath =
+        documentedRepository &&
+        signerWorkflow &&
+        signerWorkflow.startsWith(`${documentedRepository}/`)
+          ? signerWorkflow.slice(documentedRepository.length + 1)
+          : "";
+      const isWorkflowPath = /^\.github\/workflows\/[A-Za-z0-9_.-]+\.ya?ml$/.test(workflowPath);
+      const workflowText =
+        isWorkflowPath && fs.existsSync(path.join(ROOT, workflowPath))
+          ? fs.readFileSync(path.join(ROOT, workflowPath), "utf8")
+          : "";
+      return (
+        repository === documentedRepository &&
+        isWorkflowPath &&
+        /^jobs\s*:\s*$/m.test(workflowText) &&
+        /^ {2}attest\s*:\s*(?:#.*)?$/m.test(workflowText) &&
+        /^refs\/tags\/[^\s/]+$/.test(sourceRef || "")
+      );
+    });
+    check(
+      "README.md and docs/BUILD.md both contain attestation verification examples",
+      documentedExamplesByFile.get("README.md").length > 0 &&
+        documentedExamplesByFile.get("docs/BUILD.md").length > 0,
+      JSON.stringify(
+        Object.fromEntries(
+          [...documentedExamplesByFile].map(([file, examples]) => [file, examples.length]),
+        ),
+      ),
+    );
+    check(
+      "every documented attestation verification example binds this release repository, attest workflow, and tag ref",
+      documentedRepository !== "" &&
+        documentedAttestationExamples.length > 0 &&
+        verifiedExamples.length === documentedAttestationExamples.length,
+      JSON.stringify({
+        documentedRepository,
+        examples: documentedAttestationExamples,
+        invalid: documentedAttestationExamples.filter((example) => !verifiedExamples.includes(example)),
+      }),
+    );
+
+    // The table is deliberately compared with the release-derived subject set,
+    // not a second literal list. That keeps the documentation coupled to both
+    // configured targets and the artifact-upload names that actions/attest
+    // actually receives.
+    const buildDoc = read("docs/BUILD.md");
+    const subjectTableHeader = "| Attested subject | What it covers |";
+    const subjectTableStart = buildDoc.indexOf(subjectTableHeader);
+    const subjectTable = subjectTableStart === -1
+      ? ""
+      : buildDoc.slice(subjectTableStart, buildDoc.indexOf("\n\n", subjectTableStart));
+    const documentedSubjects = [...subjectTable.matchAll(/\|\s*`([^`]+)`\s*\|/g)]
+      .map((match) => match[1])
+      .sort();
+    const provenanceStart = buildDoc.indexOf("## Build provenance");
+    const provenanceEnd =
+      provenanceStart === -1 ? -1 : buildDoc.indexOf("\n## ", provenanceStart + "## Build provenance".length);
+    const provenanceSection =
+      provenanceStart === -1
+        ? ""
+        : buildDoc.slice(provenanceStart, provenanceEnd === -1 ? undefined : provenanceEnd);
+    const documentsMetadataExclusion =
+      /(?:manifests?|latest\*?\.yml)[\s\S]{0,240}(?:blockmaps?)[\s\S]{0,240}attestation subjects?/i.test(
+        provenanceSection,
+      );
+    check(
+      "docs/BUILD.md's attested-subject table matches every release-derived artifact class and excludes updater metadata",
+      subjectTableStart !== -1 &&
+        documentedSubjects.length === expectedSubjects.length &&
+        documentedSubjects.every((subject, index) => subject === expectedSubjects[index]) &&
+        documentsMetadataExclusion,
+      JSON.stringify({
+        expectedSubjects,
+        documentedSubjects,
+        documentsMetadataExclusion,
+      }),
+    );
+
+    // This checks the bounded safety claim, not a SLSA certification: static
+    // source can show that the workflow is top-level and uses actions/attest,
+    // but cannot prove GitHub's runtime isolation or attestation service.
+    const readme = read("README.md");
+    const documentationClaimsLevelTwo = [readme, buildDoc].every((doc) =>
+      /\bSLSA\s+Build\s+Level\s+2\b/i.test(doc) && !/\bSLSA\s+Build\s+Level\s+3\b/i.test(doc),
+    );
+    const workflowTriggers = workflowLines.slice(0, jobsAt === -1 ? workflowLines.length : jobsAt).join("\n");
+    check(
+      "README.md and docs/BUILD.md describe the current top-level actions/attest design as SLSA Build Level 2, not Level 3",
+      documentationClaimsLevelTwo &&
+        !/^ {2}workflow_call\s*:/m.test(workflowTriggers) &&
+        attestStepUses.slice(1).length > 0 &&
+        attestStepUses.slice(1).every((action) => action === "actions/attest"),
+      JSON.stringify({
+        documentationClaimsLevelTwo,
+        reusableWorkflow: /^ {2}workflow_call\s*:/m.test(workflowTriggers),
+        attestStepUses,
+      }),
+    );
+
+    // Restrict this oracle to provenance guidance and require all three
+    // components of a timing claim, so unrelated build instructions remain
+    // free to document measurements.
+    const provenanceGuidance = [
+      ["README.md", readme.slice(readme.indexOf("### Verifying a download"), readme.indexOf("### Build from source"))],
+      ["docs/BUILD.md", provenanceSection],
+    ];
+    const measuredLatencyClaims = provenanceGuidance.flatMap(([file, section]) =>
+      section
+        .split(/(?<=[.!?])\s+/)
+        .filter(
+          (sentence) =>
+            /\b(?:attestation|attest(?:ation)? job|release run)\b/i.test(sentence) &&
+            /\b(?:measured|measurement)\b/i.test(sentence) &&
+            /\b\d+(?:\.\d+)?\s*(?:ms|milliseconds?|seconds?|minutes?|hours?)\b/i.test(sentence),
+        )
+        .map((sentence) => `${file}: ${sentence.trim()}`),
+    );
+    check(
+      "provenance guidance claims no measured attestation or release-run latency",
+      measuredLatencyClaims.length === 0,
+      JSON.stringify(measuredLatencyClaims),
     );
   }
 

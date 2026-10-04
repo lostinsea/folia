@@ -2,9 +2,70 @@
 
 This document explains how to create releases for Folia.
 
+**Two paths can put a release on GitHub, and only one of them should.** The tag
+workflow (`.github/workflows/release.yml`) builds on GitHub runners, attests
+what it built, and is the supported way to publish Folia — see "Publishing a
+release" below and "Build provenance" in [`BUILD.md`](BUILD.md).
+
+`npm run release` (`scripts/release.js`) is the older local path. It builds on a
+workstation and uploads with `gh`, and what it uploads carries **no** GitHub
+attestation, so `gh attestation verify` fails on those files — correctly. It is
+also **not** a completeness check: it publishes whatever it happens to find. It
+remains useful for local packaging, rehearsing the mechanics and dry runs, but
+it should not be used to publish official Folia releases.
+
+## Publishing a release (the supported path)
+
+The workflow path, in order. Each step is here because skipping it produces a
+release that looks finished and is not.
+
+1. Bump `version` in **both** `package.json` and `package-lock.json`
+   (`npm pkg set version=X.X.X`, then `npm install --package-lock-only`),
+   commit and push. `npm ci` in the workflow fails outright if the two
+   disagree.
+2. Tag and push the tag:
+   ```bash
+   git tag -a vX.X.X -m "Folia X.X.X"
+   git push origin vX.X.X
+   ```
+3. **Dispatch against the tag ref, never a branch:**
+   ```bash
+   gh workflow run release.yml --repo lostinsea/folia --ref vX.X.X
+   ```
+   `attest` and `create-release` are both gated on a tag ref, so a dispatch
+   against `main` builds all three platforms and then attests and publishes
+   nothing.
+4. Watch the run: `gh run watch <id> --repo lostinsea/folia --exit-status`.
+   The `attest` job must complete before publication — `create-release`
+   declares `needs: [release, attest]`, so a failed attestation blocks the
+   release rather than yielding an unattested one.
+5. After publication, verify a **downloaded** artifact rather than trusting the
+   run page:
+   ```bash
+   gh release download vX.X.X --repo lostinsea/folia \
+     --pattern "Folia-Setup-X.X.X.exe"
+   gh attestation verify Folia-Setup-X.X.X.exe \
+     --repo lostinsea/folia \
+     --signer-workflow lostinsea/folia/.github/workflows/release.yml \
+     --source-ref refs/tags/vX.X.X
+   ```
+6. Confirm the update manifest still describes the artifact that was uploaded —
+   the sha512 in `latest.yml` against the installer's own. See "Cutting a
+   release" in [`BUILD.md`](BUILD.md).
+
+**Do not patch a gap in that sequence with `npm run release`.** A locally cut
+release carries no attestation, so uploading over an attested tag replaces
+verifiable artifacts with unverifiable ones. If a release already exists, that
+script attempts to delete and recreate it, deletes the local tag, and attempts
+to delete the remote tag when `origin` matches the repository in
+`package.json`. Its GitHub commands are pinned to that repository, but this
+does not prevent replacement of its own releases: GitHub's immutable-releases
+feature is a separate opt-in and is not adopted here.
+
 ## Prerequisites
 
-Before running the release script, ensure you have:
+Both paths need the GitHub CLI. The rest of this document describes the local
+script, so unless noted otherwise it applies to that path only.
 
 1. **GitHub CLI (gh)** installed and authenticated
    ```bash
@@ -18,13 +79,22 @@ Before running the release script, ensure you have:
    gh auth login
    ```
 
+   Verifying release provenance additionally needs a `gh` recent enough to have
+   the `gh attestation` command group — `gh attestation verify --help` is the
+   check.
+
 2. **Node.js and npm** installed
 
 3. **Git repository** properly configured with remote
 
-## Usage
+## The local script (legacy, unattested)
 
-### Interactive Release (Recommended)
+> **Nothing in this section produces build provenance, and nothing in it
+> guarantees a complete release.** Use it for local packaging, for rehearsing
+> the mechanics with `--dry-run`, and for testing installers you build for
+> yourself. Publish through the workflow above.
+
+### Interactive run
 
 ```bash
 npm run release
@@ -34,8 +104,8 @@ This will:
 1. Check prerequisites
 2. Show current version and prompt for new version (patch/minor/major/custom)
 3. Ask for confirmation
-4. Build for Windows and Linux
-5. Create GitHub release with all artifacts
+4. Build for Windows, and for Linux when the host can
+5. Create a GitHub release from whatever artifacts it then finds
 
 ### Specify Version Directly
 
@@ -43,14 +113,17 @@ This will:
 npm run release -- 1.7.0
 ```
 
-### Dry Run (Preview without executing)
+### Dry Run (Preview)
 
 ```bash
 npm run release -- --dry-run
 npm run release -- --dry-run 1.7.0
 ```
 
-Shows what would happen without making any changes. Useful for verifying the release process.
+Changes no files and publishes nothing. It does still run the prerequisite
+checks and the pre-build `npm run test:packaging`; the builds, the strict
+post-build check and every `gh` release command are skipped and printed
+instead.
 
 ### Skip Build (Use existing artifacts)
 
@@ -67,21 +140,41 @@ Skips the build step and uses existing files in `dist/` folder. Useful when you'
 npm run release -- --dry-run --skip-build 1.7.0
 ```
 
-## What the Script Does
+## What the script actually does
 
-1. **Checks prerequisites** - Verifies gh CLI, authentication, and git repo
-2. **Version selection** - Interactive menu or use provided version
-3. **Updates package.json** - Bumps version if changed
-4. **Commits version bump** - Creates git commit and pushes
-5. **Builds Windows** - Creates NSIS installer (.exe)
-6. **Builds Linux** - Creates AppImage and .deb packages
-7. **Renames installer** - Creates dash-named installer for auto-update compatibility
-8. **Collects artifacts** - Gathers all release files from dist/
-9. **Creates GitHub release** - Uploads all artifacts with release notes
+1. **Checks prerequisites** - `gh` installed, `gh` authenticated, and a git
+   repository
+2. **Version selection** - interactive menu, or the version passed as an
+   argument
+3. **Checks packaging and licence notices** - runs `npm run test:packaging`
+   before anything is built or pushed
+4. **Updates `package.json`** - if the version changed. **`package-lock.json`
+   is left alone**, so the two then disagree until that is fixed by hand, and
+   the workflow's `npm ci` fails on exactly that disagreement
+5. **Commits and pushes the bump** - only if the version changed; commit and
+   push errors are ignored, so either can fail without stopping the release
+6. **Attempts the Windows build** (NSIS installer) and, where the host can, the
+   **Linux** build (AppImage and `.deb`). A Windows failure aborts the run on
+   WSL and native Windows but is logged and swallowed elsewhere; a Linux
+   failure is always logged and swallowed. There is no macOS build in this
+   script at all
+7. **Re-runs `npm run test:packaging`** with `PACKAGING_STRICT=1`, which turns a
+   skipped oracle into a failure. It is skipped entirely in a dry run, and
+   under `--skip-build` it judges the `dist/win-unpacked` archive already on
+   disk — failing rather than passing if that archive is absent or older than
+   `package-lock.json`
+8. **Collects artifacts** - pattern-matches `dist/`, warns about and skips
+   files whose names do not contain the version being released (a substring
+   check on the filename, and update manifests are exempt from it), and aborts
+   only if it finds nothing at all
+9. **Creates the GitHub release** - deleting and recreating an existing release
+   on the same tag, then uploading what was collected, with notes derived from
+   those files
 
-## Build Artifacts
+## Artifacts the local script produces
 
-The following files are included in each release:
+A run in which both builds succeed produces these; a partial run publishes a
+subset:
 
 | File | Platform | Description |
 |------|----------|-------------|
@@ -90,17 +183,36 @@ The following files are included in each release:
 | `Folia-X.X.X.AppImage` | Linux | Portable AppImage |
 | `folia_X.X.X_amd64.deb` | Linux | Debian package |
 
-These names are not documentation that has to be kept in step by hand:
-`scripts/release.js` builds the same list from `package.json` and fails the
-release if an expected artifact is missing or an unexpected one appears.
+**That list is not enforced.** The script's dry-run list varies only with
+whether the host can build Linux; it is printed by `--dry-run` and compared
+against nothing. A real run globs `dist/` instead,
+keeps whatever matches its patterns and carries the version being released as a
+substring of the filename, and fails only when it finds nothing whatsoever. So a
+release can go out with the Windows installer alone — a Linux build that failed
+is logged and skipped, not treated as an error — and nothing afterwards reports
+the release as incomplete. Check what was uploaded before announcing it.
 
-**`latest.yml` / `latest-linux.yml` are produced and uploaded.** They are the
-update manifests `electron-updater` polls; without them in the release assets an
-installed build cannot see the release. See `BUILD.md`, "Auto-update".
+The workflow publishes a wider set — it also builds the Windows portable `.exe`
+and the macOS `.dmg`, on runners of the matching OS — and it attests the
+Windows `.exe` files, the `.dmg`, the `.AppImage` and the `.deb`. It also checks
+each leg's output before uploading it and fails the run if a required file is
+missing, rather than publishing what survived. See "Build provenance" in
+[`BUILD.md`](BUILD.md).
+
+**Whatever `latest*.yml` files are sitting in `dist/` are uploaded.** They are
+the update manifests `electron-updater` polls; without the one for a platform in
+the release assets, an installed build on it cannot see the release. `latest.yml`
+is written by the Windows build and `latest-linux.yml` by the Linux build, so a
+skipped build produces no fresh manifest for its platform — and because
+manifests are exempt from the version filter, one left over from an earlier
+build is uploaded rather than rejected. See `BUILD.md`, "Auto-update".
 
 ## Platform Notes
 
-### Running from WSL (Recommended)
+Which host you run the local script on decides which artifacts exist at all,
+and therefore what a "successful" run publishes.
+
+### Running from WSL (widest local coverage)
 - Windows build uses PowerShell automatically
 - Linux build runs natively
 - Both platforms built in single run

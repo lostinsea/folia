@@ -95,6 +95,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Verify Linux release artifact completeness
+        if: matrix.os == 'ubuntu-latest'
+        run: >-
+          node -e "const fs = require('fs'); const files = fs.readdirSync('dist'); const required = [['Linux AppImage', f => /\.AppImage$/i.test(f)], ['Linux Debian package', f => /\.deb$/i.test(f)], ['Linux update manifest', f => f === 'latest-linux.yml']]; const missing = required.filter(([, matches]) => !files.some(matches)).map(([name]) => name); if (missing.length) throw new Error('Missing release artifacts: ' + missing.join(', '));"
+
       - name: Upload Linux artifacts
         if: matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -106,6 +111,11 @@ jobs:
             dist/latest-linux.yml
           if-no-files-found: error
 
+      - name: Verify Windows release artifact completeness
+        if: matrix.os == 'windows-latest'
+        run: >-
+          node -e "const fs = require('fs'); const pkg = require('./package.json'); const files = fs.readdirSync('dist'); const token = String.fromCharCode(36); const expand = (pattern, ext) => pattern.split(token + '{version}').join(pkg.version).split(token + '{ext}').join(ext); const portablePattern = (pkg.build.portable || {}).artifactName || pkg.build.win.artifactName || pkg.build.artifactName; const installerPattern = (pkg.build.nsis || {}).artifactName || pkg.build.win.artifactName || pkg.build.artifactName; const portable = expand(portablePattern, 'exe'); const installer = expand(installerPattern, 'exe'); const required = [['Windows portable executable', f => f === portable], ['Windows NSIS setup executable', f => f === installer], ['Windows update manifest', f => f === 'latest.yml'], ['Windows blockmap', f => /\.blockmap$/i.test(f)]]; const missing = required.filter(([, matches]) => !files.some(matches)).map(([name]) => name); if (missing.length) throw new Error('Missing release artifacts: ' + missing.join(', '));"
+
       - name: Upload Windows artifacts
         if: matrix.os == 'windows-latest'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -116,6 +126,11 @@ jobs:
             dist/*.blockmap
             dist/latest.yml
           if-no-files-found: error
+
+      - name: Verify macOS release artifact completeness
+        if: matrix.os == 'macos-latest'
+        run: >-
+          node -e "const fs = require('fs'); const files = fs.readdirSync('dist'); const required = [['macOS disk image', f => /\.dmg$/i.test(f)], ['macOS update manifest', f => f === 'latest-mac.yml']]; const missing = required.filter(([, matches]) => !files.some(matches)).map(([name]) => name); if (missing.length) throw new Error('Missing release artifacts: ' + missing.join(', '));"
 
       - name: Upload macOS artifacts
         if: matrix.os == 'macos-latest'

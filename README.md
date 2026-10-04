@@ -247,7 +247,8 @@ the other platforms are launched directly.
 >
 > Folia is not code-signed, so SmartScreen will warn on first run. Click
 > **More info**, then **Run anyway**. The source is in this repository and the
-> installer can be rebuilt from it.
+> installer can be rebuilt from it. Build provenance (below) does not remove
+> this warning — it is not a code signature.
 
 Folia checks for updates against this fork's own GitHub releases feed: once a
 few seconds after launch in packaged builds, and on request from the menu. That
@@ -269,6 +270,40 @@ download.
 This is the only connection Folia opens on its own initiative. There is
 currently no setting to turn it off; unpackaged (development) runs never check
 at all.
+
+### Verifying a download
+
+For releases published by the attestation-enabled tag workflow, every runnable
+release binary has a GitHub artifact attestation: a signed record of the
+repository, workflow and commit it was built from, bound to the file's own
+digest. Earlier releases predate this support and have no attestation; a
+verification failure for one of them is expected, not evidence that the file
+was changed. The binary itself is not modified — GitHub stores the attestation
+separately rather than embedding it.
+
+With a recent [GitHub CLI](https://cli.github.com/) (one that has the
+`gh attestation` command group):
+
+```bash
+gh attestation verify Folia-Setup-X.X.X.exe \
+  --repo lostinsea/folia \
+  --signer-workflow lostinsea/folia/.github/workflows/release.yml \
+  --source-ref refs/tags/vX.X.X
+```
+
+Attested: the Windows portable and installer `.exe`, the macOS `.dmg`, the Linux
+`.AppImage` and `.deb`. The `latest*.yml` update manifests and the `.blockmap`
+files are published too but deliberately not attested — they are updater
+metadata, not something you run.
+
+**What that proves, and what it does not.** It proves the file came out of this
+repository's release workflow, at a given commit, and has not changed since. It
+is not a claim that the software is safe or bug-free, it is **SLSA Build Level
+2** rather than Level 3, and it is **not** a code signature: the binaries remain
+unsigned, so SmartScreen on Windows and Gatekeeper on macOS still warn. Builds
+you make yourself, and any release cut from a workstation rather than by the
+workflow, have no attestation and will fail verification. Detail in
+[`BUILD.md`](https://github.com/lostinsea/folia/blob/main/docs/BUILD.md).
 
 ### Build from source
 
