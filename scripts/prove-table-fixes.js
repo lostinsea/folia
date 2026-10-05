@@ -16882,7 +16882,7 @@ const REVERTS = [
           ],
         },
         {
-          id: "R604",
+          id: "R667",
           suite: "test:packaging",
           what: "document an attestation verifier command for a different repository",
           file: path.join(ROOT, "README.md"),
@@ -16896,7 +16896,7 @@ const REVERTS = [
           ],
         },
         {
-          id: "R605",
+          id: "R668",
           suite: "test:packaging",
           what: "document a Linux attestation subject that the release workflow does not produce",
           file: BUILD_DOC,
@@ -16910,7 +16910,7 @@ const REVERTS = [
           ],
         },
         {
-          id: "R606",
+          id: "R669",
           suite: "test:packaging",
           what: "claim SLSA Build Level 3 for the documented README provenance design",
           file: path.join(ROOT, "README.md"),
@@ -16924,7 +16924,7 @@ const REVERTS = [
           ],
         },
         {
-          id: "R607",
+          id: "R670",
           suite: "test:packaging",
           what: "claim a measured attestation release-run latency in provenance guidance",
           file: BUILD_DOC,
@@ -16939,7 +16939,7 @@ const REVERTS = [
           ],
         },
         {
-          id: "R608",
+          id: "R671",
           suite: "test:packaging",
           what: "omit the Linux update-manifest check while still uploading the remaining Linux artifacts",
           file: path.join(ROOT, ".github", "workflows", "release.yml"),
@@ -16954,7 +16954,7 @@ const REVERTS = [
           ],
         },
         {
-          id: "R609",
+          id: "R672",
           suite: "test:packaging",
           what: "omit the Windows artifact directory from final release publication",
           file: path.join(ROOT, ".github", "workflows", "release.yml"),
@@ -16969,7 +16969,7 @@ const REVERTS = [
           ],
         },
         {
-          id: "R610",
+          id: "R673",
           suite: "test:packaging",
           what: "omit the Windows updater manifest from the uploaded release artifacts",
           file: path.join(ROOT, ".github", "workflows", "release.yml"),
@@ -17002,6 +17002,36 @@ const APPROVED_FULL_HARNESS_DEFERRALS = Object.freeze({
 });
 
 const argv = process.argv.slice(2);
+function duplicateRevertIds(records) {
+  const counts = new Map();
+  for (const { id } of records) counts.set(id, (counts.get(id) || 0) + 1);
+  return [...counts].filter(([, count]) => count > 1).map(([id, count]) => `${id} (${count})`);
+}
+
+function proveUniqueRevertIds() {
+  const duplicateIds = duplicateRevertIds(REVERTS);
+  const positive = [{ id: "R-unique-a" }, { id: "R-unique-b" }];
+  const negative = [...positive, { id: "R-unique-a" }];
+  const negativeIds = duplicateRevertIds(negative);
+  if (
+    duplicateIds.length ||
+    duplicateRevertIds(positive).length ||
+    negativeIds.length !== 1 ||
+    negativeIds[0] !== "R-unique-a (2)"
+  ) {
+    console.error(
+      `SELF-CHECK FAILED: revert IDs must be unique; duplicate inventory: ` +
+        `${duplicateIds.length ? duplicateIds.join(", ") : "<none>"}.`,
+    );
+    process.exit(2);
+  }
+  console.log(
+    `revert-ID inventory self-check OK: ${REVERTS.length} unique IDs; ` +
+      "the injected duplicate was detected",
+  );
+}
+
+proveUniqueRevertIds();
 // A refactor cannot break a revert's ASSERTIONS without also running its suite,
 // but it breaks a revert's ANCHOR - the text the harness perturbs - for free,
 // silently, and the report only arrives hours later at the end of a full run.
@@ -17302,6 +17332,14 @@ function boundedTranscriptDiagnostics(out, limit = 6, width = 240) {
   return diagnostics.length ? diagnostics : ["<no transcript captured>"];
 }
 
+function boundedParentFailureDiagnostics(transcript, limit = 3, width = 240) {
+  return (transcript.parentFailures || [])
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, limit)
+    .map((line) => (line.length <= width ? line : line.slice(0, width - 1) + "…"));
+}
+
 function suiteRunHealth(run, suite, { mutationRun, exactShutdownTail }) {
   const transcript = suiteTranscriptHealth(run.stdout, {
     requirePassingFooter: !mutationRun,
@@ -17351,6 +17389,37 @@ function suiteRunHealth(run, suite, { mutationRun, exactShutdownTail }) {
 // and about the right thing.
 function runSuiteChecked(suite) {
   return suiteRunHealth(runSuite(suite), suite, { mutationRun: false });
+}
+
+function proveUnusableSuiteFailureDiagnostics() {
+  const parentFailure = "FAIL  parent assertion to report  -> parent evidence";
+  const stdout = [
+    "PASS  parent control",
+    parentFailure,
+    "[companion stdout] FAIL  companion impostor  -> companion evidence",
+    "=== 1 passed, 1 failed ===",
+  ].join("\n");
+  const transcript = suiteTranscriptHealth(
+    stdout,
+    {
+      requirePassingFooter: false,
+      requireTaggedCompanionTranscript: true,
+      diagnosticOut: [stdout, "FAIL  stderr impostor  -> stderr evidence"],
+    },
+  );
+  const selected = boundedParentFailureDiagnostics(transcript);
+  if (
+    !transcript.healthy ||
+    transcript.parentFailures.length !== 1 ||
+    selected.length !== 1 ||
+    selected[0] !== parentFailure ||
+    selected.some((line) => /companion|stderr/i.test(line))
+  ) {
+    console.error(
+      "SELF-CHECK FAILED: unusable-suite diagnostics must report only parent stdout failures.",
+    );
+    process.exit(2);
+  }
 }
 
 // THE MATCHING SUBJECT IS THE ASSERTION NAME, NOT THE WHOLE FAIL LINE, and both
@@ -18363,6 +18432,7 @@ proveExpectedFailureEvidencePolicy();
 proveSuiteNames();
 proveCompanionTranscriptRoles();
 proveReleaseDeferralPolicy();
+proveUnusableSuiteFailureDiagnostics();
 
 if (fullHarnessReleaseRun) {
   const status = spawnSync("git", ["status", "--porcelain", "--untracked-files=all"], {
@@ -18403,12 +18473,20 @@ if (expectsOnly || fullHarnessReleaseRun) {
     skipsBySuite.set(s, skips);
     if (!run.healthy) {
       unusableSuites.set(s, run.reasons);
+      const parentFailures = boundedParentFailureDiagnostics(run.transcript);
       console.error(
         `${s}  SUITE UNUSABLE (${run.reasons.join("; ")}) - it emitted ${names.length} ` +
           `assertion name(s), which is a TRUNCATED catalogue, not a complete one. Every ` +
           `regex under this suite is reported UNAUDITED below rather than as an orphan: ` +
           `a name that a crashed run never reached has not been shown to be dead.`,
       );
+      if (parentFailures.length) {
+        console.error(
+          `  ^ parent FAIL assertion line(s), stdout only; showing ${parentFailures.length} of ` +
+            `${run.transcript.parentFailures.length}:`,
+        );
+        for (const line of parentFailures) console.error(`    ${line}`);
+      }
       continue;
     }
     console.log(`${s}  ${names.length} assertion(s)`);
