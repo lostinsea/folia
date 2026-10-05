@@ -1,3 +1,4 @@
+(function () {
 // ============================================
 // mermaid-config.js - Mermaid Theme Configuration
 // ============================================
@@ -119,8 +120,7 @@ function getMermaidConfig(isDark) {
   };
 }
 
-// Export for use in other modules
-module.exports = {
+const mermaidConfig = {
   MERMAID_LIGHT_THEME,
   MERMAID_DARK_THEME,
   MERMAID_FLOWCHART,
@@ -128,3 +128,11 @@ module.exports = {
   MERMAID_FONT_PX,
   getMermaidConfig
 };
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = mermaidConfig;
+}
+if (typeof window !== 'undefined') {
+  window.FoliaMermaidConfig = mermaidConfig;
+}
+})();

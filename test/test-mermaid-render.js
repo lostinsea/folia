@@ -1385,13 +1385,18 @@ async function run(win) {
 
   const atBoot = await exec(`
     ({ mermaidLoaded: typeof window.mermaid !== 'undefined',
-       scriptTags: [...document.querySelectorAll('script[src]')]
-         .filter(s => /mermaid/.test(s.src)).length,
+       mermaidLibraryScripts: [...document.querySelectorAll('script[src]')]
+         .filter(s => /(?:^|\\/)mermaid\\.min\\.js(?:[?#]|$)/.test(s.src)).length,
+       mermaidNamedScripts: [...document.querySelectorAll('script[src]')]
+         .map(s => new URL(s.src).pathname.split('/').pop())
+         .filter(name => /mermaid/.test(name)).sort(),
        ensureExists: typeof ensureMermaid === 'function' })
   `);
   check(
     "mermaid is not loaded at startup",
-    atBoot.mermaidLoaded === false && atBoot.scriptTags === 0,
+    atBoot.mermaidLoaded === false &&
+      atBoot.mermaidLibraryScripts === 0 &&
+      JSON.stringify(atBoot.mermaidNamedScripts) === JSON.stringify(["mermaid-config.js"]),
     JSON.stringify(atBoot),
   );
   check(

@@ -23,7 +23,10 @@ if (!window.FoliaUtils) {
   throw new Error('FoliaUtils must load before renderer.js');
 }
 const { removeBOM, getFileName, getDirectory, escapeRegex, formatBytes } = window.FoliaUtils;
-const { getMermaidConfig } = require('./mermaid-config');
+if (!window.FoliaMermaidConfig) {
+  throw new Error('FoliaMermaidConfig must load before renderer.js');
+}
+const { getMermaidConfig } = window.FoliaMermaidConfig;
 const { positionContextMenu, hideContextMenu: hideContextMenuHelper } = require('./context-menu-utils');
 const { parseEmojis } = require('./emoji-parser');
 

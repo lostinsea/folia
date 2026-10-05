@@ -612,8 +612,10 @@ async function main() {
   // 2. Scripts and stylesheets loaded by the renderer document.
   const indexHtml = read("src/index.html");
   const utilsScript = '<script src="utils.js"></script>';
+  const mermaidConfigScript = '<script src="mermaid-config.js"></script>';
   const rendererScript = '<script src="renderer.js"></script>';
   const utilsScriptAt = indexHtml.indexOf(utilsScript);
+  const mermaidConfigScriptAt = indexHtml.indexOf(mermaidConfigScript);
   const rendererScriptAt = indexHtml.indexOf(rendererScript);
   check(
     "SEC-08 utils.js loads exactly once before renderer.js",
@@ -622,6 +624,17 @@ async function main() {
       indexHtml.indexOf(utilsScript, utilsScriptAt + utilsScript.length) === -1 &&
       indexHtml.indexOf(rendererScript, rendererScriptAt + rendererScript.length) === -1,
     JSON.stringify({ utilsScriptAt, rendererScriptAt }),
+  );
+  check(
+    "SEC-08 mermaid-config.js loads exactly once between utils.js and renderer.js",
+    utilsScriptAt >= 0 &&
+      mermaidConfigScriptAt > utilsScriptAt &&
+      rendererScriptAt > mermaidConfigScriptAt &&
+      indexHtml.indexOf(
+        mermaidConfigScript,
+        mermaidConfigScriptAt + mermaidConfigScript.length,
+      ) === -1,
+    JSON.stringify({ utilsScriptAt, mermaidConfigScriptAt, rendererScriptAt }),
   );
   check(
     "SEC-08 utils.js is packaged for its classic-script consumer",
@@ -640,6 +653,24 @@ async function main() {
     "SEC-08 renderer consumes window.FoliaUtils without a CommonJS fallback",
     utilsBinding && !utilsRequire,
     JSON.stringify({ utilsBinding, utilsRequire }),
+  );
+  const mermaidConfigBinding =
+    /const\s*\{\s*getMermaidConfig\s*\}\s*=\s*window\.FoliaMermaidConfig\s*;/.test(
+      rendererSource,
+    );
+  const mermaidConfigRequire =
+    /require\s*\(\s*["'](?:\.\/)?mermaid-config(?:\.js)?["']\s*\)/.test(
+      rendererSource,
+    );
+  check(
+    "SEC-08 mermaid-config.js is packaged for its classic-script consumer",
+    isPackaged(files, "src/mermaid-config.js"),
+    JSON.stringify({ packaged: isPackaged(files, "src/mermaid-config.js") }),
+  );
+  check(
+    "SEC-08 renderer consumes window.FoliaMermaidConfig without a CommonJS fallback",
+    mermaidConfigBinding && !mermaidConfigRequire,
+    JSON.stringify({ mermaidConfigBinding, mermaidConfigRequire }),
   );
   const srcRe = /<(?:script[^>]*\ssrc|link[^>]*\shref)=["']([^"':]+)["']/gi;
   while ((m = srcRe.exec(indexHtml))) {
@@ -1747,6 +1778,29 @@ async function main() {
           `${buildChecks.length} check_build_file (need 10) - ` +
           "a reformat that breaks this parse would silently disarm every " +
           "assertion below it",
+      );
+      const mermaidOrderGuard =
+        script.includes(
+          `const mermaidConfig = '<script src=\\"mermaid-config.js\\"></script>';`,
+        ) &&
+        script.includes("mermaidConfigAt > utilsAt") &&
+        script.includes("rendererAt > mermaidConfigAt");
+      const mermaidPackageGate =
+        /check_build_file "mermaid-config\.js"\s*\n\s*\nif \[ "\$MISSING_BUILD" -eq 1 \]; then[\s\S]*?exit 1\s*\nfi/.test(
+          script,
+        );
+      check(
+        "post-upstream-merge.sh preserves Mermaid loader recovery guards",
+        scriptTags.includes("mermaid-config.js") &&
+          buildChecks.includes("mermaid-config.js") &&
+          mermaidOrderGuard &&
+          mermaidPackageGate,
+        JSON.stringify({
+          scriptTags,
+          buildChecks,
+          mermaidOrderGuard,
+          mermaidPackageGate,
+        }),
       );
 
       // grep semantics: the pattern is a BRE, but every one of them is a plain

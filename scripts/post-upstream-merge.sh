@@ -251,6 +251,31 @@ check_html_script "custom-tabs.js"
 check_html_script "custom-theme.js"
 check_html_script "custom-performance.js"
 check_html_script "utils.js"
+check_html_script "mermaid-config.js"
+
+if node -e "
+  const fs = require('fs');
+  const html = fs.readFileSync('src/index.html', 'utf8');
+  const utils = '<script src=\"utils.js\"></script>';
+  const mermaidConfig = '<script src=\"mermaid-config.js\"></script>';
+  const renderer = '<script src=\"renderer.js\"></script>';
+  const utilsAt = html.indexOf(utils);
+  const mermaidConfigAt = html.indexOf(mermaidConfig);
+  const rendererAt = html.indexOf(renderer);
+  process.exit(
+    utilsAt >= 0 &&
+      mermaidConfigAt > utilsAt &&
+      rendererAt > mermaidConfigAt &&
+      html.indexOf(mermaidConfig, mermaidConfigAt + mermaidConfig.length) === -1
+      ? 0
+      : 1,
+  );
+"; then
+  echo "   ✓ mermaid-config.js loads once between utils.js and renderer.js"
+else
+  echo "   ✗ ORDER: mermaid-config.js must load once between utils.js and renderer.js"
+  exit 1
+fi
 
 # Removed features must STAY removed. custom-language.js came from the
 # intermediate fork, not from upstream, so a merge from that side can
@@ -285,6 +310,12 @@ check_build_file "custom-tabs.js"
 check_build_file "custom-theme.js"
 check_build_file "custom-performance.js"
 check_build_file "custom-styles.css"
+check_build_file "mermaid-config.js"
+
+if [ "$MISSING_BUILD" -eq 1 ]; then
+  echo "   ✗ One or more required customizations are missing from build.files"
+  exit 1
+fi
 
 # The mirror image, and the more dangerous half: this asserts an ABSENCE, so a
 # matcher that has stopped matching reports success. The old exact-quote grep

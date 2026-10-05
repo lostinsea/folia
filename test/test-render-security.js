@@ -157,6 +157,146 @@ async function runUtilsLoaderProbe() {
   }
 }
 
+async function runMermaidConfigLoaderProbe() {
+  const commonJsMermaidConfig = require("../src/mermaid-config.js");
+  const commonJsLight = commonJsMermaidConfig.getMermaidConfig(false);
+  const commonJsDark = commonJsMermaidConfig.getMermaidConfig(true);
+  const expectedKeys = [
+    "MERMAID_DARK_THEME",
+    "MERMAID_FLOWCHART",
+    "MERMAID_FONT_PX",
+    "MERMAID_LIGHT_THEME",
+    "MERMAID_SEQUENCE",
+    "getMermaidConfig",
+  ];
+  check(
+    "SEC-08 mermaid-config preserves its CommonJS API",
+    JSON.stringify(Object.keys(commonJsMermaidConfig).sort()) === JSON.stringify(expectedKeys) &&
+      commonJsMermaidConfig.MERMAID_FONT_PX === 14 &&
+      commonJsLight.theme === "default" &&
+      commonJsDark.theme === "dark" &&
+      commonJsLight.themeVariables.primaryColor === "#279EA7" &&
+      commonJsDark.themeVariables.primaryColor === "#3DBDC6" &&
+      commonJsLight.flowchart.padding === 6 &&
+      commonJsDark.flowchart.rankSpacing === 38 &&
+      commonJsLight.sequence.width === 118 &&
+      commonJsDark.sequence.messageFontSize === 14,
+    JSON.stringify({ keys: Object.keys(commonJsMermaidConfig).sort(), commonJsLight, commonJsDark }),
+  );
+
+  const loaderWin = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+    },
+  });
+  const sentinel = startErrorSentinel(loaderWin, { label: "sec08-mermaid-loader" });
+
+  try {
+    await loaderWin.loadFile(path.join(__dirname, "fixtures", "mermaid-config-loader.html"));
+    const probe = await loaderWin.webContents.executeJavaScript(
+      `(() => {
+        const api = window.FoliaMermaidConfig;
+        const terminal = document.getElementById("sec08-mermaid-loader-terminal");
+        const light = api && api.getMermaidConfig(false);
+        const dark = api && api.getMermaidConfig(true);
+        return {
+          terminal: terminal && terminal.dataset.status,
+          requireType: typeof window.require,
+          moduleType: typeof window.module,
+          processType: typeof window.process,
+          apiType: typeof api,
+          keys: api && Object.keys(api).sort(),
+          fontPx: api && api.MERMAID_FONT_PX,
+          light: light && {
+            theme: light.theme,
+            primaryColor: light.themeVariables.primaryColor,
+            fontSize: light.themeVariables.fontSize,
+            flowchartPadding: light.flowchart.padding,
+            sequenceWidth: light.sequence.width,
+          },
+          dark: dark && {
+            theme: dark.theme,
+            primaryColor: dark.themeVariables.primaryColor,
+            fontSize: dark.themeVariables.fontSize,
+            flowchartRankSpacing: dark.flowchart.rankSpacing,
+            sequenceMessageFontSize: dark.sequence.messageFontSize,
+          },
+        };
+      })()`,
+      true,
+    );
+    check(
+      "SEC-08 classic mermaid-config script runs without Node globals",
+      probe.requireType === "undefined" &&
+        probe.moduleType === "undefined" &&
+        probe.processType === "undefined",
+      JSON.stringify(probe),
+    );
+    check(
+      // This static document marker proves parsing completed independently of
+      // FoliaMermaidConfig, so R683 can distinguish a missing API from a failed load.
+      "SEC-08 mermaid loader document reaches its terminal DOM marker",
+      probe.terminal === "parsed",
+      JSON.stringify(probe),
+    );
+    check(
+      "SEC-08 classic mermaid-config script publishes representative FoliaMermaidConfig behavior",
+      probe.apiType === "object" &&
+        JSON.stringify(probe.keys) === JSON.stringify(expectedKeys) &&
+        probe.fontPx === 14 &&
+        probe.light &&
+        probe.light.theme === "default" &&
+        probe.light.primaryColor === "#279EA7" &&
+        probe.light.fontSize === "14px" &&
+        probe.light.flowchartPadding === 6 &&
+        probe.light.sequenceWidth === 118 &&
+        probe.dark &&
+        probe.dark.theme === "dark" &&
+        probe.dark.primaryColor === "#3DBDC6" &&
+        probe.dark.fontSize === "14px" &&
+        probe.dark.flowchartRankSpacing === 38 &&
+        probe.dark.sequenceMessageFontSize === 14,
+      JSON.stringify(probe),
+    );
+
+    const alive = await proveSentinelAlive(loaderWin, sentinel);
+    check(
+      "SEC-08 mermaid loader error sentinel was demonstrably watching both channels",
+      alive.console === true && alive.dom === true,
+      JSON.stringify(alive),
+    );
+  } finally {
+    const sentinelReport = await sentinel.stop();
+    check(
+      "SEC-08 mermaid loader fixture emits no unexpected errors",
+      sentinelReport.hits.length === 0 && sentinelReport.stalls.length === 0,
+      JSON.stringify(sentinelReport),
+    );
+    if (!loaderWin.isDestroyed()) loaderWin.destroy();
+  }
+}
+
+async function runFocusedLoaderProbes() {
+  // Without main.js, Electron exits as soon as a probe destroys its only
+  // BrowserWindow. Keep this no-Node window alive until both independent
+  // loader fixtures have completed.
+  const keepAliveWin = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+    },
+  });
+  try {
+    await runUtilsLoaderProbe();
+    await runMermaidConfigLoaderProbe();
+  } finally {
+    if (!keepAliveWin.isDestroyed()) keepAliveWin.destroy();
+  }
+}
+
 async function run(win) {
   // A MAIN-PROCESS property, asserted before any page state matters.
   //
@@ -4931,13 +5071,14 @@ app.whenReady().then(async () => {
 
   try {
     if (SEC08_LOADER_FOCUSED_HARNESS) {
-      await runUtilsLoaderProbe();
+      await runFocusedLoaderProbes();
     } else {
       await sleep(2500);
       const win = BrowserWindow.getAllWindows()[0];
       if (!win) throw new Error("no BrowserWindow was created");
 
       await runUtilsLoaderProbe();
+      await runMermaidConfigLoaderProbe();
       await win.webContents.executeJavaScript(E2E_SENTINEL);
       await run(win);
     }

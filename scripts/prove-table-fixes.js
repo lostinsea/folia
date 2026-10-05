@@ -17111,17 +17111,22 @@ const REVERTS = [
           file: HTML,
           from:
             '    <script src="utils.js"></script>\n' +
+            '    <script src="mermaid-config.js"></script>\n' +
             '    <script src="renderer.js"></script>',
           to:
             '    <script src="renderer.js"></script>\n' +
-            '    <script src="utils.js"></script>',
+            '    <script src="utils.js"></script>\n' +
+            '    <script src="mermaid-config.js"></script>',
           suite: "test:packaging",
           expect: [
             /^SEC-08 utils\.js loads exactly once before renderer\.js$/,
+            /^SEC-08 mermaid-config\.js loads exactly once between utils\.js and renderer\.js$/,
           ],
           mustPass: [
             /^SEC-08 utils\.js is packaged for its classic-script consumer$/,
             /^SEC-08 renderer consumes window\.FoliaUtils without a CommonJS fallback$/,
+            /^SEC-08 mermaid-config\.js is packaged for its classic-script consumer$/,
+            /^SEC-08 renderer consumes window\.FoliaMermaidConfig without a CommonJS fallback$/,
           ],
           requireMustPassAssertions: true,
           requireExactFailures: true,
@@ -17141,6 +17146,82 @@ const REVERTS = [
           mustPass: [
             /^SEC-08 utils\.js loads exactly once before renderer\.js$/,
             /^SEC-08 utils\.js is packaged for its classic-script consumer$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R683",
+          what: "withhold FoliaMermaidConfig from the no-Node classic-script loader",
+          file: MERMAID_CFG,
+          from: "if (typeof window !== 'undefined') {",
+          to: "if (typeof window !== 'undefined' && typeof process !== 'undefined') {",
+          suite: SEC08_LOADER_EVIDENCE_SUITE,
+          expect: [
+            /^SEC-08 classic mermaid-config script publishes representative FoliaMermaidConfig behavior$/,
+          ],
+          mustPass: [
+            /^SEC-08 mermaid-config preserves its CommonJS API$/,
+            /^SEC-08 classic mermaid-config script runs without Node globals$/,
+            /^SEC-08 mermaid loader document reaches its terminal DOM marker$/,
+            /^SEC-08 mermaid loader error sentinel was demonstrably watching both channels$/,
+            /^SEC-08 mermaid loader fixture emits no unexpected errors$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R684",
+          what: "load renderer.js before its FoliaMermaidConfig classic-script dependency",
+          file: HTML,
+          from:
+            '    <script src="mermaid-config.js"></script>\n' +
+            '    <script src="renderer.js"></script>',
+          to:
+            '    <script src="renderer.js"></script>\n' +
+            '    <script src="mermaid-config.js"></script>',
+          suite: "test:packaging",
+          expect: [
+            /^SEC-08 mermaid-config\.js loads exactly once between utils\.js and renderer\.js$/,
+          ],
+          mustPass: [
+            /^SEC-08 mermaid-config\.js is packaged for its classic-script consumer$/,
+            /^SEC-08 renderer consumes window\.FoliaMermaidConfig without a CommonJS fallback$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R685",
+          what: "restore renderer's CommonJS fallback instead of consuming the FoliaMermaidConfig global",
+          file: RENDERER,
+          from: "const { getMermaidConfig } = window.FoliaMermaidConfig;",
+          to: "const { getMermaidConfig } = require('./mermaid-config');",
+          suite: "test:packaging",
+          expect: [
+            /^SEC-08 renderer consumes window\.FoliaMermaidConfig without a CommonJS fallback$/,
+          ],
+          mustPass: [
+            /^SEC-08 mermaid-config\.js loads exactly once between utils\.js and renderer\.js$/,
+            /^SEC-08 mermaid-config\.js is packaged for its classic-script consumer$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R686",
+          what: "reverse the post-merge Mermaid loader ordering guard",
+          file: MERGE_SH,
+          from: "mermaidConfigAt > utilsAt &&",
+          to: "mermaidConfigAt < utilsAt &&",
+          suite: "test:packaging",
+          expect: [
+            /^post-upstream-merge\.sh preserves Mermaid loader recovery guards$/,
+          ],
+          mustPass: [
+            /^SEC-08 mermaid-config\.js loads exactly once between utils\.js and renderer\.js$/,
+            /^SEC-08 mermaid-config\.js is packaged for its classic-script consumer$/,
+            /^SEC-08 renderer consumes window\.FoliaMermaidConfig without a CommonJS fallback$/,
           ],
           requireMustPassAssertions: true,
           requireExactFailures: true,
