@@ -19,7 +19,8 @@ const path = require("path");
 // app is ready. See test-userdata-isolation.js.
 require("./test-userdata-isolation");
 
-require("../src/main.js");
+const SEC08_LOADER_FOCUSED_HARNESS = process.env.SEC08_LOADER_FOCUSED_HARNESS === "1";
+if (!SEC08_LOADER_FOCUSED_HARNESS) require("../src/main.js");
 
 const dir = require("./test-visual-utils").tempDir("mdv-sec-");
 
@@ -68,6 +69,93 @@ const E2E_SENTINEL = `
   window.addEventListener('unhandledrejection', e => window.__e2eErrors.push(String(e.reason)));
   null;
 `;
+
+async function runUtilsLoaderProbe() {
+  const commonJsUtils = require("../src/utils.js");
+  check(
+    "SEC-08 utils preserves its CommonJS API",
+    commonJsUtils.removeBOM("\uFEFFloader") === "loader" &&
+      commonJsUtils.getFileName("C:\\docs\\loader.md") === "loader.md" &&
+      commonJsUtils.getDirectory("C:\\docs\\loader.md") === "C:/docs" &&
+      commonJsUtils.escapeRegex("a+b?") === "a\\+b\\?" &&
+      commonJsUtils.formatBytes(1536) === "1.5 KB",
+    JSON.stringify(Object.keys(commonJsUtils).sort()),
+  );
+
+  const loaderWin = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+    },
+  });
+  const sentinel = startErrorSentinel(loaderWin, { label: "sec08-utils-loader" });
+
+  try {
+    await loaderWin.loadFile(path.join(__dirname, "fixtures", "utils-loader.html"));
+    const probe = await loaderWin.webContents.executeJavaScript(
+      `(() => {
+        const api = window.FoliaUtils;
+        const terminal = document.getElementById("sec08-utils-loader-terminal");
+        return {
+          terminal: terminal && terminal.dataset.status,
+          requireType: typeof window.require,
+          moduleType: typeof window.module,
+          processType: typeof window.process,
+          apiType: typeof api,
+          behavior: api && {
+            removeBOM: api.removeBOM("\\uFEFFloader"),
+            fileName: api.getFileName("C:\\\\docs\\\\loader.md"),
+            directory: api.getDirectory("C:\\\\docs\\\\loader.md"),
+            regex: api.escapeRegex("a+b?"),
+            bytes: api.formatBytes(1536),
+          },
+        };
+      })()`,
+      true,
+    );
+    check(
+      "SEC-08 classic utils script runs without Node globals",
+      probe.requireType === "undefined" &&
+        probe.moduleType === "undefined" &&
+        probe.processType === "undefined",
+      JSON.stringify(probe),
+    );
+    check(
+      // This static document marker proves parsing completed independently of
+      // FoliaUtils, so R680 can distinguish a missing API from a failed load.
+      "SEC-08 loader document reaches its terminal DOM marker",
+      probe.terminal === "parsed",
+      JSON.stringify(probe),
+    );
+    check(
+      "SEC-08 classic utils script publishes representative FoliaUtils behavior",
+      probe.apiType === "object" &&
+        probe.behavior &&
+        probe.behavior.removeBOM === "loader" &&
+        probe.behavior.fileName === "loader.md" &&
+        probe.behavior.directory === "C:/docs" &&
+        probe.behavior.regex === "a\\+b\\?" &&
+        probe.behavior.bytes === "1.5 KB",
+      JSON.stringify(probe),
+    );
+
+    const alive = await proveSentinelAlive(loaderWin, sentinel);
+    check(
+      "SEC-08 loader error sentinel was demonstrably watching both channels",
+      alive.console === true && alive.dom === true,
+      JSON.stringify(alive),
+    );
+  } finally {
+    const sentinelReport = await sentinel.stop();
+    check(
+      "SEC-08 loader fixture emits no unexpected errors",
+      sentinelReport.hits.length === 0 && sentinelReport.stalls.length === 0,
+      JSON.stringify(sentinelReport),
+    );
+    if (!loaderWin.isDestroyed()) loaderWin.destroy();
+  }
+}
 
 async function run(win) {
   // A MAIN-PROCESS property, asserted before any page state matters.
@@ -4841,18 +4929,18 @@ app.whenReady().then(async () => {
   }, 180000);
   watchdog.unref?.();
 
-  await sleep(2500);
-  const win = BrowserWindow.getAllWindows()[0];
-  if (!win) {
-    console.log("FAIL  no BrowserWindow was created");
-    app.exit(1);
-    return;
-  }
-
-  await win.webContents.executeJavaScript(E2E_SENTINEL);
-
   try {
-    await run(win);
+    if (SEC08_LOADER_FOCUSED_HARNESS) {
+      await runUtilsLoaderProbe();
+    } else {
+      await sleep(2500);
+      const win = BrowserWindow.getAllWindows()[0];
+      if (!win) throw new Error("no BrowserWindow was created");
+
+      await runUtilsLoaderProbe();
+      await win.webContents.executeJavaScript(E2E_SENTINEL);
+      await run(win);
+    }
   } catch (error) {
     console.log(
       "FAIL  harness threw:",

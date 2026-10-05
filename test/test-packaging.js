@@ -611,6 +611,36 @@ async function main() {
 
   // 2. Scripts and stylesheets loaded by the renderer document.
   const indexHtml = read("src/index.html");
+  const utilsScript = '<script src="utils.js"></script>';
+  const rendererScript = '<script src="renderer.js"></script>';
+  const utilsScriptAt = indexHtml.indexOf(utilsScript);
+  const rendererScriptAt = indexHtml.indexOf(rendererScript);
+  check(
+    "SEC-08 utils.js loads exactly once before renderer.js",
+    utilsScriptAt >= 0 &&
+      rendererScriptAt > utilsScriptAt &&
+      indexHtml.indexOf(utilsScript, utilsScriptAt + utilsScript.length) === -1 &&
+      indexHtml.indexOf(rendererScript, rendererScriptAt + rendererScript.length) === -1,
+    JSON.stringify({ utilsScriptAt, rendererScriptAt }),
+  );
+  check(
+    "SEC-08 utils.js is packaged for its classic-script consumer",
+    isPackaged(files, "src/utils.js"),
+    JSON.stringify({ packaged: isPackaged(files, "src/utils.js") }),
+  );
+  const rendererSource = stripJsComments(read("src/renderer.js"));
+  const utilsBinding =
+    /const\s*\{\s*removeBOM\s*,\s*getFileName\s*,\s*getDirectory\s*,\s*escapeRegex\s*,\s*formatBytes\s*\}\s*=\s*window\.FoliaUtils\s*;/.test(
+      rendererSource,
+    );
+  const utilsRequire = /require\s*\(\s*["'](?:\.\/)?utils(?:\.js)?["']\s*\)/.test(
+    rendererSource,
+  );
+  check(
+    "SEC-08 renderer consumes window.FoliaUtils without a CommonJS fallback",
+    utilsBinding && !utilsRequire,
+    JSON.stringify({ utilsBinding, utilsRequire }),
+  );
   const srcRe = /<(?:script[^>]*\ssrc|link[^>]*\shref)=["']([^"':]+)["']/gi;
   while ((m = srcRe.exec(indexHtml))) {
     const ref = m[1].replace(/^\.\//, "");

@@ -19,7 +19,10 @@ let failedNavigationRequestCount = 0;
 let lastNavigationRequestResult = null;
 
 // Helper modules
-const { removeBOM, getFileName, getDirectory, escapeRegex, formatBytes } = require('./utils');
+if (!window.FoliaUtils) {
+  throw new Error('FoliaUtils must load before renderer.js');
+}
+const { removeBOM, getFileName, getDirectory, escapeRegex, formatBytes } = window.FoliaUtils;
 const { getMermaidConfig } = require('./mermaid-config');
 const { positionContextMenu, hideContextMenu: hideContextMenuHelper } = require('./context-menu-utils');
 const { parseEmojis } = require('./emoji-parser');

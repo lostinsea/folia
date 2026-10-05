@@ -250,6 +250,7 @@ check_html_script "custom-collapse.js"
 check_html_script "custom-tabs.js"
 check_html_script "custom-theme.js"
 check_html_script "custom-performance.js"
+check_html_script "utils.js"
 
 # Removed features must STAY removed. custom-language.js came from the
 # intermediate fork, not from upstream, so a merge from that side can

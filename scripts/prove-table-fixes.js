@@ -53,6 +53,7 @@ const LICENSE_MD = path.join(ROOT, "LICENSE");
 const NOTICES_GEN = path.join(ROOT, "scripts", "generate-notices.js");
 const ATTRS = path.join(ROOT, ".gitattributes");
 const HTML = path.join(SRC, "index.html");
+const UTILS = path.join(SRC, "utils.js");
 const CUSTOM_CSS = path.join(SRC, "custom-styles.css");
 const CENSUS = path.join(ROOT, "test", "theme-census.js");
 const GOLDEN = path.join(ROOT, "test", "fixtures", "theme-golden.json");
@@ -98,6 +99,7 @@ const F22_NEWLINE_EVIDENCE_SUITE = "test:f22-newline-evidence";
 const F22_ACK_EVIDENCE_SUITE = "test:f22-ack-evidence";
 const F22_CTIME_R660_EVIDENCE_SUITE = "test:f22-ctime-r660-evidence";
 const F22_QUEUE_EVIDENCE_SUITE = "test:f22-queue-evidence";
+const SEC08_LOADER_EVIDENCE_SUITE = "test:sec08-loader-evidence";
 const R660_PROOF_ONLY_SHUTDOWN_TAIL = Object.freeze([
   "Shutdown approval renderer unusable: webContents destroyed",
 ]);
@@ -131,6 +133,10 @@ const VIRTUAL_SUITES = Object.freeze({
   [F22_QUEUE_EVIDENCE_SUITE]: Object.freeze({
     npmScript: "test:tabs",
     environment: Object.freeze({ F22_QUEUE_FOCUSED_HARNESS: "1" }),
+  }),
+  [SEC08_LOADER_EVIDENCE_SUITE]: Object.freeze({
+    npmScript: "test:security",
+    environment: Object.freeze({ SEC08_LOADER_FOCUSED_HARNESS: "1" }),
   }),
 });
 
@@ -17075,6 +17081,66 @@ const REVERTS = [
           mustPass: [
             /^the PDF restore fixture persists a dark effective preference and dark diagrams$/,
             /^the PDF result notification follows restored dark theme and export hold$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R680",
+          what: "publish the utility object only when a renderer still has Node",
+          file: UTILS,
+          from: "if (typeof window !== 'undefined') {",
+          to: "if (typeof window !== 'undefined' && typeof process !== 'undefined') {",
+          suite: SEC08_LOADER_EVIDENCE_SUITE,
+          expect: [
+            /^SEC-08 classic utils script publishes representative FoliaUtils behavior$/,
+          ],
+          mustPass: [
+            /^SEC-08 utils preserves its CommonJS API$/,
+            /^SEC-08 classic utils script runs without Node globals$/,
+            /^SEC-08 loader document reaches its terminal DOM marker$/,
+            /^SEC-08 loader error sentinel was demonstrably watching both channels$/,
+            /^SEC-08 loader fixture emits no unexpected errors$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R681",
+          what: "load renderer.js before its FoliaUtils classic-script dependency",
+          file: HTML,
+          from:
+            '    <script src="utils.js"></script>\n' +
+            '    <script src="renderer.js"></script>',
+          to:
+            '    <script src="renderer.js"></script>\n' +
+            '    <script src="utils.js"></script>',
+          suite: "test:packaging",
+          expect: [
+            /^SEC-08 utils\.js loads exactly once before renderer\.js$/,
+          ],
+          mustPass: [
+            /^SEC-08 utils\.js is packaged for its classic-script consumer$/,
+            /^SEC-08 renderer consumes window\.FoliaUtils without a CommonJS fallback$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R682",
+          what: "restore renderer's CommonJS fallback instead of consuming the FoliaUtils global",
+          file: RENDERER,
+          from:
+            "const { removeBOM, getFileName, getDirectory, escapeRegex, formatBytes } = window.FoliaUtils;",
+          to:
+            "const { removeBOM, getFileName, getDirectory, escapeRegex, formatBytes } = require('./utils');",
+          suite: "test:packaging",
+          expect: [
+            /^SEC-08 renderer consumes window\.FoliaUtils without a CommonJS fallback$/,
+          ],
+          mustPass: [
+            /^SEC-08 utils\.js loads exactly once before renderer\.js$/,
+            /^SEC-08 utils\.js is packaged for its classic-script consumer$/,
           ],
           requireMustPassAssertions: true,
           requireExactFailures: true,
