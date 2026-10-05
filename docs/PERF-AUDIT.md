@@ -16,8 +16,8 @@
 
 ## Measurement methodology
 
-- Machine: **AMD EPYC 7763**, 16 vCPU exposed / 32 logical processors, **127.9GB RAM**, **Windows 11 Enterprise 26200**
-- Runtime: **Electron v41.7.1**, **Node v20.18.3**
+- Original audit machine: **AMD EPYC 7763**, 16 vCPU exposed / 32 logical processors, **127.9GB RAM**, **Windows 11 Enterprise 26200**
+- Original audit runtime: **Electron v41.7.1**, **Node v20.18.3**; later experiments specify their own environment below.
 - Harness: copied the `test-tab-refresh.js` pattern:
   - `require("./main.js")`
   - wait for `BrowserWindow.getAllWindows()[0]`
@@ -550,6 +550,91 @@ startup, the eventual isolated preload, or the full SEC-08 benchmark
 set. The initial path-confounded result remains unexplained; the
 same-path result does not license a claim that all SEC-08 performance
 gates have passed.
+
+### SEC-08 utility-loader preparation — real-file startup check (integration branch)
+
+This SEC-08 unit loads the existing `utils.js` as a local classic
+script before `renderer.js`, keeps its CommonJS API and uses a
+browser global without a Node fallback. The main window is still
+Node-privileged. Before measurement, the material-regression budget
+was fixed at **both >10% and >25 ms** at p50 or p95 for either
+entry-to-FCP or entry-to-`did-finish-load`. Within each run, A/B
+uses one identical disposable app path and real files, Electron
+**43.4.1** / Chromium **150.0.7871.224** on the same AMD EPYC
+Windows 11 host (release **10.0.26300**), fresh profiles, and
+alternating AB/BA order (V2: four AB/three BA; V3: seven each).
+The pooled observations span two disposable app roots, balanced
+within each variant. Chromium's original buffered paint entry
+timestamp supplies FCP; the wait for that entry is not part of
+its timestamp. This is a startup probe, not the full SEC-08
+benchmark set.
+
+The first run stopped at pair 3B: `did-finish-load` had fired but
+the FCP entry was not yet buffered when queried immediately.
+Its three baseline and two candidate samples cannot establish
+the seven-pair p50/p95 gate. The corrected runner waited up to
+1.8 seconds for the actual entry and completed **seven A and
+seven B** observations, all with valid FCP entries. Baseline
+to candidate entry-to-FCP p50 was **1214.2 to 1221.0 ms**
+(+6.8 ms, +0.56%); p95 was **1601.0 to 1812.4 ms**
+(**+211.4 ms, +13.20%**), crossing the fixed budget.
+Entry-to-load p50 was **1210.76 to 1239.56 ms**
+(+28.80 ms, +2.38%) and p95 **1790.43 to 1814.80 ms**
+(+24.37 ms, +1.36%), neither crossing it. Paired FCP
+candidate-minus-baseline deltas were -317.9, +6.8, +102.7,
++69.6, +674.5, -453.2 and -250.0 ms: large outliers
+occurred on both variants, but the failed p95 cannot be waived
+by inspection. Original candidate source hashes matched after
+the run, the disposable app was restored and no probe-owned
+process remained. Raw samples, snapshots and logs are retained
+in session artifacts `files/sec08-loader-fcp-probe-20261005`
+and `files/sec08-loader-fcp-probe-v2-20261005`.
+
+After that run the unit was **blocked**. Before another measurement,
+one machine-exclusive confirmation was predeclared: add 14 balanced
+pairs and judge the pooled 21-per-variant p50/p95 against the
+unchanged budget, retaining the failed observation regardless of
+the outcome. No further retry or load-only substitution was
+authorized.
+
+The single predeclared confirmation completed **14 additional
+balanced pairs** with no excluded samples. V3 entry-to-FCP
+p50/p95 baseline to candidate was **1202.1/1660.9 to
+1167.9/1534.6 ms** (deltas -34.2/-126.3 ms); entry-to-load
+was **1216.47/1893.38 to 1198.64/1585.58 ms**
+(-17.83/-307.80 ms). Pooling the immutable V2 observations
+with V3 gives **21 samples per variant**: entry-to-FCP p50/p95
+**1213.8/1601.0 to 1211.9/1534.6 ms**
+(-1.9/-66.4 ms), entry-to-load
+**1216.47/1790.43 to 1218.36/1585.58 ms**
+(+1.89/-204.85 ms). **No pooled metric crosses the unchanged
+both >10% and >25 ms budget.** With nearest-rank p95, seven
+observations select the maximum, while 21 select the
+second-highest: B's failed **1812.4 ms** sample is retained
+in the pooled data but not selected by pooled p95
+(**1534.6 ms**). The pooled maxima, a descriptive
+cross-check rather than the predeclared decision statistic,
+are **1660.9 ms A** and **1812.4 ms B**
+(+151.5 ms, +9.12%); this comparison also stays below
+the >10% part of the fixed budget. Pooled p95 A came from
+V2 and B from V3, so this is a balanced-across-runs
+comparison, **not** one common app-path run. V3 paired FCP
+deltas ranged from **-178.4 to +104.0 ms**, well above
+the budget's 25 ms component in either direction; the
+probe cannot exclude a small cost from the extra script.
+The raw observations, all paired deltas, source hashes, fixed
+pooled rule and complete Electron/Chromium versions are retained in
+`files/sec08-loader-fcp-probe-v3-20261005/results.json`.
+The initial seven-pair FCP p95 failure remains in the record;
+larger balanced sampling did not reproduce a material
+regression, rather than proving that the original result
+was impossible or that the module has zero cost. The reviewed
+worktree's candidate bytes and the disposable app's candidate
+sources were restored, and the probe left no child processes.
+This clears only the bounded empty-window real-file startup
+comparison, not packaged startup, file-open/render, Electron
+bootstrap before the probe entry, compositor presentation or
+the complete SEC-08 performance matrix.
 
 ## Measured and found already fast
 - **Custom tab sync I/O is not the current bottleneck.**

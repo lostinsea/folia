@@ -3089,7 +3089,7 @@ control removed the declaration block but overlooked the associated
 were the only 12 main.js insertions. That guard is being corrected
 once to allow the planned same-path measurement to distinguish code
 from worktree-path/order effects. The corrected same-path experiment
-then observed **seven balanced AB/BA pairs** under one identical
+then observed **seven AB/BA-interleaved pairs** under one identical
 worktree filename, renderer URL and Electron 43.4.1 runtime:
 FCP-proxy p50/p95 HEAD **1168.0/1203.0 ms**, candidate
 **1161.6/1190.5 ms**; load p50/p95 HEAD
@@ -3135,6 +3135,152 @@ must never be selectable in a packaged or unmarked launch. The
 first harness unit has completed independent Sol/Terra/Luna review
 and integration; the remaining renderer migration has not. This
 is a harness migration, not completion of SEC-08.
+
+**Next unit handoff (2026-10-05).** The integration owner created clean
+`feat/w2-sec08-loader-one-20261005` from `1d088ab` to migrate exactly
+one renderer-only module's loader. Opus mapped module dependencies;
+Luna independently checked the smallest safe dual-mode design.
+Both found pure, already-packaged modules suitable for a first unit,
+but Opus preferred `mermaid-config.js` with a renderer `require`
+fallback and a separate no-Node probe, whereas Luna preferred
+`utils.js` without the fallback. The integration owner selected
+`utils.js`: it has one product importer and no dependencies, and
+using its browser global directly makes an absent or misordered tag
+fail instead of succeeding through Node. Preserve its CommonJS API,
+wrap classic-script declarations to avoid collisions, and have Terra
+prove browser-without-Node behavior and existing Node behavior
+independently. Sol (high) now owns the three product-file edits in
+the isolated worktree; Terra follows with tests, automation and
+individual revert proof. No isolation flag change is authorized.
+Sol completed the three-file product edit, preserving the CommonJS
+API and making `renderer.js` fail loudly without the preceding local
+script; source syntax and the diff check passed. Terra's independent
+test design preferred a dedicated new suite, whereas the integration
+owner requested reusing the existing security suite if its isolated
+no-Node window can prove the same browser behavior without adding
+another full-suite catalogue. Terra now owns that bounded test,
+packaging, post-merge and individually reverting proof work; at that
+handoff, neither targeted tests nor reviews were claimed.
+Terra's focused security suite passed **199/199**, its no-Node
+loader leg **6/6**, and packaging **309 passed, 0 failed** with
+two absent-asar SKIPs. The **621** combined anchor setups resolved;
+R680-R682 each individually reported PROVEN with the intended exact
+failure and passing controls, and their source bytes were restored.
+Three fresh Sol/Terra/Luna read-only reviews of the complete eight-file
+unit (including the new fixture) are now in flight. They must finish
+before any performance attribution or integration; the full SEC-08
+benchmark matrix, clean-tree release suite, fresh strict asar, full
+revert inventory and wave screenshots remain open.
+The first fresh review round found no product blocker: Sol and Terra
+reported no significant issue, while Luna identified an overclaim in
+the fixture's hard-coded terminal marker. It proves that the isolated
+test document loaded, not that `utils.js` executed; the separate
+representative-behavior assertion proves script execution. Terra is
+renaming that independent R680 passing control to reflect its actual
+meaning, without making it depend on the very global-publication
+branch R680 removes. The reviewers agreed the main renderer remains
+Node-enabled and the missing asar and startup evidence remain open.
+Terra corrected the label and its exact R680 passing-control matcher
+without altering the static marker: it now says the **document reached
+its terminal DOM marker**, while the separate behavior assertion alone
+proves utility execution. Focused **6/6**, full security **199/199**,
+individual R680 **PROVEN**, and **621** anchor setups still pass.
+Fresh-review follow-ups are checking that correction. Terra is
+running a machine-exclusive, same-path real-file seven-pair startup
+comparison in a disposable session probe; until it produces complete
+samples, the loader unit's performance gate remains open.
+All three independent Sol/Terra/Luna follow-ups found the corrected
+test control accurate and no new blocker. Their code-review agreement
+does not independently execute the claimed suites or reverts; the
+test owner's focused results above remain the execution evidence.
+The first real-file same-path A/B run stopped at pair 3B: Chromium had
+no FCP entry when its complete page fired `did-finish-load`; only
+three baseline and two candidate observations were valid, with two
+complete pairs too few for the predeclared seven-pair p50/p95 gate
+(`files/sec08-loader-fcp-probe-20261005/results.json`). Source
+hashes matched, the disposable app was restored to candidate bytes,
+and the reviewed worktree was unchanged. This is **inconclusive**,
+not a pass or attributed regression. One bounded session-only
+measurement correction will await the actual buffered FCP entry
+without changing its recorded timestamp, then repeat the full
+balanced run; another failed collection will be recorded rather
+than retried blindly.
+The corrected real-file run completed all seven alternating AB/BA pairs
+with valid original-timestamp FCP entries. Under the predeclared
+**both >10% and >25 ms** criterion, candidate FCP p95 crossed the
+gate: baseline **1601.0 ms**, candidate **1812.4 ms**
+(+211.4 ms, +13.20%); FCP p50 was 1214.2 to 1221.0 ms
+(+6.8 ms, +0.56%). Load p50/p95 did not cross it.
+Paired FCP deltas changed sign and ranged from -453.2 to
++674.5 ms; this is a **blocked startup gate**, not a proved
+module-loader cost or permission to integrate. The unchanged
+candidate worktree, restored disposable app and raw samples are
+recorded in `files/sec08-loader-fcp-probe-v2-20261005/results.json`
+and `docs/PERF-AUDIT.md`. Before further measurement, Terra
+predeclared one machine-exclusive confirmation with 14 further
+balanced pairs and a pooled 21-per-variant p50/p95 decision
+against the **same** budget, retaining both runs and stopping
+if collection or the pooled gate failed. Read-only research of
+the next module did not waive this unit's performance gate.
+That single confirmation completed **14 further balanced pairs**,
+with no excluded samples. V3 FCP p50/p95 baseline to candidate
+was **1202.1/1660.9 to 1167.9/1534.6 ms**. The predeclared
+pooled **21 A/21 B** decision produced FCP p50/p95
+**1213.8/1601.0 to 1211.9/1534.6 ms** and load
+**1216.47/1790.43 to 1218.36/1585.58 ms**: no pooled
+metric crossed the unchanged both >10% and >25 ms budget.
+The original seven-pair p95 failure remains an observed failure,
+**not** silently relabelled as a pass. Nearest-rank p95 is the
+maximum at seven observations but the second-highest at 21,
+so the failed candidate's 1812.4 ms outlier remains in the
+pooled data but not in its p95 value. Even the pooled maxima
+compare **1660.9 to 1812.4 ms** (+151.5 ms, +9.12%),
+below the >10% half of the material-regression rule. The
+pooled comparison combines two runs, each path-controlled
+within its own A/B pair (pooled p95 A from V2 and B from V3);
+it clears only the bounded startup gate, with substantial
+per-launch noise;
+it does not clear packaged startup, file-open/render or the
+complete SEC-08 benchmark matrix. All original and disposable
+source hashes matched candidate B after the run, with no
+probe-owned process left; raw results and the fixed pooled
+decision are retained at
+`files/sec08-loader-fcp-probe-v3-20261005/results.json`.
+The isolated loader unit was committed as `839e1f8` on the
+clean `feat/w2-sec08-loader-one-20261005` stream after the
+three independent correction follow-ups, then fast-forwarded
+serially into the integration checkout at `839e1f8`.
+Post-landing impacted startup, Mermaid, security, tabs, packaging
+and combined anchor checks then passed: startup **11/11**,
+Mermaid **125/125**, security **199/199**, tabs **478/478**,
+packaging **318 passed, 0 failed** with one packaged-feed
+SKIP (no auto-updatable build), and all **621** anchor setups
+resolved. Packaging inspected an existing built `app.asar`,
+not a fresh build from this commit. The anchor result is
+a setup audit, not proof that
+the full revert inventory ran. Full clean-tree suite,
+strict freshly built asar, full revert inventory, viewed wave
+screenshots and complete SEC-08 isolation remain open.
+
+**Next loader handoff (2026-10-05).** After the utility loader
+landed and its impacted checks passed, the integration owner
+created clean `feat/w2-sec08-loader-mermaid-20261005` from
+`839e1f8`. Independent Opus architecture research and Luna
+design assessment agree `mermaid-config.js` is the smallest
+next dependency-free module with one renderer importer.
+Both require an IIFE, preserved CommonJS API, one fail-loud
+browser-global consumer and a real no-Node proof; neither
+supports reviving a renderer `require` fallback. Luna
+additionally identified existing R319 source-anchor sensitivity
+and theme geometry checks as relevant; Terra should assess
+whether a separate IIFE revert proves distinct value instead
+of adding redundant machinery. The prior six-module inventory
+is a snapshot: the `notification-helpers.js` packaged module
+has no current product importer, so count active imports afresh
+before calling loader migration complete. Sol (high) now owns
+only the three product-file edits in the isolated worktree;
+Terra's test, proof and performance handoff follows. The
+main-window isolation flag remains unchanged.
 
 **Order of work is fixed by the audit** (each step independently shippable):
 rebuild the harnesses' renderer access on a test-only preload → give the 6 local
