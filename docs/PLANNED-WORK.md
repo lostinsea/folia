@@ -3281,6 +3281,97 @@ before calling loader migration complete. Sol (high) now owns
 only the three product-file edits in the isolated worktree;
 Terra's test, proof and performance handoff follows. The
 main-window isolation flag remains unchanged.
+Sol completed the three-file Mermaid config product migration
+without changing config values or call sites, keeping the
+existing R319 theme-selection anchor intact. Syntax and
+diff checks passed; no Electron suite or mutation proof had
+run at that handoff. Terra now owns focused no-Node and Node
+behavior tests, theme/Mermaid controls, packaging and post-merge
+guards, and individual reverts in the isolated worktree.
+The fresh independent review and startup performance attribution
+remain pending; no second-unit integration is authorized yet.
+Terra's no-Node loader leg passed **12/12**, Mermaid **125/125**,
+theme **363/363**, and packaging **315 passed** with two absent-`dist`
+asar-notice SKIPs. The preceding integration run had an existing
+built asar and passed more artifact assertions; neither result
+is the required strict check against a fresh build. All **625**
+anchor setups resolved. R683-R686
+each reported one intended named failure with restored product
+hashes. The first R681 adaptation only duplicated `utils.js`,
+losing its original script-order proof; the integration owner
+caught that after the initial review. Terra restored R681's
+three-tag **Utils-before-renderer** order mutation. The
+mutated source now fails exactly the two coupled script-order
+assertions, leaves package and direct-consumer controls passing,
+and was individually PROVEN with product hashes restored;
+packaging and all 625 anchors still pass. R319's
+existing theme-selection anchor resolves, but a separate
+individual mutation is **UNUSABLE**, not PROVEN: theme reached
+the expected 361/363 failure state, then the harness rejected a
+post-footer `Shutdown approval renderer unusable: webContents
+destroyed` diagnostic also observed after the normal 363/363
+theme run. It is not assigned a release-proof exception;
+investigate it within a bounded follow-up. The R681 correction
+triggered a new fresh independent Sol/Terra/Luna review round;
+startup attribution, commit and serial integration of this
+second unit remain pending.
+The fresh GPT-6 Sol, GPT-5.6 Terra and GPT-6 Luna read-only
+round found no further significant implementation or test
+issue; Sol explicitly confirmed the corrected R681's two
+ordering failures and independent controls, while Luna
+retained R319's UNUSABLE status and the pending performance
+gate. None independently executed suites or reverts.
+Terra now owns one machine-exclusive, real-file, same-path
+21-pair AB/BA startup comparison (baseline `839e1f8` vs
+the three reviewed product files), with a predeclared material
+rule of **both >10% and >25 ms** at FCP or window-load
+p50/p95. It must report raw samples, the original buffered
+FCP timestamps and restored-source integrity; no result
+or integration is claimed until it completes.
+The fixed **21-pair / 42-launch** real-file same-path
+comparison then completed with all buffered FCP entries present
+and no excluded samples or retries. Baseline-to-candidate
+entry-to-FCP p50/p95 was **978.3/1141.8 to
+988.8/1089.1 ms** (+10.5/-52.7 ms); entry-to-load was
+**999.989/1125.363 to 1005.036/1127.190 ms**
+(+5.046/+1.827 ms). Neither metric crossed the fixed
+**both >10% and >25 ms** budget. The paired FCP
+median/mean were **-11.40/-19.63 ms**, opposite in sign to
+the unpaired p50, with 21 pair deltas spanning
+**-213.5 to +231.5 ms**. Nearest-rank p95 at 21 samples
+selects one second-highest launch per variant; that tail
+estimate is noisy. This does not show zero module cost or
+clear file-open/render, packaged startup or the full SEC-08
+benchmark set. Original worktree hashes matched and the
+disposable product bytes were restored to candidate.
+Raw results, snapshots and logs are retained in
+`files/sec08-mermaid-loader-fcp-20261005/results.json`;
+the method and limitations are recorded in `docs/PERF-AUDIT.md`.
+The second loader unit is ready for a named-diff check,
+reviewed stream commit and serial integration, followed by
+post-landing impacted checks. R319 remains UNUSABLE as
+recorded above, not a new proof exception.
+The nine-file reviewed unit was committed as `05f7862` on
+clean `feat/w2-sec08-loader-mermaid-20261005`. The integration
+branch had since committed the prior utility-loader evidence
+as `a7449ac`, so fast-forward was unavailable; the same
+reviewed patch landed serially by cherry-pick as `28b4dcf`,
+without a product/test merge conflict. At landing, startup,
+Mermaid, theme, security, tabs, packaging and anchor checks
+were still pending; no integrated suite pass was then claimed.
+Those checks then completed serially on integration `28b4dcf`
+with exit **0** throughout: startup **11/11**, Mermaid
+**125/125**, theme **363/363**, security **205/205**,
+tabs **478/478**, packaging **324 passed, 0 failed** with
+one packaged-update-feed SKIP (no auto-updatable build),
+and all **625** anchor setups resolved. The anchor run is
+setup only, not behavioral revert execution; packaging
+inspected the existing asar, not a fresh strict release
+artifact. Documentation alone is pending in the integration
+checkout. Full clean-tree 13-suite run, R319 resolution and
+complete revert inventory, fresh strict asar, regenerated
+and viewed wave screenshots and complete SEC-08 isolation
+remain open.
 
 **Order of work is fixed by the audit** (each step independently shippable):
 rebuild the harnesses' renderer access on a test-only preload → give the 6 local
@@ -3878,6 +3969,11 @@ This takes hours, which is why it is a scheduled item rather than a routine step
 It is nonetheless a **release blocker**: the milestone gate requires the complete
 harness inventory with all non-deferred proofs executed, not a green
 result obtained by hiding failed or unattempted records.
+**Known open proof:** R319's individual mutation currently reaches
+the expected theme failures but is reported UNUSABLE because the
+harness rejects a post-footer shutdown diagnostic also seen in a
+normal theme run. Resolve the proof/teardown issue before the
+complete run; R319 has no approved DEFERRED exception.
 
 **Preconditions that make the result meaningful:** a clean working tree, no
 Electron process running, and **no review diff generated while it runs** — the

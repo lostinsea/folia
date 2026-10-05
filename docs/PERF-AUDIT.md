@@ -636,6 +636,51 @@ comparison, not packaged startup, file-open/render, Electron
 bootstrap before the probe entry, compositor presentation or
 the complete SEC-08 performance matrix.
 
+### SEC-08 Mermaid-config loader — real-file startup check (integration branch)
+
+The next loader unit publishes the existing `mermaid-config.js`
+as a local classic script before `renderer.js`, keeping its
+CommonJS API and using a browser global without a Node fallback.
+The main window remains Node-privileged. Before measurement
+the material-regression rule was fixed: candidate worse by
+**both >10% and >25 ms** at p50 or p95 of entry-to-FCP or
+entry-to-`did-finish-load`. One disposable real-file app path
+was used for both variants, with only `mermaid-config.js`,
+`index.html` and `renderer.js` swapped from immutable baseline
+`839e1f8` and reviewed candidate snapshots. On the same AMD
+EPYC Windows 11 host (release **10.0.26300**), Electron
+**43.4.1** / Chromium **150.0.7871.224** launched **21 fresh
+isolated profiles per variant** in alternating AB/BA order
+(11 AB, 10 BA). All 42 launches produced an actual buffered
+Chromium FCP entry within a bounded 1.8-second wait after
+`did-finish-load`; each metric uses the original paint entry
+timestamp rather than wait time, with no load-only fallback,
+excluded outlier or repeated collection.
+
+| Entry-to metric | Baseline A p50 / p95 | Candidate B p50 / p95 | B-A p50 / p95 |
+|---|---:|---:|---:|
+| FCP | 978.300 / 1141.800 ms | 988.800 / 1089.100 ms | +10.500 ms (+1.073%) / -52.700 ms (-4.616%) |
+| `did-finish-load` | 999.989 / 1125.363 ms | 1005.036 / 1127.190 ms | +5.046 ms (+0.505%) / +1.827 ms (+0.162%) |
+
+**No p50 or p95 crosses the predeclared material-regression rule.**
+The A/B FCP maxima were 1302.6/1152.2 ms, but individual
+paired FCP differences ranged **-213.5 to +231.5 ms**
+(load **-336.346 to +266.412 ms**). The paired FCP
+median/mean were **-11.40/-19.63 ms** (11/21 pairs faster
+for B), opposite the unpaired p50's +10.5 ms. With
+nearest-rank p95 and 21 samples, each p95 is just the
+second-highest single launch, not a stable tail estimate.
+This probe is too noisy to establish zero added cost or
+exclude a small regression.
+Its clock begins when the probe runs, not at Electron process
+creation. It measures an initially empty, nonpackaged window,
+not file-open/render, OS compositor presentation or the
+complete SEC-08 performance matrix. Source hashes in the
+review worktree matched the pre-run candidate, and disposable
+sources were restored to those candidate bytes. Raw ordered samples,
+source snapshots, logs and the fixed rule are in session
+artifacts `files/sec08-mermaid-loader-fcp-20261005/results.json`.
+
 ## Measured and found already fast
 - **Custom tab sync I/O is not the current bottleneck.**
   - `custom-tabs.js:69-111,640`
