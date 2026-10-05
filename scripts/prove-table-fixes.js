@@ -64,6 +64,7 @@ const SOURCE_UTILS = path.join(ROOT, "test", "test-source-utils.js");
 const TABLE_TEST = path.join(ROOT, "test", "test-table-display.js");
 const POPUPS = path.join(ROOT, "test", "test-popup-security.js");
 const MERMAID_TEST = path.join(ROOT, "test", "test-mermaid-render.js");
+const TEST_PRELOAD = path.join(ROOT, "test", "test-preload.js");
 const THEME_FIXTURE = path.join(ROOT, "test", "fixtures", "syntax-census.md");
 const THEME_JS = path.join(SRC, "custom-theme.js");
 const PKG_TEST = path.join(ROOT, "test", "test-packaging.js");
@@ -16983,6 +16984,100 @@ const REVERTS = [
             /^every required release artifact class is independently validated before upload$/,
             /^the final release publishes exactly the validated upload artifact directories$/,
           ],
+        },
+        {
+          id: "R674",
+          // SEC-08 interim harness gate. The preload must never appear simply
+          // because a launch is unpackaged: tests opt in explicitly, and a
+          // packaged build must be unable to opt in at all.
+          what: "enable the test-only preload for every launch instead of only unpackaged marked tests",
+          file: MAIN,
+          from:
+            '!app.isPackaged && process.argv.includes("--folia-test-preload")',
+          to: "true",
+          suite: "test:packaging",
+          expect: [
+            /^the test-only preload is gated to unpackaged marked main launches$/,
+          ],
+          mustPass: [
+            /^the marked test-only preload fails closed when its file is missing$/,
+            /^test\/test-preload\.js exists but is intentionally excluded from build\.files$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R675",
+          // The PDF result remains healthy here. Only the test-only bridge is
+          // removed, so capability and delivery must fail while product
+          // controls remain green.
+          what: "remove the marked PDF-restore bridge while leaving the product export handshake intact",
+          file: TEST_PRELOAD,
+          from: "globalThis.__foliaTestPdfRestore = Object.freeze({",
+          to: "globalThis.__foliaTestPdfRestoreUnavailable = Object.freeze({",
+          suite: "test:mermaid",
+          expect: [
+            /^the marked test-only PDF restore preload exposes its PDF restore capability$/,
+            /^the completed PDF export delivers its fresh bridge token after restoration$/,
+          ],
+          mustPass: [
+            /^the renderer answers pdf-export-ready$/,
+            /^PDF export drops dark mode on the body$/,
+            /^PDF export re-themes the diagrams to match the light page$/,
+            /^the PDF restore fixture persists a dark effective preference and dark diagrams$/,
+            /^the PDF restore witness sees prepare force light with its hold raised and fresh result notification absent$/,
+            /^the PDF result notification follows restored dark theme and export hold$/,
+            /^a completed PDF export leaves no theme hold behind$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R676",
+          // The result notification is emitted after the optional awaited
+          // restore. Returning this fixture to light makes that branch skip,
+          // so these two assertions must distinguish the setup from the
+          // actual restore without disturbing the bridge itself.
+          what: "restore the PDF fixture's stale light preference, skipping its awaited dark re-theme",
+          file: MERMAID_TEST,
+          from: "localStorage.setItem('themeMode', 'dark');",
+          to: "localStorage.setItem('themeMode', 'light');",
+          suite: "test:mermaid",
+          expect: [
+            /^the PDF restore fixture persists a dark effective preference and dark diagrams$/,
+            /^the PDF success notification is emitted only after dark diagrams and hold restoration$/,
+            /^the PDF result notification follows restored dark theme and export hold$/,
+            /^the completed PDF export delivers its fresh bridge token after restoration$/,
+          ],
+          mustPass: [
+            /^PDF export drops dark mode on the body$/,
+            /^PDF export re-themes the diagrams to match the light page$/,
+            /^the PDF restore witness sees prepare force light with its hold raised and fresh result notification absent$/,
+            /^a completed PDF export leaves no theme hold behind$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R677",
+          // A normal dark fixture cannot distinguish every measured fill from
+          // one. The mixed-fill control carries one light value, so weakening
+          // this predicate leaves both real states green but makes that
+          // control fail.
+          what: "accept one dark node as proof that every measured PDF diagram fill is dark",
+          file: MERMAID_TEST,
+          from: "state.nodeFillLuminances.every((fillLum) => fillLum < 0.5)",
+          to: "state.nodeFillLuminances.some((fillLum) => fillLum < 0.5)",
+          suite: "test:mermaid",
+          expect: [
+            /^the PDF dark-diagram probe rejects a mixed-fill control$/,
+          ],
+          mustPass: [
+            /^the PDF restore fixture persists a dark effective preference and dark diagrams$/,
+            /^the PDF result notification follows restored dark theme and export hold$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
         },
       ];
 

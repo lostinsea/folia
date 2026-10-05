@@ -23,6 +23,7 @@
 //    collapsed, not covered, not clipped. A screenshot is also written to
 //    screenshots/ every run as a debugging artifact; nothing asserts on it.
 const { app, BrowserWindow, ipcMain } = require("electron");
+const { randomUUID } = require("crypto");
 const fs = require("fs");
 const path = require("path");
 const { VISUAL_PROBE_SOURCE, inspectVisual, captureScreenshot, startErrorSentinel, proveSentinelAlive, LIVENESS_MUTE_REASON, trapExternalOpens, waitForExternalTrap, tempDir, releaseTempDir } = require("./test-visual-utils");
@@ -30,6 +31,12 @@ const { VISUAL_PROBE_SOURCE, inspectVisual, captureScreenshot, startErrorSentine
 // Isolate this suite's userData profile before main.js exists and before the
 // app is ready. See test-userdata-isolation.js.
 require("./test-userdata-isolation");
+
+const TEST_PRELOAD_MARKER = "--folia-test-preload";
+if (!process.argv.includes(TEST_PRELOAD_MARKER)) {
+  process.argv.push(TEST_PRELOAD_MARKER);
+}
+const PDF_RESTORE_TOKEN = randomUUID();
 
 require("../src/main.js");
 
@@ -166,6 +173,14 @@ const DIAGRAMS_READY = `
     });
   })()
 `;
+
+function everyMeasuredFillDark(state) {
+  return (
+    state.nodeCount >= 3 &&
+    state.nodeFillLuminances.length === state.nodeCount &&
+    state.nodeFillLuminances.every((fillLum) => fillLum < 0.5)
+  );
+}
 
 async function run(win) {
   const exec = (code) => win.webContents.executeJavaScript(code, true);
@@ -478,9 +493,18 @@ async function run(win) {
 
       const viewer = document.getElementById('viewer');
       const pairs = [];
+      const nodeFillLuminances = [];
+      let nodeCount = 0;
       viewer.querySelectorAll('.mermaid g.node').forEach(n => {
+        nodeCount++;
         const shape = n.querySelector('rect, path, polygon, circle');
         const label = n.querySelector('span.nodeLabel, .nodeLabel, text');
+        if (shape) {
+          const fillLum = lum(getComputedStyle(shape).fill);
+          if (fillLum !== null) {
+            nodeFillLuminances.push(Math.round(fillLum * 1000) / 1000);
+          }
+        }
         if (!shape || !label) return;
         const fill = getComputedStyle(shape).fill;
         const color = getComputedStyle(label).color;
@@ -500,6 +524,9 @@ async function run(win) {
         bodyDark: document.body.classList.contains('dark-mode'),
         mermaidBlocks: viewer.querySelectorAll('.mermaid').length,
         measured: pairs.length,
+        fillLuminances: pairs.map(p => p.fillLum),
+        nodeCount,
+        nodeFillLuminances,
         worst: worst,
         worstRatio: worst ? worst.ratio : null
       };
@@ -625,6 +652,40 @@ async function run(win) {
   await captureScreenshot(win, "mermaid-render");
 
   // --- 8. PDF export must re-theme the diagrams, not just the body ---------
+  // The earlier legacy-toggle regression deliberately clicks the old toggle,
+  // which changes darkMode but leaves themeMode at its initial light value.
+  // PDF restoration reads themeMode first, so make this fixture's intended
+  // dark preference explicit only after that legacy coverage has finished.
+  const pdfRestoreFixture = await exec(`(() => {
+    localStorage.setItem('themeMode', 'dark');
+    return {
+      mode: resolveStoredMode(),
+      resolvesDark: resolveDarkPreference(),
+      bodyDark: document.body.classList.contains('dark-mode')
+    };
+  })()`);
+  const pdfRestoreFixtureTheme = await exec(MEASURE);
+  check(
+    "the PDF restore fixture persists a dark effective preference and dark diagrams",
+    pdfRestoreFixture.mode === "dark" &&
+      pdfRestoreFixture.resolvesDark === true &&
+      pdfRestoreFixture.bodyDark === true &&
+      everyMeasuredFillDark(pdfRestoreFixtureTheme),
+    JSON.stringify({ fixture: pdfRestoreFixture, theme: pdfRestoreFixtureTheme }),
+  );
+  const mixedFillControl = {
+    ...pdfRestoreFixtureTheme,
+    nodeFillLuminances: [
+      ...pdfRestoreFixtureTheme.nodeFillLuminances.slice(0, -1),
+      1,
+    ],
+  };
+  check(
+    "the PDF dark-diagram probe rejects a mixed-fill control",
+    !everyMeasuredFillDark(mixedFillControl),
+    JSON.stringify(mixedFillControl),
+  );
+
   // mermaid bakes colours into the emitted SVG, so dropping the .dark-mode
   // class for a light export left dark diagrams on a light page. The handshake
   // is drivable straight over IPC, so this needs no native save dialog: main
@@ -667,21 +728,146 @@ async function run(win) {
   // failure. The assertion below turns that discovery into a guard: a
   // completed PDF export must leave nothing held.
   {
-    const restored = new Promise((resolve) =>
-      ipcMain.once("pdf-restore-observed", () => resolve(true)),
+    const bridgeAvailable = await exec(
+      `typeof globalThis.__foliaTestPdfRestore?.signal`,
     );
-    await exec(`(() => {
-      const { ipcRenderer } = require('electron');
-      const once = () => { ipcRenderer.send('pdf-restore-observed'); };
-      setTimeout(once, 2500);
+    check(
+      "the marked test-only PDF restore preload exposes its PDF restore capability",
+      bridgeAvailable === "function",
+      bridgeAvailable,
+    );
+
+    const pdfResultName = `suite-pdf-handshake-${PDF_RESTORE_TOKEN}.pdf`;
+    const notificationProbeInstalled = await exec(`(() => {
+      const original = window.showNotification;
+      if (typeof original !== 'function') return false;
+      window.__pdfResultNotificationProbe = { original, observation: null };
+      window.showNotification = function(message, ...args) {
+        if (String(message).includes(${JSON.stringify(pdfResultName)})) {
+          window.__pdfResultNotificationProbe.observation = {
+            hold: (typeof exportThemeHold === 'number' ? exportThemeHold : -1),
+            theme: ${MEASURE}
+          };
+        }
+        return original.call(this, message, ...args);
+      };
       return true;
     })()`);
-    win.webContents.send("pdf-export-result", {
-      success: true,
-      path: "C:\\\\tmp\\\\suite-pdf-handshake.pdf",
+    check(
+      "the PDF notification witness patches the real notifier",
+      notificationProbeInstalled === true,
+      String(notificationProbeInstalled),
+    );
+    const beforeResult = await exec(`(() => ({
+      hold: (typeof exportThemeHold === 'number' ? exportThemeHold : -1),
+      bodyDark: document.body.classList.contains('dark-mode'),
+      notification: document.getElementById('notificationMessage').textContent
+    }))()`);
+    check(
+      "the PDF restore witness sees prepare force light with its hold raised and fresh result notification absent",
+      beforeResult.bodyDark === false &&
+        beforeResult.hold > 0 &&
+        !beforeResult.notification.includes(pdfResultName),
+      JSON.stringify(beforeResult),
+    );
+
+    let resolveFreshWitness;
+    const freshWitnessDelivery = new Promise((resolve) => {
+      resolveFreshWitness = resolve;
     });
-    await Promise.race([restored, sleep(8000)]);
-    ipcMain.removeAllListeners("pdf-restore-observed");
+    const onRestoreObserved = (event, token) => {
+      if (event.sender === win.webContents && token === PDF_RESTORE_TOKEN) {
+        resolveFreshWitness({ kind: "fresh-bridge-signal" });
+      }
+    };
+    ipcMain.on("pdf-restore-observed", onRestoreObserved);
+
+    let freshWitness = { kind: "capability-unavailable" };
+    let resultRestored = { kind: "not-sent" };
+    let notificationAfterRestore = false;
+    try {
+      win.webContents.send("pdf-export-result", {
+        success: true,
+        path: "C:\\\\tmp\\\\" + pdfResultName,
+      });
+      try {
+        await waitFor(
+          exec,
+          "the PDF result notification after its theme restore",
+          `document.getElementById('notificationMessage').textContent.includes(${JSON.stringify(pdfResultName)})`,
+          8000,
+        );
+        const restoredHold = await exec(`(() => ({
+          hold: (typeof exportThemeHold === 'number' ? exportThemeHold : -1),
+          bodyDark: document.body.classList.contains('dark-mode'),
+          notification: document.getElementById('notificationMessage').textContent,
+          notificationObservation: window.__pdfResultNotificationProbe &&
+            window.__pdfResultNotificationProbe.observation
+        }))()`);
+        resultRestored = {
+          ...restoredHold,
+          theme: await exec(MEASURE),
+        };
+      } catch (error) {
+        resultRestored = {
+          kind: "timeout",
+          error: String(error && error.message ? error.message : error),
+        };
+      }
+      notificationAfterRestore =
+        notificationProbeInstalled === true &&
+        resultRestored.notificationObservation &&
+        resultRestored.notificationObservation.hold === 0 &&
+        everyMeasuredFillDark(resultRestored.notificationObservation.theme);
+
+      if (
+        bridgeAvailable === "function" &&
+        notificationAfterRestore &&
+        resultRestored.hold === 0
+      ) {
+        const signalSent = await exec(
+          `globalThis.__foliaTestPdfRestore.signal(${JSON.stringify(PDF_RESTORE_TOKEN)})`,
+        );
+        freshWitness = await Promise.race([
+          freshWitnessDelivery,
+          sleep(8000).then(() => ({
+            kind: "timeout",
+          })),
+        ]);
+        freshWitness.signalSent = signalSent;
+      }
+    } finally {
+      ipcMain.removeListener("pdf-restore-observed", onRestoreObserved);
+      await exec(`(() => {
+        const probe = window.__pdfResultNotificationProbe;
+        if (probe) {
+          window.showNotification = probe.original;
+          delete window.__pdfResultNotificationProbe;
+        }
+        return true;
+      })()`).catch(() => {});
+    }
+    check(
+      "the PDF success notification is emitted only after dark diagrams and hold restoration",
+      notificationAfterRestore,
+      JSON.stringify(resultRestored.notificationObservation),
+    );
+    check(
+      "the PDF result notification follows restored dark theme and export hold",
+      resultRestored.hold === 0 &&
+        resultRestored.bodyDark === true &&
+        resultRestored.theme &&
+        everyMeasuredFillDark(resultRestored.theme) &&
+        typeof resultRestored.notification === "string" &&
+        resultRestored.notification.includes(pdfResultName),
+      JSON.stringify(resultRestored),
+    );
+    check(
+      "the completed PDF export delivers its fresh bridge token after restoration",
+      freshWitness.kind === "fresh-bridge-signal" &&
+        freshWitness.signalSent === true,
+      JSON.stringify(freshWitness),
+    );
     const held = await exec(
       `(typeof exportThemeHold === 'number' ? exportThemeHold : -1)`,
     );

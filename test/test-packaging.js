@@ -572,10 +572,42 @@ async function main() {
     "the macOS explicit-install branch must report an error, replay any absorbed user " +
       "intent, return false, and never claim BaseUpdater's paired quit lifecycle",
   );
+  const TEST_PRELOAD_REF = "../test/test-preload.js";
   const preloadRe = /preload:\s*path\.join\(\s*__dirname\s*,\s*["'`]([^"'`]+)["'`]\s*\)/g;
+  let testPreloadReferences = 0;
   let m;
-  while ((m = preloadRe.exec(mainJs))) addRef(SRC, m[1]);
+  while ((m = preloadRe.exec(mainJs))) {
+    if (m[1] === TEST_PRELOAD_REF) {
+      testPreloadReferences += 1;
+    } else {
+      addRef(SRC, m[1]);
+    }
+  }
   check("found at least one preload reference in main.js", referenced.size > 0);
+  const testPreloadGate =
+    /const testPreloadPreferences\s*=\s*!app\.isPackaged\s*&&\s*process\.argv\.includes\(\s*["']--folia-test-preload["']\s*\)\s*\?\s*\{\s*preload:\s*path\.join\(\s*__dirname\s*,\s*["']\.\.\/test\/test-preload\.js["']\s*\)\s*\}\s*:\s*\{\s*\};/.test(
+      mainJs,
+    );
+  check(
+    "the test-only preload is gated to unpackaged marked main launches",
+    testPreloadReferences === 1 && testPreloadGate,
+    JSON.stringify({ testPreloadReferences, testPreloadGate }),
+  );
+  check(
+    "the marked test-only preload fails closed when its file is missing",
+    /if\s*\(\s*testPreloadPreferences\.preload\s*&&\s*!fs\.existsSync\(\s*testPreloadPreferences\.preload\s*\)\s*\)\s*\{[\s\S]*?process\.exit\(1\);[\s\S]*?\}/.test(
+      mainJs,
+    ),
+  );
+  check(
+    "test/test-preload.js exists but is intentionally excluded from build.files",
+    fs.existsSync(path.join(ROOT, "test", "test-preload.js")) &&
+      !isPackaged(files, "test/test-preload.js"),
+    JSON.stringify({
+      exists: fs.existsSync(path.join(ROOT, "test", "test-preload.js")),
+      packaged: isPackaged(files, "test/test-preload.js"),
+    }),
+  );
 
   // 2. Scripts and stylesheets loaded by the renderer document.
   const indexHtml = read("src/index.html");

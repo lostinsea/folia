@@ -107,6 +107,15 @@ async function run(win) {
 
   const exec = (code) => win.webContents.executeJavaScript(code, true);
 
+  const testPreloadBridge = await exec(
+    `typeof globalThis.__foliaTestPdfRestore`,
+  );
+  check(
+    "an unmarked security launch has no test-only PDF restore bridge",
+    testPreloadBridge === "undefined",
+    `typeof globalThis.__foliaTestPdfRestore=${testPreloadBridge}`,
+  );
+
   // This suite's whole job is to fire hostile input at the app, so a large
   // share of the console noise it produces is the app defending itself. Those
   // patterns are ignored by name; anything else that reaches the console, or

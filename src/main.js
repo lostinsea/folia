@@ -2358,6 +2358,17 @@ function readMarkdownSnapshot(filePath, callback, attempt = 1) {
 
 function createWindow() {
   const savedState = loadWindowState();
+  const testPreloadPreferences =
+    !app.isPackaged && process.argv.includes("--folia-test-preload")
+      ? { preload: path.join(__dirname, "../test/test-preload.js") }
+      : {};
+  if (
+    testPreloadPreferences.preload &&
+    !fs.existsSync(testPreloadPreferences.preload)
+  ) {
+    fs.writeSync(2, `Missing test preload: ${testPreloadPreferences.preload}\n`);
+    process.exit(1);
+  }
 
   mainWindow = new BrowserWindow({
     // Restore saved position/size; fall back to 1200×800 centred on first run
@@ -2371,6 +2382,7 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
+      ...testPreloadPreferences,
       enableRemoteModule: true,
       backgroundThrottling: true, // Throttle background renderers to save CPU
     },
