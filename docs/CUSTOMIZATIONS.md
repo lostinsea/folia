@@ -67,6 +67,7 @@ and the next tab switch silently repainted the pre-refresh copy.
   switched away).
 - **Switching to a tab re-reads the file** when its `mtime` changed, so a
   background tab is never shown stale. Tabs with unsaved edits are skipped.
+
 - **Dirty state is structural**: the tab's cached `content` versus its
   `originalContent`, compared with line endings normalised. Reading renderer's
   `#unsavedIndicator` was tried first and is *not* safe - the element keeps its
@@ -89,6 +90,20 @@ and the next tab switch silently repainted the pre-refresh copy.
   re-applies it while diagrams/images settle, cancelled on user input.
 - **`getScroller()`** picks `.content-wrapper` in normal view and `#viewer` in
   split/edit view, matching the CSS.
+
+**Disk-version policy (F22, 2026-10-01).** Main, renderer and the tab overlay
+compare device, inode, size and `mtimeMs` when checking a file version;
+they carry but do not compare `ctimeMs`. Windows can advance ctime after a
+file is selected without changing its bytes, causing false Save conflicts
+and rejected tab switches. This is an explicit maintainer trade-off, not a
+claim that every same-size external change is detected: a different writer
+can change bytes without changing the file's identity or size, then restore
+its old mtime. In that case the version tuple alone cannot distinguish the
+external edit, and a later Save may overwrite it. Deletion, path identity
+and ordinary size/mtime mismatch protections remain separate. The stronger
+raw-byte witness design is tracked after wave 2 as `ctime-byte-witness` in
+`docs/PLANNED-WORK.md`; do not silently restore a strict ctime comparison
+without resolving the original false conflicts and measuring the result.
 
 **"File Updated" prompt behaviour.** The bottom-left toast
 (`#fileUpdateToast`) is only appropriate for the tab the user is actually

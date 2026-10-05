@@ -83,16 +83,16 @@ it is a decision that has not been made.
 
 ## Counting
 
-The register holds **24 work items**: 1 active parent and 23 not-started — of
-which 19 are PENDING (one of those additionally marked DEFERRED by a recorded
+The register holds **25 work items**: 1 active parent and 24 not-started — of
+which 20 are PENDING (two of those additionally marked DEFERRED by recorded
 maintainer decision) and 4 are BLOCKED on a named dependency. The active count
 tracks the number of live delivery streams; it is one today because only Stream A
 is editing source. `w2-f22` is
 additionally broken into **6 subtasks**, which are *steps within* that item and
 not separate work.
 
-A naive row count of the underlying tracker therefore reports **30 open rows**
-(1 parent + 6 subtasks + 23 not-started). Both numbers are correct; they answer
+A naive row count of the underlying tracker therefore reports **31 open rows**
+(1 parent + 6 subtasks + 24 not-started). Both numbers are correct; they answer
 different questions. Quote "24 items" for scope and "30 rows" only when
 reconciling against the tracker.
 
@@ -142,10 +142,2452 @@ pass; `--anchors` resolves clean afterwards; **and the mandatory close-path
 performance gate below is closed — that is, a final benchmark run evaluated
 against a budget declared in advance, not the initial characterization alone.**
 
-**Criteria status (2026-09-05): all of the above are met.** Suites, revert
-proofs, anchors and the performance gate are executed and recorded below. What
-remains is the final three-reviewer round over the executed state and the
-serialised integration — this item is **not** landed.
+**Historical criteria status (2026-09-05): all of the above were met for the
+then-current implementation.** Suites, revert proofs, anchors and the
+performance gate are recorded below. The later file-lifecycle reconstruction
+reopened the execution gates; this historical result must not be used to
+approve the current working tree.
+
+**Current extension (2026-09-29): still ACTIVE and not landed.** The expanded
+active-editor shutdown gate first failed at raw p95 **90.654 ms (LF)** and
+**117.275 ms (CRLF)** against the predeclared **16.7 ms** budget. After correcting
+the tab fold, the product-source run passed all **42 observations**, with
+**9.633 ms (LF)** and **12.0271 ms (CRLF)** active-editor p95; a further
+product change to preserve the failed-Save guard on an ordinary tab switch was
+re-attested at **10.9407 ms (LF)** and **12.0808 ms (CRLF)**; a subsequent
+review-corrected background-disk-adoption path was re-attested at
+**9.6951 ms (LF)** and **11.7335 ms (CRLF)**, each with all 42 observations
+under budget. The expanded render-patch fixture passes **193/193**. Its
+ordinary-switch failed-Save revert R654 and the separate accepted-disk-adoption
+revert R656 are individually **PROVEN** on the current product and test bytes;
+the transcript reader now accepts only the exact normal shutdown teardown
+after the suite footer and keeps unexpected output fatal. The added regression
+proves a renderer-only failed Save survives an unchanged-disk switch, while
+accepted external disk adoption clears the stale failure. Earlier independent
+Sol and Luna reviews disagreed: Sol found no product defect, while Luna found
+this missing disk-adoption case;
+Sol subsequently validated Luna's finding. A fresh full review is pending. The
+earlier `test:tabs` run to reach the companion checks recorded **317/326**
+assertions on the disposable integration tree; it was not a pass. A
+before/after query proved that the
+**test-only** `__shutdown.reset()` cleared a restored physical tab's
+authoritative deletion baseline after its renderer had registered: the same
+owner changed from `known:true` to `known:false` while the retained-owner
+count stayed unchanged. Reloading to a new renderer generation after the reset
+restores a known owner with no unresolved deletion, and the installed
+scenarios' first ordinary tab cleanup now passes without bypassing
+`closeTab()`. The phase-two exact-positive fixture had withheld the real
+renderer commit before forging its reply; delivering the held commit now
+proves the renderer froze. Its subsequent clean-close and duplicate-replay
+controls also pass after moving their test-only reset before the next renderer
+reload and proving the restored physical-tab setup. Another exact-owner
+diagnostic found the first gap tab was unfrozen with deletion `known:true`
+before a test reset and `known:false` afterward; its close refused, leaving
+the older same-path tab behind to contaminate later tests. Closing it through
+the existing public path *before* that reset now passes, as does the
+post-edit cleanup, without weakening the owner guard. A shared
+fail-loud cleanup check exposed a separate test teardown that tried to close
+a still-frozen tab after an approved absorbed-user close. A test-only restart
+now requires an exact clean or explicitly user-approved terminal response,
+matching commit and freeze, and restores every physical owner in a new
+renderer before public cleanup and reset; all four absorbed window-close
+replay rows pass. A successful final updater quit also passes a distinct
+two-approval and positive-launch gate before the same owner restoration.
+The absorbed app-quit rows now pass a reason-specific terminal gate as well.
+The final absorbed close is drained before the installed suite resets, so
+the following semantic cleanup now leaves no restored tabs. The semantic
+fixture's cooked renderer script now parses, and its dirty/undo CRLF oracles
+match the product's deliberate cache spelling. Deferred-continuation fixtures
+now deliver a real renderer verification before injecting loss; the isolated
+teardown continuation companion passed **7/7**. The latest full
+`test:tabs` run on those fixture bytes reached **333/335**: the installed
+updater-error seam, semantic cleanup and ordinary continuation checks passed,
+but the dangling-symlink Save button timed out and a missing-file save-race
+fixture could not select an authoritative physical tab. That run stopped
+before the isolated companions and is **not** a suite pass. Later focused
+checks passed save-path races, pending-save/close, edit-mode CRLF and
+mixed-newline cases. The initial pending-save conflict was test-induced:
+`__shutdown.reset()` cleared an already registered owner baseline; moving it
+before registration and re-adopting the same live owner after a later
+necessary reset preserved the product's fail-closed guard. A fresh control
+tab, exact deletion warning and scoped replacement approval let the deletion
+classifier check pass; the focused harness reached **27/27** before timing out
+at later inactive/stale-selection fixtures. That is a timeout, **not** a
+passing suite. The maintainer chose to retain fail-closed selection of
+deleted tabs and not add a new-document/Save As workflow. Opus and Luna agree
+deleted-A replay is unreachable; Opus proposed a direct reassertion for the
+stale-selection retry, but Luna found that it would test a seam rather than a
+user-reachable workflow. The conservative fixture correction will retain the
+first owner-inactive refusal and drop both unsupported replay claims; it will
+not claim to prove the unreachable `wx+` creation branch. That test-only
+correction removes a later forbidden re-selection of frozen deleted A. The
+subsequent focused run advances through frozen thaw to the lost-ACK fixture
+before timing out after **27/27** checks; the deferred deletion assertions
+have not yet run. Scoped diagnostics measured a retry at **4.636 s** and a
+consumed ACK at **8.667 s**, then isolated the stall to the test's unbounded
+`observeNoFurtherDeliveries` renderer evaluation; no unexpected synchronous
+main dialog fired. The observer must fail loudly rather than hanging before
+its saved-result oracle can run. After bounding that observer, a later focused
+run reached the same lost-ACK case but stalled in the shared
+`waitForDeletionAckQuiescence` helper, whose renderer-count evaluation is
+also unbounded. Both evaluators are now bounded, but another focused run
+reached the **90 s global harness watchdog** before either could return a
+pre-watchdog failure: it reported a destroyed window only *after* teardown.
+The 90 s focused budget must be measured against the mandatory retry and
+quiescence intervals before treating these runs as modal hangs.
+A provisional longer focused-only watchdog yielded a definitive **35/47**
+run in **111.437 s**; the F22-only watchdog is now **150 s** from that
+measurement, while other watchdogs are unchanged. Its first cluster of
+deletion assertion failures shared `deletedAOwner: null`: the test observer
+recorded asynchronous `ipc.send` owner announcements but missed the
+production `select-file-tracking` accepted through `ipc.sendSync`. Capturing
+only the real accepted synchronous decision, with exact IPC descriptor
+restoration, yielded a definitive **37/47** focused run under the new
+watchdog. Its first failure is now the owner-path-moved ACK fixture: it sends
+eight intentionally forged ACKs before delivering the real one, but selects
+the first forwarded ACK by event ID and reason, which is a forged one that
+main correctly rejects. The exact production ACK needs a full-envelope
+correlation rather than that partial lookup. The later stale-save-order
+fixture still throws `FOLIA_PENDING_SAVE`: its snapshot invokes the shutdown
+dirty-list oracle while intentionally holding an earlier Save reply, although
+that oracle correctly refuses a pending Save. A test-only correction must
+witness the exact refusal while pending and read the dirty list only after
+settlement. That exact pending-save witness is now in the disposable fixture,
+but the next **37/47** focused run exposed a separate renderer-evaluation
+`SyntaxError: Identifier 'tab' has already been declared`. Scoping those
+renderer scripts and correlating the owner-path-moved ACK against every
+field of the real envelope yielded **38/53** focused assertions. Main now
+accepts and retires that exact ACK, but the test's 4.25-second quiescence
+window still observes a change in that event's delivery/ACK counts; that
+change must be diagnosed, not waived. The later
+ordered-save fixture fabricates `tab.content` while its live editor still
+contains the base bytes; its B Save consequently fails disk conflict rather
+than proving newer-success ordering. A fresh-file disk version also needs
+settling before adoption. After those assertions, another fixture refers
+to `closeFile` outside its lexical scope; it needs a separately owned reload
+tab. None of these runs or partial prefixes is a suite pass.
+The next focused run produced five real ordered-save opens, including B's
+successful main-process write and the three controlled failures; the first
+ordered-save production assertion and pending-save refusal passed. Its stale
+A and duplicate C assertions still apply a *global* reload-conflict-empty
+condition even though earlier scenarios left unrelated conflict keys, and
+the stale-A no-control condition includes B's delayed watcher-resume IPC.
+The dedicated foreground reload tab then passed its stale-result and
+single-toast check. A later background-reload toast check failed, and the
+run reached the close/reopen tab-generation fixture but exceeded the
+focused watchdog before any final footer. The owned Electron process tree
+was stopped; this is an incomplete run, not an updated pass count.
+An exact, one-shot, restored deleted-file confirmation let the subsequent
+same-path close/reopen generation fixture pass for both old success and
+old failure replies. The background failure-owner check also passed. The
+run then reached the separate closed-failure-reply case and timed out at
+**43/55 checks** under the 150-second watchdog: this second deleted-file
+close uses the same synchronous warning without a scoped test answer.
+That established the need for a shared exact close-warning fixture;
+**43/55 is a timed-out prefix, not a suite result**.
+The shared exact one-shot responder cleared that second hang. The focused
+run reached a definitive **45/58**, including passing same-path generation,
+closed-success/closed-failure reply, and background-failure-owner checks.
+Its next independent phase-two composite fails: a synthesized `file-opened`
+payload with no authoritative disk metadata is deferred while frozen but
+does not become the active tab after thaw; the fixture also compares a
+`replayedOperations` counter that the production shutdown snapshot does
+not expose. Opus and Luna independently agree that a real main-produced
+`open-file-path` request during this *renderer-only* freeze is the honest
+producer and must be observed in the frozen queue before thaw. Three absent
+counter comparisons can never pass, and a fourth (`undefined === undefined`)
+is vacuously true. Replace them with queue drain, unique tab/owner adoption
+and exact content/notification effects; a real main shutdown commit instead
+blocks file-open ingress, so this fixture must not claim that boundary.
+The other outstanding deletion, ordered-save
+and background-toast assertions remain red; **45/58 is not a pass**.
+The next focused attempt stopped earlier at **37/47** because a new
+ordered-B setup witness incorrectly required the global file-tracking-active
+flag, which edit mode keeps false even for a selected owner. That test-only
+condition now requires B-correlated `set-active-file` and
+`resume-file-watching` controls plus a real selected-owner witness instead.
+The next **37/47** attempt proved the selected B owner but exposed a
+deadlock in that test requirement: A's reply is deliberately held, so
+the pending-save gate correctly emits only B's `pause-file-watching` until
+A settles. The `set-active-file` and `resume-file-watching` controls belong
+*after* A retires, with a new selection generation; the fixture must prove
+that exact transition and no extra controls on duplicate delivery. The
+stale-A/C conflict checks are scoped to this document's path key; the
+failed-reload toast check
+accounts separately for the deletion watcher notification. Those final
+edits have **not yet been exercised** by another run, so the 37/47 prefix
+must not be read as a regression of the prior 45/58 fixture bytes.
+The newest complete focused run is **48/58**: B's selected owner and
+pending-save watcher transition, stale-A and duplicate-C invariants,
+background reload notifications and closed-reply cases now pass. The real
+main-produced `file-opened` event queues once during the renderer-only
+freeze, produces one authoritative tab/owner after thaw, and stays
+one-shot on a second thaw. The phase-two composite remains red for an
+additional test-oracle mistake: its `getActiveDocumentIdentity()` result
+has no `selectionGeneration`, and `tabSnapshot()` calls the baseline
+`originalContent`, not `original`. Its actual success/failure content,
+queue drain, toasts, and second-thaw idempotence match the intended
+behavior; the selection check must use a real accepted tracking owner
+instead of removing that requirement. Nine deletion assertions remain
+red as separate fixture work. No integrated `test:tabs` pass or product
+change follows from this focused result.
+The accepted-owner witness and corrected `originalContent` checks now
+pass in a complete **49/58** focused run, including the full phase-two
+renderer-only freeze and thaw composite. All nine remaining failures
+are in the deletion-protocol fixture; its first is owner-path-moved ACK
+quiescence after an exact main-accepted ACK. This is **not** a full
+`test:tabs` pass or a wave-2 release approval.
+The deleted-A fixture has since been restructured to keep tombstoned A
+active through its Save conflict and explicit reload, rather than switch
+to B and make unreachable reselection claims. The first run witnessed
+the real main `SaveConflictError` but stalled at main's synchronous
+replacement-consent dialog: the exact test responder had been restored
+immediately after the asynchronous reload request, before main raised
+the dialog. Its lifetime now covers the adoption wait; that revised
+fixture has **no complete runtime verdict yet**. Product fail-closed
+selection and Save guards remain unchanged.
+The final A bytes then passed in a complete **54/58** focused run. The
+real A Save conflict, cached tombstone, single watcher across deletion
+and recreation, guarded replacement bytes and explicit reload adoption
+all passed without allowing deleted-tab reselection. Exactly four ACK
+fixture assertions remain red: owner-path-moved no-retry quiescence,
+terminal owner-close/replacement-owner delivery observation, inactive
+watcher-owner observation, and frozen refusal timing. Main accepted and
+retired the exact owner-path-moved ACK, but that event's delivery/ACK
+counts changed during the mandatory 4.25-second quiescence window;
+the source of the change must be distinguished before changing its
+oracle. The complete focused result is not an integrated `test:tabs`
+pass or release gate.
+Failure-only diagnostics on the next **54/58** focused run found the
+exact change: after the accepted terminal attempt 1, main sent the
+*same* event ID and watcher generation as attempt 2; the renderer
+forwarded one `consumed:true` ACK for that second attempt. The test
+restores the owner's path before observing quiescence, so independent
+review is checking whether a still-missing file legitimately reactivates
+the retained tombstone after that restoration. The diagnostic alone
+does not establish either a scheduled-retry product bug or a passing
+no-retry oracle; the measured window remains 4.25 seconds.
+Opus and Luna independently classify the second delivery as a
+post-terminal reactivation of retained deletion evidence, not an
+in-flight or timer-driven retry. They differ on the proposed quiet
+window: Opus suggests holding the renderer owner path moved until after
+quiescence; Luna points out that main's missing-file poll can re-report
+the tombstone while the path is still moved. The no-*scheduled-retry*
+oracle must therefore distinguish the poll producer from the retry
+timer without disabling either the poll or the measured window.
+Opus verified Luna's poll counterexample and withdrew the quiet-window
+proposal. An honest 4.25-second oracle must positively observe that no
+retry timer arms and pair any additional send with re-insertion of the
+durable record into the active-delivery map; a count-only zero-traffic
+check cannot distinguish the two mechanisms.
+Separately, terminal owner-close/replacement-owner ACK checks are being
+split from the live owner-keyed acceptance oracle: close retires both
+records *before* the held ACK, whereas replacement must positively
+witness whether its id-keyed tombstone survives adoption before its
+ACK is released. No status has been promoted on that correction.
+A later **54/58** focused run witnessed both terminal paths' real
+before/after map state and inert late ACKs. Complete disk adoption
+synchronously removes the replacement-owner tombstone and delivery,
+just as close does for its own owner; no asynchronous adoption message
+is emitted. The fixture's last remaining expectation of one such
+message was corrected to zero **after** that run; three other ACK
+fixtures remained independently red.
+The terminal correction and a main-boundary synchronous selection
+witness for inactive B now pass in a complete **56/58** focused run,
+independently repeated on the same test bytes. Main's accepted B owner
+has a distinct tab/path/selection generation and no scheduled retry;
+the probe no longer infers main ownership from renderer-only messages.
+Only owner-path-moved activation-versus-retry and frozen-delivery timing
+remain red. The focused run exits nonzero and does not approve landing.
+The owner-path-moved test-only oracle now records ordered same-record
+active-map insertions and positive unarmed retry-timeout state, while
+retaining the entire 4.25-second observation and exactly matching any
+later delivery/ACK to an insertion. Its static checks and R655 anchor
+resolve passed; **no Electron verdict on these changed bytes yet**.
+Opus and Luna agree the frozen test must hold an authentic main
+watcher-produced envelope *before* freezing, release it well inside the
+four-second ACK deadline, then witness the renderer's exact `frozen`
+refusal and main's parked live record before thaw. Their initial
+disagreement about post-thaw delivery was resolved by tracing the
+thaw-time owner reassertion; neither proposal licenses a forbidden
+ordinary reselection of deleted A.
+Luna traced `thawDocument()` to the renderer's accepted tracking
+reassertion, which increments selection generation and reaches main's
+replay path without a `switchToTab` call. Opus independently traced the
+generation guard again and **withdrew** the parked-without-replay
+reading: after a genuine frozen ACK, thaw reoffers the same event with
+attempt 2 and a later selection generation, then the unfrozen renderer
+consumes it. The old run changed the owner's generation but had no
+frozen ACK, so it cannot prove this post-thaw replay. The fixture must
+prove `frozen` and parked/no-retry before thaw, then that exact
+same-event reoffer, consumed ACK and retired record after thaw, without
+an ordinary reselection of deleted A.
+The first exclusive focused run of both changed test-only oracles exited
+nonzero at **55/58** (`f22-frozen-replay-focused-integration-tabs.log`);
+owner-path-moved, frozen ACK and a newly red lost-ACK assertion failed.
+The main-record `Map.set` snapshots the *prior* attempt before the
+subsequent send increments it, so the new activation probe found zero
+although the later delivery had attempt 2. Freezing calls
+`assertFileTrackingOwnership(..., false)`, which reoffers the missing
+owner's event before the held attempt 1 is released: the observed
+frozen ACK was attempt 2 and the delayed first delivery was refused as
+`stale-selection`; thaw then consumed attempt 3. The lost-ACK main
+probe saw `inFlight:true` and a simultaneously armed retry timeout on
+its last attempt, so its strict accepted-attempt check failed even
+though main retired the record. These are **diagnoses, not approved
+oracle relaxations or product changes**; distinguish the timer's source
+and review the freeze sequence before correction. An earlier command
+accidentally ran the root checkout's 18/18 tabs instead of the
+integration worktree and is not F22 evidence.
+Opus's read-only freeze review confirms the freeze itself sends
+attempt 2 at the newer generation and its exact `frozen` ACK parks the
+record with retry unarmed; the test's later hand-delivery of held
+attempt 1 is refused as stale, without un-parking, and thaw consumes
+attempt 3. The current index-1 post-thaw assumption cannot hold.
+Terra owns the bounded test-only correction on the disposable
+integration fixture; owner-path and lost-ACK diagnoses remain separate.
+Luna's independent owner-path review agrees this is a test-probe
+timing defect: `Map.set` snapshots the retained record *before*
+`deliverDeletionReport` increments its attempt, so the insertion
+appears as attempt 1 although the causally subsequent production
+delivery is attempt 2. Preserve the 4.25-second interval and correlate
+the insertion to the later delivery rather than demanding attempt 2
+on the insertion snapshot. Luna separately found a genuine product
+timer invariant violation in the lost-ACK observation: a repeated
+producer reoffered a live record with its retry timeout still armed,
+so the new attempt was simultaneously `inFlight` with
+`retryTimeoutActive:true`. The strict test probe correctly rejects
+that state. Main's retry callback clears the timer before sending,
+and explicit selection replay clears it before sending; repeated
+producer reactivation must likewise not send while a retry remains
+armed. Product correction and fresh performance/behavior gates are
+pending, not yet approved.
+Opus's independent timer trace agrees with Luna on the product
+violation: the retry callback, new-record producer and explicit
+selection replay enter the sender with retry unarmed, but the
+existing-tombstone producer can enter with it armed. Guarding the
+sender on the retry handle defers that redundant report until its
+bounded backoff expires; clearing the entire attempt in the
+producer would instead double-send a genuinely in-flight report.
+That latency trade must be documented at the guard and proved in
+the focused suite without relaxing the ACK-state oracle.
+Sol made the narrow product edit to `deliverDeletionReport` in the
+disposable integration worktree: refuse a send while its retry
+timeout remains armed. Syntax, CRLF and diff checks passed; the global
+`--anchors` run still identifies the **38 inherited** rotted setups
+and none names this guard. Terra's revised frozen fixture now keys
+the freeze/release/thaw sequence to attempts 2/1/3, respectively,
+and statically passes. Neither change has a new runtime verdict;
+Terra is correcting the remaining owner-path insertion-to-send
+correlation before the next exclusive focused run. Since product
+bytes changed, reattest the 16.7 ms active-editor gate rather than
+reusing the unchanged-product 42/42 measurement.
+The first focused run on the product retry guard plus the corrected
+owner-path/frozen attempts reached **56/58**; the lost-ACK case now
+passes with its strict unarmed-retry assertion intact. In
+owner-path-moved, the independent activation/accepted-ACK witness is
+valid but a global ACK-list slice uses the count of *this event's*
+ACKs, pulling old forged ACKs into the one-to-one comparison and
+terminating quiescence after 2059 ms. In frozen, attempts 2/1/3,
+frozen/stale/consumed ACKs, parked state and final main retirement
+all occur; whole-snapshot equality across the freeze incorrectly
+rejects the intended `isFileTrackingActive:true` to `false`
+transition. The test-only comparisons are being corrected while
+retaining exact state/ACK and 4250 ms gates. No 58/58 verdict yet.
+The guarded product was remeasured in the exclusive process-isolated
+F22 shutdown gate: **42/42 observations**, 0 failures, budget **16.7
+ms**, worst-case active-editor raw p95 **8.987 ms LF** and **12.1789 ms
+CRLF** at 2 MB × 25 tabs; the persistent local result is
+`f22-retry-guard-attestation.json`. The next focused run reached
+**57/58**: frozen and lost-ACK checks both pass, while owner-path
+quiescence still ended after 2059 ms despite a valid same-record
+reactivation/accepted-ACK witness. The adapter projected incomplete
+delivery/ACK objects and passed `undefined` delivery properties to
+the strict one-to-one comparator; it must carry canonical envelopes
+and the activation's complete `.identity`, without relaxing the
+comparator or the 4250 ms window.
+The owner-path adapter now forwards the complete canonical
+delivery/ACK envelopes to the strict matchers. The exclusive focused
+integration run exited **0, 58/58** with owner-path, frozen and
+lost-ACK assertions all passing (`f22-complete-focused-integration-tabs.log`).
+Its owner-path assertion requires `observedMs >= 4250`, the exact
+post-terminal activation-to-send/ACK provenance, and the forged-ACK
+rejections; the frozen assertion retains the pre-thaw parked/no-retry
+proof and three exact lifecycle attempts. The **complete non-focused**
+`test:tabs` and fresh independent Sol/Terra/Luna reviews are in
+progress; neither the focused nor the benchmark pass closes the
+remaining integration, individual-revert or release gates.
+Fresh independent Terra review found the new retry-timer guard has
+**no deterministic break-code witness yet**: the lost-ACK fixture
+allows at least three deliveries and does not force a real production
+re-entry while `retryTimeout` is armed. Mutating away the guard could
+leave 58/58 green. Before landing, add a bounded producer-re-entry
+scenario at the live timer boundary with a positive setup witness,
+assert no early attempt/send, and individually prove the guard's
+revert fails that exact assertion while unrelated legs pass.
+The fresh independent **Sol/Terra/Luna** round agrees the active
+retry guard cannot be approved from the 58/58 focused result alone:
+Terra and Luna both independently require a deterministic duplicate
+production attempt while the retry timer is armed. Sol also found
+two distinct owner-path oracle gaps: `every()` makes an empty
+reactivation list appear valid, and one active-map insertion followed
+by a synchronous send failure and a later timer-driven retry could
+masquerade as a direct watcher reoffer because the probe only checks
+retry handles at insertion and ACK, not during delivery. Terra/Luna
+did not report those two additional gaps; no reviewer found a
+product stranding path in the retry guard. Preserve the recorded
+agreements *and* Sol's additional findings for correction and a
+fresh round after changed bytes. The full non-focused tabs run was
+already running on the pre-review bytes and must finish before its
+test file is edited.
+The complete non-focused `test:tabs` run on those bytes has since
+finished **426/428, exit 1** (`f22-full-integration-tabs.log`).
+All focused ACK cases pass; its two independent failures are the
+suite-wide sentinel collecting 11 console errors from intentional
+F22 negative cases that ran outside a scoped mute, and the later
+renderer-dies-mid-commit fixture reaching neither a pending commit
+nor the crash (`crashedDuringCommit:0`, `commitPendingAtCrash:null`,
+`settleWhy:fallback-unresponsive`). Neither may be waved away as
+focused-only or declared a full-suite pass. Opus is tracing the
+commit setup; Luna is checking that any sentinel muting remains
+strictly audited rather than hiding unrelated errors.
+Luna independently rejects a long F22-wide sentinel mute: generic
+`[object Object]` errors cannot be attributed to their intentional
+fixture merely by matching their family/source. Use narrow negative
+case mutes with awaited failure witnesses, exact suppressed-entry
+checks, `unmute()` in `finally` and the existing sentinel liveness
+and final no-hits gates.
+The mid-commit fixture's no-answer behavior has a source-backed
+candidate cause: the F22 frozen test injected renderer-only shutdown
+request ID **97001**; `custom-tabs.js` retains that as its highest
+request ID for the page. Main's later real request ID **157** is
+lower and could be dropped as stale, explaining the absent commit
+and `fallback-unresponsive`. The renderer replay-cache seam can
+positively confirm the high-water mark; Opus is checking page
+navigation between those fixtures before changing test setup.
+Opus confirmed the renderer's shutdown-request high-water ID is
+module-scoped and only rises until an actual page navigation; it
+withdrew its earlier speculative save-latch and preflight theories.
+The F22 injected ID 97001 can therefore starve main's later
+request 157. Prefer a test-owned synthetic ID derived from the live
+renderer cursor and a positive check that main's next real ID still
+exceeds it in the full chain; a page reload would rehydrate persisted
+tabs and risks a blocking large-render dialog. Any new isolated
+fixture must also work under the fresh focused-harness ID range.
+The first focused run of the deterministic retry-guard fixture
+stopped **28/29** on its *diagnostic*, not a product assertion:
+`deletionDetail()` was called before initialization. It also only
+compared renderer counts where it promised to prove the main attempt
+unchanged. Terra is moving both new assertions below the diagnostic
+declaration and adding a before/after main-record witness before
+another exclusive verdict; the result is not a retry-guard proof yet.
+The corrected deterministic fixture now passes **60/60** in an
+exclusive focused run: a live missing-file poll sees the retained
+record while a genuine captured retry callback is parked, cannot
+advance the main attempt or send an early envelope, and releasing
+that callback delivers/ACKs attempt 2. This is **not yet an
+individual revert proof**. The first R657 attempt exited
+`UNUSABLE` although it restored the product bytes: `test:tabs`
+enforces a tagged companion transcript, while the externally
+selected focused harness has no companions. Terra is wiring a
+harness-owned virtual focused suite, following the existing F22
+newline-evidence pattern, so R657 can prove the exact guard without
+weakening transcript certification.
+The virtual-suite R657 mutation reached the intended assertion but
+returned **COLLATERAL**, not PROVEN: automatic missing-file polling
+raced the dedicated fixture's parked-retry setup under the reverted
+guard and advanced its main attempt before the controlled poll;
+the existing lost-ACK assertion also failed from the same removed
+guard and is not a valid `mustPass` for this revert. Product bytes
+were restored. A test-only suspension of *automatic* polling for
+the dedicated path, retaining the captured real poll callback for
+the controlled re-entry, and independent surviving setup controls
+are required before re-running R657. Do not count either unusable
+or collateral attempt as proof.
+The dedicated fixture then passed **60/60** after suspending only
+automatic 2-second polling on its exact missing-file path while
+retaining and invoking the captured real poll callback. R657's
+harness-owned virtual suite individually returned **PROVEN, exit
+0** (`f22-r657-controlled-proof.log`): with only the retry guard
+removed, its positive armed-timer/real-poll setup stayed green and
+the exact no-early-send assertion failed. The mutation additionally
+broke the older lost-ACK assertion, an unlisted but printed genuine
+consequence, not a required independent must-pass. The product
+source hash matched before and after the proof; the earlier
+`UNUSABLE` and `COLLATERAL` runs remain historical failures, not
+proofs.
+The first focused run of the bounded synthetic freeze ID stopped
+**28/29 before freeze** with a precise setup witness: focused main
+and renderer cursors were already **1**, so its asserted zero
+baseline/id 1 was false. Terra is correcting the focused-only
+premise to allow its actual cursor while preserving the strict
+full-chain requirement that main's next real ID exceed the
+synthetic ID. No new full-suite verdict on these bytes yet.
+Terra's focused/full-chain split now passes the exclusive focused
+tabs run **60/60, exit 0** on fixture SHA-256
+`300BF6FDF0F2F33F62FEEF9E4DC676D81D3964E6A7253901A60F569BD44BE4D2`.
+Focused setup accepts a pre-existing real request while preserving
+the full-chain main-cursor inequality. The complete non-focused
+mid-commit and suite-wide error-sentinel verdicts remain pending.
+The first complete non-focused run on the corrected focused bytes
+stopped **353/354, exit 1** before the frozen fixture: main and
+renderer cursors were both **156**, and the proposed synthetic
+ID **157** would equal main's next real ID, not precede it. The
+strict safety gate correctly rejected the injection; this is
+neither a frozen-ACK nor a mid-commit verdict. The fixture now
+needs a way to freeze without poisoning the later main request,
+not another relaxation of the full-chain inequality.
+Terra's read-only source trace found that the frozen-deletion case
+can drive the real renderer commit listener with the latest
+**already-issued** main/renderer request ID and current revision,
+without emitting a new phase-one request. It will require equal
+positive cursors and assert both remain unchanged after the
+commit; the next real main ID then necessarily outranks the
+freeze's ID. This tests frozen deletion, not fresh phase-one
+consent. Terra is making this bounded test-only correction;
+the full suite and sentinel still require a new verdict.
+The first complete suite with real-cursor commit-only freeze got
+past the frozen fixture (**frozen-ACK and retry-guard cases pass**)
+but ended **427/430, exit 1**. Its suite-wide sentinel still caught
+intentional errors; the later renderer-dies-mid-commit case still
+recorded no intercepted commit, and the isolated portable updater
+companion ended **12/13** with `harness threw`. These are three
+separate failures, not a passing full suite. The commit-only freeze
+removed the demonstrated 157/156 cursor collision; the later
+failure now needs its own actual route/fixture-state diagnosis.
+The later mid-commit failure is not evidence that the first
+commit-only correction failed: a **second** F22 replay fixture
+still emitted renderer-only shutdown IDs **910001–910004** after
+that case, without advancing main's cursor. Main's subsequent
+real request **157** was again discarded by the renderer's
+monotonic stale-ID guard. Terra is applying the same bounded
+commit-only, existing-real-ID treatment to that replay fixture;
+the full suite must be rerun afterward. Source audit found no
+other renderer-only `quit-approval-request` emissions in the
+tab fixture.
+After converting all four late replay freezes to commit-only
+real-ID reuse, the exclusive full tabs run reached **428/430,
+exit 1**. The renderer-dies-mid-commit case now **passes with an
+intercepted real commit**; both frozen-ACK and phase-two replay
+fixtures pass. Remaining failures are the suite-wide intentional
+console-error sentinel and the portable updater companion's
+**12/13 `harness threw`** result. The sentinel still requires
+per-operation attribution and bounded suppression; the
+companion is a separate blocking fixture failure.
+The portable companion's renderer exception was a fixture-state
+failure: later cases dereferenced an active tab after successful
+hand-off freeze, child-error retry or dead-child reload had left
+no such tab. Terra restored and positively witnessed a real
+selected fixture tab at each boundary; the exclusive standalone
+portable companion now passes **47/47**. Its test-only bytes need
+the complete non-focused suite to establish that the parent
+companion also passes. Remaining sentinel errors include
+pre-F22 file-open/owner-selection scenarios (visible in the
+captured screenshots), so attribution must cover the full
+suite rather than only F22.
+The complete suite on the repaired portable fixture still exits
+**428/430**: the child companion is now green **47/47, exit 0**,
+and mid-commit still passes, but the parent transcript oracle
+still expects the pre-repair **44** checks and correctly rejects
+the extra three setup witnesses. Terra is updating that exact
+expected inventory. The other failure is the suite-wide
+intentional-error sentinel; **no** full-suite green is claimed.
+Terra updated the parent portable companion's exact expected
+footer to **47/47**, preserving its child-exit and no-fail-line
+checks; the complete run on those bytes remains pending. A
+read-only attribution pass proves only **three** of the eleven
+unmuted console hits by unique F22 save error/path
+(appeared-file, deleted-owner, ordered EACCES). Five other
+source families account for eight hits but have no reliable
+operation label in the aggregate transcript; screenshots
+support possible contexts, not proof. Terra is scoping exact
+suppression to those three witnessed negative saves first;
+the others remain visible until independently attributed.
+The first complete run with those three bounded save mutes ended
+**431/433, exit 1**. The portable parent companion and the
+deleted-owner and ordered-EACCES exact mute assertions passed,
+but the appeared-file mute captured **zero** errors even though
+its expected `Save failed: The file changed while the save was
+starting` remains unmuted in the final sentinel. This disproves
+the assumed emit window; Terra is locating the actual producer
+before changing its scope. The sentinel retains nine hits:
+the escaped changed-file error plus eight unattributed adoption,
+tracking, and invalid-save errors. No empty mute is acceptable.
+Opening/viewing the escaped error's actual `tabs-error-6.png`
+shows the active dirty tab **`f22-producer-save-race.md`**, not
+the earlier proposed `f22-save-appeared.md`. Generic changed-file
+error text did not uniquely identify its producer: the
+appeared-file attribution above is disproven, and the producer
+race remains a candidate pending a matched operation/result
+witness. Do not count this as a third proven mute yet.
+Source/visual tracing then established the changed-while-starting
+renderer error comes from the *producer-save-race* (`saveMarkdownFile`)
+rather than the appeared-file raw IPC helper; the corrected narrow
+mute passed in its first full run. That run nonetheless stopped
+**371/376, exit 1** before the suite-wide sentinel: edit-mode CRLF,
+mixed-newline and spelling Saves received unexpected on-disk
+conflicts, and ordered B did not refresh its settled tracking
+owner. The earlier complete run on the old mute bytes passed
+these cases. Whether this is timing from the new drain or
+independent fixture instability is unproven; do not relax
+file-version assertions or claim the scoped-mute patch complete.
+An exact-byte complete-suite repeat reproduced mixed-newline
+and ordered-B conflicts (**372/376**). More decisively, the
+exclusive F22-focused run on the same test bytes, with **no
+sentinel or mute active**, failed CRLF/mixed/spelling/ordered-B
+version witnesses (**44/49**). That rules out sentinel draining
+as a necessary cause. Initial diagnostics indicate a later
+metadata-only `ctimeMs` change while other version components
+remain equal, but the first transition and its ownership
+baseline are not yet located. Terra is instrumenting the
+seed→selection→pre-Save path for a discriminating fixture
+verdict; do not change disk-version comparison on speculation.
+The focused diagnostic now reproduces **44/49** with
+post-selection `ctimeMs` moving while dev/ino/size/mtimeMs
+remain equal in CRLF, mixed-newline and ordered-B. Mixed and
+ordered-B retain the old accepted owner baseline and refuse
+unchanged disk bytes; CRLF receives a later reselection and
+succeeds. Opus's source trace confirms main's shared version
+predicate includes `ctimeMs` and stores **no selection-time
+digest**. Simply dropping `ctimeMs` would avoid false conflicts
+but lose detection of same-size content changes with restored
+mtime, a data-integrity trade-off. The next product investigation
+will preserve that protection while addressing ctime-only
+drift, with fresh performance attestation required for any
+source change. Diagnostic instrumentation is currently gated
+behind `F22_CTIME_DIAGNOSTIC=1`.
+The role handoff is active: GPT-6 Sol (high) owns the bounded
+product correction, preserving metadata-change detection and
+the save/path security boundary; Terra owns a separate read-only
+test design until product bytes settle. Its proposed controls
+are exact ctime-only/same-byte acceptance, same-size changed
+bytes with restored mtime rejection, denied-read and unknown
+baseline failure, an unchanged fast path, and an individual
+revert that breaks acceptance without breaking those
+refusals. No new product perf or focused-suite pass exists yet.
+Sol's first product iteration retains an owner raw-byte
+witness and confines ctime-only acceptance to a checked Save
+boundary, keeping the global version predicate strict. The
+first exclusive focused run on those bytes stopped **8/9**
+before Save: `createActiveTab` could not establish the
+producer-race file's physical identity (`identity:null`,
+selection generation 1). This is a new product/selection
+regression until disproven, not a ctime fix verdict. Sol is
+diagnosing within the bounded product assignment; tests,
+performance gate and security-negative controls remain
+unproven on these bytes.
+Moving the witness read until *after* physical selection
+removed the first failure, but the next focused run stopped
+**17/18**: reselecting `f22-edit-mode-crlf.md` left the other tab
+active with no owner. A read that advances ctime can still
+poison a subsequent strict selection. This refutes a Save-only
+patch as sufficient for these measured bytes; Sol is tracing
+the shared selection/owner boundary rather than relaxing
+the fixture or assuming a later Save attestation fixes it.
+Sol stopped the bounded product experiment and byte-restored
+`src/main.js` to its pre-assignment Git blob
+`d36976a443a9590a0ad2a94b8ce12c1da01` (including the
+earlier retry guard). The version predicate and tab
+re-selection/adoption paths also judge ctime, so adding a
+baseline read in main can itself advance metadata and cause
+the next owner selection to fail. A reliable content-based
+exception requires an end-to-end raw-byte witness from the
+original read/adoption through main owner authority and
+through watcher/reselection, with tamper and performance
+controls. Changing only Save or ignoring ctime would be an
+unverified scope/security trade-off. This is a genuine
+maintainer design gate before another implementation attempt.
+**Maintainer decision, 2026-10-01:** ignore ctime-only
+differences now, document the loss of same-size changed-byte
+protection when mtime is restored, and track a stronger
+content-witness design under `ctime-byte-witness` after wave 2.
+This resolves the design gate, not the execution gates:
+the ctime policy still needs code, exact fixtures and revert
+proofs, a focused/full suite, independent reviews and fresh
+performance measurement before `w2-f22` can close.
+Sol applied the chosen policy at the three shared equality
+surfaces in main, tabs and renderer, leaving the version
+payload, validity checks, deletion and path-identity guards
+unchanged. On those exact product bytes an exclusive F22
+focused run returned **60/60, exit 0**, including CRLF,
+mixed-newline, spelling and ordered Saves that had failed on
+the strict ctime comparison. This is a first behavioral
+check, not proof of a controlled ctime-only setup, the
+retained non-ctime guards, complete-suite health or perf.
+Terra now owns the explicit two-drift selection/Save fixture
+and individual per-surface revert records.
+Terra's controlled policy fixture now passes in an exclusive
+focused run **62/62, exit 0**. On a fresh file it uses a
+reversible Windows read-only attribute transition, positively
+witnesses ctime-only drift with identical raw bytes and
+unchanged dev/ino/size/mtime, then independently proves
+real tab re-selection and real correlated Save after a
+second drift. Ordinary reads were empirically not a
+deterministic trigger; no skip or fixed wait substitutes
+for the observed version shape. Individual main/tab/renderer
+reverts, complete-suite health and fresh perf remain
+pending on the current product bytes.
+The process-isolated F22 gate then ran on the same ctime-policy
+product bytes and passed **all 42/42 observations with zero
+failures** against the predeclared **16.7 ms raw-p95** budget.
+At 2 MiB x 25 tabs, worst-case active-editor raw p95 was
+**10.1539 ms LF / 13.4979 ms CRLF** (20 samples each);
+the exact raw samples and per-point verdicts are in
+`f22-ctime-policy-attestation.json` with transcript
+`f22-ctime-policy-benchmark.log` in the current session files.
+This closes the measured ctime-policy performance gate only
+while its product bytes remain unchanged; it does not close
+the failing complete-suite/revert/review gates.
+The first complete non-focused run on the controlled fixture
+ended **420/435, exit 1**. Both new ctime selection and Save
+assertions pass and the portable companion passes. Eleven
+phase-two malformed-revision cases began with **no held
+request** instead of their required clean-commit setup; this
+intermittent full-chain fixture problem was known before
+the ctime policy and needs its own positive-control diagnosis.
+Three narrow intentional-Save mute assertions captured the
+right error but failed solely because their expected literal
+`renderer.js:4893` source line shifted to **4894** with the
+product edit. Those source locations must be asserted by
+file/path and valid line shape, not a brittle fixed number;
+the final sentinel still reports seven other unattributed
+errors. No full-suite pass is claimed.
+Terra then added a stronger clean-live setup before each
+phase-two malformed-revision case and corrected the three
+mute checks to require the exact renderer source file with
+a valid numeric line rather than a brittle fixed number.
+The first complete run on those test bytes stopped
+**213/214** in the renderer setup before any malformed case,
+with Electron's generic `Script failed to execute` and no
+underlying JS exception detail. This does **not** prove the
+phase-two setup is repaired. Terra is surfacing the actual
+exception before changing setup logic; product/performance
+bytes remain unchanged.
+The exception was test-only: the new witness called nonexistent
+`getActiveTabId()` instead of reading the exported active
+tab's `id`. After correction, the exclusive complete suite
+reached **434/435, exit 1**: all phase-two malformed replies,
+both controlled ctime policy legs, all three exact
+intentional-Save mutes, the mid-commit crash, and the portable
+companion pass. **Only the suite-wide sentinel remains red,**
+with seven unmuted adoption/tracking/invalid-identity errors
+whose operation provenance is not established by the aggregate
+log. No broad mute or full-suite green is claimed.
+The ctime-policy product bytes now have a fresh independent
+Sol/Terra/Luna review round in progress; the Sol author of
+the change and the Terra author of the test are not counted
+as those reviewers. In parallel, Terra is collecting a
+non-suppressing, per-operation sidecar for the seven
+remaining console errors. The existing sentinel remains
+fully live and red until each event is causally classified;
+review and diagnosis do not advance `w2-f22` by themselves.
+Fresh independent ctime-policy review round: Sol and Terra
+reported no actionable production findings; Luna agreed
+the three product comparators are consistent but alone
+identified a **cross-platform test blocker**. The new
+controlled ctime fixture calls Windows `attrib`
+unconditionally, so Linux/macOS `test:tabs` would abort
+before either ctime assertion. Terra must supply a
+positively witnessed POSIX metadata-only trigger or
+report an unsupported environment explicitly; no silent
+skip or green cross-platform claim. The reviewers agree
+on the product boundary and disagree only in the
+test-coverage finding (found by Luna, missed by the other
+two). A material test correction requires another
+fresh review round.
+Terra repaired the cross-platform fixture: Windows still
+uses proven reversible `attrib`, while POSIX reversibly
+toggles only owner-execute via `chmod`, with the same
+byte/version/write-access setup oracles and no skip. The
+POSIX path is static-checked but has no runtime verdict yet.
+A diagnostic-only full tabs run on the preceding test bytes
+again reached **434/435**, with all five hypothesized narrow
+console-error windows recording **zero** events. The seven
+remaining sentinel hits across five error/source signatures
+(with repeats in the raw stream) were *unscoped*: the candidate quit-alpha/beta
+clean open, ctime Save, replacement-owner adoption/stale
+delivery, and frozen thaw did not emit them within their
+drained boundaries. Terra is adding arrival-time
+assertion adjacency rather than treating screenshots or
+family names as sufficient provenance.
+The first arrival-time diagnostic run did **not** reach the
+sentinel verdict: it stopped at **212/214** when the phase-two
+clean-live setup refused to mutate the document; that initial
+error alone did not prove a standing freeze. A second exclusive
+diagnostic run stopped at **213/214** and discriminated the state:
+freeze clear, zero deferred operations, writable editor, but
+**no active tab** after the invalid-revision reload sequence.
+Terra added a conditional normal open of the established
+quit-beta fixture and an awaited active-tab/path witness;
+the next exclusive complete run passed every phase-two case
+and returned **434/435, exit 1**, with only the suite-wide
+console sentinel red. Immediate
+event records placed
+one disk-adoption refusal after the negative shutdown-revision
+case and before its next assertion, but the other error
+families remain unattributed; an attestation refusal during
+failed-run cleanup is not evidence about a test operation.
+That complete run retained **six** deduplicated sentinel hits
+across disk-adoption, tracking-selection/reassertion and
+invalid-identity-Save signatures; its diagnostic sidecar
+recorded **24** raw console arrivals, including expected
+negative cases already scoped by existing mutes. One Save
+identity refusal is positively tied to the dangling-symlink
+negative case; adoption errors cluster across invalid-revision
+reloads, while tracking errors also occurred after unreadable
+approval and during deletion-owner exercises. Timing alone
+does not establish their decision payloads or justify suppression.
+No console errors have been muted on the basis of assertion
+adjacency alone.
+Independent Opus/Luna sentinel feedback agrees that the
+dangling-symlink Save is a controlled negative and that a
+suite-wide mute would hide failures. They disagree on the
+other families: Opus considers all reload/selection refusals
+intentional and proposes exact scoped mutes; Luna finds the
+adoption reasons unproven and the tracking/reassertion
+failures potentially actionable until owner recovery is
+witnessed. The complete transcript supports Luna's caution:
+the committed-navigation cluster includes two main-process
+`Refusing watcher selection without a valid disk version`
+logs, so treating every selection refusal as a deliberately
+rejected deleted-file owner would be unsound. The symlink
+oracle proves no old-target write and a refused Save, but its
+current lexical link-key witness does not exclusively prove
+which renderer identity guard triggered; refine its cause
+before attributing a new mute to that guard. Terra will
+diagnose the navigation owner/version boundary before
+changing the sentinel.
+The first attempt to capture that navigation witness stopped
+earlier at **213/214**: after the invalid-revision reloads,
+the clean-live helper's reopen of `quit-beta.md` sent a real
+`open-file-path`; main logged a successful read and send,
+but the renderer logged both adoption-commit and attestation
+refusals and remained without an active document for the
+five-second wait. This is not proof of a standing freeze or
+a timeout that should simply be lengthened. Terra is
+capturing the structured refusal reasons without suppressing
+errors before changing the setup again. No navigation-owner
+verdict is claimed from this failed run.
+The next exclusive run reproduced the early **213/214** stop.
+A scoped, non-suppressing renderer diagnostic captured
+`capability-target-mismatch` from main's adoption commit,
+then `invalid-adoption-identity` (`known:false`, no
+capability) on attestation of the reused `quit-beta.md`
+path; `currentFilePath` and the selection cursor remained
+unset. Both are fail-closed product replies, not proof that
+a five-second wait is too short. The fixture repeatedly
+resets main's owner baselines while reloading the renderer
+and trying to reopen a previously registered path. Terra
+must establish a fresh, real owner and a positive selected
+document witness without masking either rejection before
+the navigation diagnosis can continue.
+Terra's fresh physical phase-two fixture then passed every
+malformed-revision and commit case with a selected owner
+whose physical version, canonical key, tab and page session
+were positively matched. The exclusive complete suite
+reached **434/435, exit 1**; the only failure was the console
+sentinel (**seven** deduplicated hits, **24** raw arrivals).
+The navigation witness reached both generation boundaries:
+the first had no subsequent tracking refusal; the second
+sent two `invalid-selection-disk-version` replies when the
+fixture created and switched to a synthetic relative
+`f22-navigation-edit.md` tab with **no physical file**.
+This does not establish watcher loss for a stable file, nor
+justify muting a refusal. Terra is replacing that synthetic
+stand-in with a real disk-backed tab and proving its accepted
+owner before drawing a sentinel verdict.
+The first exclusive run on the disk-backed navigation
+fixture passed phase two and the first generation case,
+then stopped at **238/239** because a diagnostic referenced
+`replacementTracking` outside its block. Terra corrected
+that test-only scope error without a second Electron run.
+Before repeating it, the positive owner oracle also needs
+to respect main's two distinct success reply shapes:
+an ordinary accepted `select-file-tracking` reply carries
+`accepted`/`trackingActive`, whereas a disk-adoption reply
+additionally carries `approvedOwner`; requiring
+`approvedOwner` for every normal tab can create another
+vacuous timeout. No navigation or sentinel verdict is
+claimed from the interrupted run.
+After the oracle correction, a fresh exclusive complete
+suite reached **434/435, exit 1**. The navigation witness
+proved no active file/selection at the first intentionally
+empty boundary; the second used the real physical
+`f22-navigation-edit.md` owner with a finite disk version
+and a main `select-file-tracking` decision of
+`accepted:true, trackingActive:true`. Its subsequent
+close-state selection was accepted with tracking inactive.
+The original dirty-close assertion passed. The remaining
+sentinel retained **eight** deduplicated hits from **25**
+raw arrivals, including the still-unresolved
+invalid-revision-reload adoption cluster, prior-owner
+tracking/reassertion clusters and the dangling-symlink
+Save refusal. The diagnostic console wrapper contributes
+one alternate `?:56` source signature; it is not a separate
+product error. No mute has been added.
+An attempted normal tab-close cleanup before the malformed
+revision reloads failed its own setup at **207/209**:
+two fixture-owned tabs remained open despite `frozen:false`,
+no deferred operations and no renderer exception. This
+was rolled back, not treated as a successful empty-page
+setup. `closeTab` also requires an authenticated document
+identity and deletion-state answer, which test-only
+`__shutdown.reset()` can invalidate while retaining the
+renderer tabs. The earlier strategy of closing those tabs
+at that boundary cannot be assumed to work. The next
+candidate is to clear only the fixture's persisted-tab
+state immediately before each *deliberate* renderer reload
+and verify the replacement starts empty; no product
+refusal will be suppressed.
+The first persisted-tab-clear attempt stopped at **207/209**
+on an overbroad setup oracle. It positively observed storage
+clear from three keys to zero and the replacement renderer
+with **zero tabs, no active tab, no current path**, but
+then failed because the new page held one localStorage key.
+`custom-tabs.js` persists tabs specifically under `openTabs`
+and `activeTabPath`; the renderer and theme code also persist
+unrelated UI settings. The generic `localStorage.length === 0`
+test therefore cannot prove tab restoration and rejects a
+valid empty page. That unproven helper was rolled back.
+The next verdict must test the two tab keys' *contents* and
+the actual renderer tab/active state, not all storage keys.
+With that exact oracle, the next exclusive suite passed
+**446/447, exit 1**. Both cancel/confirm replacement pages
+in all six malformed-revision cases proved zero restored
+tabs, no active/current path, and empty-or-absent
+`openTabs`/`activeTabPath`; phase two and the physical
+navigation owner still passed. The adoption-*commit*
+refusal family vanished without a mute. One adoption
+*attestation* refusal remains after a separate valid
+phase-two commit's deliberate reload. The sentinel retained
+**six** hits from **14** raw arrivals, including paired
+tracking/refusal errors after the unreadable-response and
+deletion-owner scenarios, and the dangling-symlink Save.
+Do not claim the remaining events have the same cause
+as the eliminated malformed-revision contamination.
+The next exclusive complete run again reached **446/447**,
+with **five** deduplicated sentinel hits from **13** raw
+arrivals; the intermittent valid-commit-reload adoption
+attestation did not occur on those bytes. A scoped,
+non-suppressing diagnostic around the unreadable-response
+operation and real-handler restoration saw **zero**
+tracking errors and the same active physical
+`phase-two-reopen-1.md`, finite version and owner identity
+before/after. Two selection refusals and a failed
+prior-owner reassertion appeared 5–6 ms *after* that
+scope ended, before the next staleness PASS. The next
+fixture operation resets test-only main state and creates
+a `quit-alpha.md` tab with synthetic `cached-answer` bytes
+unrelated to the disk. Terra is testing whether that
+unnecessary tab creation, rather than the unreadable
+response, generates the three errors. No mute is justified
+by the earlier assertion adjacency.
+After removing that artificial tab creation, an exclusive
+run passed the physical same-ID cache, fresh/stale and
+duplicate-response assertions, and reached **447/448,
+exit 1**, sentinel-only. The unreadable-response tracking
+cluster disappeared without a mute; the remaining
+**three** deduplicated sentinel hits came from the
+dangling-symlink Save and a selection/refusal pair after
+the inactive-deleted-owner scenario. In the latter,
+main's exact log names `f22-deleted-inactive-a.md` as
+`ENOENT` while verifying a watcher selection. The fixture
+then calls a shared `clearTabs()` that closes all tabs
+concurrently; if B closes while missing A remains, ordinary
+selection can try A and fail. Terra must prove the ordering
+and close missing A before B with positive live-owner and
+no-reselection witnesses, or report the actual different
+cause; no broad deletion mute is justified.
+The first sequential-cleanup run stopped at **370/372**
+on a test-probe cardinality assumption, not a watcher
+refusal: main's `recordSnapshot()` projected the same
+owner-keyed deletion record twice (`count:2`, one
+ID tombstone) before close, then zero records/tombstones
+afterward. It observed the exact deletion warning for
+A, A removed, B still active with its real owner, and
+**zero** missing-A watcher selections during that
+interval. Terra changed the oracle to require matching
+identity/state for every projection and complete retirement
+rather than one projection only; this correction has not
+had an exclusive complete-suite verdict yet. The
+three-hit sentinel state above still applies only to
+the earlier fully completed run.
+The corrected sequential cleanup then passed in an
+exclusive complete suite, **449/450, exit 1**:
+the exact deletion warning retired missing A and its
+owner-keyed record while B remained selected, B closed
+only afterward, and all downstream frozen/replay checks
+passed. **Zero** tracking-selection or prior-owner
+reassertion refusals remained. The sentinel's **one**
+retained hit is now the dangling-symlink Save's
+`Refusing save with invalid document identity` at
+`renderer.js:4462`; the sidecar recorded eight raw
+events including already-scoped intentional negatives
+and its self-proved liveness probe. Do not call the
+complete suite green or mute this final hit until the
+exact Save guard cause and selected symlink owner are
+positively witnessed; the current test's lexical
+link-key comparison is weaker than renderer's actual
+alias-aware document state key.
+An exclusive focused symlink diagnostic then passed
+**65/65** and established the exact missing cause:
+the Save button returned in the renderer before sending
+any main Save IPC; its alert was exactly `Failed to save
+file: Document identity is unavailable.` The actual
+`canonicalReloadPath(currentFilePath)` resolved to the
+dangling link spelling, while the selected identity still
+named its removed old target. The mismatch triggers
+renderer.js's invalid-identity guard *before* its
+selection-generation checks; the public identity does
+not expose `selectionGeneration`, so no unproved
+generation claim is needed. Terra is tightening that
+actual-key witness and adding one awaited, exact-source
+sentinel expectation limited to this Save. The alternate
+main refusal branch remains valid only if it raises no
+renderer diagnostic. A focused pass does not itself
+close the complete-suite sentinel gate.
+Sol rechecked the owner-path reviewer finding: requiring at least
+one activation and exact accepted attempt = the activation's
+pre-send attempt + 1 closes both its empty-replay and synchronous
+send-failure/timer-retry counterexamples for the current product;
+returning a missing ACK must be null-safe and fail the oracle, not
+throw. Sol qualifies that this arithmetic alone would not rule out
+a hypothetical future timer armed before the first send, so the
+unarmed-at-insertion and ACK-state controls still matter.
+Independent Opus/Luna fixture reviews agree that the test's unawaited
+deleted-A to B to A switches leave B active, so a subsequent Save and
+explicit reload cannot prove anything about A. A must remain active until
+its tombstone Save refusal and explicit reload have been witnessed; the
+forbidden ordinary reselection claim must go. Both reviewers also require
+the inactive-owner probe to observe main's actual accepted watcher owner,
+and the frozen-ACK case to witness a still-standing freeze at delivery.
+Opus initially proposed using an id-keyed tombstone for both terminal ACK
+reasons; Luna noted that owner close retires that tombstone too, and Opus
+confirmed the correction. The owner-closed late ACK must be proved inert
+after its records have been retired at close; the replacement-owner case
+needs a separate positive pre-delivery record-presence witness rather
+than the shared owner-keyed acceptance assumption.
+An earlier full run also saw phase-two negative cases unexpectedly enter a
+user dialog instead of the expected clean commit, so that intermittent fixture setup
+still needs a discriminating witness; other full runs passed those cases on
+the same product bytes.
+`test:packaging` passes **271 checks**
+with one expected built-asar skip. The global `--anchors` audit identified
+**38** older records whose mutations need repair and individual reproving.
+Final independent reviews, remaining suites, permanent measurement records
+and serial integration are also pending.
+
+**F22 fixture update (2026-10-01, isolated integration worktree).** The
+phase-two, navigation, same-ID cache and inactive-deletion fixtures now use
+physical selected owners and ordered cleanup rather than silencing watcher
+refusals. A misplaced symlink-test `finally` initially made the portable
+companion fail to parse; it was removed before any further Electron run.
+After a focused **65/65** pass, full runs exposed two intermittent
+reload/reset races: main's test reset could clear an owner baseline before
+the reloaded physical tab's tracking selection completed. The valid-revision,
+valid-dirty and sender-gate paths now each prove the new renderer's exact
+restored owner and accepted tracking decision before reset. The symlink
+Save fixture captures the actual prepared identity, requires its selection
+generation and owner fields to match, and distinguishes the exact
+renderer-refusal and main-failure diagnostics without a broad mute. Its
+raw console observer does not wrap `console.error`, which would change
+Electron's source to `?:111`; both focused and full runs now require the
+exact native console error before a bounded boundary completes. Both
+named symlink fixtures are cleaned up on every outcome. The latest
+machine-exclusive focused and complete tabs runs passed **67/67** and
+**460/460** respectively, with **zero full-suite sentinel hits**, on test
+SHA-256 `610851160F8F6C0A3565EC7FE49619BF1DCA73AC28A847C29166D160F99CB1DE`;
+the complete record is `files/f22-final-oracle-correction-full-tabs.log` in
+the current session. These are suite verdicts, not revert or release verdicts.
+The subsequent R658 isolated mutation removed only renderer's pre-IPC
+path-key guard. Its focused run failed the precise renderer-refusal assertion
+while the valid-target symlink Save remained green; the record returned
+**PROVEN** and restored the renderer source hash exactly. The clean focused
+suite on those newer test bytes passed **67/67**. The **460/460** full-suite
+verdict above predates R658's tightened branch oracle; it must be repeated
+on final bytes. The older rotted anchors and the remaining independent
+revert proofs are still open.
+R659 individually returned **PROVEN** with the unchanged owner assertion
+rejecting a controlled early wait that had seen a tracking selection but
+had not captured a restored physical owner. The three nonempty persisted
+physical-path setup controls remained green; valid-dirty and sender-gate
+selection assertions also failed as expected collateral. The harness
+restored the test source hash exactly. Neither R658 nor R659 resolves the
+older rotted anchors or substitutes for a complete post-proof tabs run.
+The final-byte R657 retry-guard proof returned **PROVEN** again. R661
+(CustomTabs' ctime equality) and R662 (renderer comparator's directly
+observed ctime-only equality, with non-ctime and invalid-input controls)
+also returned **PROVEN** individually, with product bytes restored. R660
+(main's ctime equality) was initially **UNPROVEN**: an isolated proof-only
+checkpoint reached its controlled assertion and collateral controls, but
+the harness correctly rejected the mutation transcript because delayed
+unprefixed Save diagnostics followed the terminal suite footer. Waiting
+for the main Save queue to drain did not resolve that transcript failure;
+that unsuccessful probe was removed. Do not treat a checkpoint or an
+anchor dry-run as an R660 revert proof. The complete tabs suite on the
+current test bytes passed **464/464** with no sentinel hits or stalls
+(`files/f22-ctime-sentinel-confirm-complete-tabs.log`); one prior green
+run reported a sentinel stall, so only the later clean-instrument run
+supports this current verdict.
+The next proof-only checkpoint before the intentional path-race Saves
+eliminated those delayed Save diagnostics, but R660 still returned
+**UNUSABLE**: the terminal transcript was followed by an exact Electron
+`console-message` deprecation warning alongside the ordinary destroyed-
+renderer shutdown diagnostic. Product source was restored. At that point R660
+was time-boxed as a transcript-protocol blocker; do not widen the global
+post-footer allowlist merely to produce a green proof. On the present
+test bytes, R662 and R657 each re-proved **PROVEN** with source hashes
+restored, and a repeat full tabs run passed **464/464** with zero sentinel
+hits and zero stalls (`files/f22-ctime-sentinel-confirm-complete-tabs.log`).
+The subsequent bounded correction converted the two tab-suite
+`console-message` listeners to Electron's modern event object, eliminating
+the deprecation warning. The R660 proof-only record, not the global
+transcript rule, now permits only the observed single exact shutdown line;
+synthetic checks reject that line on ordinary runs and reject added or
+fatal output. The renderer-side observer captures the actual synchronous
+tracking reply, since the main event's `returnValue` could not be read back.
+The checkpoint requires a byte-identical ctime-only transition, one
+correlated selection, unchanged cached version, and the exact
+`disk-or-deletion-moved-before-selection` rejection when the target
+assertion fails. It fails closed on missing setup or unrelated failures.
+**R660 is now individually PROVEN** on the final test bytes: both the
+reselection and its dependent Save fail under the mutation, with the
+independent controls passing and the main source restored byte-for-byte
+(`files/f22-r660-guarded-final-proof.log`). The unmutated focused path
+passed **18/18**; the complete tabs run passed **464/464** with zero
+sentinel hits or stalls (`files/f22-r660-guarded-complete-tabs.log`).
+An earlier complete run on intermediate test bytes passed **462/464**:
+one false failure came from the unreadable main-side reply and was
+corrected; an updater-commit timing failure did not recur in the next
+complete run and is not claimed fixed. Fresh independent Sol, Terra and
+Luna reviews of the corrected proof gate found no blocking defects.
+Sol notes that the main rejection reason also covers other disk or
+deletion changes; the controlled metadata-only transition and correlated
+reply constrain, but cannot make that reason uniquely ctime-specific.
+R621's unresponsive-commit revert now anchors the production fallback-cause
+argument. Its individual break/restore proof is **PROVEN** with exactly the
+commit-refusal and frozen-document assertions failing, the independent
+question controls surviving, and the main source restored byte-for-byte
+(`files/f22-r621-complete-expect-proof.log`). Fresh independent Sol, Terra
+and Luna reviews found no blocker. R552 is **not proved**: moving its older
+silent-approval mutation to the current fallback entry caused a repeated
+commit/refusal loop, filled the harness output buffer and left a test child
+running. The exact child process tree was identified and stopped by PID;
+the production source hash was restored. That unsafe record change was
+reverted, leaving R552 `SETUP-FAILED` until a bounded, finite mutation can
+be designed and individually proved. The current `--anchors` audit still
+fails on older records (`files/f22-r621-final-anchor-audit.log`); it does
+not substitute for any individual proof.
+R63's scroller implementation had moved from main to CustomTabs. Merely
+updating its file target initially yielded a misleading **PROVEN** result:
+both failing assertions tested whether the *mutated* helper could find a
+scrollable pane, while the actual reading-position assertion stayed green
+at zero scroll. The 5c2 test now parks and reads the physical scroller
+through the unmutated renderer helper; that setup must stay green under
+the paired tab-helper/CSS mutation. R63 then individually **PROVEN** the
+reading-position regression, with the zoomed scenario's setup failure
+reported as an expected consequence rather than as restoration evidence
+(`files/f22-r63-physical-clean-proof.log`). The complete unmutated tabs
+suite passed **464/464** (`files/f22-r63-physical-complete-tabs.log`).
+An earlier mutation run also encountered an unrelated updater-boundary
+timing failure; the clean individual reproof did not. Fresh independent
+Sol, Terra and Luna reviews found no blocking issue in the corrected
+R63 proof. The older anchor audit remains a release blocker; derive its
+live failure inventory from `--anchors`, not from the status prose.
+R570's first restored anchor was **VACUOUS**: its forged wrong-generation
+READY omitted `pageSession`, so the later session guard still rejected
+the request after the generation guard was removed. The fixture now
+supplies the current valid session and separately proves an open request
+and a distinct safe generation. Two mutation runs reached the intended
+assertion but also failed unrelated updater checks; those are not clean
+proofs. R570 alone now opts into exact-failure accounting and requires
+both of its `mustPass` controls to appear as actual PASS records.
+Its subsequent individual break/restore run is **PROVEN** with only the
+target assertion failing (`files/f22-r570-observed-controls-proof.log`),
+and the unmutated complete tabs run passed **465/465** with zero sentinel
+hits or stalls (`files/f22-modern-sentinel-clean-tabs.log`). Sol identified
+the absent-PASS gap in the first review round; after its correction,
+fresh independent Sol, Terra and Luna reviews found no blocker.
+R454 now anchors only the unique `will-download` registration, preserving
+the expanded listener body and the independent policy predicate. It is
+**UNPROVEN**: its popup mutation transcript remained `UNUSABLE` because
+native popup-navigation diagnostics followed the terminal footer
+(`files/f22-r454-modern-sentinel-proof.log`). The shared test sentinel
+now uses Electron's modern single-event console signature; that removed
+the separate deprecation warning but did not cure those late diagnostics.
+The ordinary popup suite passed **93/93**, render-security **192/192**,
+and the latest complete tabs suite **465/465**. Do not accept arbitrary
+post-footer popup output to turn R454 green. Independent Sol, Terra and
+Luna reviews found no bug in the changed R570/R454 fixtures or sentinel;
+Terra raised the generic harness's permissive unlisted-failure policy,
+which was addressed with an R570-only opt-in rather than changing other
+records' deliberate semantics. The older anchor audit still fails
+(`files/f22-r570-r454-anchor-audit.log`).
+A bounded R454 handoff to Terra is checking whether the three exact
+known after-footer popup diagnostics in the mutation transcript can
+be accounted for by a mutation-only tail contract, as R660 does for
+its separate diagnostic. The control popup run put the two deliberate
+blocked-navigation messages **before** its footer. No generic
+acceptance of arbitrary late output or claim of R454 proof follows
+from this handoff; the independent policy-predicate PASS control,
+exact wiring failure, product restoration and fresh reviews are
+still required.
+Terra found the two blocked-navigation messages were in a separate
+diagnostic stream, not the parent stdout tail. A mutation-only R454
+contract now admits **only** the exact terminal parent line
+`Shutdown approval renderer unusable: webContents destroyed`; synthetic
+controls reject reordered, added and fatal late lines, and prevent a
+clean run from using the allowance. The popup baseline passed
+**93/93**; R454's individual mutation failed just the wiring check
+while the independent policy-predicate check was an observed PASS,
+and product bytes were restored (`files/r454-tail-proof-20261003.log`).
+Terra is adding R454-only exact-failure enforcement and reproving it
+before this provisional result is promoted to reviewed evidence.
+R454-only `requireExactFailures` is now in place. Its individual
+break/restore rerun is **PROVEN** with exactly the one named wiring
+failure, the independent policy predicate observed PASS, a resolved
+anchor and byte-restored `src/main.js`. Fresh independent Sol, Terra
+and Luna reviews of the final scoped verifier change are in flight;
+the popup run and this proof do not stand in for the complete harness.
+A subsequent full read-only `--anchors` audit resolved every record
+(`files/f22-r454-full-anchor-audit-20261003.log`); it did **not**
+execute or prove any other revert.
+Fresh independent Sol and Luna reviews found no blocking issue in
+R454's scoped verifier change. Terra agreed the tail contract rejects
+extra/reordered/fatal stdout and fatal stderr, but flagged a duplicate
+copy of the *same* expected failure name as a possible false proof:
+exact matching is name-set, not occurrence-count based. That
+hypothetical is not an R454-specific blocking path: the popup suite
+calls its wiring `check()` at one site once per run, and the recorded
+mutation has exactly one such failure with a correctly accounted
+footer. Adding a per-record duplicate counter to certify an
+unreachable second check would expand the general harness for a
+low-ROI edge case. The disagreement is retained here rather than
+misreported as three unanimous approvals; the R454 individual
+break/restore result is accepted within its single-run scope.
+R569's shutdown snapshot revert now uniquely anchors the all-tab scan
+rather than another active-tab snapshot call. Its active-view setup must
+appear as an observed PASS; the individual break/restore run was
+**PROVEN** with only the reading-anchor assertion failing and product
+bytes restored (`files/f22-r569-observed-setup-proof.log`). Fresh
+independent Sol, Terra and Luna reviews found no blocker. A subsequent
+full `--anchors` audit confirmed R569's anchor resolves but still found
+older `SETUP-FAILED` records (`files/f22-r569-final-anchor-audit.log`);
+this dry-run does not prove those records.
+R209 and R526 now anchor the current shared renderer guards rather than
+their former call-site shapes. Their individual break/restore runs are
+**PROVEN**: R209 names exactly the four failed-save guard assertions
+that fail under its mutation, and R526 names both navigation-prompt
+failures. Both records require their independent `mustPass` controls
+to appear as actual PASS records; R209 also rejects any unlisted
+failure. The unmutated patch suite passed **193/193** and the renderer
+source was restored byte-for-byte
+(`files/f22-r209-observed-controls-proof.log`,
+`files/f22-r526-observed-controls-proof.log`). Initial independent
+Sol and Luna reviews accepted the causal, visible R209 consequences,
+while Terra required them to be inventoried and both records' controls
+to be observed. After that correction, fresh independent Sol, Terra
+and Luna reviews found no blocker. R209 proves the combined
+unsaved-work guard is load-bearing, not every clause independently;
+R526 proves the prompt/send boundary, not completion of the file open.
+The refreshed full anchor dry-run still reports older `SETUP-FAILED`
+records (`files/f22-r209-r526-final-anchor-audit.log`).
+R210's failed-write mutation now targets the unique current
+`failedSaves.add(stateKey)` operation, leaving the separate dirty-state
+applier intact. The patch fixture waits for the observed held Save to
+settle through its pending-save lifecycle rather than waiting on the
+failed-save record that this revert removes. Its individual
+break/restore run is **PROVEN** with exactly the recorded failed-save
+and dependent cross-tab assertions failing; the injected-failure
+console control must appear as a PASS, no unlisted failure is accepted,
+and renderer bytes were restored. The unmutated patch suite passed
+**193/193** (`files/f22-r210-bounded-proof.log`). Fresh independent
+Terra and Luna reviews found no blocker. Sol's first review mistakenly
+examined the untouched root checkout; that finding did not apply to
+the integration worktree, and a new Sol review verified the correct
+worktree and found no blocker. The full anchor audit still finds older
+`SETUP-FAILED` records (`files/f22-r210-final-anchor-audit.log`);
+R210's dry-run anchor resolution is not its proof.
+R212 now anchors the current per-document success cleanup. Its
+individual mutation changes the path-scoped failure and conflict
+deletions back to global clears and is **PROVEN**: saving document B
+loses A's failed-save record, the independently checked pre-switch
+failure state is absent, and returning to A finds its guard disarmed.
+All declared controls appeared as PASS under the mutation, no
+unlisted failure was accepted, renderer bytes were restored, and
+the ordinary patch suite passed **193/193**
+(`files/f22-r212-bounded-proof.log`). Fresh independent Sol, Terra
+and Luna reviews found no blocker. This fixture directly proves
+failed-save scoping, not conflict scoping: it does not create a
+reload conflict even though the mutation also clears conflict state.
+The latest full anchor audit still finds older `SETUP-FAILED`
+records (`files/f22-r212-final-anchor-audit.log`).
+R213 now targets the current failed-save insertion, conditionally
+omitting it when an outstanding Save fails after the user enters edit
+mode. Its individual break/restore run is **PROVEN** with only the
+late-failure recording assertion failing; observed controls establish
+the held write, dirty pending document and injected console error.
+The restored patch suite passed **193/193**, and the renderer source
+was byte-restored (`files/f22-r213-bounded-proof.log`). Fresh
+independent Sol, Terra and Luna reviews found no blocker. The full
+anchor dry-run still fails on older records
+(`files/f22-r213-final-anchor-audit.log`); it is not a complete
+revert-harness pass.
+R208 now reverts the current edit-mode dirty-state setter, preserving
+its notification route while unconditionally clearing dirtiness. Its
+individual break/restore run is **PROVEN**: both the failed-write and
+still-pending-write transitions lose the unsaved state, and the late
+failure remains recorded but cannot restore that lost dirty flag.
+The failure inventory is exact, the independent failed-open and
+console controls appeared as PASS, and product source was restored
+(`files/f22-r208-bounded-proof.log`). Fresh independent Sol, Terra and
+Luna reviews found no blocker; this does not separately prove the
+reload-conflict branch of the original condition. The full anchor
+audit still fails on older records
+(`files/f22-r208-final-anchor-audit.log`).
+R545 now has a unique shutdown-snapshot anchor, but remains **UNPROVEN**.
+The first individual run could not wipe a held Electron test profile;
+after the identified child processes were stopped by PID, a clean retry
+aborted before its live-only-edit assertions because installed-updater
+fixture cleanup attempted to close a still-frozen tab. Both transcripts
+were `UNUSABLE`, not mutation detections
+(`files/f22-r545-bounded-proof.log`,
+`files/f22-r545-clean-retry-proof.log`). A subsequent unmutated,
+machine-exclusive tabs suite passed **465/465**
+(`files/f22-r545-unmutated-baseline-tabs.log`); that does not prove
+R545. Fresh independent Sol, Terra and Luna reviews agreed that the
+source mutation is scoped to the shutdown snapshot and the evidence
+does not prove it. Luna identified a plausible already-true thaw wait
+in the installed fixture; whether the mutation contributes to the
+earlier freeze remains unestablished. Do not weaken the frozen-document
+guard or accept the fatal cleanup as an expected failure.
+R234's large-tab guard revert now calls the real confirmation but
+ignores a declined answer, rather than bypassing the confirmation
+entirely. A separate restored-tab probe establishes a visible ordinary
+document before the click, then checks both the active tab and visible
+document after refusal. Its corrected individual break/restore run is
+**PROVEN** with the declined-create and restored-click failures
+accounted for exactly, the independent setup and passive-restore
+controls observed passing, and product bytes restored
+(`files/f22-r234-decline-proof.log`). The first corrected run had
+misclassified two state-dependent assertions as must-pass; it was
+`UNUSABLE`, not proof. The unmutated tabs suite passed **465/465**.
+The independent review initially disagreed about trying this mutation:
+Sol advised stopping with the old record, while Terra and Luna favored
+the ask-then-ignore correction with a self-contained visible-document
+probe. Fresh independent Sol, Terra and Luna reviews of the final
+record found no blocker; the later main-fixture assertions still
+cascade from an initial forced activation, while the restored click is
+the independent refusal witness. The latest full anchor audit still
+finds older `SETUP-FAILED` records
+(`files/f22-r234-r545-final-anchor-audit.log`).
+R254 now anchors the current already-open-file acceptance memo. Its
+individual mutation omits only the renderer's `largeConfirmed` entry
+after an authenticated re-open. It is **PROVEN** with exactly the
+duplicate renderer confirmation assertion failing: the re-open
+completed on the existing tab, while the separate main-confirmation
+and multi-select controls appeared as PASS
+(`files/f22-r254-bounded-proof.log`). Product source was restored,
+the ordinary tabs suite passed **465/465**, and fresh independent
+Sol, Terra and Luna reviews found no blocker. This proves the
+renderer does not ask again for a document main already approved;
+it is not a substitute for the remaining old anchor proofs.
+The latest full anchor dry-run still fails on older records
+(`files/f22-r254-final-anchor-audit.log`).
+R251 now uniquely removes only `silent: true` from the active-tab
+restore switch, leaving document-identity adoption and error handling
+intact. Its individual break/restore run is **PROVEN**: an expensive
+active document raises the confirmation, is declined, and consequently
+does not render or announce itself passively. Ordinary-restoration and
+large-sample setup controls appeared as PASS, failures were accounted
+for exactly, and product bytes were restored
+(`files/f22-r251-bounded-proof.log`). Fresh independent Sol, Terra
+and Luna reviews found no blocker; the later revisit assertion is a
+dependent consequence, since a declined restore leaves no active tab
+to revisit. The first unmutated tabs run after the proof was
+**464/465**: a later updater commit was refused as unresponsive.
+One separate, machine-exclusive repeat passed **465/465**
+(`files/f22-r251-independent-baseline-tabs.log`); the intermittent
+updater failure has not been diagnosed or fixed. The full anchor
+audit still fails on older records
+(`files/f22-r251-final-anchor-audit.log`).
+R252 now reverts only the `confirmed` bit on the authenticated new-tab
+creation, preserving activation, disk version and adoption identity.
+Its individual break/restore run is **PROVEN**: main's large-document
+confirmation remains an observed passing control while the renderer
+asks a second time on the selected file; the batch still opens and
+renders only the selected document, and product source is restored
+(`files/f22-r252-bounded-proof.log`). Fresh independent Sol, Terra
+and Luna reviews found no blocker. The subsequent unmutated tabs run
+was **464/465**, failing a distinct pre-install updater assertion
+after a commit was refused as unresponsive. This is not attributed
+to R252 or claimed fixed; the ordinary-suite gate remains open.
+The full anchor audit still fails on older records
+(`files/f22-r252-final-anchor-audit.log`).
+R549 now mutates only the lower-request-id rejection predicate, leaving
+the same-id response cache and equal-id pending-retry condition intact.
+The earlier whole-guard mutation returned `COLLATERAL` and is not proof.
+The narrowed individual break/restore run is **PROVEN**: exactly the
+fresh/stale request and cancelled-request replay assertions fail, each
+with an observed response to a lower ID; the selected physical-owner,
+same-id replay and clean native-close controls are required to have
+emitted PASS, and unlisted failures are rejected
+(`files/f22-r549-lower-only-proof.log`). Product source was restored
+byte-for-byte, and the following unmutated tabs suite passed **465/465**.
+Fresh independent Sol, Terra and Luna reviews found no blocker. The
+retained mutation log reports only failures, not each control's PASS
+line; the record-local harness policy supplies that guarantee. It
+also does not separately prove the upstream updater assertion emitted
+PASS, nor do these results diagnose the earlier intermittent updater
+`unresponsive` events. The refreshed full `--anchors` audit confirms
+R549 resolves but still reports older `SETUP-FAILED` records
+(`files/f22-r549-final-anchor-audit.log`).
+R250 now anchors the current restore call and reverts only
+`activate: false` to `true`, retaining its stable disk snapshot and
+version metadata. Its individual break/restore run is **PROVEN**:
+restoring four tabs raises three unwanted questions and renders five
+times instead of one, with five named restore/guard assertions failing
+and the expensive-sample, restored-tab and live-sentinel controls
+observed passing (`files/f22-r250-sentinel-presence-proof.log`).
+Forced activation sometimes also produces a disk-adoption console
+error. The record accepts that suite-wide sentinel failure only with
+the two known, distinct error signatures; if no error is reported, the
+sentinel must instead have emitted PASS. A missing, repeated or mixed
+sentinel outcome, or an unrelated reported error, cannot prove R250.
+The sentinel deduplicates identical raw errors, so this is a check of
+distinct reported hits, not a count of raw repetitions. Fresh
+independent Sol, Terra and Luna reviews found no blocker after this
+correction; product source was byte-restored. An unmutated tabs run
+was **464/465**, failing a later updater assertion when an in-flight
+commit was refused as unresponsive
+(`files/f22-r250-unmutated-tabs.log`); this does not invalidate R250's
+scoped proof or establish the cause of the intermittent ordinary-suite
+failure. The full anchor audit still has older `SETUP-FAILED` records.
+R253 now reverts only `activate: false` on trailing multi-select tabs
+in the current verified background-adoption path, preserving the disk
+snapshot, version, approval and reserved identity. Its individual
+break/restore run is **PROVEN**: two extra renderer questions, three
+renders and the wrong active tab fail the two batch assertions exactly;
+main confirmation and independent session-restore controls must have
+emitted PASS (`files/f22-r253-bounded-proof.log`). The earlier
+`COLLATERAL` run in that log is not the proof. Fresh independent Sol,
+Terra and Luna reviews found no blocker. Sol noted that R253's
+failure of the assertion named for an already-confirmed file shows
+unwanted *batch* prompts, not a second prompt for the same file;
+R252 separately proves the latter. Product source was byte-restored.
+The ordinary tabs suite has not been rerun since the R253 harness-only
+change; its latest run remains **464/465** on the updater refusal above.
+R544 now anchors the current all-tab shutdown scan and substitutes
+only the active tab as its input, retaining the snapshot and the
+existing dirty/deletion predicate. The first individually retained
+attempt was `COLLATERAL` because an unrelated updater assertion also
+failed; the next machine-exclusive break/restore run is **PROVEN**
+with exactly seven named background-dirty and dependent failures,
+while the active-edit and clean-close controls must have emitted PASS
+(`files/f22-r544-independent-proof.log`,
+`files/f22-r544-final-bounded-proof.log`). The maintained-state and
+renderer-recovery failures are downstream witnesses of the same
+omitted background tab, not seven independent defects. Fresh
+independent Sol, Terra and Luna reviews found no blocker; product
+source was byte-restored. This proof does not resolve R545's separate
+live-edit snapshot blocker or the intermittent updater failure.
+R568 now uniquely anchors the current tab-content setter, removing
+only its maintained-dirty assignment while retaining the content
+write, revision bump and freeze guard. It is **UNPROVEN**: two bounded
+break/restore attempts ended `UNUSABLE` before their target or control
+assertions ran because installed-updater fixture cleanup attempted to
+close a still-frozen tab (`files/f22-r568-bounded-proof.log`). The
+freeze guard correctly refused both the content setter and tab close;
+the cleanup failure is not mutation detection. Source bytes were
+restored. Fresh independent Sol, Terra and Luna reviews found no
+blocker in the scoped anchor and agreed no proof can be claimed.
+The follow-up, test-only diagnostic found that the abort was at a
+*later* cleanup, not the initially instrumented thaw/close pair:
+main had no pending question or commit, but still had an installed
+attempt in `awaiting-updater-boundary`, and the renderer retained its
+freeze (`files/f22-r568-state-capture-proof.log`). That observation
+does not establish whether the failed installed transition is
+mutation-induced or a fixture ordering problem. Temporary diagnostic
+instrumentation was removed after capture; do not weaken the
+retained-tab assertion or the production freeze guard. R545 remains
+separately unproven on this same boundary.
+A bounded read-only follow-up confirmed the existing installed-fixture
+thaw wait stores a false timeout but calls the shared `clearDocuments()`
+anyway. The latter tries to close a frozen tab, throws before the thaw
+assertion can report the actual failure, and the installed attempt is
+still `awaiting-updater-boundary` with no open question. Forcing a
+renderer thaw in shared cleanup would hide the unresolved
+preceding transition and make the unfrozen-before-cleanup witness
+vacuous. Keep R545/R568 unproven; first determine why the installed
+attempt never advances, rather than adding an unsafe cleanup reset.
+A narrower follow-up corrected the *location* of that problem: the
+fatal `clearDocuments()` runs in the next installed scenario's
+**preamble**, before its own reset and `install-update` send. The
+`awaiting-updater-boundary` attempt and frozen renderer were inherited
+from the preceding scenario; `pendingId` and `commitPendingId` were
+both zero. It is **not established** that the next installed attempt
+stalled, nor that main has an open question. The unmutated suite
+cleared the same preamble, but one healthy run does not establish
+whether the inherited freeze is mutation-induced or intermittent.
+Do not change production thaw/adoption semantics on that inference;
+the prior scenario's transition needs a directly correlated witness
+before either R545 or R568 can be scored.
+R214's first repaired anchor was **VACUOUS**: the existing two-save
+fixture makes the first result stale by sequence, so it never enters
+the newer view-mode mismatch branch. A new single-save fixture holds
+one real disk write, moves the document with `commitViewModeEdit`,
+observes a switch to a control tab and back to the physical owner,
+then checks that the first authorized result *applied* without
+clearing the later local edit. The first review found that merely
+recording an authorized decision did not prove application and that
+the tab-switch calls lacked selection witnesses. After correction,
+the ordinary patch suite passed **197/197**, and the individual R214
+break/restore run is **PROVEN** with only the intended dirty-state
+assertion failing; the three independent setup/application controls
+must have emitted PASS and product bytes were restored
+(`files/f22-r214-first-application-proof.log`,
+`files/f22-r214-first-application-baseline.log`). A repeated delivery
+of the same immutable decision returns false by design; the fixture
+retains the first, mutating application result rather than allowing
+the duplicate to overwrite its witness. Fresh independent Sol and
+Terra reviews found no blocker. Luna's final objection was that the
+Electron executable named another worktree in `process.argv[0]`;
+this worktree's `node_modules` junction points there, but the test
+script and its `require("../src/main.js")` resolve within the
+integration worktree. The executable location is not the tested
+source location. R211 now separately reverts *content preservation*
+at that same latest-save mismatch, assigning the older saved bytes
+while leaving the dirty-state call intact. Its individual
+break/restore run is **PROVEN** with only the newer-content assertion
+failing and the one-request, actual-application and physical-owner
+controls passing (`files/f22-r211-bounded-proof.log`). R214 was
+reproved after the fixture split: its dirty-state mutation fails only
+the dirty assertion while the new content-preservation assertion
+must PASS (`files/f22-r214-after-r211-proof.log`). The updated
+unmutated patch suite passed **198/198**
+(`files/f22-r211-r214-patch-baseline.log`); product bytes were restored
+after both individual proofs. Fresh independent Sol, Terra and Luna
+reviews found no blocker. The earlier **197/197** and R214 proof
+above are historical, not the final executed fixture state. The
+full anchor audit remains blocked on other records.
+R604's maintained-dirty shutdown-scan anchor was repaired after
+`saveFailure` joined the production return. The first rerun exposed
+five scan-cost failures, not just the two named by its old record;
+its `PROVEN` footer alone did not establish exact failure accounting
+or positive controls. Initial independent Sol and Luna reviews then
+caught a more important proof defect: replacing the whole return
+also dropped `reloadConflict` and `saveFailure`, silently changing
+shutdown protection. The final revert preserves both flags and the
+unknown-tab fallback, replacing only the maintained `state.dirty`
+read with a document comparison. Its bounded break/restore run is
+**PROVEN** with exactly five named scan-cost failures (including a
+33,554,432-byte bulk scan), both required controls observed as PASS,
+a complete suite transcript and restored product bytes
+(`files/f22-r604-guarded-proof.log`). Fresh independent Sol, Terra
+and Luna reviews found no remaining blocker; these five observations
+are linked consequences of one recomputation, not five defects.
+R604's individual proof does not close the still-failing full
+anchor audit or the intermittent unmutated updater test.
+R555's denied-navigation anchor now changes only the event boundary,
+leaving all newer shutdown-state resets intact. Initial independent
+reviews rejected the old "unclosable" claim: under the mutation the
+fixture actually observed a main-process fallback question. They also
+required this exact navigation's cancellation to be witnessed. The
+corrected fixture records the main-frame start and `will-navigate`
+for the same URL, observes `defaultPrevented` *after* the production
+guard and confirms the original file URL survives. R555's individual
+break/restore is **PROVEN**: the only failed assertion observes
+renderer `"loading"` and one needless fallback; the setup and three
+controls must actually PASS, extra failures are rejected, and
+`src/main.js` bytes were restored
+(`files/f22-r555-cancellation-proof.log`). The preceding run was
+**COLLATERAL** on an unrelated updater-commit failure and was not
+counted as proof (`files/f22-r555-witness-proof.log`). Fresh
+independent Sol, Terra and Luna reviews found no remaining blocker;
+this proves the narrower fallback regression, not an unclosable
+window. The sporadic updater failure remains unresolved.
+The post-fixture unmutated tabs run passed **465/466**, including
+both new denied-navigation assertions; its sole failure was the
+separate missing-paired-updater-quit expiry scenario, again following
+`unresponsive-during-commit`
+(`files/f22-r555-postfixture-clean-tabs.log`). The fresh full
+read-only anchor audit finds **13 SETUP-FAILED** records, including
+R552 and R645 (`files/f22-r555-current-anchor-audit.log`). Neither
+result is a clean integrated gate.
+R645's old anchor was stale and its old expected assertion was
+**WRONG-GUARD**: it did not exercise the snapshot comparison. The
+replacement mutates only `sameDocument(currentSnapshot,
+request.snapshot)` and requires a newer live edit on the same physical
+owner. Initial reviewers rejected a first green-looking run because
+the fixture sampled the tab immediately after dispatching an async
+reply; it did not prove an overwrite. The corrected fixture waits for
+the held reply's rejection or acceptance, then checks the edit. Under
+the mutation, the early `document-moved-after-request` classification
+is lost, but a *later* `tracking-selection-refused` guard rejects the
+reply and the newer note survives. The record's claim is accordingly
+**only** early conflict classification, not data loss. Its bounded
+break/restore is **PROVEN** on that narrowed claim with two exact
+expected failures, passing live-edit and retained-note controls, a
+complete transcript and restored `src/custom-tabs.js` bytes
+(`files/f22-r645-early-guard-proof.log`). Fresh independent Sol,
+Terra and Luna reviews found no blocker; the global rejection counter
+is attributed to that held reply by fixture ordering, not by a
+request-tagged diagnostic. The old overwrite claim is **not proven**.
+The post-R645 unmutated tabs run passed **468/469**, including the
+new settled-reply checks; the only failure was a different updater
+assertion, "an updater error leaves an ordinary commit active with its
+exact commit identity"
+(`files/f22-r645-postfixture-clean-tabs.log`). This is further
+evidence that updater failures are intermittent across assertions,
+not a clean gate. The subsequent full read-only anchor audit still
+finds **12 SETUP-FAILED** records; R645 now resolves
+(`files/f22-r645-current-anchor-audit.log`).
+R102's stale save-queue anchor was narrowed to the current
+`prior.then(execute, execute)` scheduling boundary. Its individual
+run is **UNUSABLE, not proven**: the mutated two-write case emitted a
+real write-boundary Save refusal but then stopped before the parent
+suite footer, likely on a modal; after more than twelve idle minutes
+the verified test Electron PID was stopped, allowing the harness to
+restore `src/main.js` byte-for-byte
+(`files/f22-r102-bounded-proof.log`). Neither the Save refusal nor
+the interrupted transcript is evidence that the intended overlap
+assertion failed. Do not rerun this mutation unchanged until the
+blocking dialog/fixture boundary is isolated.
+Fresh independent Sol, Terra and Luna reviews agree the repaired
+R102 scheduling mutation removes same-path serialization without
+damaging the queue's diagnostics, but that the interrupted run
+proves nothing. Luna identified the fixture's unstubbed `alert()`
+on the Save-failure path as a plausible cause of the stall, **not**
+an established diagnosis. The full read-only anchor audit now
+reports **11 SETUP-FAILED** records
+(`files/f22-r102-current-anchor-audit.log`); R102 resolves but is
+still an open behavioral proof.
+Following the later R552 watchdog diagnosis, R102's old interrupted
+run is likewise not evidence of a hung modal: it was externally
+stopped without the tab suite's own timeout footer. A single
+machine-exclusive, unchanged R102 mutation is being allowed to
+reach that internal watchdog or a complete suite footer, with
+product restoration and PID-scoped cleanup. This diagnostic does
+not promote R102 until exact failures and positive controls are
+accounted for; no global alert interception is justified.
+That one unchanged R102 run reached the **suite's own 1,820-second
+watchdog**, and the complete parent transcript ended
+`=== TIMED OUT after 88/88 checks ===`
+(`files/r102-proof-20261003-0619.log`). The watchdog's generic
+"blocking dialog is most likely" is **not** a diagnosis, and no
+R102 target or control assertion was reached. The harness
+restored all product source bytes without external killing or a
+surviving Electron process. R102 is still **UNUSABLE / UNPROVEN**.
+Opus is mapping the last completed check and next awaited
+operation read-only; no second unchanged R102 mutation is
+justified until the stalled boundary is identified.
+Opus's read-only trace localized the unresolved wait **between**
+R102's second positive control and its queue-serialization check:
+scenario 9d's `await exec(...)` runs two Save clicks with only
+`window.confirm` stubbed, leaving a real renderer `window.alert`
+on Save-refusal paths. The earlier write-boundary refusal supports
+that hypothesis, but no transcript proves an alert actually fired.
+The supervising process probe matched zero test Electron processes
+throughout and is therefore not a valid no-modal witness. Terra
+has a bounded fixture-only handoff to capture alerts **inside
+scenario 9d**, first prove the stub sees its own sentinel, report
+any Save refusal as an explicit failed assertion, and restore both
+dialog hooks. Only after a healthy unmutated suite should another
+R102 mutation run be interpreted; no broad mute or production
+change is justified.
+The scoped scenario-9d alert fixture proved its own sentinel,
+restored both dialog hooks, and passed the unmutated tabs suite
+**478/478**. One R102 mutation then completed naturally, not after
+a watchdog: same-path active writes overlapped **1 → 2** and the
+renderer captured an explicit write-boundary Save refusal instead
+of blocking on its alert. The queue assertion failed as intended,
+but six additional assertions failed, including retained disk
+bytes, dependent scenario 9e checks and the visible-error
+sentinel (`files/r102-s9d-proof-20261003-0706.log`).
+The harness printed `PROVEN` under R102's older non-exact policy;
+**do not accept that verdict yet**. Opus is classifying every
+extra failure before requiring exact membership, and product
+source bytes were restored. The generated screenshot was opened
+and viewed, showing raw `S9D_SECOND` beside rendered `S9D_FIRST`;
+the temporary PNG was then removed.
+Opus's read-only audit separated the six additional failures:
+the Save-refusal alert, retained first-write disk bytes, dirty
+store/disk mismatch and global visible-error sentinel follow
+directly from two same-path writes overlapping. The other **two**
+are inherited scenario-9e failures: it assumes 9d left a clean
+disk/session, so its reload never acquired a different document
+under the R102 mutation, making an R101-related discard check
+degenerate. Do not list those two as R102 detections or accept the
+non-exact harness verdict. Scenario 9e needs its own disk-backed
+reload setup before R102 can require exact failures; a focused
+read-only trace is checking whether a small reset is sound when
+9d left a refused, dirty Save.
+The follow-up found no cheap disk-marker reset: under R102 the disk
+already differs from 9e's stale text, yet the reload is not adopted.
+The dirty edit itself does not block reload; ownership/selection and
+main-process Save authority remain unsettled. A sound independent 9e
+fixture needs a correlated clean-owner reload and is a substantive
+change, so do not invent a passing 9e setup or count its two inherited
+failures as R102 detections. A narrower, explicitly reported 9e skip
+when 9d's witnessed precondition fails is under read-only evaluation;
+R102 remains UNPROVEN pending a sound exact-failure run.
+Opus confirmed the existing harness records `SKIP  <name> - <reason>`
+as live but **unobserved**, not PASS or FAIL. Terra now owns the narrow
+R102 fixture and revert-record handoff: skip exactly the two dependent
+9e assertions with an explicit blocked reason only if 9d's existing
+clean-Save setup fails; keep 9e fully exercised and zero-skipped on a
+healthy run and under R101's separate mutation. R102 must require the
+five causal failures exactly, independent observed PASS controls and
+the global visible-error sentinel; the deferred independent 9e rebase
+is not silently claimed by this narrower proof.
+Terra's conditional 9e skip preserved the unmutated **478/478**
+with **zero skips** and made the two inherited checks explicitly
+unobserved under R102; the R102 mutation again reached same-path
+overlap, Save refusal, retained first-write bytes and the visible-error
+sentinel. Exact accounting now correctly reports **COLLATERAL**:
+six additional downstream F22 checks fail (active-document restore,
+three held-reload/ownership checks, late-edit commit and editable
+refusal), so the five-name record remains **UNPROVEN**. R101 was
+not rerun; source was byte-restored and an R102 anchor dry-run
+resolved. Fresh independent Sol, Terra and Luna reviews of the narrow
+fixture and evidence are pending. Do not broaden `expect` to claim
+the six downstream failures or claim that 9e's reload adopted bytes.
+The fresh independent Sol, Terra and Luna reviews agree: keep the
+explicit 9e skip as an interim fixture boundary and keep exact
+accounting, but R102's five-name `expect` is not a valid final proof:
+disk order, renderer refusal and store outcome can vary with the
+unqueued write schedule, while the direct queue-overlap diagnostic
+does not have its own independent two-write setup witness. The six
+downstream failures must not be absorbed. Sol additionally found that
+the printed skips are not counted in the suite footer (although the
+revert catalogue does recognize them as live/unobserved); Terra
+flagged malformed `SKIP` lines accepted by the existing catalogue
+parser; Luna highlighted the missing two-save positive control.
+These observations differ in emphasis, not in the verdict: R102
+requires a bounded, isolated deterministic queue fixture before
+promotion. Do not extend the current whole-suite mutation to chase
+downstream collateral on an already invalid schedule-dependent
+record.
+To check that the interim 9e skip did not weaken the distinct R101
+proof, R101 was rerun individually after the fixture change. Its
+own reload setup saw a different document, its baseline-discard
+assertion alone failed, the source bytes were restored, and the
+harness reported **PROVEN**
+(`files/r101-after-r102-skip-proof-20261003.log`).
+The maintainer chose **bounded F22 proof work** rather than
+documenting the remaining gaps and moving to another wave-2 stream.
+The next handoff is a single read-only Opus design pass for an
+isolated deterministic R102 queue observation; any implementation
+remains capped to one reviewable fixture unit, with no whole-suite
+revert rerun to chase incidental disk order or downstream state.
+R545/R568 will get a separate bounded attempt at the preceding
+freeze transition after R102's disposition. No release gate is
+waived by this prioritization.
+In parallel, a read-only Opus check found that both R545's live-only
+dirty checks and R568's semantic setter checks (including their
+independent PASS controls) live in `runShutdownScenarios()` and
+`runSameDocumentShutdownScenarios()`. The freeze-producing
+generation/installed-updater scenarios own **none** of those named
+checks. A single focused, self-proving virtual suite invoking just
+the two relevant scenario functions is a bounded alternative to
+force-thaw or broad cleanup; it still needs live error-sentinel,
+both-function reach and complete-footer evidence before either
+record can be rerun. This is only a design, not proof. It must wait
+until Terra releases the focused test-dispatch region after R102.
+With R102's focused unit reviewed, Terra now owns **one capped shared
+R545/R568 fixture attempt**. It must first prove a clean standalone
+shutdown+semantic mode actually reaches both target functions with
+their independent controls and live error sentinel, then run the two
+mutations separately with source restoration. If either function
+depends on broader fixture state or a mutation again leaves an
+unresolved freeze, stop rather than adding a forced thaw or widening
+the expected failure set. No previously reported `UNUSABLE` run has
+been reclassified by this handoff.
+The shared focused baseline showed why the two functions cannot
+simply be composed: it reached a complete parent footer but passed
+**117/121**, with four failures in the *semantic* fixture. The
+preceding shutdown scenarios left `phase-two-reopen-1.md` live; the
+semantic fixture could not close it. R545's two targets and both
+controls, as well as R568's two protocol controls, each appeared
+once as PASS; R568's semantic targets did not run. Its console and
+DOM sentinels proved live, but a clean baseline is required before
+mutation. Terra removed the temporary shared focused dispatch and
+suite registration; **neither R545 nor R568 was mutated**, product
+bytes were unchanged and the full anchor dry-run resolved
+(`files/f22-shutdown-semantic-focused-baseline-20261003.log`).
+The next bounded handoff is R545-only, using the demonstrated
+shutdown scenario without the contaminating semantic extension.
+R568 must have its own independent clean semantic fixture; no
+force-thaw or broad cleanup reset is justified by this result.
+The R545-only focused baseline then passed **115/115** with its two
+targets, live-only/background controls and sentinel each observed
+PASS. One R545 mutation completed with a restored product source and
+failed both intended checks, but **six further lifecycle assertions**
+also failed (late-edit commit, editable refusal, retry-safe thaw,
+Cancel default and clean cancellation). The exact record correctly
+reported **COLLATERAL**, not proof
+(`files/f22-r545-focused-proof-20261003.log`). No extra failures
+will be listed as R545 targets merely to turn the run green. Terra is
+removing the temporary focused route while keeping the R545
+exact-failure guard, so future contaminated mutation runs cannot
+promote themselves under the older permissive policy. R568 has not
+yet been mutated in this focused attempt.
+The R545-focused route was removed after that rejected run; R545
+returned to `test:tabs`, keeping only the new fail-closed
+`requireExactFailures` setting. The full anchor dry-run still
+resolved (`files/f22-r545-cleanup-anchor-audit-20261003.log`).
+The final bounded proof attempt is **R568 only**: a fresh,
+semantic-only focused mode may be tried if it proves its own clean
+setup, both R568 target checks, at least two genuinely independent
+PASS controls that survive the setter mutation, sentinel liveness and
+a complete footer. Otherwise the temporary mode is removed and R568
+remains unproven. This attempt will not replay the prior inherited
+installed freeze or weaken its guard.
+The R568 semantic-only focused baseline passed **27/27** with
+both target checks, independent editor-mode/pool-closure controls,
+live two-channel error sentinel and host-file cleanup. Its one
+mutation run emitted a **17/27** suite footer followed by
+`Shutdown approval renderer unusable: webContents destroyed` on
+parent stdout. The harness correctly marked the transcript
+**UNUSABLE** before scoring the ten failed assertions, and restored
+`src/custom-tabs.js` byte-for-byte
+(`files/f22-r568-focused-proof-20261003.log`). No tail allowance,
+reclassification of unseen failures, forced thaw or second mutation
+was attempted. The temporary unproved focused mode is being removed;
+R568 remains individually **UNPROVEN**. The full anchor dry-run
+resolved after the attempt.
+The semantic-only temporary route and its changed R568 control
+selection were removed; R568 is back on `test:tabs` with its
+original `mustPass`, `requireMustPassAssertions` and
+`requireExactFailures`. A final full read-only anchor audit again
+resolved every setup
+(`files/f22-r568-cleanup-anchor-audit-20261003.log`).
+Fresh independent Sol, Terra and Luna are reviewing the only
+lasting R545 revert-record change (`requireExactFailures`) and this
+bounded evidence disposition. F22 remains active, not integrated;
+these two unresolved proofs are not release approvals.
+The fresh independent Sol, Terra and Luna reviews found **no
+blocker** in that R545 fail-closed guard or the R545/R568 evidence
+disposition. They agree the guard rejects collateral, not that R545
+or R568 is proved. A normal, unmutated tabs regression run after the
+retained focused R102 fixture is the next verification step; it is
+not a clean-tree milestone run.
+That normal, machine-exclusive tabs run completed **478/478** with
+zero failures after the focused-proof changes
+(`files/f22-postfocused-integrated-tabs-20261003.log`). This is an
+unmutated affected-suite check on the still-uncommitted F22 worktree,
+not the mandatory clean-tree full suite, full revert harness,
+strict built-asar packaging or viewed release screenshots.
+The two pre-agreed bounded R545/R568 proof attempts are exhausted:
+R545 has a clean standalone setup but six additional downstream
+failures under its mutation; R568 has a clean standalone semantic
+setup but an unusable post-footer mutation transcript. Neither
+should be called a proof or rerun unchanged. Any further isolation
+requires a fresh scoped decision; documenting these explanations
+alone does not make the complete revert harness pass or release
+F22 from its mandatory gates.
+The maintainer authorized **one more bounded target-only isolation
+round**, one record at a time, rather than switching workstreams.
+Opus is tracing whether R545 can end its existing shutdown scenario
+immediately after both target and independent control assertions,
+before the six later lifecycle checks, without a forced thaw, broad
+reset or incomplete footer. Terra will edit only if the design is
+small and self-contained. R568 follows R545's verdict, not in
+parallel. No prior collateral or unusable run has been promoted and
+no release gate is waived.
+Opus's read-only R545 target-only trace found a **structural stop**.
+Returning after the second target would still execute a `finally`
+assertion about update-borrow IDs whose witnesses are populated only
+by later updater scenarios; even an unmutated focused run would fail.
+The caller also enters several state-dependent later scenarios.
+Relocating that assertion and gating the callers would exceed the
+agreed small-fixture bound and change unrelated test ownership.
+There was no new R545 edit or mutation. Keep its exact-failure guard
+and **UNPROVEN** status; evaluate R568 separately under the same
+bounded target-only criterion.
+The read-only R568 target-only trace also reached a **structural
+stop**. Its semantic function emits the maintained-dirty checks
+among many dirty-dependent sibling assertions in one monolithic
+result; omitting the siblings would suppress real failures. The
+earlier focused log's **27/27** raw footer had the same late
+`Shutdown approval renderer unusable: webContents destroyed` line as
+the mutation, so even the clean focused transcript would fail the
+strict parent-tail rule; an R568-only mutation-tail exception would
+not certify a healthy baseline. The mutation footer's **17/27**
+already implies more failures than R568's two named targets, but
+their exact names were not retained by the unusable proof log and
+must not be guessed. Another mutation solely to chase those names
+would exceed this bounded round. No R568 code, source or fixture was
+changed in this second design pass. Both R545 and R568 remain
+individually **UNPROVEN** and continue to block the F22 execution
+gates; completing them now needs a broader reviewed test redesign
+or an explicit reprioritization, not another identical mutation.
+The maintainer subsequently chose that explicit reprioritization:
+**defer R545 and R568's individual proofs, switch to independent wave-2
+work, and do not let these two deferred proofs alone block release.**
+This supersedes the preceding blocking disposition, not its evidence.
+R545 remains COLLATERAL/UNPROVEN and R568 UNUSABLE/UNPROVEN; neither
+becomes PROVEN or a behaviorally withdrawn `skip`. The release harness
+must account for exactly these two explicit exceptions separately
+from proofs and fail closed on all other records. F22 is still
+unmerged, and all other individual, integration and release gates
+remain in force. In particular, no release was authorized.
+Opus found the existing focused F22 virtual-suite pattern can run a
+clean, standalone two-Save queue observation without carrying 9e or
+later F22 state. Terra now owns a capped fixture/revert-record
+implementation and one individual proof. The record must require an
+observed two-enqueued/two-completed setup and live alert-capture
+control as PASS, and only same-path queue overlap as the deterministic
+FAIL. One detail of the read-only proposal was corrected before
+handoff: a no-refusal `mustPass` would be invalid, because the earlier
+R102 mutant *did* trigger a legitimate write-boundary refusal. Neither
+disk ordering nor Save refusal may be required as deterministic
+mutation evidence; no global sentinel may be claimed unless the
+focused runner actually installs and proves one.
+Terra implemented the standalone queue-only virtual suite in a
+bounded pass. Its clean focused run passed **6/6**; under the R102
+mutation both Save requests were enqueued, started and completed,
+the alert-capture sentinel was proved live, and same-path queue
+max-active rose **1 → 2** with one overlap. The sole failed name was
+the direct queue-serialization check, with both setup controls
+observed PASS; product bytes were restored and the full read-only
+anchor audit resolved. This individual R102 proof is **provisional**
+until fresh independent Sol, Terra and Luna reviews of the focused
+fixture complete (`files/r102-queue-focused-proof-20261003.log`).
+It does not claim that disk bytes were overwritten, that 9e adopted a
+reload under the mutant, or that a global error sentinel ran in this
+focused mode. The ordinary tabs suite's earlier **478/478** healthy
+run and R101's individual proof are separate evidence, not part of
+the focused R102 mutation verdict.
+In the fresh independent R102-focused review, Sol found no blocker.
+Terra noted that the queue's `completed` counter also counts failed
+Save operations: two enqueued/completed requests do not by themselves
+prove two successful physical disk writes. Luna noted that the
+focused runner does not exercise the full console/DOM error sentinel.
+Both are valid *scope* concerns; a global zero-error `mustPass` or a
+no-refusal requirement would incorrectly reject the observed
+write-boundary failure under this mutant. Terra owns a bounded
+correction/claim-disposition for these findings before R102 is
+accepted. Do not claim disk overwrite, successful dual writes, or
+global visible-error absence from this focused transcript.
+Terra corrected both review points without requiring an impossible
+no-refusal control. The fixture and R102 record now claim two
+same-path Save **operations settled in main**, not two successful
+physical writes. A deliberate `ErrorEvent` proves the focused
+`window.__e2eErrors` listener live; the focused suite then checks for
+no uncaught JavaScript errors. It still does **not** claim that the
+normal suite's console/DOM sentinel ran, and the expected
+write-boundary refusal remains diagnostic-only. The corrected clean
+focused run passed **8/8**; the individual R102 mutation again failed
+only the queue overlap check with all four controls PASS and
+byte-restored source
+(`files/r102-queue-listener-proof-20261003.log`). The full anchor
+dry-run resolved. Fresh independent Sol, Terra and Luna review of
+this material correction is in progress.
+The fresh second round by independent Sol, Terra and Luna found no
+remaining blocker. **R102 is individually PROVEN for the narrow,
+deterministic same-path queue-serialization invariant**: the
+mutation makes overlapping Save operations observable while the
+two-operation setup and focused uncaught-JS-error listener remain
+live. There is no overwrite/data-loss, dual-successful-write, 9e
+reload or global console/DOM-cleanliness claim. The interim full-tabs
+9e skip remains conditional; R101 separately remains PROVEN. This
+closes R102's individual revert gate, **not** F22's full-suite or
+release gates.
+R94's old tab-switch rebaseline anchor was repaired to the current
+indentation, but its individual run is **WRONG-GUARD**: the expected
+second-tab undo assertion did not fail; an unrelated updater
+commit/error assertion did. Product bytes were restored
+(`files/f22-r94-bounded-proof.log`). Do not infer this hook remains
+load-bearing from the historical record or rerun the same mutation
+unchanged; isolate whether another path now captures the baseline.
+The isolation found that normal switches use `beginFileOpen`, which
+captures the arriving tab's edit baseline; the old hook runs only on
+the legacy fallback. R94 now reverts this *active* capture, and the
+fixture positively checks that physical tab B was selected and edited.
+Its bounded break/restore is **PROVEN** with exactly the intended
+second-tab undo resurrection failure, passing setup and A-tab
+round-trip controls, and restored renderer bytes
+(`files/f22-r94-active-path-proof.log`). Fresh independent Sol, Terra
+and Luna reviews found no blocker. The earlier WRONG-GUARD run is
+historical, not proof of the active hook.
+The post-R94 unmutated tabs suite passed **469/469**, including the
+second-tab setup and undo assertions
+(`files/f22-r94-postfixture-clean-tabs.log`). This clean repeat does
+not resolve the preceding intermittent updater failures. The full
+read-only anchor audit now reports **10 SETUP-FAILED** records
+(`files/f22-r94-current-anchor-audit.log`).
+R100's old order-swap anchor also targeted the legacy fallback,
+not the active `beginFileOpen` capture. Its repaired revert captures
+the arriving tab's baseline *before* its dirty state is restored;
+the original later capture then no-ops for a preserved baseline. The
+fixture now witnesses tab A dirty and tab B selected and clean before
+editing B. The first individual run was **COLLATERAL**: R100's
+intended dirty-state failure occurred, but two later F22 Save controls
+failed on ctime-only metadata drift despite successful saves and
+matching disk bytes (`files/f22-r100-active-order-proof.log`). A
+bounded retry with unchanged exact-failure policy was **PROVEN**:
+only the intended "clean B inherits dirty A" assertion failed;
+required setup and content controls passed and product bytes were
+restored (`files/f22-r100-bounded-retry-proof.log`). R94 was separately
+reproved after the shared setup witness changed, with only its
+second-tab undo failure (`files/f22-r94-after-r100-setup-proof.log`).
+Fresh independent Sol, Terra and Luna reviews found no blocker;
+Luna corrected its initial reading of the Save-control version
+evidence: mtime was unchanged, only ctime moved. The cause of that
+metadata-only drift is not established by this proof.
+The post-R100 unmutated tabs suite passed **470/470**, including
+both dirty-to-clean arrival controls
+(`files/f22-r100-postfixture-clean-tabs.log`). The full read-only
+anchor audit now has **9 SETUP-FAILED** records
+(`files/f22-r100-current-anchor-audit.log`); neither this clean
+repeat nor the anchor count resolves the intermittent updater issue.
+R92's discard anchor was retargeted to the current
+`setDocumentDirtyState` path without removing history or dirty-state
+restoration. Its first run had a linked but unlisted replay failure;
+the corrected, strictly accounted individual break/restore is
+**PROVEN** with two exact failures: the discarded text remains on
+screen, then is replayed from the tab record. The round-trip setup
+must PASS and renderer bytes were restored
+(`files/f22-r92-exact-proof.log`). Fresh independent Sol, Terra and
+Luna reviews found no blocker; these are two observations of one
+baseline-restoration defect, not separate fixes.
+R101's reload-baseline anchor was retargeted to the current forced
+capture. Its bounded individual break/restore is **PROVEN** with only
+the named discard failure: after a witnessed different-content
+reload, removing the capture restores stale pre-reload text instead.
+The different-content setup must PASS; renderer bytes were restored
+(`files/f22-r101-bounded-proof.log`). Fresh independent Sol, Terra
+and Luna reviews found no blocker.
+R98's retargeted background-save mutation is **VACUOUS**: the
+ordinary suite stayed green after dropping replies for an inactive
+tab (`files/f22-r98-bounded-proof.log`). Independent Sol, Terra and
+Luna reviews agree that the existing fixture proves disk write but
+does not witness the *first* reply arriving and settling while the
+other tab is active; a main-process ACK retry after returning can
+mask the drop. Terra owns a bounded test-only first-delivery witness
+and individual reproof in the integration worktree; no result is
+claimed before that handoff returns. R98 is still open.
+Terra's first delivered fixture produced two named failures and a
+**471/471** unmutated tabs run
+(`files/f22-r98-first-delivery-proof.log`,
+`files/f22-r98-tabs-baseline.log`), but the fresh independent Sol,
+Terra and Luna review **did not accept it yet**. The fixture holds
+attempt one only; main may retry the same unacknowledged result after
+four seconds, before release or after returning to the saved tab,
+making a valid mutation appear green. Luna also identified that the
+fixed-sleep elapsed assertion does not measure async Exit completion.
+Terra has the bounded correction handoff. R98 remains **UNPROVEN**
+until that feedback is resolved and reproved without a retry race.
+Terra's bounded follow-up held every correlated retry, released
+attempt one on the background tab, retained retries through return
+and Exit, then released and settled them in cleanup. It replaced the
+fixed-sleep claim with an observable Exit transition and six-second
+deadline. The individual R98 mutation now reports the same two
+named failures with held and released attempts `[1, 2]`, no extra
+failures, and an unmutated **470/470** tabs baseline
+(`files/f22-r98-retry-bounded-proof.log`,
+`files/f22-r98-retry-bounded-tabs-baseline.log`); product source hashes
+were restored. Fresh independent Sol, Terra and Luna reviews of
+these corrected bytes are underway. Do not count R98 as accepted
+until those verdicts are adjudicated.
+Those three independent reviews all **blocked acceptance** of the
+retry-bounded fixture. Sol and Terra agreed that renderer pending-save
+settlement precedes the asynchronous main-process ACK: the fixture
+could remove its interceptor while main still owns a delivery and
+retry timer. Luna additionally found that a retry arriving before
+the stage returns can escape while the first request ID has not been
+assigned, and that zero captured retries bypasses the cleanup check.
+The observed `[1, 2]` proof remains useful evidence, but does not
+make those paths deterministic. Terra has the narrowly scoped
+follow-up to capture the request ID on the first intercepted send,
+and to await both renderer settlement and main delivery/correlation
+quiescence before removing interception. R98 is still **UNPROVEN**.
+That follow-up's individual run ended **UNUSABLE**: while enforcing
+main delivery/correlation and renderer pending-count baselines, the
+held attempts did not settle those counts, so the fixture threw before
+a complete parent-suite footer
+(`files/f22-r98-main-correlation-proof.log`). Product bytes restored.
+Do not treat the earlier green R98 mutation as accepted. Stop
+expanding this timing fixture; restore its last tested ordinary-suite
+version and leave the R98 proof open for a separate bounded design.
+That prior fixture has been restored without the unproven ACK hooks.
+One unmutated machine-exclusive tabs run passed **470/470**
+(`files/f22-r98-restored-fixture-tabs-baseline.log`); product source
+hashes matched before and after, and no test processes remained.
+This confirms an ordinary baseline, **not** an R98 proof; R98 stays
+open.
+Opus's later read-only retry trace established a key constraint
+for a bounded reproof: main ACKs only the **current** attempt
+number; holding every retry indefinitely cannot settle its
+delivery, and a one-time `finally` snapshot can miss a later
+attempt. The failed main-quiescence log is consistent with that
+shape but cannot exclude a try-body error masked by teardown.
+A safer candidate is to intercept only attempt one, restore
+ordinary delivery **before** releasing it, enforce a measured
+release inside the four-second ACK deadline, and witness main's
+delivery/correlation counters returning to baseline before a
+stronger Exit claim. This is a design hypothesis, **not** a proof;
+the mutant must also clean up without an unacknowledged retry
+leaking into later tests.
+Opus's follow-up excluded the tempting `__shutdown.reset()` cleanup:
+main explicitly forbids resetting before the Save result and ACK,
+and renderer has no reset for its pending-save map. There is a
+production-path candidate instead. R98 drops results only while
+the saved tab is **not** active; after witnessing that attempt one
+was dropped on the background tab, switch back and let a later
+natural retry pass the guard, settle renderer pending Save and ACK
+main. This may make the older Exit/discard symptom pass under
+the mutation, so a bounded revised record must honestly require
+only the initial background-delivery failure and prove both
+renderer and main cleanup before later suite cases. The post-switch
+ACK leg is not yet witnessed, so this remains **UNPROVEN**.
+Terra has since produced a bounded first-delivery candidate:
+attempt one is held for under three seconds, main's send hook is
+restored before release, and both renderer pending count and main
+delivery/correlation counters must return to baseline. On the
+mutant, returning to the saved tab allows the *production retry*
+to settle, rather than using a test-only reset. The individual
+R98 run reports exactly one first-background-delivery failure;
+the old Exit/discard and disk/tab controls remain required PASS,
+and the restored ordinary tabs run passed **475/475**
+(`files/f22-r98-bounded-*.log`). This proves at most the
+**immediate delivery** boundary, not inevitable data loss or
+Exit failure. Fresh independent Sol, Terra and Luna reviews are
+underway before counting this proof.
+Fresh independent Sol, Terra and Luna reviews all **accepted** the
+bounded R98 proof with no blocking disagreement. A timed attempt-one
+delivery settles while the other physical tab is active on healthy
+bytes; under the mutation it does not, but the saved tab's later
+natural retry settles after return. Renderer pending Save and both
+main delivery/correlation counts return to baseline in either case,
+with the old Exit/return behavior retained as PASS controls.
+R98 is **PROVEN for prompt first-background-delivery only**;
+it does not demonstrate that removing this guard inevitably loses
+data or that Exit must fail despite retries.
+The current read-only full `--anchors` audit reports exactly six
+unresolved records: R86, R87, R96, R97, R99 and R552
+(`files/f22-current-full-anchor-audit.log`); R102's anchor resolves
+but its individual stalled proof remains unusable.
+R86's old source anchor has since been retargeted to the active
+`prepared.content` save path, changing only the view-mode source to
+the stale textarea while preserving edit-mode saves. Its individual
+run detected the named stale-disk-write failure but also six
+collateral failures (including later F22 Save controls and CRLF view
+saves), so the exact-failure policy correctly rejected it as
+**COLLATERAL / UNPROVEN**
+(`files/f22-r86-individual-proof.log`). The anchor resolves and
+product bytes restored; no new ordinary-suite run was claimed.
+Recount unresolved anchors on current bytes rather than reusing the
+pre-R86 inventory. Do not narrow this mutation to a fixture-specific
+special case merely to make the proof green.
+R87 has also been retargeted to the successful view-mode Save-result
+adoption, without changing edit-mode or failure handling. The
+in-memory-document assertion failed as intended, but two F22
+pending-save/close assertions also failed. Their relation to the
+mutation has not been established; the exact proof verdict is
+**COLLATERAL / UNPROVEN** (`files/r87-individual-proof.log`).
+Product bytes restored, the anchor resolves, and no post-mutation
+ordinary-suite result is claimed.
+R96 has been retargeted to the active successful edit-mode
+Save-result assignment while retaining the saved-byte dirty
+comparison. The individual run reached an unrelated fixture
+precondition in subsequent scenario 9c and threw before a complete
+suite footer: scenario 9b's mutation left its store different from
+disk, and 9c requires a clean disk baseline. It is **UNUSABLE /
+UNPROVEN**, not a detection
+(`files/r96-retarget-proof.log`; see the retained `r96-retarget-*`
+transcripts). The source anchor resolves, product bytes restored, and
+no healthy result is inferred from the interrupted mutation.
+R97's narrow edit-mode dirty-state revert also stopped on the
+**same** scenario-9c clean-baseline precondition and is
+**UNUSABLE / UNPROVEN** (`files/f22-r97-bounded-proof.log`).
+Both R96 and R97 mutate scenario 9b state intentionally; scenario
+9c assumes that earlier scenario left a pristine store. This is now
+a shared fixture-isolation problem, not a reason to add new
+failure names or widen either revert. Terra has a bounded handoff to
+restore scenario 9c's independently checked disk baseline after
+recording 9b's assertions, then reprove R97 before reconsidering R96.
+The bounded isolation attempt still hit 9c's clean-baseline fatal,
+so it was **not kept**. The fixture was byte-restored to the last
+tested version, then one unmutated machine-exclusive tabs run
+passed **470/470** with product bytes unchanged and no test
+Electron left running
+(`files/f22-r97-fixture-isolation-proof.log`,
+`files/f22-r97-restored-fixture-tabs-baseline.log`).
+R96 and R97 both remain **UNPROVEN**; repeating their unchanged
+mutations would only reproduce a fatal, not supply evidence.
+Opus's read-only follow-up located the precise shared obstacle:
+scenario 9c's clean-baseline check still asserts scenario 9b's
+**pre-reset** dirty and saved-store values. R96 changes the
+pre-reset store and prevents the old reset gate; R97 changes the
+pre-reset dirty flag, so the bounded post-test reset could not
+make either assertion true. A 9c-only physical-disk fixture with
+its own post-reload owner/content checks is the narrow structural
+alternative; its design is not yet implemented or proven. Do not
+weaken 9b's own saved-store/dirty assertions to make this pass.
+Terra has now separated 9c's physical-byte setup from 9b's
+pre-reset renderer state while retaining the real reload and
+post-reload identity/disk/version checks. Its first R97 mutation
+reached a complete suite footer: exactly the renderer dirty assertion
+failed; the tab remained dirty independently, so the old record's
+second expected failure was a **WRONG-GUARD**, not a second detected
+bug (`files/f22-r97-independent-9c-baseline-proof.log`).
+The R97 record is being corrected to require that tab assertion
+as a passing control, then reproved with an unmutated baseline.
+Neither the new fixture nor R97 is accepted yet.
+The corrected individual R97 run reports **exactly the one
+renderer-dirty failure** with the tab still dirty, the saved-store,
+disk/race setup and other-tab controls passing. Its restored
+unmutated tabs run passed **470/470**, product bytes were restored,
+and no test Electron remained
+(`files/f22-r97-corrected-proof.log`,
+`files/f22-r97-corrected-tabs-baseline.log`). Fresh independent Sol,
+Terra and Luna reviews of the fixture and proof are in progress;
+R97 is provisionally proven, **not yet accepted**.
+Fresh independent Sol, Terra and Luna reviews all **accepted** the
+independent 9c fixture and R97's narrow proof. They found no
+blocking disagreement: 9c still requires an accepted real reload
+and independent disk/owner/version witnesses; R97 alone breaks
+the renderer dirty answer while the tab baseline and other controls
+remain intact. R97 is **PROVEN** for that renderer-level behavior.
+The same fixture can now be tested against R96 separately; R96 is
+not promoted by R97's result.
+R96's separate individual mutation has now reached a complete
+footer: exactly the named saved-store failure occurred while the
+disk still held `S9B_SENT`, later editor text remained dirty,
+the tab baseline and other tab remained correct, and the positive
+controls passed. The restored ordinary tabs run passed
+**470/470** (`files/r96-followup-*.log`); product bytes restored.
+Fresh independent Sol, Terra and Luna review is underway before
+accepting R96, and its result does not change R98's status.
+All three fresh reviews **accepted** R96's independent saved-store
+proof with no blocking disagreement. The R96 mutation alone copies
+later keystrokes into the document store while disk and the tab
+baseline remain on the written bytes; R97's separate dirty-state
+mutation leaves that store intact. R96 is **PROVEN** for this
+saved-byte boundary.
+Opus's read-only R86/R87 collateral trace found that the later F22
+failures use their **own** file content, not scenario 6's `V_EDITED`
+fixture bytes. The reverted code is a global view-mode save path;
+its wrong textarea source/re-adoption remains active in later F22
+tests. Ctime-only drift is not evidenced in either transcript.
+Do not use a scenario-6 cleanup to hide those real downstream
+effects. The bounded next step is to enumerate and independently
+reprove all causally linked failures in each record under the
+existing exact-failure policy, retaining independent passing
+controls; R86/R87 remain **UNPROVEN** until then.
+R86's revised record now names the scenario-6 disk failure and
+all six measured downstream view-mode save-source failures without
+loosening exactness. Its individual run reports exactly those seven
+failures and passing divergent-store, in-memory and unaffected
+edit-mode CRLF controls; restored ordinary tabs passed **470/470**
+(`files/f22-r86-corrected-individual-proof.log`,
+`files/f22-r86-corrected-tabs-baseline.log`). Fresh independent Sol,
+Terra and Luna reviews must still verify that each added failure
+really follows from the same wrong source before R86 is accepted.
+R87 remains unproven.
+The R86 reviews did **not** converge. Sol and Luna blocked counting
+scenario 7's discard assertion as an R86 failure: scenario 6's bad
+view-mode save leaves the renderer dirty, scenario 7 fails to
+establish a clean initial dirty baseline, and its discard correctly
+restores the inherited value. Terra regarded this as a downstream
+consequence. Sol also requested local stale-textarea witnesses for
+the later F22 view-mode Save fixtures; Terra considered their
+captured wrong request bytes sufficient. The exact seven-failure
+transcript remains evidence, **not accepted proof**. A bounded
+test-ownership correction will make scenario 7's baseline clean
+and witnessed, make those later Save fixtures locally demonstrate
+their divergent sources, and then remeasure R86's exact failure
+set without weakening the harness.
+That first correction repaired and witnessed scenario 7's clean
+baseline, but the next R86 mutation was **UNUSABLE**: all four new
+producer-race/pending-close stale-textarea setup assertions failed
+to appear as required `PASS`
+(`files/f22-r86-hygiene-individual-proof.log`). No exact R86
+verdict or post-change healthy result can be inferred. An
+unmutated baseline is being run before deciding whether to repair
+or roll back the new fixture; do not run another mutation until its
+own setup is demonstrably alive.
+The unmutated tabs run made this a measured fixture bug, not an
+R86 effect: **471/475 passed**; precisely the four new witnesses
+failed. Their captured active path/tab, target content and distinct
+stale textarea were sound, but they required a
+`selectionGeneration` field that `getActiveDocumentIdentity()` does
+not return (`files/f22-r86-hygiene-unmutated-tabs-baseline.log`).
+Terra has the bounded correction to witness the renderer's separate
+active-selection generation instead. R86 remains **UNPROVEN** until
+an unmutated green setup, exact individual proof and restored green
+run establish it.
+The corrected shared setup witness now reads the renderer's
+active-selection generation separately from its tab owner. On these
+fixture bytes the unmutated tabs suite passed **475/475** before
+mutation, R86 failed exactly **six** locally supported view-mode
+save-source assertions while scenario 7's discard remained PASS,
+and the restored suite passed **475/475** afterward. Product bytes
+matched before/after (`files/f22-r86-selection-generation-*.log`).
+Fresh independent Sol, Terra and Luna reviews of this material
+fixture correction are underway. R86 remains provisionally proven,
+not accepted until they adjudicate the prior blockers.
+The fresh independent Sol, Terra and Luna reviews **all accepted**
+the corrected R86 proof. Sol and Luna explicitly confirmed their
+earlier blockers are gone: scenario 7 has its own witnessed clean
+baseline, and each later F22 view-mode Save witnesses its own
+selected owner and divergent textarea before dispatch. The six
+exact failures, required PASS controls and pre/post **475/475**
+baselines now establish R86 as **PROVEN** for the global view-mode
+save-source boundary. R87 remains a separate, unproven
+view-mode Save-*result* boundary.
+R87's separate mutation now reports exactly the scenario-6
+in-memory overwrite and two F22 pending-save/close failures, with
+locally witnessed divergent textarea setups, correct disk bytes
+and edit-mode controls all passing. Renderer bytes were restored
+and the ordinary tabs run passed **475/475**
+(`files/r87-followup-proof.log`,
+`files/r87-followup-tabs-baseline.log`).
+Fresh independent Sol, Terra and Luna review of those linked
+failures is underway before accepting R87; this does not promote
+any other open revert.
+Fresh independent Sol, Terra and Luna reviews all **accepted R87's
+narrow stale-adoption proof**. They agree the later F22 assertions
+fail because the view-mode Save result overwrites the correct
+in-memory document with an independently witnessed stale textarea,
+despite correct saved disk bytes and correlated results. These
+downstream failures do **not** demonstrate broken pending-save
+deferral or close sequencing themselves: both still waited for
+results. R87 is **PROVEN** for the in-memory Save-result boundary,
+not for an unrelated sequencing claim.
+R99 has been retargeted to the renderer's live current-owner guard.
+Its one individual run reported exactly the named foreground
+contamination failure while the disk-write, first-delivery and
+saved-tab controls passed; the restored ordinary tabs run passed
+**470/470**, with renderer bytes restored
+(`files/r99-*.log`). Fresh independent Sol, Terra and Luna review is
+underway before this proof can be accepted. On the current bytes a
+full read-only anchor audit now finds **only R552**
+`SETUP-FAILED` (`files/f22-post-r99-full-anchor-audit.log`);
+anchor resolution is not a proof, and R552's previously unsafe
+silent-approval mutation is not to be run unchanged. Opus is tracing
+a safe execution boundary read-only.
+The fresh independent Sol, Terra and Luna reviews **all accepted
+R99's narrow foreground-contamination proof**: the identity guard
+alone is removed, exactly one named assertion fails, and the disk,
+delivery, saved-tab and restored-suite controls hold. They differed
+on the shared 9c fixture's retry qualification: Sol and Luna retain
+the unresolved ACK/quiescence caveat, while Terra judged it excluded
+by the observed first delivery. This does **not** promote R98's
+first-attempt settlement or cleanup claim; R98 stays **UNPROVEN**.
+Opus's read-only R552 trace located the moved fallback guard and
+proposed mutating it to a fail-safe *decline* rather than an
+auto-approval, avoiding the destructive updater/close continuation.
+This is a candidate design, **not proof**; it must be exercised and
+reviewed independently before accepting R552.
+R552's unsafe auto-approval revert has now been replaced with that
+fail-closed, post-latch decline candidate. It is deliberately
+**UNPROVEN**: suppressing shared fallback dialogs in the full tabs
+suite could cause collateral timeouts, so no mutation or ordinary
+suite run was claimed. A fresh full read-only `--anchors` audit on
+current bytes reports **all anchors resolving**
+(`files/f22-post-r552-full-anchor-audit.log`). This closes the stale
+anchor inventory only; it does **not** close R552, R98, R86/R87,
+R96/R97, R102, R545/R568 or the complete-harness release gate.
+One later machine-exclusive **fail-closed** R552 run was allowed,
+but it exceeded a six-minute watchdog with no completed parent
+suite footer. Only its verified test Electron PID was stopped; the
+harness then restored `main.js` byte-for-byte and classified the
+run **UNUSABLE** (`files/r552-individual-proof.log`). A deleted-file
+Save conflict appeared in the tail, but its cause is not proven.
+Do not mistake the truncated run or resolved anchors for a revert
+proof. R552 remains **UNPROVEN**.
+Opus's read-only comparison of R552 and R102 showed the six-minute
+stop was an **external limit**, not the tabs suite's own watchdog:
+the parent watchdog starts at 420 seconds **plus** companion and
+teardown budgets, over 900 seconds. The deleted-file
+`SaveConflictError` in R552 is a main-process console error, and
+that scenario already has a scoped renderer-alert stub; the R102
+tail is a different renderer failure. Neither transcript proves a
+shared hanging modal or even that the suite had stopped making
+progress. A single machine-exclusive R552 run allowed to reach
+the suite's own watchdog or complete normally is a justified
+diagnostic, without altering or globally swallowing alerts.
+The justified full-watchdog R552 run **completed naturally in
+555.9 seconds**, well before its computed **1,820-second** internal
+watchdog (`files/r552-rerun-*.log`). The four declared fallback
+questions failed as intended and all existing `mustPass` controls
+held; another sixteen assertions failed outside the exact
+`expect` set. The harness correctly called this **COLLATERAL**,
+not proof. Product bytes restored and no test processes survived.
+No re-raise storm or hanging modal is established. Opus is
+independently classifying the extra failures before any decision to
+enumerate them; R552 remains **UNPROVEN**.
+Opus found the additional failures all route through the **same
+shared fallback-question funnel**; the fail-closed mutation
+suppresses every caller, including invalid-revision and installed
+commit cases. Widening the record to all twenty names would make a
+very broad proof of the funnel, not a discriminating proof of
+R552's original intent. A narrower call-site mutation is being
+traced read-only before making another code or test change; the
+current run remains **COLLATERAL / UNPROVEN** despite a complete
+suite footer.
+Opus's narrower trace corrected its earlier call-site count to
+eleven and showed that R552's four declared assertions arrive by
+**different** routes. The bare page with no tab overlay reaches
+the unique trailing `dispatchShutdownRequest` fallback after the
+loading branch; unreadable-answer and crashed-renderer cases take
+other branches. Terra has a bounded R552 retarget to that single
+call site, replacing only its question with a fail-closed decline,
+retaining adjacent loading controls and requiring the bare-page
+failure exactly. The broader four-route claim is withdrawn for
+this record; other routes need their own evidence rather than
+being implied by its result.
+The narrowed R552 run completed naturally in **385.7 seconds**.
+The intended bare-page fallback assertion failed, all three
+required controls passed, and product bytes restored; however two
+other assertions failed, so the exact harness verdict is
+**COLLATERAL / UNPROVEN** (`files/r552-narrow-*.log`).
+The deferred-commit failure recorded the mutation's decline
+reason, but the synchronous overlay-probe failure recorded
+`settleWhy: null`; it is not yet attributable to the same call
+site. Opus is tracing these two routes read-only before any
+expectation is widened or another run is attempted.
+Opus traced the two extras to the same narrowed call site. The
+deferred-commit case carries the mutation's unique decline reason.
+The probe-throw case snapshots `settleWhy` **before** emitting
+`close`, so its `null` does not refute the route; the actual close
+finds an unusable but live renderer and reaches that trailing
+dispatch branch. That latter link still lacks a post-close runtime
+witness. Terra has a bounded handoff to capture it, positively
+prove the fresh close and live-unusable owner, and require exactly
+the three linked failures with independent passing controls.
+No R552 proof is accepted yet.
+The bounded correction added a **post-close** runtime witness to
+the probe-throw case: request ID advanced, the renderer was
+unusable, its webContents remained live/non-crashed, and the
+mutation's decline reason was observed. The narrowed R552 run
+finished naturally with exactly the bare-page, probe-throw and
+deferred-commit failures, all four required controls passing,
+`main.js` restored, and healthy tabs **476/476 both before and
+after** (`files/r552-live-unusable-*.log`,
+`files/r552-witness-*.log`). Fresh independent Sol, Terra and Luna
+reviews are underway before this scoped live-unusable dispatch
+proof is accepted; the old broad fallback-funnel claim remains
+unproven.
+Fresh independent Sol, Terra and Luna reviews all **accepted the
+narrow R552 proof**. The mutation can only decline the live-unusable
+renderer at the trailing dispatch call; it cannot approve an
+updater or close action. The bare-page, probe-throw and
+deferred-commit-loss cases each reach that exact branch, with
+post-close evidence for the non-obvious probe route and zero
+destructive continuations. The individual run failed exactly
+those three assertions, required four independent PASS controls,
+and restored `main.js`; pre/post tabs runs passed **476/476**.
+R552 is **PROVEN for this dispatch fallback only**. The former
+whole-funnel claim is not accepted by this scoped proof.
+Remove diagnostic sidecars, finish the remaining individual proofs,
+repair and reprove the older rotted
+anchors, obtain fresh independent final reviews, and complete strict
+built-asar packaging, clean-tree suites, viewed wave screenshots,
+performance gates and serialized integration before promoting F22.
 
 **Mandatory close-path measurement — CLOSED (2026-09-05).** This item adds an IPC
 round trip on shutdown and a renderer-side scan of every open tab, so it falls
@@ -459,6 +2901,69 @@ that is blocked (`.github/copilot-instructions.md`, "Traps in this repository").
 Any approval prompt this item introduces must be designed around that, or the
 suites hang instead of failing.
 
+**2026-10-04 full-harness exception handoff.** The F22 worktree now has a
+reviewed no-argument release path that first rejects a dirty tree, audits every
+anchor and live assertion name, and then reports only fingerprinted R545/R568
+as **DEFERRED/UNPROVEN** without applying those individual mutations. Explicit
+ID runs still attempt the ordinary proofs; a skipped-only deferred assertion,
+orphaned name, unusable baseline, failed non-deferred proof or un-restored edit
+cannot produce a release-success result. The initial design that matched
+R568's incomplete mutant-failure signature was rejected by all three
+independent reviewers; the corrected design received a fresh Sol/Terra/Luna
+round with no blocker. A focused clean tabs name audit found both records'
+`expect` and `mustPass` names live, and the full read-only anchor audit resolved.
+The dirty-tree negative control exited before any suite. These are **not**
+a clean-tree complete revert run, full integration, strict built-asar packaging,
+or authorization to release. The no-Electron and machine-exclusivity
+preconditions remain operator checks immediately before the eventual full run.
+The first **full** live-name audit then **failed closed**
+(`files/f22-full-name-audit-20261004.log`): several clean suite transcripts
+end with a shutdown-destruction line after their footer, R135's built-asar
+assertions were not observable without a build, and R543 still names an old
+navigation assertion. A direct clean startup and popup run confirmed the
+single shutdown line after passing footers; this is not permission to ignore
+arbitrary or fatal output. Terra owns a bounded test/harness correction;
+neither the complete name audit nor the release preflight was green at that
+point. Terra's correction now admits only that exact lone line on clean
+passing baselines, emits R135's two unavailable built-asar assertions as
+**named SKIPs**, and retargets R543 to the current denied-navigation
+assertion. The first complete audit on those bytes still exited 2 when its
+clean tabs suite returned 477/478; it correctly left that suite's catalogue
+UNAUDITED, but did not retain the failing assertion name. A separate clean
+tabs run passed **478/478**, and one machine-exclusive complete `--expects`
+retry exited **0** (`files/f22-full-name-audit-retry-20261004.log`):
+no orphaned names or unusable suites. R135's two built-asar names are live
+but **SKIPPED/unobserved without a build**, not execution or proof. The
+independent Sol/Terra/Luna repair reviews agreed on the named-SKIP and
+current R543 behavior; Sol found no blocker. Terra raised the existing
+release-workflow gap (the tag workflow does not itself run the manual full
+suite/revert gates), and Luna raised the existing generic exact two-line
+mutation teardown allowance and lockfile-only asar freshness check. None
+was introduced by this narrow repair; keep the manual wave-2 exit gates
+mandatory and run strict packaging against the actual new build. This
+audit pass does **not** close the complete revert, clean integrated suite,
+strict built-asar packaging or viewed-screenshot gates.
+On the reviewed F22 bytes, the complete `npm test` chain exited **0**
+(`files/f22-full-suite-20261004.log`); its packaging leg still reported
+the same two absent built-asar SKIPs, so this is not strict packaging.
+A fresh independent Sol/Terra/Luna round over the current F22 lifecycle,
+owner and test/revert evidence found no additional blocker; all three kept
+the explicit R545/R568 deferrals and remaining wave exit gates visible.
+The F22 stream was then committed as `ade3073` on
+`feat/w2-f22-reviewed-20261004`, leaving that worktree clean. This is a
+stream commit. With explicit maintainer approval, the integration
+checkout's earlier one-line removal of the `dirtyTabNames()` active-tab
+snapshot was restored before fast-forwarding F22 through `ade3073`.
+The combined anchor audit resolved. The post-landing `npm test` run
+finished **nonzero**, with theme at **355/363** (PDF-ready, theme-menu
+and OS-colour-scheme setup failures); its other legs, including tabs
+**478/478**, passed (`files/f22-integrated-full-suite-20261004.log`).
+One separate quiet theme run then passed **363/363**
+(`files/f22-integrated-theme-repro-20261005.log`). The failed aggregate
+is retained, not reclassified as a green full suite. No clean-tree
+combined suite, full release revert inventory, strict fresh built-asar
+verification or visual release inspection has yet been claimed.
+
 ---
 
 ## B. Security and wave-2 hardening
@@ -481,6 +2986,155 @@ inventory table).
 > `renderer.js` at **8,631** lines; at `db7b960` the file is **9,319**. Re-take
 > the counts against the tree before planning the work — do not budget from the
 > table above.
+
+**2026-10-05 first-unit design check; no implementation at that point.** A minimal
+Electron 43.4.1 window with the main window's current
+`nodeIntegration: true, contextIsolation: false` settings printed
+`{"bridge":null,"preload":"contextBridge API can only be used when contextIsolation is enabled","requireType":"function"}`
+when its preload called `contextBridge.exposeInMainWorld`. The proposed
+first-unit test preload therefore cannot use `contextBridge` until the
+later flag flip: it must use a narrowly scoped, main-gated plain global
+for interim test access, **not** claim isolation or a security fix, and
+switch its exposure mechanism along with the eventual flag flip. Opus
+and Luna agreed on harness-first sequencing and a test-only mode; Luna
+correctly narrowed the first migration from all injection sites to one
+fixed-purpose, non-security suite route. Their uncertainty about
+whether the current flags let `contextBridge` attach at all is resolved
+by the observed runtime exception. SEC-08 is still PENDING, the main
+renderer remains Node-privileged, and the complete migration and
+performance gates below remain mandatory.
+
+**First harness-unit handoff.** A clean isolated worktree
+`feat/w2-sec08-harness-one-20261005` was created from the combined
+integration HEAD `7cc985a`. Sol (high) has implemented only the
+main-window test-preload selection gate there, uncommitted: the
+nonpackaged, explicitly marked `--folia-test-preload` path selects
+`test/test-preload.js`, and a marked launch with a missing file fails
+loudly. Terra then added the test-only preload, one PDF-restoration signal
+migration with a current-window, fresh-token, post-result witness,
+the exact test-only packaging exception, and two individual reversions.
+The targeted Mermaid suite passed **120/120**, the unmarked security
+suite **193/193**, and packaging **304 passed** with **two built-asar
+SKIPs**; R674 and R675 each reported PROVEN with their named failures
+and passing controls, and all 616 anchor setups resolved. This does
+not substitute for a freshly built strict asar or complete suite.
+Three **fresh**, independent Sol/Terra/Luna reviews of the entire
+unit, including its untracked preload, completed a first round:
+Terra found no blocker; Sol and Luna independently found that the
+new signal can be sent before the renderer finishes its awaited PDF
+theme restoration. Sol's follow-up established that the missing
+post-restore observable was also present in the old test, but the new
+path removes its 2.5-second delay and exposes the race. Terra owns a
+bounded correction using the existing post-restore notification,
+and that correction now passes Mermaid **122/122**, individually
+PROVEN R675 with the expected three bridge failures and passing
+pre/post-result controls, and **616/616** anchor setups. In the fresh
+second review Sol and Terra reported no new blocker, but Luna found
+that the scenario's stored light preference may skip the very awaited
+dark-theme restore the new notification is meant to witness. Both
+the Terra role owner and Sol reviewer independently confirmed this:
+the old fixture also had the conflicting preference, but the new
+completion claim requires an exercised restore. Terra revised the
+PDF fixture to a late dark preference, light prepare, exact
+success-notification-time restored hold and all-node dark-fill
+checks, and fresh bridge token only afterward. The targeted Mermaid
+suite passed **126/126**, R675-R679 each reported individually
+PROVEN with exact named failures and required passing controls, and
+all **620** anchors resolved. R674 was already PROVEN against its
+separate packaging gate. This was substantially more test/proof
+machinery than the initial one-route design (roughly 450 changed
+tracked lines); a new independent Sol/Terra/Luna round is now
+checking both correctness and whether that scope earns its
+maintenance cost. That round found no remaining correctness blocker:
+all three agreed the late dark preference and event-time all-node
+snapshot are meaningful; Sol and Terra identified the synthetic
+stale/fresh-token exchange as unnecessary harness machinery, while
+Luna did not regard it as a vacuity. Sol and Luna also found the
+separate frozen/exact-one-key test-global reverts R678/R679 low ROI
+for a non-isolated, test-only global; Terra considered them distinct
+contract proofs. The integration owner is keeping the real
+gate/delivery/dark-restore/all-node controls while requesting a
+bounded trim of the synthetic exchange and R678/R679. Sol
+incorrectly treated R674 as not yet individually run; its earlier
+targeted packaging proof is recorded above. Terra's bounded ROI trim
+removed that synthetic stale/rejected-token exchange and the
+test-global shape reverts R678/R679 while retaining R674-R677,
+the single fresh-token/sender bridge delivery witness and
+notification-time all-node restore probe. Mermaid passed **125/125**;
+the four remaining records were each run and PROVEN with exact
+failures and passing controls; all **618** anchors resolved. A new
+independent Sol/Terra/Luna review of this **reduced** final diff is
+complete: all three found no new significant issue, and Luna
+confirmed the late dark-restore/event-time controls survive the
+trim. A before/after cold-start and first-paint check against the
+unchanged integration tree is now underway because the gate touches
+main-window creation. The first probe was rejected before producing
+a window (Electron 43's immutable `BrowserWindow` export prevented
+instrumentation), so it supplies **no samples or gate clearance**.
+One bounded fallback will observe `browser-window-created` instead
+of replacing the export. That fallback measured seven fresh,
+before/after-interleaved Electron 43.4.1 launches from **different
+worktree paths** and crossed the predeclared material-regression
+budget: first-contentful-paint proxy p50 **805.3 to 906.9 ms**
+(+101.6 ms, +12.62%), and main-window load p50 **843.0 to
+940.3 ms** (+97.3 ms, +11.54%). Both p95 deltas were smaller
+(+15.2 and +26.7 ms, respectively); raw sample pairs varied in
+sign, with a paired FCP median delta of about +17 ms. This is a
+**failed/unexplained performance gate**, not evidence that the
+unmarked preload branch alone costs 100 ms and not permission to
+waive the budget. One final same-path, balanced-order diagnostic
+initially failed before Electron launched because its positive
+control removed the declaration block but overlooked the associated
+`...testPreloadPreferences` spread; a read-only diff confirmed these
+were the only 12 main.js insertions. That guard is being corrected
+once to allow the planned same-path measurement to distinguish code
+from worktree-path/order effects. The corrected same-path experiment
+then observed **seven balanced AB/BA pairs** under one identical
+worktree filename, renderer URL and Electron 43.4.1 runtime:
+FCP-proxy p50/p95 HEAD **1168.0/1203.0 ms**, candidate
+**1161.6/1190.5 ms**; load p50/p95 HEAD
+**1203.3/1234.5 ms**, candidate **1193.9/1230.7 ms**.
+Neither metric crossed the fixed **both >10% and >25 ms** regression
+budget in the controlled comparison. This clears only the
+**unmarked, harness-only selection gate** under the stated empty
+window/in-memory-compile limitations, not the complete SEC-08
+benchmark set. Both experiments and their uncertainties are recorded
+in `docs/PERF-AUDIT.md`. The source unit is reviewed, measured for
+its bounded scope, and its six named files were committed as
+`6be9311` on the clean isolated
+`feat/w2-sec08-harness-one-20261005` stream after the targeted
+startup suite passed **11/11**. The stream then fast-forwarded
+serially into the integration checkout at `6be9311`. Post-landing
+startup **11/11**, Mermaid **125/125**, security **193/193** and
+packaging **313 passed, 0 failed, 1 packaged-feed SKIP**; all **618**
+combined anchors resolved
+(`files/sec08-integrated-anchor-audit-20261005.log`; setup only, not
+proof). One complete integrated `npm test`
+subsequently exited **0** with all 13 suites completing, including
+tabs **478/478** and theme **363/363**
+(`files/sec08-integrated-full-suite-20261005.log`). This result was
+on the integration checkout with documentation changes pending,
+**not** the final clean-tree release run; its packaging leg still
+did not strictly verify a freshly built asar. The old failed tabs
+and combined `--expects` observations are retained. One complete
+machine-exclusive, read-only `--expects` run on the newly landed
+tree then exited **0**: all **618** records' assertion names were
+live across **15** suite catalogues, with the three existing
+mutation-only names excused and one packaged-update-feed assertion
+SKIPPED/unobservable without a new build
+(`files/sec08-integrated-live-name-audit-20261005.log`). This audit
+does **not** execute the reverts or replace the prior failed runs.
+The full clean-tree revert inventory, fresh strict packaging, viewed
+screenshots and complete SEC-08 isolation remain open.
+Opus found that the existing packaging scanner only matches
+direct single-literal `preload: path.join(__dirname, "...")`
+references and that `test/` is not shipped. Do not evade the scanner
+by changing `path.join` shape: the new conditional test-only
+reference must be explicitly covered by a packaging assertion and
+must never be selectable in a packaged or unmarked launch. The
+first harness unit has completed independent Sol/Terra/Luna review
+and integration; the remaining renderer migration has not. This
+is a harness migration, not completion of SEC-08.
 
 **Order of work is fixed by the audit** (each step independently shippable):
 rebuild the harnesses' renderer access on a test-only preload → give the 6 local
@@ -813,6 +3467,37 @@ and the saving is stated as a measured number.
 
 ## D. Performance and UI correctness
 
+### `ctime-byte-witness` — restore content-aware disk-change detection · PENDING · DEFERRED
+
+**Not a wave-2 release blocker.** The 2026-10-01 maintainer decision accepts
+ignoring ctime-only disk-version changes for now: on Windows an unchanged
+file's `ctimeMs` can move after selection, falsely refusing Save and
+re-selection. Unlike identity, size or mtime, ctime is metadata, not proof
+that document bytes changed.
+
+**Accepted limitation, not an eliminated risk:** a separate writer can
+replace bytes with different content of the same length and restore the
+previous `mtimeMs` while retaining the same file identity. With ctime
+ignored, the version tuple alone cannot detect that change, and an
+unsaved local edit may overwrite it. Normal external edits that move
+mtime or size, and changes of file identity, must still fail closed.
+Do not describe the current policy as protecting against deliberate
+restored-mtime edits.
+
+**Future scope.** Bind a trusted raw-byte witness to the original disk
+read or adoption, carry it into main's owner baseline, and use it
+across watcher notification, tab re-selection and the final Save
+write boundary. Preserve deletion and path-identity guards, prove
+same-size changed bytes with restored mtime are refused, and measure
+the read/hash cost against the predeclared performance gates. This
+is scheduled **after `w2-release`**, not blocked on it.
+
+**Completion criteria.** Genuine ctime-only, byte-identical changes
+remain usable; equal-size changed bytes with restored mtime cannot
+overwrite external content; denied/unknown attestations fail closed;
+the targeted tests have individual break-code/restore-code proofs;
+startup, selection and Save costs are measured and accepted.
+
 ### `table-breakout-perf` — the single largest remaining render cost · PENDING
 
 `applyTableBreakout()` is the dominant phase on wide documents. Measured in
@@ -923,6 +3608,78 @@ the paid one:
 with signtool.exe` whether or not a certificate exists
 (`.github/copilot-instructions.md`). The builds are unsigned.
 
+**2026-10-04 stream handoff.** The free-attestation workflow and its initial
+oracles were committed on the separate provenance branch (`c571acab`); the
+reviewed publication/upload-path checks and corrected verification guidance
+followed as `6ab5466`. The branch-local revert IDs were R600-R610. Packaging
+passed with the built-asar oracle explicitly skipped because that branch had
+no current build; its publication/upload-path records each failed their
+named assertion under its own revert, with required controls passing. Fresh
+independent Sol/Terra/Luna reviews converged after the release asset and
+updater-manifest omissions were corrected.
+
+**Integration after F22.** The first cherry-pick conflicted with F22's
+revert-harness and packaging-oracle blocks; Terra preserved both sets of
+checks. The two provenance commits are now landed as `f245cb8` and
+`6712089` in the integration checkout. Because F22 already owned the
+branch-local record IDs, provenance uses **R663-R673** in the combined
+inventory. A fail-closed duplicate-ID self-check now runs before every
+harness mode, and its injected-duplicate negative control exits 2. The
+combined anchor audit resolves
+(`files/sec08-integrated-anchor-audit-20261005.log`) and packaging passes with
+the remaining packaged-update-feed skip; neither result individually
+reproves the renamed records. Fresh independent Sol/Terra/Luna
+integration-seam reviews agreed
+there is no new blocker in the merged ID guard, paired-edit restore or
+publication assertions; none treated the renamed records as individually
+proven. The first combined `--expects` run exited **2**
+(`files/combined-provenance-live-name-20261005.log`): tabs returned
+**477/478**, leaving that suite's names UNAUDITED, while the other
+catalogues showed no orphan. A separate clean tabs run and the prior
+complete F22 worktree suite both passed **478/478**; neither changes
+the combined-audit verdict. The original harness did not retain the
+failing assertion line, so Terra added bounded fail-closed diagnostics.
+The targeted one-suite `--expects R543` with those
+diagnostics also exited 2: its one tabs failure was **"a pre-install
+updater error leaves the exact update commit active and its replaced
+deadline stale"**, with `updateCommitHeld:false`
+(`files/combined-tabs-audit-diagnostic-20261005.log`). A subsequent
+direct tabs run exited **477/478** on a *different* updater assertion,
+**"a missing paired updater quit expires fail-closed, retires only its
+attempt, and replays the absorbed user close"**. Its recorded events
+showed the replayed window-close request and then a real renderer
+`unresponsive` event, which routed main through its fallback instead
+of leaving the held request pending
+(`files/integrated-tabs-update-commit-diagnosis-20261005.log`). These
+are actual failed runs, not an approved fixture exception or evidence
+that the product can discard edits. F22 product and tabs-test bytes
+are unchanged by the provenance landing. The subsequent integrated
+live-name audit is recorded above as healthy; a clean-tree suite
+still remains pending. One
+subsequent idle-machine, machine-exclusive direct tabs run on the
+same combined tree passed **478/478**
+(`files/combined-tabs-exclusive-diagnosis-20261005.log`). This
+does not explain the distinct earlier updater-fixture failures,
+replace the failed full `--expects` result, or authorize another
+blind retry loop.
+
+The integrated provenance records **R663-R673** were each executed in
+one bounded targeted mutation run
+(`files/combined-provenance-targeted-proofs-20261005.log`). Every
+record reported **PROVEN** with its named failure and required controls,
+and the run restored its touched files. A fresh independent
+Sol/Terra/Luna review of the added bounded diagnostic also found no
+blocker; it does not change an unusable baseline's exit or verdict.
+The reviewed combined-ID guard and diagnostic were committed as
+`7cc985a` on the integration branch. This does not complete the
+separate full revert inventory or the published-artifact attestation
+check.
+This is **integrated but not complete**: verify an actual downloaded artifact
+from an attestation-enabled published release when one exists. Do not cut a
+release merely to manufacture that evidence; automatic pre-publication
+verification is not a completion requirement. Paid signing still needs the
+maintainer's decision.
+
 **Completion criteria.** Attestations are produced by the release workflow and
 verifiable against a published artifact; the packaging suite asserts the workflow
 still emits them; the signing decision is recorded here either way.
@@ -965,19 +3722,27 @@ a rewrite that drops it re-opens the gap that was closed on 2026-09-02.
 
 ### `fullrun` — the complete revert harness from a clean tree · PENDING · blocks `w2-release`
 
-Run every record in `scripts/prove-table-fixes.js` end to end from a clean tree.
+Account for every record in `scripts/prove-table-fixes.js` from a clean
+tree: run every non-deferred record end to end, and report the two
+explicitly approved deferred individual proofs (R545 and R568) as
+**DEFERRED/UNPROVEN**, not PROVEN or behaviorally withdrawn `skip`.
+Explicit targeted runs of those records must remain available for
+future proof work. No other record may be silently deferred.
 This takes hours, which is why it is a scheduled item rather than a routine step.
 It is nonetheless a **release blocker**: the milestone gate requires the complete
-harness, and a release that skipped it has not been proven at all.
+harness inventory with all non-deferred proofs executed, not a green
+result obtained by hiding failed or unattempted records.
 
 **Preconditions that make the result meaningful:** a clean working tree, no
 Electron process running, and **no review diff generated while it runs** — the
 harness mutates repository files, so a diff taken mid-run contains reverted code
 and reads exactly like a real finding.
 
-**Completion criteria.** Every record either PROVEN or explained; no
-`SETUP-FAILED` (a rotted anchor never reports a pass, but it also never reports
-a proof).
+**Completion criteria.** Every non-deferred record PROVEN or explicitly
+explained under its existing policy; exactly R545/R568 reported as
+DEFERRED/UNPROVEN with their reasons; no unapproved deferral and no
+`SETUP-FAILED`. Anchors and live assertion-name audits still cover
+the deferred records. A rotted anchor never reports a pass.
 
 ### `shots` — regenerate and *look at* every theme screenshot · PENDING · blocks `w2-release`
 
@@ -997,6 +3762,20 @@ produced but not viewed does not count toward it.
 regenerated **and visually confirmed by a human or reviewing agent that actually
 opened the image**; the golden re-captured only if a deliberate change requires
 it.
+
+**2026-10-05 partial visual pass.** The six regenerated
+`screenshots/themes/` scheme images and three theme-menu images were
+opened and inspected: prose, tables, code, blockquotes, menu panels
+and selection ticks were visible. The same integrated run's recently
+generated search, Mermaid, popup zoom, list/TOC, table, dialog,
+security-inline-style and F22 tab images were opened and inspected.
+`dialog-short-window.png` visibly contains the Insert Table dialog
+within the short viewport; its earlier handoff description as a bare
+Beta tab was not reproduced when the file was reopened. The blue
+`selfcheck-frame-freshness.png` is a capture sentinel, not a product
+surface. This is **not** a completion claim: the wave-wide surface
+inventory, any later changed surfaces, and the final clean-tree
+regenerate-and-view pass remain open.
 
 ### `final-cleanup` — clean the tree before release · PENDING · blocks `w2-release`
 
@@ -1034,11 +3813,13 @@ Explicit dependencies:
 | `w2-release` | `w2-f22`, `w2-hygiene`, `w2-privacy`, `w2-sec08`, `w2-upstream`, **`fullrun`, `shots`, `final-cleanup`** (+ `w2-ci`, `w2-docs`, `w2-f23`, `w2-f25`, all **done**) | The milestone ships once, not per fix. The last three are verification prerequisites, not courtesies: the milestone gates require the **complete** revert harness, **viewed** screenshots and a clean tree, so a release without them is a release that skipped its own gates. |
 | `user-verify` | `final-cleanup` | Verifying a dirty tree verifies nothing that will ship. It runs after `final-cleanup` and may be returned either side of the release cut, as the maintainer's own verification. |
 | `diagnostic-log-hardening` | `w2-privacy` (practical, not blocking) | The opt-in switch has to exist before there is a gated file to harden. It is DEFERRED rather than BLOCKED: it is scheduled after wave 2 by the 2026-09-02 decision, not prevented by anything. |
+| `ctime-byte-witness` | `w2-f22` (practical, not blocking) | The ctime-only policy and its measured false-conflict baseline must exist first. The stronger witness is scheduled after wave 2 by the 2026-10-01 decision, not required for release. |
 
 Everything else is independent and may be taken in any order.
 
-**`diagnostic-log-hardening` is deliberately absent from `w2-release`'s row.** It
-is **not** a wave-2 release blocker. If that ever changes, it is added to
+**`diagnostic-log-hardening` and `ctime-byte-witness` are deliberately absent
+from `w2-release`'s row.** Neither is a wave-2 release blocker. If that changes,
+the item is added to
 `w2-release`'s "Waits on" cell above and nowhere else.
 
 **`fullrun`, `shots` and `final-cleanup` are blockers, corrected 2026-09-03.**
@@ -1054,7 +3835,9 @@ cleanup, or the required viewed screenshots.**
 
 **Suggested order**, given the above:
 
-1. **`w2-f22`** — active; finish it.
+1. **`w2-f22`** — landed on the integration branch, not released; finish
+   its remaining clean-tree and release verification without reopening
+   the maintainer-deferred R545/R568 individual proofs as release blockers.
 2. **`w2-sec08`** — the long pole, and an **exclusive** stream: while it holds
    `src/`, no other source work runs (see *Parallel delivery without reducing
    quality*). Only docs-scoped work proceeds alongside it.
@@ -1067,7 +3850,8 @@ cleanup, or the required viewed screenshots.**
    everything above.
 8. **Gated items** (`n2-user`, `n16-insert-anchor`, `perf-node-count`,
    Azure signing) — as decisions arrive.
-9. **`readme-story`, `sign-provenance` (free half), `rv4-nth`** — any time.
+9. **`readme-story`, `rv4-nth`** — any time. The free-attestation half of
+   `sign-provenance` is integrated; published-artifact verification remains.
 10. **`shots` → `fullrun` → `final-cleanup` → `w2-release` → `user-verify`** —
     the closing sequence. All three of `shots`, `fullrun` and `final-cleanup` are
     **blockers** of `w2-release`; `fullrun` and `final-cleanup` both want a quiet
@@ -1076,6 +3860,8 @@ cleanup, or the required viewed screenshots.**
     in this sequence that is not a release blocker.
 11. **`diagnostic-log-hardening`** — **after** `w2-release`. Deferred out of
     wave 2 on 2026-09-02; it ships in a later stage, not this milestone.
+12. **`ctime-byte-witness`** — **after** `w2-release`. The accepted ctime-only
+    policy ships with wave 2; the stronger content witness does not.
 
 ---
 
@@ -1099,8 +3885,9 @@ subtasks, `w2-sec08`, `w2-f03`, `w2-privacy`, `w2-hygiene`, `w2-kbscroll`,
 `w2-release`, `mermaid-cold-cache-source`, `mermaid-block-identity`,
 `perf-mermaid-sweep`, `table-breakout-perf`, `upstream-toolbar-overflow`,
 `rv4-nth`, `readme-story`, `fullrun`, `shots`, `final-cleanup`,
-`diagnostic-log-hardening` (deferred, but ungated — no decision is outstanding on
-it), the free-attestation half of `sign-provenance`, the measurement and
+`diagnostic-log-hardening` and `ctime-byte-witness` (both deferred, but
+ungated — no decision is outstanding on either), the free-attestation half
+of `sign-provenance`, the measurement and
 evaluation half of `perf-node-count`, and the *classification* work in
 `w2-upstream` (only the feature calls are gated).
 
@@ -1126,6 +3913,8 @@ the item entry.
 | **2026-09-04** | **Two review findings about the portable updater's temp-file surface are rejected as out of scope, not as wrong.** Both are real properties of the design; neither is introduced by this work, and both would need a different mechanism rather than a bigger check. | **Rejected — "the acknowledgement token is readable by another same-user process".** True: it is embedded in `update.bat` inside a `mkdtemp` directory, and `mode: 0o600` does nothing to Windows ACLs, so any process running as the same user can read it and forge an `ack`. The token is what the review round asked for and it does what it can — it makes a *stale* or *blind* marker useless and raises a forgery from "guess the directory name" to "read the directory". It cannot defend against a same-user process, and neither can anything else here: that process can already replace `update.bat` before it runs, replace the downloaded installer, or kill the app. A genuine fix is an OS-protected channel (a named pipe with an ACL, or a helper process), which is a design change, not a hardening tweak. **Residual risk, accepted and recorded:** a same-user local process can make Folia quit without an installer having started. It cannot make it quit with unsaved work, because the commit re-asks whenever the document has moved. **Rejected — "`%` in an interpolated path is expanded by `cmd.exe`".** Also true, also pre-existing: `downloadedUpdatePath` and the batch directory have been interpolated into this script since SEC-20. Nothing in this round widened it, and the `if not exist "<installer>" goto failed` line added here makes the failure mode *observable and fail-closed* where it used to be a silent no-install. A real fix means not building a batch file at all. |
 | **2026-09-04** | **Two implementation decisions taken while fixing the `w2-f22` review findings.** No sealed finding was rejected — all ten were valid — but both of these changed something a reader could reasonably expect to have been left alone, so they are recorded rather than absorbed. | **The portable spawn handler no longer cancels merely because another question is open.** The old guard was `if (pendingShutdown \|\| !isSameShutdownDocumentSession(...))`. The commit now raises its own force-fresh approval, and `requestShutdown` already **queues** a force-fresh intent behind an open question and re-raises it on settle — which is what the installed updater's public commit does, and what *"an updater commit arriving behind another question remains a required fresh question"* already asserts. Cancelling would make the portable path the only one that silently drops a stronger intent. The document-session half of the guard is kept, and the acknowledgement boundary re-checks both. **Cost, not an eliminated risk:** a portable child can now sit parked while an unrelated close question is on screen. It is bounded — the queued intent either runs or is declined, and a decline stands the child down through the new `onDeclined` channel. **R560's id is repurposed, not reused.** Its mutation (`return attempt.committed` → `return false`) is provably inert: `attempt.committed` is true only when the commit fired synchronously, and that path has already revoked the authorization and raised a fresh request, so both return values leave identical state. The record keeps its id and its subject — authorization across the installed updater's deferred-commit gap — and gains a mutation that can actually fail, plus a new assertion written for it. Deleting it and allocating a fresh id instead would have left a silent gap where a record used to be. |
 | **2026-09-05** | **`w2-f22`'s performance gate is CLOSED, and the 2026-09-02 and 2026-09-03 rows above are superseded on that point only.** Neither is rewritten: their reasoning is why the closed gate can be trusted, and the numbers they recorded were never in dispute. | The 2026-09-02 row recorded a first measurement and the 2026-09-03 row correctly refused to call it a pass — one fixture, no before-path, no budget declared in advance. **Two of those three are now closed** (a 50 KB / 500 KB / 2 MB × 1 / 10 / 25 tab matrix plus all-dirty LF and CRLF worst cases at 2 MB × 25 tabs; a **16.7 ms** raw-p95 budget fixed *before* the runs it judged). **The third cannot be closed and is not claimed to be:** the approval path did not previously exist, so there is no before-number, which is exactly why a predeclared budget carries the verdict. Three runs, each executed exactly once: run 1 **failed honestly** at **22.4936 ms (LF)** and **98.1947 ms (CRLF)** and drove the maintained-dirty-state architecture; runs 2 and 3 passed every observation with 0 failures. **Run 1 is retained as a result, not a discarded outlier** — recording only the passing runs would hide the reason they pass. Full method and runs are in `bench/BASELINE.md`; the defect and fix are `docs/PERF-AUDIT.md` PERF-10. **Run 2's raw samples were not persisted** (the durable-output path did not yet exist); run 3's attestation artifact is machine-local and deliberately uncommitted. **No item status changes because of this decision:** `w2-f22` stays **ACTIVE**, is **not landed and not merged**, and still owes the final three-reviewer round over the executed state and serialised integration. |
+| **2026-10-01** | **Ignore ctime-only disk-version changes in wave 2; defer content-aware verification.** The complete F22 fixture reproducibly saw Windows ctime drift after selection with unchanged dev/ino/size/mtime and disk bytes. A Save-only raw-byte-witness prototype itself triggered a later tab-selection refusal; a correct witness would span the original read, owner, watcher, selection and Save. The maintainer chose the smaller policy and explicitly said the stronger protocol is not a priority now. | `w2-f22` must still prove unchanged-file Saves work, while changes of identity, size and mtime continue to fail closed. **Accepted security/data-loss limitation:** a same-size external edit with restored mtime and unchanged file identity will no longer be distinguished by the version tuple alone and could be overwritten. Document this explicitly; do not claim otherwise. Track an end-to-end raw-byte witness as new `ctime-byte-witness`, PENDING · DEFERRED after `w2-release`, with no new release dependency. The abandoned prototype was byte-restored before this decision; no passing suite or fresh performance verdict is implied. |
+| **2026-10-04** | **Defer the R545 and R568 individual proofs; switch to independent wave-2 work.** The bounded target-only designs failed to isolate these mutants without suppressing real assertions or accepting an unusable transcript. The maintainer explicitly chose not to block the eventual release on those two proofs, while saying **no release yet**. | Preserve both mutants and their target failures, label each **DEFERRED/UNPROVEN** in the full revert inventory, and keep targeted runs available; neither is PROVEN or a behaviorally withdrawn `skip`. Require an explicit, fail-closed exception for exactly these two IDs; all other harness records and all other release gates remain mandatory. Do not infer this decision authorizes F22 integration or release. |
 
 ---
 
@@ -1207,10 +3996,11 @@ delivery without reducing quality*.
 - **Screenshots, performance measurement and the full harness remain
   machine-exclusive** across all worktrees, exactly as *Machine-level
   exclusivity* states. Three reviewers do not make a shared machine safe.
-- **The per-unit gates stand unchanged**: the targeted suite, individually proven
-  revert records, screenshots actually *viewed*, the performance acceptance
-  gates, a clean diff, and the milestone-boundary full suite and full revert
-  harness.
+- **The per-unit gates stand unchanged except for the explicit R545/R568
+  individual-proof deferral recorded above**: the targeted suite,
+  individually proven revert records for other fixes, screenshots actually
+  *viewed*, the performance acceptance gates, a clean diff, and the
+  milestone-boundary full suite and complete revert inventory.
 
 ### Evidence ownership
 
@@ -1263,8 +4053,10 @@ none is a maintainer's discretionary call:
 1. **Full `npm test` green from a clean tree** — all 13 suites, not a subset.
 2. **`PACKAGING_STRICT=1 npm run test:packaging` green.** Without the flag, a run
    that built nothing reports "0 failed" having verified nothing.
-3. **`fullrun` complete** — the *complete* revert harness from a clean tree,
-   every record PROVEN or explained, no `SETUP-FAILED`.
+3. **`fullrun` complete** — the *complete* revert inventory from a clean
+   tree, every non-deferred record PROVEN or explained under its
+   existing policy, exactly R545/R568 explicitly DEFERRED/UNPROVEN
+   under the maintainer's recorded exception, no `SETUP-FAILED`.
 4. **`shots` complete** — every screenshot for the wave's visual surfaces
    **regenerated and viewed**. Capturing is not verifying.
 5. **`final-cleanup` complete** — clean tree, `--anchors` resolving, chain green,
@@ -1278,6 +4070,10 @@ returned either side of the release cut.
 recommended, not blocking"* and said releasing without them was "a maintainer
 call, not a protocol violation". That contradicted the milestone gates stated
 above and in *Parallel delivery*, and is withdrawn.
+
+**Reaffirmed 2026-10-01.** Keep these release gates. Time-box low-return
+investigations and report their exact blockers rather than building elaborate
+fixture machinery or quietly treating an unproved gate as complete.
 
 ---
 
@@ -1451,11 +4247,12 @@ editing this file themselves.
 
 **Now, in parallel:**
 
-- **Stream A — `w2-f22`, the critical shutdown work.** Already active. It owns
-  `src/main.js`, `src/custom-tabs.js`, `test/test-tab-refresh.js`,
+- **Stream A — `w2-f22`, the critical shutdown work.** Its product and test
+  changes have landed on the integration branch; release verification remains.
+  It owned `src/main.js`, `src/custom-tabs.js`, `test/test-tab-refresh.js`,
   `test/test-render-security.js`, `scripts/prove-table-fixes.js` and
-  `bench/bench-f22-shutdown.js` today. Finish
-  it before anything else claims those files.
+  `bench/bench-f22-shutdown.js`. Its two deferred individual proofs do not
+  waive the other release gates.
 - **Stream B — documentation, provenance and upstream research.** Touches no
   product source: `readme-story` and the free-attestation half of
   `sign-provenance`. Its one `test/` exception is `test/test-packaging.js`, and
@@ -1467,9 +4264,10 @@ editing this file themselves.
   verdicts. The classification itself is `w2-upstream`, which stays BLOCKED on
   `upstream-toolbar-overflow` precisely so it is not done against a moving
   target; feature additions found during that reading still go through their
-  decision gate. Safe to run alongside A because their file sets are disjoint.
+  decision gate. Its provenance changes have also landed on the integration
+  branch. The disjoint-file rule still applies to any remaining work.
 
-**After A lands:**
+**After A lands (now the integration branch's state):**
 
 - **Stream C — `w2-sec08`, then `w2-f03`, as one exclusive broad security
   stream.** These are not parallelisable with each other or with anything else

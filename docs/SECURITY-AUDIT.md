@@ -474,8 +474,24 @@ behind its own minimal preload, exposing only that popup's own bridge API. Four
 assertions in `test-popup-security.js` pin it ("*popup exposes only its own
 bridge API"), so a popup cannot silently regain Node access.
 
-**Deferred: the main window** (`main.js:384`). This is a deliberate, measured
+**Deferred: the main window** (`main.js:2383-2384`). This is a deliberate, measured
 decision rather than an omission, so the measurements are recorded here.
+
+**2026-10-05 harness-only preparation, not a security fix.** The reviewed
+`feat/w2-sec08-harness-one-20261005` stream, now landed on the integration
+branch as `6be9311`, conditionally selects a
+`test/`-resident preload for explicitly marked, unpackaged main-window
+test launches and migrates one PDF-test signal off renderer `require`.
+Unmarked and packaged launches do not select it; `test/` is excluded
+from packaged assets. Electron 43.4.1 rejects
+`contextBridge.exposeInMainWorld` while the current main window has
+`contextIsolation: false`, so the interim test capability uses a
+narrow plain global. The production main window **still has**
+`nodeIntegration: true` and `contextIsolation: false`; neither the
+isolation risk nor the handler/path-validation work below has been
+closed. This preparatory unit is integrated but unreleased, and the
+historical inventory below must be
+recounted before the broader migration.
 
 | What has to move | Count |
 |---|---|

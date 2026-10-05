@@ -12,6 +12,7 @@
 | PERF-06 | **[FIXED]** TOC + collapsible-section rebuild runs on every render | On a **2.0MB / 2001-heading** doc, `buildTableOfContents()` + `makeHeadersCollapsible()` cost **27.1ms** on full render and about **30ms** on changed renders | Medium | Medium |
 | PERF-07 | **[FIXED]** Mermaid theme changes synchronously re-render every diagram | Toggling theme on a **20-diagram** doc spent **423.7ms** in `mermaid.run()` and **431.6ms** total in `updateMermaidTheme()`; visible-first rendering cut the blocking toggle to **~85ms** | Medium | Medium |
 | PERF-10 | **[FIXED]** The shutdown approval scan recomputed every open document's dirtiness | Closing after editing every tab, at **25 tabs x 2MB**: raw p95 **22.4936ms** (LF) and **98.1947ms** (CRLF) against a predeclared **16.7ms** budget; maintaining the answer at the edit instead brought the same observations to **1.002ms** and **1.2792ms** | Medium | High |
+| PERF-11 | **[FIXED ON INTEGRATION BRANCH; UNRELEASED]** Closing with an active 2 MB editor rebuilt newline spelling and repeated whole-document comparisons | At **25 tabs x 2MB**, active-editor raw p95 **90.654ms** (LF) / **117.275ms** (CRLF), versus **9.6951ms** / **11.7335ms** on the latest product bytes; predeclared budget **16.7ms**, final matrix **42/42** within budget | Medium | High |
 
 ## Measurement methodology
 
@@ -473,6 +474,82 @@ timing — it marks the run **failed**, which means the number is **not accepted
 a gate result**, though raw diagnostic timing may remain in the output and in the
 durable artifact. Without the oracle a scan that found nothing would report an
 excellent number and be entirely wrong about it.
+
+### PERF-11 — An active editor reintroduced whole-document close work
+
+The PERF-10 shutdown scan fix did not eliminate the separate **active editor
+fold** before the scan. The later file-lifecycle reconstruction added newline
+spelling preservation, and reconciling a 2 MB textarea on close repeated
+semantic comparisons and constructed a per-character newline array even for
+uniform endings. It failed the *same predeclared* raw-p95 **16.7 ms** frame
+budget: **90.654 ms** for LF and **117.275 ms** for CRLF at 25 tabs. The
+initial failure comes from the predecessor handoff; no new raw-sample artifact
+is claimed for it. Intermediate attempted fixes and their honest failures are
+retained in `bench/BASELINE.md`.
+
+**The correction — `src/custom-tabs.js`.** Enumerate newline boundaries
+instead of every document character; take the uniform LF/CRLF/bare-CR path
+without running mixed-ending alignment; reuse the already computed
+byte-inequality and known dirty state rather than recompare large strings
+while folding the active tab. Keep mixed endings on the alignment path and
+preserve the document's original disk spelling when its semantic text has
+not changed.
+
+The latest product-source benchmark, after the separate failed-Save
+tab-switch and accepted-background-adoption corrections, records raw
+active-editor p95 **9.6951 ms LF** and **11.7335 ms CRLF** (20 samples each),
+**42/42 observations** at or below the budget and **zero failures**. The
+worker asserts the active edit and checks the exact dirty filenames; a fast
+empty scan cannot pass. Raw arrays are in the machine-local
+`f22-p3-background-disk-adoption-benchmark.json`, with its console
+transcript beside it. The measured F22 product bytes have since landed on
+the integration branch; this remains performance evidence for that source,
+**not** a passing combined suite, full revert inventory or release gate.
+
+### SEC-08 test-only preload selection — bounded startup check (unreleased)
+
+The first SEC-08 harness unit conditionally selects a test-only preload
+at main-window creation. Production and unmarked development launches
+do not select it; the main window is still Node-privileged. Before
+measurement, the regression budget was set to **both >10% and >25 ms**
+at either p50 or p95 for either startup-to-first-contentful-paint
+(FCP) or main-window `did-finish-load`. All comparisons used Electron
+**43.4.1** on the same Windows machine, seven fresh isolated-profile
+processes per variant, with the preload marker absent.
+
+The first real-file, strictly before/after-interleaved comparison
+used the integration checkout and a *different-path* SEC-08 worktree.
+It crossed the budget at p50: entry-to-FCP **805.3 to 906.9 ms**
+(+101.6 ms, +12.62%) and entry-to-load **843.0 to 940.3 ms**
+(+97.3 ms, +11.54%). The p95 changes were **+15.2 ms** and
+**+26.7 ms**. Individual paired deltas changed sign, with median
+paired FCP delta about **+17 ms**; these observations are retained,
+not relabelled as a pass or attributed to the new gate on code
+inspection alone.
+
+A second, **same-path** attribution check ran the unchanged HEAD and
+candidate `main.js` program sources under the same candidate-worktree
+filename, helper paths and renderer URL, with alternating AB/BA order.
+A staged-source check verified that the sole program difference was
+the test-preload selection block and its `webPreferences` spread.
+Both variants loaded a real Folia window; all samples had valid
+Chromium FCP entries. Entry-to-FCP p50/p95 were **1168.0/1203.0 ms**
+for HEAD and **1161.6/1190.5 ms** for the candidate; entry-to-load
+were **1203.3/1234.5 ms** and **1193.9/1230.7 ms**, respectively.
+Neither metric regressed in this controlled comparison. Raw records,
+positive controls, sample spreads and the predeclared budget are in
+the machine-local `sec08-browser-window-fcp-results-20261005.json`
+and `sec08-attribution-results-20261005.json`.
+
+This bounds the **unmarked startup gate** on an initially empty,
+`show:false` main window. The FCP clock begins when the probe script
+runs (not at Electron process creation); the same-path comparison
+uses in-memory `Module._compile`, not a normal disk `require`. It
+does not measure representative file-open rendering, packaged
+startup, the eventual isolated preload, or the full SEC-08 benchmark
+set. The initial path-confounded result remains unexplained; the
+same-path result does not license a claim that all SEC-08 performance
+gates have passed.
 
 ## Measured and found already fast
 - **Custom tab sync I/O is not the current bottleneck.**

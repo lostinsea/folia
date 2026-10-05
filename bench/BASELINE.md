@@ -1935,6 +1935,48 @@ under the session state directory on the machine that produced them
 and are deliberately not committed. A later run can reproduce the shape by
 setting `F22_RESULT_FILE` (see `docs/BUILD.md`); nothing is written by default.
 
+### Later file-lifecycle reconstruction: active-editor close (2026-09-29)
+
+The three runs above describe the earlier shutdown implementation; they did
+**not** exercise closing with an active edited textarea. The file-lifecycle
+reconstruction added that mode to the same process-isolated gate at 2 MB x
+25 tabs, in both LF and CRLF. Each active-editor observation has 20 raw
+samples, asserts that edit mode and the edited document are actually present,
+checks the exact dirty-filename result, and is judged by the existing,
+predeclared raw-p95 **16.7 ms** budget.
+
+| Product state | Active-editor LF raw p95 | Active-editor CRLF raw p95 | Result |
+|---|---:|---:|---|
+| Before the active-editor fold correction | **90.654 ms** | **117.275 ms** | FAIL |
+| Newline-boundary extraction alone | **25.0739 ms** | **23.8855 ms** | FAIL |
+| Uniform-newline shortcut added | **37.231 ms** | **26.4493 ms** | FAIL |
+| Redundant cache comparisons removed | 15.77 ms | **19.0217 ms** | FAIL |
+| Known-dirty fold added | **29.8021 ms** | **24.7584 ms** | FAIL |
+| Reuse the first byte-equality result | 9.633 ms | 12.0271 ms | pass, 0 failures |
+| After preserving the failed-Save guard on a direct tab switch | 10.9407 ms | 12.0808 ms | pass, 0 failures |
+| After clearing a stale failure on accepted background disk adoption | 9.6951 ms | 11.7335 ms | pass, 0 failures |
+
+These are **individual untrimmed runs**, not steps averaged together or
+outliers dropped from a passing result. The final three each passed all
+**42 observations** against the same budget; the last run's raw arrays and
+per-observation verdicts are in the machine-local
+`f22-p3-background-disk-adoption-benchmark.json`, with its `.log` alongside.
+The preceding passing runs' artifacts are `f22-p3-option-benchmark.json`
+and `f22-p0-reused-equality-benchmark.json`, each with a `.log` under the same
+session state directory. The earlier 90.654/117.275 ms failure is recovered
+from the previous session's handoff rather than a new raw-sample artifact;
+it must not be represented as rederived from one. All remaining F22 suite,
+revert and review gates still apply: a passing performance gate does not
+land the item.
+
+The older run 3 cold/warm worst p95s (2.5902/1.0375 ms) are **not an established
+same-runner, same-machine comparison** to the current reconstruction. For a
+contemporaneous check, the unchanged `main` checkout's worst cold/warm p95s
+were 5.1247/4.9751 ms, versus 5.7359/7.267 ms in the reconstructed product,
+using byte-equivalent benchmark logic and the same machine. These close paths
+do different work; the gap is recorded rather than silently called a
+like-for-like improvement or an accepted performance regression.
+
 ### What this gate deliberately does NOT measure
 
 - **No before/after for the protocol itself.** The approval path did not exist
