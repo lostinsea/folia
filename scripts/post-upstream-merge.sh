@@ -259,6 +259,7 @@ check_html_script "custom-performance.js"
 check_html_script "utils.js"
 check_html_script "mermaid-config.js"
 check_html_script "context-menu-utils.js"
+check_html_script "file-helpers-core.js"
 check_html_script "emoji-map.js"
 check_html_script "emoji-parser.js"
 
@@ -270,6 +271,7 @@ if node -e "
   const utils = '<script src=\"utils.js\"></script>';
   const mermaidConfig = '<script src=\"mermaid-config.js\"></script>';
   const contextMenu = '<script src=\"context-menu-utils.js\"></script>';
+  const fileHelpersCore = '<script src=\"file-helpers-core.js\"></script>';
   const renderer = '<script src=\"renderer.js\"></script>';
   const customTabs = '<script src=\"custom-tabs.js\"></script>';
   const emojiMapAt = html.indexOf(emojiMap);
@@ -277,6 +279,7 @@ if node -e "
   const utilsAt = html.indexOf(utils);
   const mermaidConfigAt = html.indexOf(mermaidConfig);
   const contextMenuAt = html.indexOf(contextMenu);
+  const fileHelpersCoreAt = html.indexOf(fileHelpersCore);
   const rendererAt = html.indexOf(renderer);
   const customTabsAt = html.indexOf(customTabs);
   process.exit(
@@ -290,18 +293,22 @@ if node -e "
       utilsAt >= 0 &&
       mermaidConfigAt > utilsAt &&
       contextMenuAt > mermaidConfigAt &&
+      fileHelpersCoreAt > contextMenuAt &&
+      rendererAt > fileHelpersCoreAt &&
       rendererAt > contextMenuAt &&
       customTabsAt > contextMenuAt &&
+      customTabsAt > fileHelpersCoreAt &&
       customTabsAt > rendererAt &&
       html.indexOf(mermaidConfig, mermaidConfigAt + mermaidConfig.length) === -1 &&
-      html.indexOf(contextMenu, contextMenuAt + contextMenu.length) === -1
+      html.indexOf(contextMenu, contextMenuAt + contextMenu.length) === -1 &&
+      html.indexOf(fileHelpersCore, fileHelpersCoreAt + fileHelpersCore.length) === -1
       ? 0
       : 1,
   );
 "; then
-  echo "   ✓ emoji-map.js and emoji-parser.js load once before renderer.js; context-menu-utils.js follows mermaid-config.js"
+  echo "   ✓ emoji-map.js and emoji-parser.js load once before renderer.js; context-menu and file helpers precede consumers"
 else
-  echo "   ✗ ORDER: emoji-map.js -> emoji-parser.js -> renderer.js must load once; context-menu-utils.js must follow mermaid-config.js"
+  echo "   ✗ ORDER: loader scripts must load once before their renderer and tab consumers"
   exit 1
 fi
 
@@ -340,6 +347,8 @@ check_build_file "custom-performance.js"
 check_build_file "custom-styles.css"
 check_build_file "mermaid-config.js"
 check_build_file "context-menu-utils.js"
+check_build_file "file-helpers-core.js"
+check_build_file "file-helpers.js"
 check_build_file "emoji-map.js"
 check_build_file "emoji-parser.js"
 

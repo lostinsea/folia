@@ -20,6 +20,10 @@
   if (!window.FoliaContextMenu) {
     throw new Error("FoliaContextMenu must load before custom-tabs.js");
   }
+  if (!window.FoliaFileHelpers) {
+    throw new Error("FoliaFileHelpers must load before custom-tabs.js");
+  }
+  const fileHelpers = window.FoliaFileHelpers;
   const {
     positionContextMenu: positionTabMenu,
     hideContextMenu: hideTabMenuEl,
@@ -1292,25 +1296,7 @@
   // text. Three overlay paths read from disk directly - auto-refresh on tab
   // switch, session restore, and multi-file open - so all three were affected.
   //
-  // Require the real helper rather than re-implementing it - the two copies
-  // would drift on the next upstream change to the wrapping rules.
-  // (nodeIntegration is on, and file-helpers.js only pulls in fs/path.)
-  let fileHelpers = null;
-  try {
-    fileHelpers = require("./file-helpers");
-  } catch (error) {
-    console.error(
-      "[CustomTabs] file-helpers unavailable; falling back to raw reads:",
-      error,
-    );
-  }
-
   function normaliseFileContent(content, filePath) {
-    if (!fileHelpers) {
-      return content && content.charCodeAt(0) === 0xfeff
-        ? content.substring(1)
-        : content;
-    }
     let result = fileHelpers.removeBOM(content);
     result = fileHelpers.wrapMermaidContent(result, filePath);
     return result;
@@ -2392,7 +2378,6 @@
    * @returns {boolean} true if the switch should proceed
    */
   function confirmLargeTab(tab, silent) {
-    if (!fileHelpers || typeof fileHelpers.isLargeDocument !== "function") return true;
     if (largeConfirmed.has(tab.id)) return true;
 
     let verdict;

@@ -1820,6 +1820,7 @@ for (const [profile, want] of Object.entries(CORPUS_DIGEST)) {
 // it here would make npm test a benchmark.
 {
   const fh = require(path.join(__dirname, "..", "src", "file-helpers.js"));
+  const core = require(path.join(__dirname, "..", "src", "file-helpers-core.js"));
 
   check(
     "file-helpers still exports the size-guard estimator",
@@ -1827,6 +1828,27 @@ for (const [profile, want] of Object.entries(CORPUS_DIGEST)) {
       typeof fh.isLargeDocument === "function" &&
       typeof fh.LARGE_DOC_BUDGET_MS === "number",
     "the product's guard is gone or renamed; this axis and the guard's tuning are stale",
+  );
+  check(
+    "file-helpers adapter preserves the browser core estimator without refitting",
+    fh.estimateRenderUnits === core.estimateRenderUnits &&
+      fh.estimateRenderMs === core.estimateRenderMs &&
+      fh.isLargeDocument === core.isLargeDocument &&
+      fh.MS_PER_UNIT === core.MS_PER_UNIT &&
+      fh.FENCED_LINE_DISCOUNT === core.FENCED_LINE_DISCOUNT &&
+      fh.LARGE_DOC_BUDGET_MS === core.LARGE_DOC_BUDGET_MS,
+    JSON.stringify({
+      adapter: {
+        msPerUnit: fh.MS_PER_UNIT,
+        fencedLineDiscount: fh.FENCED_LINE_DISCOUNT,
+        largeDocBudgetMs: fh.LARGE_DOC_BUDGET_MS,
+      },
+      core: {
+        msPerUnit: core.MS_PER_UNIT,
+        fencedLineDiscount: core.FENCED_LINE_DISCOUNT,
+        largeDocBudgetMs: core.LARGE_DOC_BUDGET_MS,
+      },
+    }),
   );
 
   if (typeof fh.estimateRenderUnits === "function") {

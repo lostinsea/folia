@@ -73,6 +73,8 @@ const MERMAID_CFG = path.join(SRC, "mermaid-config.js");
 const CONTEXT_MENU_UTILS = path.join(SRC, "context-menu-utils.js");
 const EMOJI_MAP = path.join(SRC, "emoji-map.js");
 const EMOJI_PARSER = path.join(SRC, "emoji-parser.js");
+const FILE_HELPERS_CORE = path.join(SRC, "file-helpers-core.js");
+const FILE_HELPERS = path.join(SRC, "file-helpers.js");
 // The two vendoring OUTPUTS. Both are gitignored derived artifacts rather than
 // tracked source, which is exactly why they need reverts: nothing in git can
 // notice them drifting, so the only guard is the packaging suite's freshness
@@ -103,6 +105,12 @@ const F22_ACK_EVIDENCE_SUITE = "test:f22-ack-evidence";
 const F22_CTIME_R660_EVIDENCE_SUITE = "test:f22-ctime-r660-evidence";
 const F22_QUEUE_EVIDENCE_SUITE = "test:f22-queue-evidence";
 const SEC08_LOADER_EVIDENCE_SUITE = "test:sec08-loader-evidence";
+const SEC08_FILE_HELPERS_PUBLICATION_EVIDENCE_SUITE =
+  "test:sec08-file-helpers-publication-evidence";
+const SEC08_FILE_HELPERS_DOTFILE_EVIDENCE_SUITE =
+  "test:sec08-file-helpers-dotfile-evidence";
+const SEC08_FILE_HELPERS_MISSING_GLOBAL_EVIDENCE_SUITE =
+  "test:sec08-file-helpers-missing-global-evidence";
 const R660_PROOF_ONLY_SHUTDOWN_TAIL = Object.freeze([
   "Shutdown approval renderer unusable: webContents destroyed",
 ]);
@@ -146,6 +154,18 @@ const VIRTUAL_SUITES = Object.freeze({
   [SEC08_LOADER_EVIDENCE_SUITE]: Object.freeze({
     npmScript: "test:security",
     environment: Object.freeze({ SEC08_LOADER_FOCUSED_HARNESS: "1" }),
+  }),
+  [SEC08_FILE_HELPERS_PUBLICATION_EVIDENCE_SUITE]: Object.freeze({
+    npmScript: "test:security",
+    environment: Object.freeze({ SEC08_FILE_HELPERS_PUBLICATION_HARNESS: "1" }),
+  }),
+  [SEC08_FILE_HELPERS_DOTFILE_EVIDENCE_SUITE]: Object.freeze({
+    npmScript: "test:security",
+    environment: Object.freeze({ SEC08_FILE_HELPERS_DOTFILE_HARNESS: "1" }),
+  }),
+  [SEC08_FILE_HELPERS_MISSING_GLOBAL_EVIDENCE_SUITE]: Object.freeze({
+    npmScript: "test:security",
+    environment: Object.freeze({ SEC08_FILE_HELPERS_MISSING_GLOBAL_HARNESS: "1" }),
   }),
 });
 
@@ -13012,8 +13032,16 @@ const REVERTS = [
           nameVariesWithState:
             "test-packaging.js templates this name from the path under test, so the components/ spelling only exists once the revert is applied",
           file: PKG_TEST,
-          from: '              "libs/prismjs/prism-bundle.js",\n            ]) {',
-          to: '              "libs/prismjs/components/prism-core.min.js",\n            ]) {',
+          from:
+            '              "libs/prismjs/prism-bundle.js",\n' +
+            '              "src/file-helpers-core.js",\n' +
+            '              "src/file-helpers.js",\n' +
+            "            ]) {",
+          to:
+            '              "libs/prismjs/components/prism-core.min.js",\n' +
+            '              "src/file-helpers-core.js",\n' +
+            '              "src/file-helpers.js",\n' +
+            "            ]) {",
           suite: "test:packaging",
           expect: [
             // The assertion NAME is templated from the path, so the revert does
@@ -17133,6 +17161,7 @@ const REVERTS = [
             '    <script src="utils.js"></script>\n' +
             '    <script src="mermaid-config.js"></script>\n' +
             '    <script src="context-menu-utils.js"></script>\n' +
+            '    <script src="file-helpers-core.js"></script>\n' +
             '    <script src="renderer.js"></script>',
           to:
             '    <script src="emoji-map.js"></script>\n' +
@@ -17140,12 +17169,14 @@ const REVERTS = [
             '    <script src="renderer.js"></script>\n' +
             '    <script src="utils.js"></script>\n' +
             '    <script src="mermaid-config.js"></script>\n' +
-            '    <script src="context-menu-utils.js"></script>',
+            '    <script src="context-menu-utils.js"></script>\n' +
+            '    <script src="file-helpers-core.js"></script>',
           suite: "test:packaging",
           expect: [
             /^SEC-08 utils\.js loads exactly once before renderer\.js$/,
             /^SEC-08 mermaid-config\.js loads exactly once between utils\.js and renderer\.js$/,
             /^SEC-08 context-menu-utils\.js loads exactly once after mermaid-config\.js and before both consumers$/,
+            /^SEC-08 file-helpers-core\.js loads exactly once after context-menu-utils\.js and before both consumers$/,
           ],
           mustPass: [
             /^SEC-08 utils\.js is packaged for its classic-script consumer$/,
@@ -17208,6 +17239,7 @@ const REVERTS = [
             '    <script src="utils.js"></script>\n' +
             '    <script src="mermaid-config.js"></script>\n' +
             '    <script src="context-menu-utils.js"></script>\n' +
+            '    <script src="file-helpers-core.js"></script>\n' +
             '    <script src="renderer.js"></script>',
           to:
             '    <script src="emoji-map.js"></script>\n' +
@@ -17215,11 +17247,13 @@ const REVERTS = [
             '    <script src="utils.js"></script>\n' +
             '    <script src="renderer.js"></script>\n' +
             '    <script src="mermaid-config.js"></script>\n' +
-            '    <script src="context-menu-utils.js"></script>',
+            '    <script src="context-menu-utils.js"></script>\n' +
+            '    <script src="file-helpers-core.js"></script>',
           suite: "test:packaging",
           expect: [
             /^SEC-08 mermaid-config\.js loads exactly once between utils\.js and renderer\.js$/,
             /^SEC-08 context-menu-utils\.js loads exactly once after mermaid-config\.js and before both consumers$/,
+            /^SEC-08 file-helpers-core\.js loads exactly once after context-menu-utils\.js and before both consumers$/,
           ],
           mustPass: [
             /^SEC-08 mermaid-config\.js is packaged for its classic-script consumer$/,
@@ -17296,6 +17330,7 @@ const REVERTS = [
             '    <script src="utils.js"></script>\n' +
             '    <script src="mermaid-config.js"></script>\n' +
             '    <script src="context-menu-utils.js"></script>\n' +
+            '    <script src="file-helpers-core.js"></script>\n' +
             '    <script src="renderer.js"></script>',
           to:
             '    <script src="emoji-map.js"></script>\n' +
@@ -17303,10 +17338,12 @@ const REVERTS = [
             '    <script src="utils.js"></script>\n' +
             '    <script src="mermaid-config.js"></script>\n' +
             '    <script src="renderer.js"></script>\n' +
-            '    <script src="context-menu-utils.js"></script>',
+            '    <script src="context-menu-utils.js"></script>\n' +
+            '    <script src="file-helpers-core.js"></script>',
           suite: "test:packaging",
           expect: [
             /^SEC-08 context-menu-utils\.js loads exactly once after mermaid-config\.js and before both consumers$/,
+            /^SEC-08 file-helpers-core\.js loads exactly once after context-menu-utils\.js and before both consumers$/,
           ],
           mustPass: [
             /^SEC-08 mermaid-config\.js loads exactly once between utils\.js and renderer\.js$/,
@@ -17586,6 +17623,152 @@ const REVERTS = [
             /^SEC-08 emoji-parser\.js is packaged for its classic-script renderer$/,
             /^post-upstream-merge\.sh preserves Mermaid loader recovery guards$/,
             /^post-upstream-merge\.sh preserves context-menu loader recovery guards$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R702",
+          what: "withhold FoliaFileHelpers from the no-Node classic-script loader",
+          file: FILE_HELPERS_CORE,
+          from: "if (typeof window !== 'undefined') {",
+          to: "if (typeof window !== 'undefined' && typeof process !== 'undefined') {",
+          suite: SEC08_FILE_HELPERS_PUBLICATION_EVIDENCE_SUITE,
+          expect: [
+            /^SEC-08 classic file-helpers-core script preserves BOM, Mermaid, and estimator behavior$/,
+            /^SEC-08 classic file-helpers-core script follows its browser platform extension rules \(19 cases\)$/,
+          ],
+          mustPass: [
+            /^SEC-08 file-helpers adapter preserves its CommonJS API, reader errors, and IPC payloads$/,
+            /^SEC-08 file-helpers core matches Node extname behavior on Windows and POSIX \(19 cases\)$/,
+            /^SEC-08 classic file-helpers-core script runs without Node globals$/,
+            /^SEC-08 file-helpers loader document reaches its terminal DOM marker$/,
+            /^SEC-08 file-helpers loader error sentinel was demonstrably watching both channels$/,
+            /^SEC-08 file-helpers loader fixture emits no unexpected errors$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R703",
+          what: "load the file-helpers core after both of its classic-script consumers",
+          file: HTML,
+          from:
+            '    <script src="context-menu-utils.js"></script>\n' +
+            '    <script src="file-helpers-core.js"></script>\n' +
+            '    <script src="renderer.js"></script>\n' +
+            '    <script src="custom-tabs.js"></script>',
+          to:
+            '    <script src="context-menu-utils.js"></script>\n' +
+            '    <script src="renderer.js"></script>\n' +
+            '    <script src="custom-tabs.js"></script>\n' +
+            '    <script src="file-helpers-core.js"></script>',
+          suite: "test:packaging",
+          expect: [
+            /^SEC-08 file-helpers-core\.js loads exactly once after context-menu-utils\.js and before both consumers$/,
+          ],
+          mustPass: [
+            /^SEC-08 file-helpers-core\.js is packaged for its classic-script consumers$/,
+            /^SEC-08 file-helpers\.js is packaged for its main-process consumer$/,
+            /^SEC-08 custom-tabs consumes window\.FoliaFileHelpers and fails loudly without a CommonJS fallback$/,
+            /^SEC-08 file-helpers\.js remains a Node adapter over the browser core$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R704",
+          what: "restore custom-tabs' CommonJS file-helper fallback",
+          file: TABS,
+          from: "const fileHelpers = window.FoliaFileHelpers;",
+          to: "const fileHelpers = require(\"./file-helpers\");",
+          suite: "test:packaging",
+          expect: [
+            /^SEC-08 custom-tabs consumes window\.FoliaFileHelpers and fails loudly without a CommonJS fallback$/,
+          ],
+          mustPass: [
+            /^SEC-08 file-helpers-core\.js loads exactly once after context-menu-utils\.js and before both consumers$/,
+            /^SEC-08 file-helpers\.js remains a Node adapter over the browser core$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R705",
+          what: "remove custom-tabs' fail-loud missing FoliaFileHelpers guard",
+          file: TABS,
+          from:
+            "if (!window.FoliaFileHelpers) {\n" +
+            "    throw new Error(\"FoliaFileHelpers must load before custom-tabs.js\");\n" +
+            "  }\n",
+          to: "",
+          suite: SEC08_FILE_HELPERS_MISSING_GLOBAL_EVIDENCE_SUITE,
+          expect: [
+            /^SEC-08 custom-tabs fails loudly when its browser file-helpers core is absent$/,
+            /^SEC-08 custom-tabs missing-global probe suppresses only the expected core error$/,
+          ],
+          mustPass: [
+            /^SEC-08 file-helpers missing-global probe removes and restores the browser core around a fresh custom-tabs load$/,
+            /^SEC-08 file-helpers missing-global sentinel was demonstrably watching both channels$/,
+            /^SEC-08 file-helpers missing-global probe emits no unexpected errors$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R706",
+          what: "stop the Node file-helper adapter from re-exporting the browser core",
+          file: FILE_HELPERS,
+          from: "  ...fileHelpersCore,\n",
+          to: "",
+          suite: "test:packaging",
+          expect: [
+            /^SEC-08 file-helpers\.js remains a Node adapter over the browser core$/,
+          ],
+          mustPass: [
+            /^SEC-08 file-helpers-core\.js loads exactly once after context-menu-utils\.js and before both consumers$/,
+            /^SEC-08 custom-tabs consumes window\.FoliaFileHelpers and fails loudly without a CommonJS fallback$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R707",
+          what: "treat a leading-dot filename as though it had a normal extension",
+          file: FILE_HELPERS_CORE,
+          from: "return dot > 0 && name !== '..' ? name.slice(dot).toLowerCase() : '';",
+          to: "return dot >= 0 && name !== '..' ? name.slice(dot).toLowerCase() : '';",
+          suite: SEC08_FILE_HELPERS_DOTFILE_EVIDENCE_SUITE,
+          expect: [
+            /^SEC-08 file-helpers core matches Node extname behavior on Windows and POSIX \(1 case\)$/,
+            /^SEC-08 classic file-helpers-core script follows its browser platform extension rules \(1 case\)$/,
+          ],
+          mustPass: [
+            /^SEC-08 file-helpers adapter preserves its CommonJS API, reader errors, and IPC payloads$/,
+            /^SEC-08 classic file-helpers-core script runs without Node globals$/,
+            /^SEC-08 file-helpers loader document reaches its terminal DOM marker$/,
+            /^SEC-08 classic file-helpers-core script preserves BOM, Mermaid, and estimator behavior$/,
+            /^SEC-08 file-helpers loader error sentinel was demonstrably watching both channels$/,
+            /^SEC-08 file-helpers loader fixture emits no unexpected errors$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R708",
+          what: "reverse the post-merge file-helper loader ordering guard",
+          file: MERGE_SH,
+          from: "rendererAt > fileHelpersCoreAt &&",
+          to: "rendererAt < fileHelpersCoreAt &&",
+          suite: "test:packaging",
+          expect: [
+            /^post-upstream-merge\.sh preserves file-helpers loader recovery guards$/,
+          ],
+          mustPass: [
+            /^SEC-08 file-helpers-core\.js loads exactly once after context-menu-utils\.js and before both consumers$/,
+            /^SEC-08 custom-tabs consumes window\.FoliaFileHelpers and fails loudly without a CommonJS fallback$/,
+            /^SEC-08 file-helpers\.js is packaged for its main-process consumer$/,
+            /^SEC-08 file-helpers\.js remains a Node adapter over the browser core$/,
           ],
           requireMustPassAssertions: true,
           requireExactFailures: true,

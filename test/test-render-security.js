@@ -14,13 +14,30 @@
 const { app, BrowserWindow } = require("electron");
 const fs = require("fs");
 const path = require("path");
+const vm = require("vm");
 
 // Isolate this suite's userData profile before main.js exists and before the
 // app is ready. See test-userdata-isolation.js.
 require("./test-userdata-isolation");
 
 const SEC08_LOADER_FOCUSED_HARNESS = process.env.SEC08_LOADER_FOCUSED_HARNESS === "1";
-if (!SEC08_LOADER_FOCUSED_HARNESS) require("../src/main.js");
+const SEC08_FILE_HELPERS_FOCUSED_HARNESS =
+  process.env.SEC08_FILE_HELPERS_FOCUSED_HARNESS === "1";
+const SEC08_FILE_HELPERS_PUBLICATION_HARNESS =
+  process.env.SEC08_FILE_HELPERS_PUBLICATION_HARNESS === "1";
+const SEC08_FILE_HELPERS_DOTFILE_HARNESS =
+  process.env.SEC08_FILE_HELPERS_DOTFILE_HARNESS === "1";
+const SEC08_FILE_HELPERS_MISSING_GLOBAL_HARNESS =
+  process.env.SEC08_FILE_HELPERS_MISSING_GLOBAL_HARNESS === "1";
+if (
+  !SEC08_LOADER_FOCUSED_HARNESS &&
+  !SEC08_FILE_HELPERS_FOCUSED_HARNESS &&
+  !SEC08_FILE_HELPERS_PUBLICATION_HARNESS &&
+  !SEC08_FILE_HELPERS_DOTFILE_HARNESS &&
+  !SEC08_FILE_HELPERS_MISSING_GLOBAL_HARNESS
+) {
+  require("../src/main.js");
+}
 
 const dir = require("./test-visual-utils").tempDir("mdv-sec-");
 
@@ -522,6 +539,363 @@ async function runEmojiLoaderProbe() {
       JSON.stringify(sentinelReport),
     );
     if (!loaderWin.isDestroyed()) loaderWin.destroy();
+  }
+}
+
+const FILE_HELPER_EXTENSION_CASES = [
+  "diagram.mmd",
+  "diagram.MMD",
+  "diagram.MeRmAiD",
+  "diagram.mermaid",
+  "document.md",
+  "document.markdown",
+  "document.mdown",
+  "document.mkd",
+  "document.mkdn",
+  ".md",
+  "..mmd",
+  "C:.mmd",
+  "diagram.mmd.",
+  "diagram.mmd/",
+  "diagram.mmd\\",
+  "dir/diagram.mmd",
+  "C:\\docs\\diagram.mmd",
+  "C:\\docs\\.md",
+  "dir.mmd\\plain",
+  "...",
+];
+
+async function runFileHelpersLoaderProbe({
+  includeCore = true,
+  includeMissingGlobal = true,
+  extensionCases = FILE_HELPER_EXTENSION_CASES,
+} = {}) {
+  if (includeCore) {
+  const extensionCaseLabel =
+    `${extensionCases.length} ${extensionCases.length === 1 ? "case" : "cases"}`;
+  const commonJsCore = require("../src/file-helpers-core.js");
+  const commonJsAdapter = require("../src/file-helpers.js");
+  const expectedAdapterKeys = [
+    "FENCED_LINE_DISCOUNT",
+    "LARGE_DOC_BUDGET_MS",
+    "MS_PER_UNIT",
+    "SUPPORTED_EXTENSIONS",
+    "estimateRenderMs",
+    "estimateRenderUnits",
+    "isLargeDocument",
+    "isMarkdownFile",
+    "isMermaidFile",
+    "readMarkdownFile",
+    "removeBOM",
+    "sendIPCResult",
+    "wrapMermaidContent",
+  ];
+  const adapterProbePath = path.join(dir, "file-helpers-loader.mmd");
+  fs.writeFileSync(adapterProbePath, "\uFEFFgraph TD\n  A --> B\n", "utf8");
+  let adapterRead;
+  let adapterError;
+  try {
+    adapterRead = await new Promise((resolve) => {
+      commonJsAdapter.readMarkdownFile(adapterProbePath, (error, content) =>
+        resolve({ error, content }),
+      );
+    });
+    adapterError = await new Promise((resolve) => {
+      commonJsAdapter.readMarkdownFile(
+        path.join(dir, "file-helpers-loader-missing.md"),
+        (error, content) => resolve({ error, content }),
+      );
+    });
+  } finally {
+    fs.unlinkSync(adapterProbePath);
+  }
+  const sent = [];
+  const webContents = {
+    send(channel, payload) {
+      sent.push({ channel, payload });
+    },
+  };
+  commonJsAdapter.sendIPCResult(webContents, "file-helpers-success", true, { value: 1 });
+  commonJsAdapter.sendIPCResult(webContents, "file-helpers-failure", false, { reason: "missing" });
+  check(
+    "SEC-08 file-helpers adapter preserves its CommonJS API, reader errors, and IPC payloads",
+    JSON.stringify(Object.keys(commonJsAdapter).sort()) === JSON.stringify(expectedAdapterKeys) &&
+      Object.keys(commonJsCore).every((key) => commonJsAdapter[key] === commonJsCore[key]) &&
+      adapterRead.error === null &&
+      adapterRead.content === "```mermaid\ngraph TD\n  A --> B\n\n```" &&
+      adapterError.error &&
+      adapterError.error.code === "ENOENT" &&
+      adapterError.content === null &&
+      JSON.stringify(sent) ===
+        JSON.stringify([
+          {
+            channel: "file-helpers-success",
+            payload: { success: true, value: 1 },
+          },
+          {
+            channel: "file-helpers-failure",
+            payload: { success: false, reason: "missing" },
+          },
+        ]),
+    JSON.stringify({
+      adapterKeys: Object.keys(commonJsAdapter).sort(),
+      adapterRead: {
+        code: adapterRead.error && adapterRead.error.code,
+        content: adapterRead.content,
+      },
+      adapterError: {
+        code: adapterError.error && adapterError.error.code,
+        content: adapterError.content,
+      },
+      sent,
+    }),
+  );
+
+  const coreSource = fs.readFileSync(path.join(__dirname, "..", "src", "file-helpers-core.js"), "utf8");
+  const platformResults = ["win32", "linux"].map((platform) => {
+    const module = { exports: {} };
+    vm.runInNewContext(coreSource, {
+      module,
+      process: { platform },
+    }, { filename: `file-helpers-core-${platform}.js` });
+    const pathApi = platform === "win32" ? path.win32 : path.posix;
+    return extensionCases.every((filePath) => {
+      const extension = pathApi.extname(filePath).toLowerCase();
+      return (
+        module.exports.isMermaidFile(filePath) ===
+          [".mmd", ".mermaid"].includes(extension) &&
+        module.exports.isMarkdownFile(filePath) ===
+          [".md", ".markdown", ".mdown", ".mkd", ".mkdn", ".mmd", ".mermaid"].includes(extension)
+      );
+    }) && (() => {
+      try {
+        module.exports.isMermaidFile(42);
+        return false;
+      } catch (error) {
+        return error && error.name === "TypeError";
+      }
+    })();
+  });
+  check(
+  `SEC-08 file-helpers core matches Node extname behavior on Windows and POSIX (${extensionCaseLabel})`,
+    platformResults.every(Boolean),
+    JSON.stringify({ extensionCases, platformResults }),
+  );
+
+  const loaderWin = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+    },
+  });
+  const sentinel = startErrorSentinel(loaderWin, { label: "sec08-file-helpers-loader" });
+
+  try {
+    await loaderWin.loadFile(path.join(__dirname, "fixtures", "file-helpers-loader.html"));
+    const probe = await loaderWin.webContents.executeJavaScript(
+      `(() => {
+        const api = window.FoliaFileHelpers;
+        const terminal = document.getElementById("sec08-file-helpers-loader-terminal");
+        const fence = String.fromCharCode(96).repeat(3);
+        const sample = "# H\\n| a | b |\\n" + fence + "\\n| c | d |\\n" + fence + "\\n";
+        const estimated = api && api.estimateRenderUnits(sample);
+        const large = api && api.isLargeDocument(sample, 0);
+        const cases = ${JSON.stringify(extensionCases)}.map((filePath) => ({
+          filePath,
+          mermaid: api && api.isMermaidFile(filePath),
+          markdown: api && api.isMarkdownFile(filePath),
+        }));
+        return {
+          terminal: terminal && terminal.dataset.status,
+          requireType: typeof window.require,
+          moduleType: typeof window.module,
+          processType: typeof window.process,
+          navigatorPlatform: navigator.platform,
+          apiType: typeof api,
+          bom: api && api.removeBOM("\\uFEFFloader"),
+          mmd: api && api.wrapMermaidContent("graph TD", "diagram.mmd"),
+          markdown: api && api.wrapMermaidContent("# Heading", "document.md"),
+          fenced: api && api.wrapMermaidContent(fence + "mermaid\\ngraph TD\\n" + fence, "diagram.mmd"),
+          constants: api && {
+            msPerUnit: api.MS_PER_UNIT,
+            fencedLineDiscount: api.FENCED_LINE_DISCOUNT,
+            largeDocBudgetMs: api.LARGE_DOC_BUDGET_MS,
+          },
+          estimated,
+          large,
+          cases,
+        };
+      })()`,
+      true,
+    );
+    const browserPath = probe.navigatorPlatform.startsWith("Win") ? path.win32 : path.posix;
+    const expectedBrowserCases = extensionCases.map((filePath) => {
+      const extension = browserPath.extname(filePath).toLowerCase();
+      return {
+        filePath,
+        mermaid: [".mmd", ".mermaid"].includes(extension),
+        markdown: [".md", ".markdown", ".mdown", ".mkd", ".mkdn", ".mmd", ".mermaid"].includes(extension),
+      };
+    });
+    check(
+      "SEC-08 classic file-helpers-core script runs without Node globals",
+      probe.requireType === "undefined" &&
+        probe.moduleType === "undefined" &&
+        probe.processType === "undefined",
+      JSON.stringify(probe),
+    );
+    check(
+      "SEC-08 file-helpers loader document reaches its terminal DOM marker",
+      probe.terminal === "parsed",
+      JSON.stringify(probe),
+    );
+    check(
+      "SEC-08 classic file-helpers-core script preserves BOM, Mermaid, and estimator behavior",
+      probe.apiType === "object" &&
+        probe.bom === "loader" &&
+        probe.mmd === "```mermaid\ngraph TD\n```" &&
+        probe.markdown === "# Heading" &&
+        probe.fenced === "```mermaid\ngraph TD\n```" &&
+        probe.constants &&
+        probe.constants.msPerUnit === 0.047 &&
+        probe.constants.fencedLineDiscount === 0.8 &&
+        probe.constants.largeDocBudgetMs === 10000 &&
+        JSON.stringify(probe.estimated) ===
+          JSON.stringify({ units: 6.6, lines: 6, fencedLines: 3, pipes: 3 }) &&
+        JSON.stringify(probe.large) ===
+          JSON.stringify({ large: true, estimatedMs: 0.3102, units: 6.6 }),
+      JSON.stringify(probe),
+    );
+    check(
+      `SEC-08 classic file-helpers-core script follows its browser platform extension rules (${extensionCaseLabel})`,
+      JSON.stringify(probe.cases) === JSON.stringify(expectedBrowserCases),
+      JSON.stringify({ probe, expectedBrowserCases }),
+    );
+
+    const alive = await proveSentinelAlive(loaderWin, sentinel);
+    check(
+      "SEC-08 file-helpers loader error sentinel was demonstrably watching both channels",
+      alive.console === true && alive.dom === true,
+      JSON.stringify(alive),
+    );
+  } finally {
+    const sentinelReport = await sentinel.stop();
+    check(
+      "SEC-08 file-helpers loader fixture emits no unexpected errors",
+      sentinelReport.hits.length === 0 && sentinelReport.stalls.length === 0,
+      JSON.stringify(sentinelReport),
+    );
+    if (!loaderWin.isDestroyed()) loaderWin.destroy();
+  }
+  }
+
+  if (!includeMissingGlobal) return;
+
+  const missingGlobalWin = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      nodeIntegration: true,
+      contextIsolation: false,
+    },
+  });
+  const missingGlobalSentinel = startErrorSentinel(missingGlobalWin, {
+    label: "sec08-file-helpers-missing-global",
+  });
+  try {
+    await missingGlobalWin.loadFile(path.join(__dirname, "fixtures", "file-helpers-loader.html"));
+    await missingGlobalSentinel.mute("missing FoliaFileHelpers must fail loudly");
+    let missingGlobalSetup;
+    let missingGlobalMute;
+    try {
+      missingGlobalSetup = await missingGlobalWin.webContents.executeJavaScript(
+        `new Promise((resolve) => {
+          const savedCore = window.FoliaFileHelpers;
+          const savedMenu = window.FoliaContextMenu;
+          window.FoliaContextMenu = {
+            positionContextMenu() {},
+            hideContextMenu() {},
+          };
+          delete window.FoliaFileHelpers;
+          const script = document.createElement("script");
+          script.src = "../../src/custom-tabs.js?sec08-missing-file-helpers=" + Date.now();
+          const finish = (event) => {
+            const coreWasAbsent = window.FoliaFileHelpers === undefined;
+            window.FoliaFileHelpers = savedCore;
+            if (savedMenu === undefined) delete window.FoliaContextMenu;
+            else window.FoliaContextMenu = savedMenu;
+            script.remove();
+            resolve({
+              event,
+              coreWasAbsent,
+              coreRestored: window.FoliaFileHelpers === savedCore,
+            });
+          };
+          script.addEventListener("load", () => finish("load"), { once: true });
+          script.addEventListener("error", () => finish("error"), { once: true });
+          document.head.appendChild(script);
+        })`,
+        true,
+      );
+      await missingGlobalSentinel.drain();
+      missingGlobalMute = missingGlobalSentinel.currentMute();
+    } finally {
+      await missingGlobalSentinel.unmute();
+    }
+    const missingGlobalSuppressed = (missingGlobalMute && missingGlobalMute.suppressed) || [];
+    const missingCoreErrors = missingGlobalSuppressed.filter(
+      (entry) =>
+        entry.kind === "console-error" &&
+        entry.detail.includes("FoliaFileHelpers must load before custom-tabs.js"),
+    );
+    check(
+      "SEC-08 file-helpers missing-global probe removes and restores the browser core around a fresh custom-tabs load",
+      missingGlobalSetup &&
+        missingGlobalSetup.event === "load" &&
+        missingGlobalSetup.coreWasAbsent === true &&
+        missingGlobalSetup.coreRestored === true,
+      JSON.stringify(missingGlobalSetup),
+    );
+    check(
+      "SEC-08 custom-tabs fails loudly when its browser file-helpers core is absent",
+      missingCoreErrors.length > 0,
+      JSON.stringify(missingGlobalSuppressed),
+    );
+    check(
+      "SEC-08 custom-tabs missing-global probe suppresses only the expected core error",
+      missingCoreErrors.length > 0 &&
+        missingCoreErrors.length === missingGlobalSuppressed.length,
+      JSON.stringify(missingGlobalSuppressed),
+    );
+    const missingGlobalAlive = await proveSentinelAlive(missingGlobalWin, missingGlobalSentinel);
+    check(
+      "SEC-08 file-helpers missing-global sentinel was demonstrably watching both channels",
+      missingGlobalAlive.console === true && missingGlobalAlive.dom === true,
+      JSON.stringify(missingGlobalAlive),
+    );
+  } finally {
+    const missingGlobalReport = await missingGlobalSentinel.stop();
+    check(
+      "SEC-08 file-helpers missing-global probe emits no unexpected errors",
+      missingGlobalReport.hits.length === 0 && missingGlobalReport.stalls.length === 0,
+      JSON.stringify(missingGlobalReport),
+    );
+    if (!missingGlobalWin.isDestroyed()) missingGlobalWin.destroy();
+  }
+}
+
+async function runFileHelpersFocusedProbe() {
+  const keepAliveWin = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+    },
+  });
+  try {
+    await runFileHelpersLoaderProbe();
+  } finally {
+    if (!keepAliveWin.isDestroyed()) keepAliveWin.destroy();
   }
 }
 
@@ -5319,7 +5693,21 @@ app.whenReady().then(async () => {
   watchdog.unref?.();
 
   try {
-    if (SEC08_LOADER_FOCUSED_HARNESS) {
+    if (SEC08_FILE_HELPERS_MISSING_GLOBAL_HARNESS) {
+      await runFileHelpersLoaderProbe({ includeCore: false });
+    } else if (SEC08_FILE_HELPERS_DOTFILE_HARNESS) {
+      await runFileHelpersLoaderProbe({
+        includeMissingGlobal: false,
+        extensionCases: [".md"],
+      });
+    } else if (SEC08_FILE_HELPERS_PUBLICATION_HARNESS) {
+      await runFileHelpersLoaderProbe({
+        includeMissingGlobal: false,
+        extensionCases: FILE_HELPER_EXTENSION_CASES.filter((filePath) => filePath !== "C:.mmd"),
+      });
+    } else if (SEC08_FILE_HELPERS_FOCUSED_HARNESS) {
+      await runFileHelpersFocusedProbe();
+    } else if (SEC08_LOADER_FOCUSED_HARNESS) {
       await runFocusedLoaderProbes();
     } else {
       await sleep(2500);
@@ -5330,6 +5718,7 @@ app.whenReady().then(async () => {
       await runMermaidConfigLoaderProbe();
       await runContextMenuLoaderProbe();
       await runEmojiLoaderProbe();
+      await runFileHelpersLoaderProbe();
       await win.webContents.executeJavaScript(E2E_SENTINEL);
       await run(win);
     }

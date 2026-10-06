@@ -616,6 +616,7 @@ async function main() {
   const utilsScript = '<script src="utils.js"></script>';
   const mermaidConfigScript = '<script src="mermaid-config.js"></script>';
   const contextMenuScript = '<script src="context-menu-utils.js"></script>';
+  const fileHelpersCoreScript = '<script src="file-helpers-core.js"></script>';
   const rendererScript = '<script src="renderer.js"></script>';
   const customTabsScript = '<script src="custom-tabs.js"></script>';
   const emojiMapScriptAt = indexHtml.indexOf(emojiMapScript);
@@ -623,6 +624,7 @@ async function main() {
   const utilsScriptAt = indexHtml.indexOf(utilsScript);
   const mermaidConfigScriptAt = indexHtml.indexOf(mermaidConfigScript);
   const contextMenuScriptAt = indexHtml.indexOf(contextMenuScript);
+  const fileHelpersCoreScriptAt = indexHtml.indexOf(fileHelpersCoreScript);
   const rendererScriptAt = indexHtml.indexOf(rendererScript);
   const customTabsScriptAt = indexHtml.indexOf(customTabsScript);
   check(
@@ -671,6 +673,23 @@ async function main() {
     contextMenuScriptAt,
     rendererScriptAt,
     customTabsScriptAt,
+    }),
+  );
+  check(
+    "SEC-08 file-helpers-core.js loads exactly once after context-menu-utils.js and before both consumers",
+    contextMenuScriptAt >= 0 &&
+      fileHelpersCoreScriptAt > contextMenuScriptAt &&
+      rendererScriptAt > fileHelpersCoreScriptAt &&
+      customTabsScriptAt > fileHelpersCoreScriptAt &&
+      indexHtml.indexOf(
+        fileHelpersCoreScript,
+        fileHelpersCoreScriptAt + fileHelpersCoreScript.length,
+      ) === -1,
+    JSON.stringify({
+      contextMenuScriptAt,
+      fileHelpersCoreScriptAt,
+      rendererScriptAt,
+      customTabsScriptAt,
     }),
   );
   const rendererSource = stripJsComments(read("src/renderer.js"));
@@ -770,6 +789,54 @@ async function main() {
     JSON.stringify({ contextMenuBinding, contextMenuRequire, rendererContextMenuGuard }),
   );
   const customTabsSource = stripJsComments(read("src/custom-tabs.js"));
+  const fileHelpersCoreSource = stripJsComments(read("src/file-helpers-core.js"));
+  const fileHelpersAdapterSource = stripJsComments(read("src/file-helpers.js"));
+  const fileHelpersCorePackaged = isPackaged(files, "src/file-helpers-core.js");
+  const fileHelpersAdapterPackaged = isPackaged(files, "src/file-helpers.js");
+  const customTabsFileHelpersBinding =
+    /const\s+fileHelpers\s*=\s*window\.FoliaFileHelpers\s*;/.test(customTabsSource);
+  const customTabsFileHelpersRequire =
+    /require\s*\(\s*["'](?:\.\/)?file-helpers(?:\.js)?["']\s*\)/.test(customTabsSource);
+  const customTabsFileHelpersGuard =
+    /if\s*\(\s*!window\.FoliaFileHelpers\s*\)\s*\{\s*throw\s+new\s+Error\s*\(\s*["']FoliaFileHelpers must load before custom-tabs\.js["']\s*\)\s*;\s*\}/.test(
+      customTabsSource,
+    );
+  check(
+    "SEC-08 file-helpers-core.js is packaged for its classic-script consumers",
+    fileHelpersCorePackaged,
+    JSON.stringify({ fileHelpersCorePackaged }),
+  );
+  check(
+    "SEC-08 file-helpers.js is packaged for its main-process consumer",
+    fileHelpersAdapterPackaged,
+    JSON.stringify({ fileHelpersAdapterPackaged }),
+  );
+  check(
+    "SEC-08 custom-tabs consumes window.FoliaFileHelpers and fails loudly without a CommonJS fallback",
+    customTabsFileHelpersBinding &&
+      !customTabsFileHelpersRequire &&
+      customTabsFileHelpersGuard,
+    JSON.stringify({
+      customTabsFileHelpersBinding,
+      customTabsFileHelpersRequire,
+      customTabsFileHelpersGuard,
+    }),
+  );
+  check(
+    "SEC-08 file-helpers.js remains a Node adapter over the browser core",
+    /require\s*\(\s*["']\.\/file-helpers-core["']\s*\)/.test(fileHelpersAdapterSource) &&
+      /readMarkdownFile/.test(fileHelpersAdapterSource) &&
+      /sendIPCResult/.test(fileHelpersAdapterSource) &&
+      /\.\.\.fileHelpersCore/.test(fileHelpersAdapterSource) &&
+      !/require\s*\(/.test(fileHelpersCoreSource),
+    JSON.stringify({
+      adapterRequiresCore: /require\s*\(\s*["']\.\/file-helpers-core["']\s*\)/.test(
+        fileHelpersAdapterSource,
+      ),
+      adapterExportsCore: /\.\.\.fileHelpersCore/.test(fileHelpersAdapterSource),
+      coreRequiresNode: /require\s*\(/.test(fileHelpersCoreSource),
+    }),
+  );
   const customTabsContextMenuBinding =
     /const\s*\{\s*positionContextMenu\s*:\s*positionTabMenu\s*,\s*hideContextMenu\s*:\s*hideTabMenuEl\s*,?\s*\}\s*=\s*window\.FoliaContextMenu\s*;/.test(
       customTabsSource,
@@ -1914,6 +1981,16 @@ async function main() {
         script.includes("rendererAt > contextMenuAt") &&
         script.includes("customTabsAt > contextMenuAt") &&
         script.includes("customTabsAt > rendererAt");
+      const fileHelpersCoreOrderGuard =
+        script.includes(
+          `const fileHelpersCore = '<script src=\\"file-helpers-core.js\\"></script>';`,
+        ) &&
+        script.includes("fileHelpersCoreAt > contextMenuAt") &&
+        script.includes("rendererAt > fileHelpersCoreAt") &&
+        script.includes("customTabsAt > fileHelpersCoreAt") &&
+        script.includes(
+          "html.indexOf(fileHelpersCore, fileHelpersCoreAt + fileHelpersCore.length) === -1",
+        );
       const emojiOrderGuard =
         script.includes(
           `const emojiMap = '<script src=\\"emoji-map.js\\"></script>';`,
@@ -1934,6 +2011,10 @@ async function main() {
         buildFailureGate && /check_build_file "mermaid-config\.js"/.test(script);
       const contextMenuPackageGate =
         buildFailureGate && /check_build_file "context-menu-utils\.js"/.test(script);
+      const fileHelpersCorePackageGate =
+        buildFailureGate &&
+        /check_build_file "file-helpers-core\.js"/.test(script) &&
+        /check_build_file "file-helpers\.js"/.test(script);
       const emojiPackageGate =
         buildFailureGate &&
         /check_build_file "emoji-map\.js"/.test(script) &&
@@ -1965,6 +2046,20 @@ async function main() {
           buildChecks,
           contextMenuOrderGuard,
           contextMenuPackageGate,
+        }),
+      );
+      check(
+        "post-upstream-merge.sh preserves file-helpers loader recovery guards",
+        scriptTags.includes("file-helpers-core.js") &&
+          buildChecks.includes("file-helpers-core.js") &&
+          buildChecks.includes("file-helpers.js") &&
+          fileHelpersCoreOrderGuard &&
+          fileHelpersCorePackageGate,
+        JSON.stringify({
+          scriptTags,
+          buildChecks,
+          fileHelpersCoreOrderGuard,
+          fileHelpersCorePackageGate,
         }),
       );
       check(
@@ -4646,6 +4741,8 @@ async function main() {
               "libs/vendor/mermaid.min.js",
               "libs/vendor/purify.min.js",
               "libs/prismjs/prism-bundle.js",
+              "src/file-helpers-core.js",
+              "src/file-helpers.js",
             ]) {
               check(
                 `${rel} is really inside the built app.asar`,

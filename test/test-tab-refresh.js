@@ -10136,10 +10136,7 @@ async function run(win) {
   const guard = await exec(`
     (async () => {
       const out = {};
-      // NOTE: this require is evaluated in the RENDERER, so it resolves against
-      // the renderer's own directory (beside file-helpers.js), not against this
-      // test file. It stays './' even though this suite lives in test/.
-      const helpers = require('./file-helpers');
+      const helpers = window.FoliaFileHelpers;
       out.bigIsLarge = helpers.isLargeDocument(window.fs.readFileSync(${jsBig}, 'utf8')).large;
       out.smallIsLarge = helpers.isLargeDocument(window.fs.readFileSync(${jsSmall}, 'utf8')).large;
 
@@ -10719,7 +10716,7 @@ async function run(win) {
     batch = await exec(`
     (async () => {
       const out = {};
-      const helpers = require('./file-helpers');
+      const helpers = window.FoliaFileHelpers;
       out.bigIsLarge = helpers.isLargeDocument(window.fs.readFileSync(${JSON.stringify(restoreBigA)}, 'utf8')).large;
       out.smallIsLarge = helpers.isLargeDocument(window.fs.readFileSync(${jsRestoreSmall}, 'utf8')).large;
 

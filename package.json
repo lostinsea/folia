@@ -97,6 +97,7 @@
       "src/mermaid-config.js",
       "src/context-menu-utils.js",
       "src/notification-helpers.js",
+      "src/file-helpers-core.js",
       "src/file-helpers.js",
       "src/emoji-map.js",
       "src/emoji-parser.js",
