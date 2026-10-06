@@ -3404,6 +3404,106 @@ Sol (high) now owns only the four product files
 consumer fallbacks. No product test, no-Node fixture,
 startup verdict, review or integration is claimed at
 this handoff.
+Sol completed the four-file product-only edit in its isolated
+stream: the IIFE preserves CommonJS and publishes
+`FoliaContextMenu`, the local tag precedes both consumers,
+and the renderer and tabs consume that browser global
+without a Node fallback. Independent read-only Opus/Luna
+product checks found no blocking issue; syntax and diff
+checks passed, but no behavior or startup gate is thereby
+proven. Terra now owns the bounded no-Node behavior and
+CommonJS tests, both-consumer packaging/order guards,
+post-merge checks and individually discriminating reverts.
+The new HTML tag also invalidates the contiguous R681/R684
+anchors, which must be repaired without weakening R681's
+original order sensitivity. No test, revert, performance
+verdict or integration is claimed at this role handoff.
+Terra completed the test/automation unit without changing
+Sol's four product files: a real no-Node fixture exercises
+viewport clamping, visibility, hiding, CommonJS parity and
+live error sentinels; packaging and post-merge guards cover
+both consumers and their ordered classic scripts. R681/R684
+retain their original distinct order mutations; R687-R692
+pin the new loader and consumers, including renderer before
+tabs. Terra reported focused no-Node **18/18**, security
+**211/211**, and packaging **322 passed** with two absent-asar
+skips; those pre-landing suite transcripts were not retained.
+All **631** anchors resolved. R680-R691 were individually
+PROVEN in the first retained run; after Luna found a missing
+renderer-before-tabs guard, Terra corrected that gap and
+individually reproved R681/R684/R686/R688/R691 plus new R692.
+The second proof log confirms restored source hashes. Evidence:
+`files/sec08-context-loader-r680-r691-proofs-20261005.log`
+and `files/sec08-context-loader-order-correction-r681-r692-proofs-20261005.log`.
+Three fresh independent Sol/Terra/Luna full-unit reviews agreed
+there is no remaining significant issue. Sol noted the helper
+fixture is not a live right-click UX check; the script-order
+guards and passing tab suite do not amount to visual proof.
+The first predeclared, serial **21-pair** real-file startup
+run passed only the numeric material-regression rule
+(**both >10% and >25 ms** at p50 or p95):
+FCP p50/p95 **936.5/1026.0 -> 943.4/1124.0 ms**,
+load **938.171/1064.835 -> 960.077/1115.381 ms**.
+Its FCP p95 worsened **98.0 ms (+9.552%)**, close to
+the 10% limb, and the candidate's **1979 ms** maximum
+remains in the 42 raw launches. Exclusivity was not
+monitored throughout; a second numeric-pass comparison
+also could not classify helper processes without parentage.
+Both runs and the failed monitor remain retained. The
+third run used the same fixed rule and **21 pairs**,
+scheduled with no other Folia tests, harness, screenshots
+or benchmarks. Preflight found no Electron process;
+an ancestry-based monitor took **78 samples over 70.2
+seconds**, finding no outside Electron or Folia test
+process. Its FCP p50/p95 was **1010.4/1104.8 ->
+1023.8/1120.9 ms** (+13.4/+16.1 ms); load
+**1033.097/1140.885 -> 1037.735/1117.770 ms**
+(+4.638/-23.115 ms). All 42 FCP entries were valid,
+source hashes restored, and the monitored per-unit
+startup gate **PASSED**. This is bounded, noisy
+nonpackaged evidence, not a zero-cost claim: process
+sampling can miss brief competitors and unrelated CPU
+work was not instrumented. See `docs/PERF-AUDIT.md` and
+`files/sec08-context-loader-fcp-lineage-20261005/`.
+The reviewed nine-file stream committed as `7f27df8` and
+landed serially via cherry-pick `b039eb7`. Post-landing,
+security **211/211**, tabs **478/478**, startup **11/11**,
+theme **363/363**, packaging **331 passed, 0 failed** with
+one packaged-update-feed SKIP, and all **631** anchor
+setups passed (retained `files/sec08-context-integrated-*-20261005.log`).
+The packaging run reused an existing asar,
+not a newly built strict artifact. SEC-08 isolation,
+the complete clean-tree release suite and revert inventory, fresh
+strict asar, and viewed screenshots remain open.
+**Next loader design, read-only (2026-10-05).** Opus and
+Luna independently selected the complete
+`emoji-map.js` -> `emoji-parser.js` dependency pair. The
+parser is the remaining non-builtin local renderer import;
+the map is its pure-data prerequisite. Both scripts must
+precede `renderer.js` in dependency order, preserve their
+Node/CommonJS interfaces, and fail loudly if a required
+browser global is missing. This is one coherent unit rather
+than loading the parser without its map. The alternative
+`file-helpers.js` mixes Node `fs`/`path` I/O with
+renderer-used helpers and spans the main process; it needs
+a separate boundary design, not an eager script tag.
+Luna identified R681/R684/R688's contiguous HTML anchors
+as order-sensitive repair work. The integration owner
+created clean `feat/w2-sec08-loader-emoji-20261005` from
+`b039eb7`; no product or test implementation, review or
+performance result is claimed for that stream yet.
+Sol (high) completed only the four product files in the
+isolated emoji stream. IIFE-scoped map and parser retain
+CommonJS, publish `FoliaEmojiMap` and `FoliaEmoji`, and
+the renderer consumes the latter without a Node fallback.
+The script tags load map -> parser -> renderer; emoji data,
+parse behavior and isolation flags are unchanged. Syntax,
+diff and CRLF checks passed; independent Opus/Luna product
+feedback found no blocker. Terra now owns the bounded
+no-Node known/unknown-shortcode fixture, Node parity and
+both render paths, packaging/post-merge order controls
+and individually proven reverts. No targeted suite, revert,
+startup result or integration is claimed at this handoff.
 
 **Order of work is fixed by the audit** (each step independently shippable):
 rebuild the harnesses' renderer access on a test-only preload → give the 6 local

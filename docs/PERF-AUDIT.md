@@ -681,6 +681,87 @@ sources were restored to those candidate bytes. Raw ordered samples,
 source snapshots, logs and the fixed rule are in session
 artifacts `files/sec08-mermaid-loader-fcp-20261005/results.json`.
 
+### SEC-08 context-menu loader — real-file startup check (integration branch)
+
+This unit loads `context-menu-utils.js` as a local classic script
+before both `renderer.js` and `custom-tabs.js`; both consumers now use
+its browser global rather than a Node fallback. The main window
+remains Node-privileged. Before measurement, the material-regression
+rule was fixed as candidate worse by **both >10% and >25 ms** at
+p50 or p95 of entry-to-FCP or entry-to-`did-finish-load`. Each
+comparison used one disposable app path for both variants, swapping only
+the four changed product files from immutable baseline `97e66cc`
+and the reviewed candidate snapshot. On the same AMD EPYC Windows
+11 host (release **10.0.26300**), Electron **43.4.1** / Chromium
+**150.0.7871.224** launched **21 fresh isolated profiles per
+variant** in each run, alternating AB/BA (11 AB, 10 BA).
+Chromium FCP entries use their original timestamps rather than
+the later observation time. No sample was excluded or retried
+within a run.
+
+The first run passed the numeric threshold but did not monitor
+competing processes throughout; it is **not** the acceptance run:
+
+| Entry-to metric | Baseline A p50 / p95 | Candidate B p50 / p95 | B-A p50 / p95 |
+|---|---:|---:|---:|
+| FCP | 936.5 / 1026.0 ms | 943.4 / 1124.0 ms | +6.9 ms (+0.737%) / +98.0 ms (+9.552%) |
+| `did-finish-load` | 938.171 / 1064.835 ms | 960.077 / 1115.381 ms | +21.906 ms (+2.335%) / +50.546 ms (+4.747%) |
+
+**No percentile crossed the predeclared numeric regression rule.**
+The FCP p95 moved close to its 10% limb, and the candidate's
+1979.0 ms maximum FCP (baseline maximum 1301.3 ms) remained in
+the results. In pair 20 (BA), candidate FCP was **1979.0 vs
+979.4 ms** baseline and load **2004.706 vs 970.593 ms**;
+with nearest-rank p95 over 21 samples, that maximum does not
+determine p95. Paired FCP differences spanned
+**-302.6 to +999.6 ms** with median **-15.2 ms** (12/21
+candidate launches faster); load differences spanned
+**-458.238 to +1034.113 ms**, median **+25.791 ms**.
+Its ordered samples and source hashes remain in
+`files/sec08-context-loader-fcp-20261005/results.json`.
+A second retained comparison also passed numerically, but
+its monitor classified Electron helpers without following
+parentage, so it could not establish exclusivity
+(`files/sec08-context-loader-fcp-exclusive-20261005/`).
+Neither prior run was discarded to improve percentiles.
+
+**Acceptance repeat.** The third run used the same baseline,
+candidate bytes, fixed threshold, balanced 21-pair method and
+fresh profiles. The integration owner scheduled no other
+Folia harness, Electron suite, screenshot or benchmark work
+during the run. Preflight saw zero Electron processes; an
+ancestry-based monitor took **78 process samples over 70.2
+seconds**, recording 206 observations of the probe's own
+Electron processes, **zero** unrelated Electron processes and
+**zero** other Folia test or benchmark Node processes. All
+**42/42** launches produced actual buffered FCP entries within
+the 1.8-second bound, with no retry or excluded sample.
+
+| Entry-to metric | Baseline A p50 / p95 | Candidate B p50 / p95 | B-A p50 / p95 |
+|---|---:|---:|---:|
+| FCP | 1010.4 / 1104.8 ms | 1023.8 / 1120.9 ms | +13.4 ms (+1.326%) / +16.1 ms (+1.457%) |
+| `did-finish-load` | 1033.097 / 1140.885 ms | 1037.735 / 1117.770 ms | +4.638 ms (+0.449%) / -23.115 ms (-2.026%) |
+
+**The machine-exclusive per-unit startup gate passes on the
+monitored repeat**, within the repository's no-competing-Folia-work
+scope. Baseline had a **1755.8 ms** maximum FCP (candidate
+maximum **1153.1 ms**), showing how one outlier can move
+between variants. Paired FCP differences spanned **-671.0
+to +158.1 ms**, median **0.0 ms**; load differences spanned
+**-759.486 to +128.575 ms**, median **+5.056 ms**.
+Nearest-rank p95 is still the second-highest of only 21
+launches; this does not establish zero cost or stable tails.
+The process monitor sampled, rather than continuously traced,
+process lifetimes: a brief competitor between samples or
+unrelated CPU work was not instrumented. Its overhead applied
+to both variants. The probe clock starts after process creation;
+the nonpackaged, initially empty window does not cover document
+rendering, compositor presentation, packaged startup or the
+full SEC-08 matrix. Candidate source hashes matched before
+and after, and the disposable app was restored to its candidate
+bytes. Ordered samples, snapshots and the monitor summary are
+in `files/sec08-context-loader-fcp-lineage-20261005/`.
+
 ## Measured and found already fast
 - **Custom tab sync I/O is not the current bottleneck.**
   - `custom-tabs.js:69-111,640`
