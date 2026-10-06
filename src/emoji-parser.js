@@ -3,7 +3,11 @@
  * Example: :star: -> ⭐
  */
 
-const emojiMap = require('./emoji-map');
+(function () {
+const emojiMap = typeof window !== 'undefined' ? window.FoliaEmojiMap : require('./emoji-map');
+if (!emojiMap) {
+  throw new Error('FoliaEmojiMap must load before emoji-parser.js');
+}
 
 /**
  * Replace emoji shortcodes with actual emoji characters
@@ -22,4 +26,11 @@ function parseEmojis(text) {
   });
 }
 
-module.exports = { parseEmojis };
+const emojiParser = { parseEmojis };
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = emojiParser;
+}
+if (typeof window !== 'undefined') {
+  window.FoliaEmoji = emojiParser;
+}
+})();

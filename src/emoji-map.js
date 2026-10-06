@@ -3,6 +3,7 @@
  * Based on GitHub emoji cheat sheet
  */
 
+(function () {
 const emojiMap = {
   // Smileys & People
   'grinning': '😀',
@@ -1264,4 +1265,10 @@ const emojiMap = {
   'black_square_button': '🔲',
 };
 
-module.exports = emojiMap;
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = emojiMap;
+}
+if (typeof window !== 'undefined') {
+  window.FoliaEmojiMap = emojiMap;
+}
+})();

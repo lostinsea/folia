@@ -611,16 +611,31 @@ async function main() {
 
   // 2. Scripts and stylesheets loaded by the renderer document.
   const indexHtml = read("src/index.html");
+  const emojiMapScript = '<script src="emoji-map.js"></script>';
+  const emojiParserScript = '<script src="emoji-parser.js"></script>';
   const utilsScript = '<script src="utils.js"></script>';
   const mermaidConfigScript = '<script src="mermaid-config.js"></script>';
   const contextMenuScript = '<script src="context-menu-utils.js"></script>';
   const rendererScript = '<script src="renderer.js"></script>';
   const customTabsScript = '<script src="custom-tabs.js"></script>';
+  const emojiMapScriptAt = indexHtml.indexOf(emojiMapScript);
+  const emojiParserScriptAt = indexHtml.indexOf(emojiParserScript);
   const utilsScriptAt = indexHtml.indexOf(utilsScript);
   const mermaidConfigScriptAt = indexHtml.indexOf(mermaidConfigScript);
   const contextMenuScriptAt = indexHtml.indexOf(contextMenuScript);
   const rendererScriptAt = indexHtml.indexOf(rendererScript);
   const customTabsScriptAt = indexHtml.indexOf(customTabsScript);
+  check(
+    "SEC-08 emoji-map.js and emoji-parser.js load exactly once in map-to-parser-to-renderer order",
+    emojiMapScriptAt >= 0 &&
+      emojiParserScriptAt > emojiMapScriptAt &&
+      rendererScriptAt > emojiParserScriptAt &&
+      indexHtml.indexOf(emojiMapScript, emojiMapScriptAt + emojiMapScript.length) === -1 &&
+      indexHtml.indexOf(emojiParserScript, emojiParserScriptAt + emojiParserScript.length) ===
+        -1 &&
+      indexHtml.indexOf(rendererScript, rendererScriptAt + rendererScript.length) === -1,
+    JSON.stringify({ emojiMapScriptAt, emojiParserScriptAt, rendererScriptAt }),
+  );
   check(
     "SEC-08 utils.js loads exactly once before renderer.js",
     utilsScriptAt >= 0 &&
@@ -658,12 +673,50 @@ async function main() {
     customTabsScriptAt,
     }),
   );
+  const rendererSource = stripJsComments(read("src/renderer.js"));
+  check(
+    "SEC-08 emoji-map.js is packaged for its classic-script parser",
+    isPackaged(files, "src/emoji-map.js"),
+    JSON.stringify({ packaged: isPackaged(files, "src/emoji-map.js") }),
+  );
+  check(
+    "SEC-08 emoji-parser.js is packaged for its classic-script renderer",
+    isPackaged(files, "src/emoji-parser.js"),
+    JSON.stringify({ packaged: isPackaged(files, "src/emoji-parser.js") }),
+  );
+  const emojiParserSource = stripJsComments(read("src/emoji-parser.js"));
+  const emojiParserBrowserMap =
+    /const\s+emojiMap\s*=\s*typeof\s+window\s*!==\s*["']undefined["']\s*\?\s*window\.FoliaEmojiMap\s*:\s*require\s*\(\s*["']\.\/emoji-map["']\s*\)\s*;/.test(
+      emojiParserSource,
+    );
+  const emojiParserMapGuard =
+    /if\s*\(\s*!emojiMap\s*\)\s*\{\s*throw\s+new\s+Error\s*\(\s*["']FoliaEmojiMap must load before emoji-parser\.js["']\s*\)\s*;\s*\}/.test(
+      emojiParserSource,
+    );
+  check(
+    "SEC-08 emoji parser uses FoliaEmojiMap in browsers, retains Node CommonJS, and fails loudly without the map",
+    emojiParserBrowserMap && emojiParserMapGuard,
+    JSON.stringify({ emojiParserBrowserMap, emojiParserMapGuard }),
+  );
+  const emojiBinding =
+    /const\s*\{\s*parseEmojis\s*\}\s*=\s*window\.FoliaEmoji\s*;/.test(rendererSource);
+  const emojiRequire = /require\s*\(\s*["'](?:\.\/)?emoji-parser(?:\.js)?["']\s*\)/.test(
+    rendererSource,
+  );
+  const rendererEmojiGuard =
+    /if\s*\(\s*!window\.FoliaEmoji\s*\)\s*\{\s*throw\s+new\s+Error\s*\(\s*["']FoliaEmoji must load before renderer\.js["']\s*\)\s*;\s*\}/.test(
+      rendererSource,
+    );
+  check(
+    "SEC-08 renderer consumes window.FoliaEmoji and fails loudly without a CommonJS fallback",
+    emojiBinding && !emojiRequire && rendererEmojiGuard,
+    JSON.stringify({ emojiBinding, emojiRequire, rendererEmojiGuard }),
+  );
   check(
     "SEC-08 utils.js is packaged for its classic-script consumer",
     isPackaged(files, "src/utils.js"),
     JSON.stringify({ packaged: isPackaged(files, "src/utils.js") }),
   );
-  const rendererSource = stripJsComments(read("src/renderer.js"));
   const utilsBinding =
     /const\s*\{\s*removeBOM\s*,\s*getFileName\s*,\s*getDirectory\s*,\s*escapeRegex\s*,\s*formatBytes\s*\}\s*=\s*window\.FoliaUtils\s*;/.test(
       rendererSource,
@@ -1837,13 +1890,13 @@ async function main() {
       check(
         "post-upstream-merge.sh checks are still parseable",
         lineChecks.length >= 6 &&
-          scriptTags.length >= 4 &&
+          scriptTags.length >= 6 &&
           absentTags.length >= 1 &&
-          buildChecks.length >= 10,
+          buildChecks.length >= 12,
         `parsed ${lineChecks.length} check_line (need 6), ` +
-          `${scriptTags.length} check_html_script (need 4), ` +
+          `${scriptTags.length} check_html_script (need 6), ` +
           `${absentTags.length} check_html_absent (need 1), ` +
-          `${buildChecks.length} check_build_file (need 10) - ` +
+          `${buildChecks.length} check_build_file (need 12) - ` +
           "a reformat that breaks this parse would silently disarm every " +
           "assertion below it",
       );
@@ -1861,14 +1914,33 @@ async function main() {
         script.includes("rendererAt > contextMenuAt") &&
         script.includes("customTabsAt > contextMenuAt") &&
         script.includes("customTabsAt > rendererAt");
+      const emojiOrderGuard =
+        script.includes(
+          `const emojiMap = '<script src=\\"emoji-map.js\\"></script>';`,
+        ) &&
+        script.includes(
+          `const emojiParser = '<script src=\\"emoji-parser.js\\"></script>';`,
+        ) &&
+        script.includes("emojiParserAt > emojiMapAt") &&
+        script.includes("rendererAt > emojiParserAt") &&
+        script.includes("html.indexOf(emojiMap, emojiMapAt + emojiMap.length) === -1") &&
+        script.includes(
+          "html.indexOf(emojiParser, emojiParserAt + emojiParser.length) === -1",
+        ) &&
+        script.includes("html.indexOf(renderer, rendererAt + renderer.length) === -1");
+      const buildFailureGate =
+        /if \[ "\$MISSING_BUILD" -eq 1 \]; then[\s\S]*?exit 1\s*\nfi/.test(script);
       const mermaidPackageGate =
-        /check_build_file "mermaid-config\.js"\s*\ncheck_build_file "context-menu-utils\.js"\s*\n\s*\nif \[ "\$MISSING_BUILD" -eq 1 \]; then[\s\S]*?exit 1\s*\nfi/.test(
-          script,
-        );
+        buildFailureGate && /check_build_file "mermaid-config\.js"/.test(script);
       const contextMenuPackageGate =
-        /check_build_file "context-menu-utils\.js"\s*\n\s*\nif \[ "\$MISSING_BUILD" -eq 1 \]; then[\s\S]*?exit 1\s*\nfi/.test(
-          script,
-        );
+        buildFailureGate && /check_build_file "context-menu-utils\.js"/.test(script);
+      const emojiPackageGate =
+        buildFailureGate &&
+        /check_build_file "emoji-map\.js"/.test(script) &&
+        /check_build_file "emoji-parser\.js"/.test(script);
+      const buildFileExclusionsWin =
+        script.includes("const excluded = entry.startsWith('!');") &&
+        script.includes("if (pattern.includes('$filename')) found = !excluded;");
       check(
         "post-upstream-merge.sh preserves Mermaid loader recovery guards",
         scriptTags.includes("mermaid-config.js") &&
@@ -1893,6 +1965,23 @@ async function main() {
           buildChecks,
           contextMenuOrderGuard,
           contextMenuPackageGate,
+        }),
+      );
+      check(
+        "post-upstream-merge.sh preserves emoji loader recovery guards",
+        scriptTags.includes("emoji-map.js") &&
+          scriptTags.includes("emoji-parser.js") &&
+          buildChecks.includes("emoji-map.js") &&
+          buildChecks.includes("emoji-parser.js") &&
+          emojiOrderGuard &&
+          emojiPackageGate &&
+          buildFileExclusionsWin,
+        JSON.stringify({
+          scriptTags,
+          buildChecks,
+          emojiOrderGuard,
+          emojiPackageGate,
+          buildFileExclusionsWin,
         }),
       );
 

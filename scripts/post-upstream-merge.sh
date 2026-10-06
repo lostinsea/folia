@@ -108,7 +108,13 @@ check_build_file() {
   if node -e "
     const pkg = require('./package.json');
     const files = pkg.build && pkg.build.files || [];
-    const found = files.some(f => typeof f === 'string' && f.includes('$filename'));
+    let found = false;
+    for (const entry of files) {
+      if (typeof entry !== 'string') continue;
+      const excluded = entry.startsWith('!');
+      const pattern = (excluded ? entry.slice(1) : entry).replace(/\\\\/g, '/');
+      if (pattern.includes('$filename')) found = !excluded;
+    }
     process.exit(found ? 0 : 1);
   " 2>/dev/null; then
     echo "   ✓ $filename present in build.files"
@@ -253,22 +259,35 @@ check_html_script "custom-performance.js"
 check_html_script "utils.js"
 check_html_script "mermaid-config.js"
 check_html_script "context-menu-utils.js"
+check_html_script "emoji-map.js"
+check_html_script "emoji-parser.js"
 
 if node -e "
   const fs = require('fs');
   const html = fs.readFileSync('src/index.html', 'utf8');
+  const emojiMap = '<script src=\"emoji-map.js\"></script>';
+  const emojiParser = '<script src=\"emoji-parser.js\"></script>';
   const utils = '<script src=\"utils.js\"></script>';
   const mermaidConfig = '<script src=\"mermaid-config.js\"></script>';
   const contextMenu = '<script src=\"context-menu-utils.js\"></script>';
   const renderer = '<script src=\"renderer.js\"></script>';
   const customTabs = '<script src=\"custom-tabs.js\"></script>';
+  const emojiMapAt = html.indexOf(emojiMap);
+  const emojiParserAt = html.indexOf(emojiParser);
   const utilsAt = html.indexOf(utils);
   const mermaidConfigAt = html.indexOf(mermaidConfig);
   const contextMenuAt = html.indexOf(contextMenu);
   const rendererAt = html.indexOf(renderer);
   const customTabsAt = html.indexOf(customTabs);
   process.exit(
-    utilsAt >= 0 &&
+    emojiMapAt >= 0 &&
+      emojiParserAt > emojiMapAt &&
+      utilsAt > emojiParserAt &&
+      rendererAt > emojiParserAt &&
+      html.indexOf(emojiMap, emojiMapAt + emojiMap.length) === -1 &&
+      html.indexOf(emojiParser, emojiParserAt + emojiParser.length) === -1 &&
+      html.indexOf(renderer, rendererAt + renderer.length) === -1 &&
+      utilsAt >= 0 &&
       mermaidConfigAt > utilsAt &&
       contextMenuAt > mermaidConfigAt &&
       rendererAt > contextMenuAt &&
@@ -280,9 +299,9 @@ if node -e "
       : 1,
   );
 "; then
-  echo "   ✓ context-menu-utils.js loads once after mermaid-config.js and before both consumers"
+  echo "   ✓ emoji-map.js and emoji-parser.js load once before renderer.js; context-menu-utils.js follows mermaid-config.js"
 else
-  echo "   ✗ ORDER: context-menu-utils.js must load once after mermaid-config.js and before both consumers"
+  echo "   ✗ ORDER: emoji-map.js -> emoji-parser.js -> renderer.js must load once; context-menu-utils.js must follow mermaid-config.js"
   exit 1
 fi
 
@@ -321,6 +340,8 @@ check_build_file "custom-performance.js"
 check_build_file "custom-styles.css"
 check_build_file "mermaid-config.js"
 check_build_file "context-menu-utils.js"
+check_build_file "emoji-map.js"
+check_build_file "emoji-parser.js"
 
 if [ "$MISSING_BUILD" -eq 1 ]; then
   echo "   ✗ One or more required customizations are missing from build.files"

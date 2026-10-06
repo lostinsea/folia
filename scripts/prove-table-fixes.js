@@ -71,6 +71,8 @@ const THEME_JS = path.join(SRC, "custom-theme.js");
 const PKG_TEST = path.join(ROOT, "test", "test-packaging.js");
 const MERMAID_CFG = path.join(SRC, "mermaid-config.js");
 const CONTEXT_MENU_UTILS = path.join(SRC, "context-menu-utils.js");
+const EMOJI_MAP = path.join(SRC, "emoji-map.js");
+const EMOJI_PARSER = path.join(SRC, "emoji-parser.js");
 // The two vendoring OUTPUTS. Both are gitignored derived artifacts rather than
 // tracked source, which is exactly why they need reverts: nothing in git can
 // notice them drifting, so the only guard is the packaging suite's freshness
@@ -17126,11 +17128,15 @@ const REVERTS = [
           what: "load renderer.js before its FoliaUtils classic-script dependency",
           file: HTML,
           from:
+            '    <script src="emoji-map.js"></script>\n' +
+            '    <script src="emoji-parser.js"></script>\n' +
             '    <script src="utils.js"></script>\n' +
             '    <script src="mermaid-config.js"></script>\n' +
             '    <script src="context-menu-utils.js"></script>\n' +
             '    <script src="renderer.js"></script>',
           to:
+            '    <script src="emoji-map.js"></script>\n' +
+            '    <script src="emoji-parser.js"></script>\n' +
             '    <script src="renderer.js"></script>\n' +
             '    <script src="utils.js"></script>\n' +
             '    <script src="mermaid-config.js"></script>\n' +
@@ -17197,11 +17203,15 @@ const REVERTS = [
           what: "load renderer.js before its FoliaMermaidConfig classic-script dependency",
           file: HTML,
           from:
+            '    <script src="emoji-map.js"></script>\n' +
+            '    <script src="emoji-parser.js"></script>\n' +
             '    <script src="utils.js"></script>\n' +
             '    <script src="mermaid-config.js"></script>\n' +
             '    <script src="context-menu-utils.js"></script>\n' +
             '    <script src="renderer.js"></script>',
           to:
+            '    <script src="emoji-map.js"></script>\n' +
+            '    <script src="emoji-parser.js"></script>\n' +
             '    <script src="utils.js"></script>\n' +
             '    <script src="renderer.js"></script>\n' +
             '    <script src="mermaid-config.js"></script>\n' +
@@ -17281,10 +17291,16 @@ const REVERTS = [
           what: "load context-menu-utils.js after its renderer consumer",
           file: HTML,
           from:
+            '    <script src="emoji-map.js"></script>\n' +
+            '    <script src="emoji-parser.js"></script>\n' +
+            '    <script src="utils.js"></script>\n' +
             '    <script src="mermaid-config.js"></script>\n' +
             '    <script src="context-menu-utils.js"></script>\n' +
             '    <script src="renderer.js"></script>',
           to:
+            '    <script src="emoji-map.js"></script>\n' +
+            '    <script src="emoji-parser.js"></script>\n' +
+            '    <script src="utils.js"></script>\n' +
             '    <script src="mermaid-config.js"></script>\n' +
             '    <script src="renderer.js"></script>\n' +
             '    <script src="context-menu-utils.js"></script>',
@@ -17374,6 +17390,202 @@ const REVERTS = [
             /^SEC-08 context-menu-utils\.js is packaged for its classic-script consumers$/,
             /^SEC-08 renderer consumes window\.FoliaContextMenu and fails loudly without a CommonJS fallback$/,
             /^SEC-08 custom-tabs consumes window\.FoliaContextMenu and fails loudly without a CommonJS fallback$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R693",
+          what: "publish FoliaEmojiMap only when a renderer still has Node",
+          file: EMOJI_MAP,
+          from: "if (typeof window !== 'undefined') {",
+          to: "if (typeof window !== 'undefined' && typeof process !== 'undefined') {",
+          suite: SEC08_LOADER_EVIDENCE_SUITE,
+          expect: [
+            /^SEC-08 classic emoji scripts publish FoliaEmojiMap and FoliaEmoji$/,
+            /^SEC-08 classic emoji parser converts known shortcodes and preserves unknown shortcodes$/,
+            /^SEC-08 emoji loader fixture emits no unexpected errors$/,
+          ],
+          mustPass: [
+            /^SEC-08 emoji map and parser preserve their CommonJS behavior$/,
+            /^SEC-08 classic emoji scripts run without Node globals$/,
+            /^SEC-08 emoji loader document reaches its terminal DOM marker$/,
+            /^SEC-08 emoji loader error sentinel was demonstrably watching both channels$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R694",
+          what: "restore the parser's unconditional Node require instead of its browser map selection",
+          file: EMOJI_PARSER,
+          from:
+            "const emojiMap = typeof window !== 'undefined' ? window.FoliaEmojiMap : require('./emoji-map');",
+          to: "const emojiMap = require('./emoji-map');",
+          suite: "test:packaging",
+          expect: [
+            /^SEC-08 emoji parser uses FoliaEmojiMap in browsers, retains Node CommonJS, and fails loudly without the map$/,
+          ],
+          mustPass: [
+            /^SEC-08 emoji-map\.js and emoji-parser\.js load exactly once in map-to-parser-to-renderer order$/,
+            /^SEC-08 emoji-map\.js is packaged for its classic-script parser$/,
+            /^SEC-08 emoji-parser\.js is packaged for its classic-script renderer$/,
+            /^SEC-08 renderer consumes window\.FoliaEmoji and fails loudly without a CommonJS fallback$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R695",
+          what: "remove the parser's fail-loud guard for an absent browser emoji map",
+          file: EMOJI_PARSER,
+          from:
+            "if (!emojiMap) {\n" +
+            "  throw new Error('FoliaEmojiMap must load before emoji-parser.js');\n" +
+            "}\n",
+          to: "",
+          suite: SEC08_LOADER_EVIDENCE_SUITE,
+          expect: [
+            /^SEC-08 emoji parser fails loudly when its browser map is absent$/,
+          ],
+          mustPass: [
+            /^SEC-08 emoji map and parser preserve their CommonJS behavior$/,
+            /^SEC-08 classic emoji scripts run without Node globals$/,
+            /^SEC-08 emoji loader document reaches its terminal DOM marker$/,
+            /^SEC-08 classic emoji scripts publish FoliaEmojiMap and FoliaEmoji$/,
+            /^SEC-08 classic emoji parser converts known shortcodes and preserves unknown shortcodes$/,
+            /^SEC-08 emoji missing-map probe removes and restores the browser map around a fresh parser load$/,
+            /^SEC-08 emoji loader error sentinel was demonstrably watching both channels$/,
+            /^SEC-08 emoji loader fixture emits no unexpected errors$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R696",
+          what: "load emoji-parser.js before its FoliaEmojiMap classic-script dependency",
+          file: HTML,
+          from:
+            '    <script src="emoji-map.js"></script>\n' +
+            '    <script src="emoji-parser.js"></script>\n' +
+            '    <script src="utils.js"></script>',
+          to:
+            '    <script src="emoji-parser.js"></script>\n' +
+            '    <script src="emoji-map.js"></script>\n' +
+            '    <script src="utils.js"></script>',
+          suite: "test:packaging",
+          expect: [
+            /^SEC-08 emoji-map\.js and emoji-parser\.js load exactly once in map-to-parser-to-renderer order$/,
+          ],
+          mustPass: [
+            /^SEC-08 emoji-map\.js is packaged for its classic-script parser$/,
+            /^SEC-08 emoji-parser\.js is packaged for its classic-script renderer$/,
+            /^SEC-08 emoji parser uses FoliaEmojiMap in browsers, retains Node CommonJS, and fails loudly without the map$/,
+            /^SEC-08 renderer consumes window\.FoliaEmoji and fails loudly without a CommonJS fallback$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R697",
+          what: "duplicate emoji-parser.js so the order check accepts a non-singleton loader",
+          file: HTML,
+          from:
+            '    <script src="emoji-map.js"></script>\n' +
+            '    <script src="emoji-parser.js"></script>\n' +
+            '    <script src="utils.js"></script>',
+          to:
+            '    <script src="emoji-map.js"></script>\n' +
+            '    <script src="emoji-parser.js"></script>\n' +
+            '    <script src="emoji-parser.js"></script>\n' +
+            '    <script src="utils.js"></script>',
+          suite: "test:packaging",
+          expect: [
+            /^SEC-08 emoji-map\.js and emoji-parser\.js load exactly once in map-to-parser-to-renderer order$/,
+          ],
+          mustPass: [
+            /^SEC-08 emoji-map\.js is packaged for its classic-script parser$/,
+            /^SEC-08 emoji-parser\.js is packaged for its classic-script renderer$/,
+            /^SEC-08 emoji parser uses FoliaEmojiMap in browsers, retains Node CommonJS, and fails loudly without the map$/,
+            /^SEC-08 renderer consumes window\.FoliaEmoji and fails loudly without a CommonJS fallback$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R698",
+          what: "restore renderer's CommonJS emoji-parser fallback instead of consuming FoliaEmoji",
+          file: RENDERER,
+          from: "const { parseEmojis } = window.FoliaEmoji;",
+          to: "const { parseEmojis } = require('./emoji-parser');",
+          suite: "test:packaging",
+          expect: [
+            /^SEC-08 renderer consumes window\.FoliaEmoji and fails loudly without a CommonJS fallback$/,
+          ],
+          mustPass: [
+            /^SEC-08 emoji-map\.js and emoji-parser\.js load exactly once in map-to-parser-to-renderer order$/,
+            /^SEC-08 emoji parser uses FoliaEmojiMap in browsers, retains Node CommonJS, and fails loudly without the map$/,
+            /^SEC-08 emoji-parser\.js is packaged for its classic-script renderer$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R699",
+          what: "remove renderer's fail-loud missing FoliaEmoji guard",
+          file: RENDERER,
+          from:
+            "if (!window.FoliaEmoji) {\n" +
+            "  throw new Error('FoliaEmoji must load before renderer.js');\n" +
+            "}\n",
+          to: "",
+          suite: "test:packaging",
+          expect: [
+            /^SEC-08 renderer consumes window\.FoliaEmoji and fails loudly without a CommonJS fallback$/,
+          ],
+          mustPass: [
+            /^SEC-08 emoji-map\.js and emoji-parser\.js load exactly once in map-to-parser-to-renderer order$/,
+            /^SEC-08 emoji parser uses FoliaEmojiMap in browsers, retains Node CommonJS, and fails loudly without the map$/,
+            /^SEC-08 emoji-parser\.js is packaged for its classic-script renderer$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R700",
+          what: "reverse the post-merge emoji loader ordering guard",
+          file: MERGE_SH,
+          from: "emojiParserAt > emojiMapAt &&",
+          to: "emojiParserAt < emojiMapAt &&",
+          suite: "test:packaging",
+          expect: [
+            /^post-upstream-merge\.sh preserves emoji loader recovery guards$/,
+          ],
+          mustPass: [
+            /^SEC-08 emoji-map\.js and emoji-parser\.js load exactly once in map-to-parser-to-renderer order$/,
+            /^SEC-08 emoji-map\.js is packaged for its classic-script parser$/,
+            /^SEC-08 emoji-parser\.js is packaged for its classic-script renderer$/,
+            /^SEC-08 renderer consumes window\.FoliaEmoji and fails loudly without a CommonJS fallback$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R701",
+          what: "let a post-merge build-file exclusion count as a packaged emoji loader",
+          file: MERGE_SH,
+          from: "if (pattern.includes('$filename')) found = !excluded;",
+          to: "if (pattern.includes('$filename')) found = true;",
+          suite: "test:packaging",
+          expect: [
+            /^post-upstream-merge\.sh preserves emoji loader recovery guards$/,
+          ],
+          mustPass: [
+            /^SEC-08 emoji-map\.js and emoji-parser\.js load exactly once in map-to-parser-to-renderer order$/,
+            /^SEC-08 emoji-map\.js is packaged for its classic-script parser$/,
+            /^SEC-08 emoji-parser\.js is packaged for its classic-script renderer$/,
+            /^post-upstream-merge\.sh preserves Mermaid loader recovery guards$/,
+            /^post-upstream-merge\.sh preserves context-menu loader recovery guards$/,
           ],
           requireMustPassAssertions: true,
           requireExactFailures: true,

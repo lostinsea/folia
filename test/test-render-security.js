@@ -380,6 +380,151 @@ async function runContextMenuLoaderProbe() {
   }
 }
 
+async function runEmojiLoaderProbe() {
+  const commonJsEmojiMap = require("../src/emoji-map.js");
+  const commonJsEmoji = require("../src/emoji-parser.js");
+  const commonJsKnown = commonJsEmoji.parseEmojis("Known :star:");
+  const commonJsUnknown = commonJsEmoji.parseEmojis("Unknown :notanemoji_xyz:");
+  check(
+    "SEC-08 emoji map and parser preserve their CommonJS behavior",
+    commonJsEmojiMap.star === "\u2b50" &&
+      JSON.stringify(Object.keys(commonJsEmoji).sort()) === JSON.stringify(["parseEmojis"]) &&
+      commonJsKnown === "Known \u2b50" &&
+      commonJsUnknown === "Unknown :notanemoji_xyz:",
+    JSON.stringify({
+      star: commonJsEmojiMap.star,
+      keys: Object.keys(commonJsEmoji).sort(),
+      commonJsKnown,
+      commonJsUnknown,
+    }),
+  );
+
+  const loaderWin = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+    },
+  });
+  const sentinel = startErrorSentinel(loaderWin, { label: "sec08-emoji-loader" });
+
+  try {
+    await loaderWin.loadFile(path.join(__dirname, "fixtures", "emoji-loader.html"));
+    const probe = await loaderWin.webContents.executeJavaScript(
+      `(() => {
+        const map = window.FoliaEmojiMap;
+        const api = window.FoliaEmoji;
+        const terminal = document.getElementById("sec08-emoji-loader-terminal");
+        return {
+          terminal: terminal && terminal.dataset.status,
+          requireType: typeof window.require,
+          moduleType: typeof window.module,
+          processType: typeof window.process,
+          mapType: typeof map,
+          parserType: typeof api,
+          mapStar: map && map.star,
+          parserKeys: api && Object.keys(api).sort(),
+          known: api && api.parseEmojis("Known :star:"),
+          unknown: api && api.parseEmojis("Unknown :notanemoji_xyz:"),
+        };
+      })()`,
+      true,
+    );
+    check(
+      "SEC-08 classic emoji scripts run without Node globals",
+      probe.requireType === "undefined" &&
+        probe.moduleType === "undefined" &&
+        probe.processType === "undefined",
+      JSON.stringify(probe),
+    );
+    check(
+      // This marker belongs to the static fixture, so it remains an
+      // independent setup control when either classic script fails to load.
+      "SEC-08 emoji loader document reaches its terminal DOM marker",
+      probe.terminal === "parsed",
+      JSON.stringify(probe),
+    );
+    check(
+      "SEC-08 classic emoji scripts publish FoliaEmojiMap and FoliaEmoji",
+      probe.mapType === "object" &&
+        probe.parserType === "object" &&
+        probe.mapStar === "\u2b50" &&
+        JSON.stringify(probe.parserKeys) === JSON.stringify(["parseEmojis"]),
+      JSON.stringify(probe),
+    );
+    check(
+      "SEC-08 classic emoji parser converts known shortcodes and preserves unknown shortcodes",
+      probe.known === "Known \u2b50" && probe.unknown === "Unknown :notanemoji_xyz:",
+      JSON.stringify(probe),
+    );
+
+    await sentinel.mute("missing FoliaEmojiMap must fail loudly");
+    let missingMapSetup;
+    let missingMapMute;
+    try {
+      missingMapSetup = await loaderWin.webContents.executeJavaScript(
+        `new Promise((resolve) => {
+          const savedMap = window.FoliaEmojiMap;
+          delete window.FoliaEmojiMap;
+          const script = document.createElement("script");
+          script.src = "../../src/emoji-parser.js?sec08-missing-map=" + Date.now();
+          const finish = (event) => {
+            const mapWasAbsent = window.FoliaEmojiMap === undefined;
+            window.FoliaEmojiMap = savedMap;
+            script.remove();
+            resolve({
+              event,
+              mapWasAbsent,
+              mapRestored: window.FoliaEmojiMap === savedMap,
+            });
+          };
+          script.addEventListener("load", () => finish("load"), { once: true });
+          script.addEventListener("error", () => finish("error"), { once: true });
+          document.head.appendChild(script);
+        })`,
+        true,
+      );
+      await sentinel.drain();
+      missingMapMute = sentinel.currentMute();
+    } finally {
+      await sentinel.unmute();
+    }
+    const missingMapSuppressed = (missingMapMute && missingMapMute.suppressed) || [];
+    check(
+      "SEC-08 emoji missing-map probe removes and restores the browser map around a fresh parser load",
+      missingMapSetup &&
+        missingMapSetup.event === "load" &&
+        missingMapSetup.mapWasAbsent === true &&
+        missingMapSetup.mapRestored === true,
+      JSON.stringify(missingMapSetup),
+    );
+    check(
+      "SEC-08 emoji parser fails loudly when its browser map is absent",
+      missingMapSuppressed.some(
+        (entry) =>
+          entry.kind === "console-error" &&
+          entry.detail.includes("FoliaEmojiMap must load before emoji-parser.js"),
+      ),
+      JSON.stringify(missingMapSuppressed),
+    );
+
+    const alive = await proveSentinelAlive(loaderWin, sentinel);
+    check(
+      "SEC-08 emoji loader error sentinel was demonstrably watching both channels",
+      alive.console === true && alive.dom === true,
+      JSON.stringify(alive),
+    );
+  } finally {
+    const sentinelReport = await sentinel.stop();
+    check(
+      "SEC-08 emoji loader fixture emits no unexpected errors",
+      sentinelReport.hits.length === 0 && sentinelReport.stalls.length === 0,
+      JSON.stringify(sentinelReport),
+    );
+    if (!loaderWin.isDestroyed()) loaderWin.destroy();
+  }
+}
+
 async function runFocusedLoaderProbes() {
   // Without main.js, Electron exits as soon as a probe destroys its only
   // BrowserWindow. Keep this no-Node window alive until both independent
@@ -395,6 +540,7 @@ async function runFocusedLoaderProbes() {
     await runUtilsLoaderProbe();
     await runMermaidConfigLoaderProbe();
     await runContextMenuLoaderProbe();
+    await runEmojiLoaderProbe();
   } finally {
     if (!keepAliveWin.isDestroyed()) keepAliveWin.destroy();
   }
@@ -5183,6 +5329,7 @@ app.whenReady().then(async () => {
       await runUtilsLoaderProbe();
       await runMermaidConfigLoaderProbe();
       await runContextMenuLoaderProbe();
+      await runEmojiLoaderProbe();
       await win.webContents.executeJavaScript(E2E_SENTINEL);
       await run(win);
     }
