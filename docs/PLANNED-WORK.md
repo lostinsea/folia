@@ -3719,6 +3719,145 @@ existing independent disk-adoption attestation; preserve the
 current unguarded-extra behavior rather than silently adding
 per-extra main-process modals. This is design evidence only:
 no extra-file IPC migration or main-window isolation has landed.
+An isolated clean stream `feat/w2-sec08-dialog-extras-20261005`
+started from `a917faf`. Terra's first baseline could not exercise
+the intended scenario: the new worktree lacked the generated,
+gitignored `libs/vendor/` and `fonts/` runtime assets (and initially
+had no Electron dependency link), so renderer bootstrap failed
+before the multi-select tests. After linking the existing dependency
+tree and running `npm run vendor` in that worktree, the unchanged
+targeted baselines passed tabs **478/478** and security **233/233**
+with no competing Electron process. The initial failures are not
+product regressions (`files/sec08-dialog-ipc-20261005/`).
+Sol (high) now owns only the dialog-selected extra-file product
+slice; Terra owns the subsequent targeted tests and independent
+revert proofs. No implementation, changed-suite verdict, benchmark
+or integration is claimed at this handoff.
+Sol changed only `src/main.js` and `src/custom-tabs.js` in the
+isolated stream: main retains each extra path and issues an opaque,
+single-use read grant with the delivered dialog batch. Its handler
+checks the main frame, page identity and batch before and after the
+asynchronous stable read; a failed newer open leaves the active
+batch alone, while a delivered newer open or page replacement
+retires it. Tabs now invoke this read sequentially before their
+independent disk-adoption attestation and suppress an error toast
+if another delivered open overtakes the batch mid-read. The primary
+dialog path, open-time size guard and other synchronous snapshot
+callers are unchanged. Both product files passed `node --check`;
+no changed-product Electron test, revert proof, performance verdict
+or review is claimed. Terra now owns bounded targeted tests and
+individually discriminating proofs, with any product defect
+returned to Sol.
+Terra added bounded real-main multi-select coverage in
+`test/test-tab-refresh.js` and two individual R710/R711
+records in the revert harness. An initial changed tabs run
+was reported green without a retained transcript. R710
+rejected a replayed grant; R711 initially reported `PROVEN`
+after restoring renderer-side reads, but the first review
+round later found its downstream failure non-discriminating.
+Those initial verdicts did not close the proof gate.
+The scenarios exercise ordered main-owned reads, the absence
+of extra open-time modals, forged/replayed grants, failure
+continuation, failed-later-open preservation and superseded
+held reads. This is isolated-stream evidence only; fresh
+independent full-unit review, cross-suites, performance
+comparison and integration are still pending.
+The first fresh independent Sol/Terra/Luna full-unit round
+found no product defect. Sol and Terra agreed the R711
+renderer-read revert was not a discriminating proof: its
+mutated snapshot lacked `path`, so an unrelated shape
+guard could fail instead, and unlisted collateral failures
+were not excluded. Terra also called out R710's missing
+exact-failure guard. Sol separately found the supersession
+scenario held the renderer invoke before main began reading,
+so it never exercised main's post-read batch check. Luna
+reported no blocker. Sol validated that a held second
+`fs.stat` callback in main's stable read is a narrow way
+to test that missing boundary. Terra owns these bounded
+test/proof corrections; the first review round does not
+close the unit or authorize integration.
+Terra's corrected R710/R711 each requires exactly its one
+intended failure with independent passing controls: R711
+now injects a renderer disk read without breaking the normal
+main-granted snapshot or the batch's shape. A narrow
+main-process test also holds the stable read's second
+`fs.stat` callback after grant consumption, delivers a
+newer open, then verifies the pending IPC rejects the
+superseded batch; R712 reverses the post-read check and
+fails that assertion alone. The final isolated tabs run
+passed **491/491** and R710/R711/R712 were individually
+**PROVEN** with source restored; the anchor audit resolved
+(`files/sec08-dialog-ipc-20261005/`). One intermediate tabs
+run had **488/489** on the existing F22 updater identity
+assertion; intermediate R711/R712 proof attempts also
+reported `COLLATERAL` before their exact-failure corrections.
+The final clean runs passed. Fresh independent
+full-unit re-review, the per-unit performance comparison,
+serialized integration and release gates remain open.
+In the second fresh Sol/Terra/Luna full-unit round, Sol and
+Luna found no product or proof blocker after the corrected
+in-flight scenario. Terra questioned why the harness
+self-check does not separately fingerprint the new
+exact-one proof declarations, then retracted the finding
+after checking the individual verdicts: changing the count
+or adding collateral cannot yield `PROVEN` in these runs.
+R319's special transcript-role pin is not a template for
+fingerprinting every record against future manual edits.
+The three fresh reviewers converge with no blocker. The
+reviewed stream remains uncommitted and unintegrated until
+its measured file-I/O/IPC performance gate is settled.
+The first bounded performance-runner attempt **did not run a
+measurement**. Reusing the existing startup/FCP runner for
+dialog multi-open requires deterministic dialog injection,
+extra-tab/content timing, IPC-call controls and repeatable
+three-size fixture state. Independent Opus and Luna
+assessments found that the proposed small adaptation would
+not supply those controls; Terra stopped before producing
+a success-shaped proxy (`files/sec08-dialog-ipc-perf-20261006/
+run-not-started.json`). The product/test stream is still
+uncommitted, the performance gate remains open, and no
+startup or multi-open regression verdict is claimed.
+The maintainer chose the complete bounded real multi-open
+comparison rather than deferring this IPC slice. Terra now
+owns a disposable, session-artifact-only baseline/candidate
+runner with the required size variants, real dialog/extra
+tab witnesses, IPC-call discrimination and machine-level
+exclusivity. No performance result is claimed at this handoff.
+That bounded comparison subsequently completed without a
+material regression under the **both >10% and >25 ms**
+rule, predeclared for p50 or p95. Across 21 actual
+multi-open repetitions per variant at each extra-file size,
+the baseline-to-candidate p50/p95 values were **40.1/48.8
+-> 42.0/61.7 ms** at 50 KiB, **45.2/65.5 ->
+51.2/67.4 ms** at 500 KiB and **53.6/102.2 ->
+68.1/108.4 ms** at 2 MiB. Candidate invokes occurred
+exactly once per extra; the baseline made none, and every
+extra tab's unique content was verified after the timed
+arrival. Six fresh-profile launches used 2 AB and 1 BA
+size pairs, with sampled process monitoring finding no
+unrelated Electron process. The 2 MiB p50
+rose **14.5 ms (+27.1%)**, below the rule's absolute
+25 ms limb; it is not a speedup or zero-cost result.
+Launch-level noise, post-arrival rendering and packaged
+startup remain outside this per-unit measurement. See
+`docs/PERF-AUDIT.md` and retained raw samples in
+`files/sec08-dialog-ipc-perf-20261006/`. The reviewed
+unit is now eligible for a named-file stream commit and
+serial integration, not for SEC-08 isolation or release.
+The reviewed four-file stream committed as `f74ae75` and
+landed serially as `c44308c`. Post-landing tabs **491/491**,
+security **233/233** and startup **11/11** passed; all current anchor
+setups resolved (`files/sec08-dialog-ipc-20261005/
+tabs-post-landing-20261006.log`,
+`security-post-landing-20261006.log`,
+`startup-post-landing-20261006.log`,
+`anchors-post-landing-20261006.log`). No post-landing
+individual revert run or new packaged archive is claimed.
+Other renderer disk reads, main-window Node isolation,
+the full 13-suite clean-tree chain, complete non-deferred
+revert inventory, regenerated-and-viewed wave screenshots
+and published-artifact verification remain open. No release
+is authorized.
 
 **Order of work is fixed by the audit** (each step independently shippable):
 rebuild the harnesses' renderer access on a test-only preload → give the 6 local

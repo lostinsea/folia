@@ -858,6 +858,65 @@ and source hashes matched. Raw samples, snapshots and
 process-monitor evidence are in
 `files/sec08-file-helpers-core-fcp-20261005/`.
 
+### SEC-08 dialog-selected extra reads — multi-open latency check
+
+This unit replaces the renderer's synchronous read of each
+additional file selected by the native multi-select dialog
+with a main-owned, one-use grant and an asynchronous stable
+read. The fixed material-regression rule, declared before
+the run, was candidate worse by **both >10% and >25 ms**
+at p50 or p95. A disposable real-file Folia app alternated
+immutable baseline `cbe233f` and the reviewed candidate's
+`main.js` and `custom-tabs.js` bytes at the same path.
+The host was Windows 11 (10.0.26300), AMD EPYC, Electron
+**43.4.1** / Chromium **150.0.7871.224**. For each
+**50 KiB, 500 KiB and 2 MiB** plain extra file, one
+fresh-profile launch of each variant made **21 timed
+multi-open repetitions**. Launch order was AB for 50 KiB,
+BA for 500 KiB and AB for 2 MiB; these are six launches,
+**not** 21 independent process pairs per size.
+
+The native dialog's selected-path result was stubbed
+deterministically, but the real `open-file-dialog` IPC,
+main-process read/delivery and renderer tab path ran.
+Each repetition measured renderer `performance.now()` from
+sending the dialog request to the extra tab's DOM creation.
+After that endpoint, the extra tab was activated and its
+unique fixture marker verified in the rendered document,
+then the fixture tabs were closed and hidden leftover DOM
+nodes cleared before the next request. Every repetition
+created and verified its extra tab. The baseline had no
+`read-dialog-extra` handler or invokes; the candidate made
+exactly one successful invoke per repetition.
+
+| Extra | Baseline p50 / p95 | Candidate p50 / p95 | B-A p50 / p95 |
+|---|---:|---:|---:|
+| 50 KiB | 40.1 / 48.8 ms | 42.0 / 61.7 ms | +1.9 ms (+4.7%) / +12.9 ms (+26.4%) |
+| 500 KiB | 45.2 / 65.5 ms | 51.2 / 67.4 ms | +6.0 ms (+13.3%) / +1.9 ms (+2.9%) |
+| 2 MiB | 53.6 / 102.2 ms | 68.1 / 108.4 ms | +14.5 ms (+27.1%) / +6.2 ms (+6.1%) |
+
+**No p50 or p95 delta crosses both limbs of the predeclared
+material-regression rule.** The 2 MiB p50 increase is
+real in these samples and is not a speedup claim or a
+no-cost claim. Process monitoring took **52 samples**,
+including **40** that observed the probe's own Electron
+processes and none that found an unrelated Electron
+process. Monitoring is sampled, not continuous,
+and does not enumerate Node-only Folia test processes;
+other CPU work was not instrumented. A first diagnostic
+attempt timed out on hidden-tab cleanup before a valid
+comparison and was retained, not incorporated into these
+samples. Each size has only one process per variant, so
+launch-to-launch noise and within-process repetition drift
+remain visible rather than corrected. This measures
+extra-tab arrival before content rendering and disk-owner
+completion, not packaged startup or the full SEC-08
+benchmark matrix. The disposable candidate and review
+worktree hashes matched after the run. Raw ordered samples,
+fixture manifests, process monitors, failed diagnostic
+and restoration evidence are under
+`files/sec08-dialog-ipc-perf-20261006/`.
+
 ## Measured and found already fast
 - **Custom tab sync I/O is not the current bottleneck.**
   - `custom-tabs.js:69-111,640`
