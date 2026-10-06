@@ -3350,7 +3350,7 @@ the method and limitations are recorded in `docs/PERF-AUDIT.md`.
 The second loader unit is ready for a named-diff check,
 reviewed stream commit and serial integration, followed by
 post-landing impacted checks. R319 remains UNUSABLE as
-recorded above, not a new proof exception.
+recorded above **at that handoff**, not a new proof exception.
 The nine-file reviewed unit was committed as `05f7862` on
 clean `feat/w2-sec08-loader-mermaid-20261005`. The integration
 branch had since committed the prior utility-loader evidence
@@ -3368,10 +3368,42 @@ and all **625** anchor setups resolved. The anchor run is
 setup only, not behavioral revert execution; packaging
 inspected the existing asar, not a fresh strict release
 artifact. Documentation alone is pending in the integration
-checkout. Full clean-tree 13-suite run, R319 resolution and
-complete revert inventory, fresh strict asar, regenerated
-and viewed wave screenshots and complete SEC-08 isolation
-remain open.
+checkout. At that handoff, the full clean-tree 13-suite
+run, R319 resolution and complete revert inventory,
+fresh strict asar, regenerated-and-viewed wave screenshots
+and complete SEC-08 isolation were still open.
+The R319 individual-proof blocker was later resolved by
+the separate harness-only stream recorded under `fullrun`;
+this historical post-landing status does not supersede
+that later result. The **complete** revert inventory
+remains open.
+**Next SEC-08 loader design, read-only (2026-10-05).**
+Independent Opus architecture research and GPT-6 Luna
+design assessment selected `context-menu-utils.js` as the
+smallest remaining *complete-module* loader unit. It has
+no Node dependency but two live product consumers,
+`renderer.js` and `custom-tabs.js`; migrate **both** in
+one unit so a Node-enabled fallback cannot silently mask
+an unmigrated tab client. Luna observed that a split
+consumer unit is technically safe while the module remains
+dual-mode, but agreed the complete-module migration is
+the coherent boundary. Keep the renderer's own
+`hideContextMenu()` separate; its imported hide alias
+is unused, while `custom-tabs.js` uses both aliases.
+Use an IIFE, preserved CommonJS exports and one fail-loud
+browser global, with an actual no-Node viewport-clamping
+proof and the bounded startup measurement. No third
+product unit is started while R319's harness-only stream
+holds the shared revert file; the main window remains
+Node-privileged and SEC-08 remains pending.
+After targeted R319 proof landed, the integration owner created
+clean `feat/w2-sec08-loader-context-20261005` from `97e66cc`.
+Sol (high) now owns only the four product files
+`context-menu-utils.js`, `index.html`, `renderer.js` and
+`custom-tabs.js`, including removal of both CommonJS
+consumer fallbacks. No product test, no-Node fixture,
+startup verdict, review or integration is claimed at
+this handoff.
 
 **Order of work is fixed by the audit** (each step independently shippable):
 rebuild the harnesses' renderer access on a test-only preload → give the 6 local
@@ -3969,11 +4001,122 @@ This takes hours, which is why it is a scheduled item rather than a routine step
 It is nonetheless a **release blocker**: the milestone gate requires the complete
 harness inventory with all non-deferred proofs executed, not a green
 result obtained by hiding failed or unattempted records.
-**Known open proof:** R319's individual mutation currently reaches
-the expected theme failures but is reported UNUSABLE because the
-harness rejects a post-footer shutdown diagnostic also seen in a
-normal theme run. Resolve the proof/teardown issue before the
-complete run; R319 has no approved DEFERRED exception.
+**Resolved targeted proof, not the complete run:** R319's
+individual mutation previously reached the expected theme
+failures but was reported UNUSABLE because the harness rejected
+a post-footer shutdown diagnostic also seen in a normal theme
+run. The targeted harness-only correction below proves R319
+individually; the complete clean-tree inventory still needs
+to run and R319 has no DEFERRED exception.
+The integration owner isolated a bounded harness-only investigation
+at `test/r319-exact-theme-tail-20261005` from `9731e95`.
+Read-only source tracing found the same exact shutdown line is
+accepted after clean theme and after designated R454/R660
+mutations, but R319 lacks a mutation-specific allowance;
+independent Opus/Luna design checks are now assessing whether
+an exact R319-only allowance retains fail-closed semantics.
+No mutation verdict or fix is claimed at this handoff.
+Opus and Luna independently agreed an exact R319-ID-only
+mutation tail can reuse the existing parser without widening
+the clean-run or other mutation policies; added/fatal/reordered
+tails and adjacent R320 must still be rejected. Luna found a
+second gate: R319 currently declares one `expect` and one
+`mustPass` without requiring exact failures or observed
+controls, yet the real mutation yields **two** theme failures.
+Terra now owns a bounded harness-only correction in that
+isolated worktree: identify both actual failure names and
+their causal relation first, then enforce exact expected
+failures and live controls if justified, add fail-closed
+self-checks and prove the real R319 revert with source
+restoration. If the second failure is unrelated or the
+evidence cannot be recovered, stop and report UNUSABLE
+instead of manufacturing a passing proof. The next SEC-08
+context-menu loader awaits this serial harness outcome.
+Terra found both real mutation failures: the mode-only
+Mermaid configuration assertion and the configuration actually
+passed to `mermaid.initialize`. The isolated harness-only
+candidate now requires those two exact failures and two
+observed passing controls, permits only R319's exact single
+shutdown line, and self-checks unrelated/fatal/reordered tails
+and adjacent R320. Clean theme passed **363/363**, all **625**
+anchors resolved, and the individual R319 revert reported
+**PROVEN**. This is targeted
+evidence, **not** the complete `fullrun` gate or an approved
+proof exception. The candidate diff is approximately 278
+lines in one harness file; three fresh independent Sol/Terra/Luna
+reviews are evaluating both fail-closed correctness and whether
+that size is warranted before any commit or integration.
+The first fresh round agreed the real R319 mutation and two
+named assertions now reach a usable footer; Sol and Luna
+found no significant behavioral blocker, though both noted
+the synthetic `411/413` footer does not match the real
+`361/363`. Terra separately identified two coupling risks:
+the new exact-tail precedence tightens R454/R660's former
+generic two-line teardown acceptance, and the new
+exact-failure-count helper is self-checked without a proof
+that bypassing its invocation in the live verdict goes red.
+These are not consensus findings; the integration owner
+accepted a bounded correction to preserve the older
+records' semantics, align the fixture with observed totals,
+and make the count branch sensitive to break/restore.
+If that demands substantially more harness machinery,
+stop and report rather than expand the unit. A material
+correction must repeat the three fresh reviews.
+The bounded correction preserved legacy R454/R660 acceptance,
+aligned the synthetic 361/363 footer and routed the live
+mutation verdict through a shared classifier. Clean theme
+**363/363**, all **625** anchors and individual R319
+**PROVEN** still pass, with source restored. Sol found no
+blocker in the follow-up, but Luna identified that the
+duplicate-failure synthetic test bypasses footer accounting:
+it appends a parsed failure instead of recording a third
+`FAIL` and a matching 360/363 footer. The integration
+owner allowed one final small correction to make this
+negative control use the real suite-health path, with a
+strict stop if it expands beyond the bounded harness unit.
+No review convergence or integration is claimed yet.
+The final negative control now inserts a third duplicate
+failure with a consistent **360/363** footer and routes it
+through `suiteRunHealth` before the live count classifier.
+R319 alone receives strict exact-tail matching; the older
+R454/R660 generic two-line teardown behavior is preserved.
+The fresh post-correction Sol/Terra/Luna round found **no
+significant issue**. A retained individual run reports
+R319 **PROVEN** with exactly two named failed assertions,
+both required controls passing and all **625** anchors resolving;
+the clean theme **363/363** control log shows the same
+shutdown line. Evidence is in
+`files/r319-final-proof-20261005.log`,
+`files/r319-final-anchors-20261005.log` and
+`files/r319-clean-theme-20261005.log`; the retained
+post-landing source-restoration hash attestation is in
+`files/r319-integrated-source-hashes-20261005.log`.
+This is an individual proof, not a full clean-tree revert inventory.
+The reviewed, isolated one-file test stream was committed as
+`97e66cc` on `test/r319-exact-theme-tail-20261005`;
+it fast-forwarded serially into integration at `97e66cc`.
+The final one-file patch was **351 insertions/15 deletions**,
+larger than the initial 278-line candidate because the
+fail-closed synthetic controls and record-scoped legacy
+behavior were made explicit. Sol found no clear smaller
+safe alternative; Terra and Luna found no final blocker.
+Post-landing machine-exclusive targeted proofs R319,
+R454 and R660 each reported **PROVEN**: R319 with exactly
+two named failures and observed passing controls; R454
+with its one named failure under its no-unlisted policy;
+R660 with two named expected failures and controls but
+**no exact-failure enforcement** (neither a no-unlisted gate
+nor an expected-failure count)
+(`files/r319-integrated-three-proof-20261005.log`).
+The mutated Mermaid config hash matched before and after
+(`files/r319-integrated-source-hashes-20261005.log`);
+the integration tree remained dirty only in this register.
+All **625** combined anchors resolved
+(`files/r319-integrated-anchors-20261005.log`, byte-identical
+to the pre-landing audit), which is setup evidence only.
+R454/R660 were included because the
+shared exact-tail parser was touched; they do not substitute
+for the still-open complete `fullrun` gate.
 
 **Preconditions that make the result meaningful:** a clean working tree, no
 Electron process running, and **no review diff generated while it runs** — the
