@@ -13,15 +13,17 @@
   const tabsContainer = document.getElementById("tabsContainer");
   const tabsElement = document.getElementById("tabs");
 
-  // Per-tab context menu. `clipboard` and the positioning helper are required
-  // directly rather than borrowed off renderer.js's script scope so this module
-  // stays self-contained.
+  // Keep the per-tab clipboard local instead of borrowing renderer.js's scope.
+  // The menu helpers come from the preceding classic script, not a Node require.
   const { clipboard, ipcRenderer: tabIpc } = require("electron");
   const crypto = require("crypto");
+  if (!window.FoliaContextMenu) {
+    throw new Error("FoliaContextMenu must load before custom-tabs.js");
+  }
   const {
     positionContextMenu: positionTabMenu,
     hideContextMenu: hideTabMenuEl,
-  } = require("./context-menu-utils");
+  } = window.FoliaContextMenu;
   let newlineAlignmentDiagnosticsEnabled = false;
   let newlineAlignmentWitnessSequence = 0;
   let pendingNewlineAlignmentWitness = null;

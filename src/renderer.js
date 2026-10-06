@@ -27,7 +27,10 @@ if (!window.FoliaMermaidConfig) {
   throw new Error('FoliaMermaidConfig must load before renderer.js');
 }
 const { getMermaidConfig } = window.FoliaMermaidConfig;
-const { positionContextMenu, hideContextMenu: hideContextMenuHelper } = require('./context-menu-utils');
+if (!window.FoliaContextMenu) {
+  throw new Error('FoliaContextMenu must load before renderer.js');
+}
+const { positionContextMenu, hideContextMenu: hideContextMenuHelper } = window.FoliaContextMenu;
 const { parseEmojis } = require('./emoji-parser');
 
 // marked, mermaid and DOMPurify are provided as globals by index.html, which

@@ -70,6 +70,7 @@ const THEME_FIXTURE = path.join(ROOT, "test", "fixtures", "syntax-census.md");
 const THEME_JS = path.join(SRC, "custom-theme.js");
 const PKG_TEST = path.join(ROOT, "test", "test-packaging.js");
 const MERMAID_CFG = path.join(SRC, "mermaid-config.js");
+const CONTEXT_MENU_UTILS = path.join(SRC, "context-menu-utils.js");
 // The two vendoring OUTPUTS. Both are gitignored derived artifacts rather than
 // tracked source, which is exactly why they need reverts: nothing in git can
 // notice them drifting, so the only guard is the packaging suite's freshness
@@ -17127,21 +17128,27 @@ const REVERTS = [
           from:
             '    <script src="utils.js"></script>\n' +
             '    <script src="mermaid-config.js"></script>\n' +
+            '    <script src="context-menu-utils.js"></script>\n' +
             '    <script src="renderer.js"></script>',
           to:
             '    <script src="renderer.js"></script>\n' +
             '    <script src="utils.js"></script>\n' +
-            '    <script src="mermaid-config.js"></script>',
+            '    <script src="mermaid-config.js"></script>\n' +
+            '    <script src="context-menu-utils.js"></script>',
           suite: "test:packaging",
           expect: [
             /^SEC-08 utils\.js loads exactly once before renderer\.js$/,
             /^SEC-08 mermaid-config\.js loads exactly once between utils\.js and renderer\.js$/,
+            /^SEC-08 context-menu-utils\.js loads exactly once after mermaid-config\.js and before both consumers$/,
           ],
           mustPass: [
             /^SEC-08 utils\.js is packaged for its classic-script consumer$/,
             /^SEC-08 renderer consumes window\.FoliaUtils without a CommonJS fallback$/,
             /^SEC-08 mermaid-config\.js is packaged for its classic-script consumer$/,
             /^SEC-08 renderer consumes window\.FoliaMermaidConfig without a CommonJS fallback$/,
+            /^SEC-08 context-menu-utils\.js is packaged for its classic-script consumers$/,
+            /^SEC-08 renderer consumes window\.FoliaContextMenu and fails loudly without a CommonJS fallback$/,
+            /^SEC-08 custom-tabs consumes window\.FoliaContextMenu and fails loudly without a CommonJS fallback$/,
           ],
           requireMustPassAssertions: true,
           requireExactFailures: true,
@@ -17190,18 +17197,26 @@ const REVERTS = [
           what: "load renderer.js before its FoliaMermaidConfig classic-script dependency",
           file: HTML,
           from:
+            '    <script src="utils.js"></script>\n' +
             '    <script src="mermaid-config.js"></script>\n' +
+            '    <script src="context-menu-utils.js"></script>\n' +
             '    <script src="renderer.js"></script>',
           to:
+            '    <script src="utils.js"></script>\n' +
             '    <script src="renderer.js"></script>\n' +
-            '    <script src="mermaid-config.js"></script>',
+            '    <script src="mermaid-config.js"></script>\n' +
+            '    <script src="context-menu-utils.js"></script>',
           suite: "test:packaging",
           expect: [
             /^SEC-08 mermaid-config\.js loads exactly once between utils\.js and renderer\.js$/,
+            /^SEC-08 context-menu-utils\.js loads exactly once after mermaid-config\.js and before both consumers$/,
           ],
           mustPass: [
             /^SEC-08 mermaid-config\.js is packaged for its classic-script consumer$/,
             /^SEC-08 renderer consumes window\.FoliaMermaidConfig without a CommonJS fallback$/,
+            /^SEC-08 context-menu-utils\.js is packaged for its classic-script consumers$/,
+            /^SEC-08 renderer consumes window\.FoliaContextMenu and fails loudly without a CommonJS fallback$/,
+            /^SEC-08 custom-tabs consumes window\.FoliaContextMenu and fails loudly without a CommonJS fallback$/,
           ],
           requireMustPassAssertions: true,
           requireExactFailures: true,
@@ -17237,6 +17252,128 @@ const REVERTS = [
             /^SEC-08 mermaid-config\.js loads exactly once between utils\.js and renderer\.js$/,
             /^SEC-08 mermaid-config\.js is packaged for its classic-script consumer$/,
             /^SEC-08 renderer consumes window\.FoliaMermaidConfig without a CommonJS fallback$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R687",
+          what: "withhold FoliaContextMenu from the no-Node classic-script loader",
+          file: CONTEXT_MENU_UTILS,
+          from: "if (typeof window !== 'undefined') {",
+          to: "if (typeof window !== 'undefined' && typeof process !== 'undefined') {",
+          suite: SEC08_LOADER_EVIDENCE_SUITE,
+          expect: [
+            /^SEC-08 classic context-menu script clamps, shows, and hides its menu$/,
+          ],
+          mustPass: [
+            /^SEC-08 context-menu utilities preserve their CommonJS API$/,
+            /^SEC-08 classic context-menu script runs without Node globals$/,
+            /^SEC-08 context-menu loader document reaches its terminal DOM marker$/,
+            /^SEC-08 context-menu loader error sentinel was demonstrably watching both channels$/,
+            /^SEC-08 context-menu loader fixture emits no unexpected errors$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R688",
+          what: "load context-menu-utils.js after its renderer consumer",
+          file: HTML,
+          from:
+            '    <script src="mermaid-config.js"></script>\n' +
+            '    <script src="context-menu-utils.js"></script>\n' +
+            '    <script src="renderer.js"></script>',
+          to:
+            '    <script src="mermaid-config.js"></script>\n' +
+            '    <script src="renderer.js"></script>\n' +
+            '    <script src="context-menu-utils.js"></script>',
+          suite: "test:packaging",
+          expect: [
+            /^SEC-08 context-menu-utils\.js loads exactly once after mermaid-config\.js and before both consumers$/,
+          ],
+          mustPass: [
+            /^SEC-08 mermaid-config\.js loads exactly once between utils\.js and renderer\.js$/,
+            /^SEC-08 context-menu-utils\.js is packaged for its classic-script consumers$/,
+            /^SEC-08 renderer consumes window\.FoliaContextMenu and fails loudly without a CommonJS fallback$/,
+            /^SEC-08 custom-tabs consumes window\.FoliaContextMenu and fails loudly without a CommonJS fallback$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R689",
+          what: "remove renderer's fail-loud missing FoliaContextMenu guard",
+          file: RENDERER,
+          from:
+            "if (!window.FoliaContextMenu) {\n" +
+            "  throw new Error('FoliaContextMenu must load before renderer.js');\n" +
+            "}\n",
+          to: "",
+          suite: "test:packaging",
+          expect: [
+            /^SEC-08 renderer consumes window\.FoliaContextMenu and fails loudly without a CommonJS fallback$/,
+          ],
+          mustPass: [
+            /^SEC-08 context-menu-utils\.js loads exactly once after mermaid-config\.js and before both consumers$/,
+            /^SEC-08 custom-tabs consumes window\.FoliaContextMenu and fails loudly without a CommonJS fallback$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R690",
+          what: "restore custom-tabs' CommonJS context-menu helper fallback",
+          file: TABS,
+          from:
+            "  } = window.FoliaContextMenu;",
+          to:
+            "  } = require(\"./context-menu-utils\");",
+          suite: "test:packaging",
+          expect: [
+            /^SEC-08 custom-tabs consumes window\.FoliaContextMenu and fails loudly without a CommonJS fallback$/,
+          ],
+          mustPass: [
+            /^SEC-08 context-menu-utils\.js loads exactly once after mermaid-config\.js and before both consumers$/,
+            /^SEC-08 renderer consumes window\.FoliaContextMenu and fails loudly without a CommonJS fallback$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R691",
+          what: "reverse the post-merge context-menu loader ordering guard",
+          file: MERGE_SH,
+          from: "rendererAt > contextMenuAt &&",
+          to: "rendererAt < contextMenuAt &&",
+          suite: "test:packaging",
+          expect: [
+            /^post-upstream-merge\.sh preserves context-menu loader recovery guards$/,
+          ],
+          mustPass: [
+            /^SEC-08 context-menu-utils\.js loads exactly once after mermaid-config\.js and before both consumers$/,
+            /^SEC-08 context-menu-utils\.js is packaged for its classic-script consumers$/,
+            /^SEC-08 renderer consumes window\.FoliaContextMenu and fails loudly without a CommonJS fallback$/,
+            /^SEC-08 custom-tabs consumes window\.FoliaContextMenu and fails loudly without a CommonJS fallback$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+        },
+        {
+          id: "R692",
+          what: "reverse the post-merge custom-tabs after renderer ordering guard",
+          file: MERGE_SH,
+          from: "customTabsAt > rendererAt &&",
+          to: "customTabsAt < rendererAt &&",
+          suite: "test:packaging",
+          expect: [
+            /^post-upstream-merge\.sh preserves context-menu loader recovery guards$/,
+          ],
+          mustPass: [
+            /^SEC-08 context-menu-utils\.js loads exactly once after mermaid-config\.js and before both consumers$/,
+            /^SEC-08 context-menu-utils\.js is packaged for its classic-script consumers$/,
+            /^SEC-08 renderer consumes window\.FoliaContextMenu and fails loudly without a CommonJS fallback$/,
+            /^SEC-08 custom-tabs consumes window\.FoliaContextMenu and fails loudly without a CommonJS fallback$/,
           ],
           requireMustPassAssertions: true,
           requireExactFailures: true,

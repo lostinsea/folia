@@ -252,28 +252,37 @@ check_html_script "custom-theme.js"
 check_html_script "custom-performance.js"
 check_html_script "utils.js"
 check_html_script "mermaid-config.js"
+check_html_script "context-menu-utils.js"
 
 if node -e "
   const fs = require('fs');
   const html = fs.readFileSync('src/index.html', 'utf8');
   const utils = '<script src=\"utils.js\"></script>';
   const mermaidConfig = '<script src=\"mermaid-config.js\"></script>';
+  const contextMenu = '<script src=\"context-menu-utils.js\"></script>';
   const renderer = '<script src=\"renderer.js\"></script>';
+  const customTabs = '<script src=\"custom-tabs.js\"></script>';
   const utilsAt = html.indexOf(utils);
   const mermaidConfigAt = html.indexOf(mermaidConfig);
+  const contextMenuAt = html.indexOf(contextMenu);
   const rendererAt = html.indexOf(renderer);
+  const customTabsAt = html.indexOf(customTabs);
   process.exit(
     utilsAt >= 0 &&
       mermaidConfigAt > utilsAt &&
-      rendererAt > mermaidConfigAt &&
-      html.indexOf(mermaidConfig, mermaidConfigAt + mermaidConfig.length) === -1
+      contextMenuAt > mermaidConfigAt &&
+      rendererAt > contextMenuAt &&
+      customTabsAt > contextMenuAt &&
+      customTabsAt > rendererAt &&
+      html.indexOf(mermaidConfig, mermaidConfigAt + mermaidConfig.length) === -1 &&
+      html.indexOf(contextMenu, contextMenuAt + contextMenu.length) === -1
       ? 0
       : 1,
   );
 "; then
-  echo "   ✓ mermaid-config.js loads once between utils.js and renderer.js"
+  echo "   ✓ context-menu-utils.js loads once after mermaid-config.js and before both consumers"
 else
-  echo "   ✗ ORDER: mermaid-config.js must load once between utils.js and renderer.js"
+  echo "   ✗ ORDER: context-menu-utils.js must load once after mermaid-config.js and before both consumers"
   exit 1
 fi
 
@@ -311,6 +320,7 @@ check_build_file "custom-theme.js"
 check_build_file "custom-performance.js"
 check_build_file "custom-styles.css"
 check_build_file "mermaid-config.js"
+check_build_file "context-menu-utils.js"
 
 if [ "$MISSING_BUILD" -eq 1 ]; then
   echo "   ✗ One or more required customizations are missing from build.files"

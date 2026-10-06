@@ -278,6 +278,108 @@ async function runMermaidConfigLoaderProbe() {
   }
 }
 
+async function runContextMenuLoaderProbe() {
+  const commonJsContextMenu = require("../src/context-menu-utils.js");
+  check(
+    "SEC-08 context-menu utilities preserve their CommonJS API",
+    JSON.stringify(Object.keys(commonJsContextMenu).sort()) ===
+      JSON.stringify(["hideContextMenu", "positionContextMenu"]) &&
+      typeof commonJsContextMenu.positionContextMenu === "function" &&
+      typeof commonJsContextMenu.hideContextMenu === "function",
+    JSON.stringify(Object.keys(commonJsContextMenu).sort()),
+  );
+
+  const loaderWin = new BrowserWindow({
+    show: false,
+    width: 320,
+    height: 240,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+    },
+  });
+  const sentinel = startErrorSentinel(loaderWin, { label: "sec08-context-menu-loader" });
+
+  try {
+    await loaderWin.loadFile(path.join(__dirname, "fixtures", "context-menu-loader.html"));
+    const probe = await loaderWin.webContents.executeJavaScript(
+      `(() => {
+        const api = window.FoliaContextMenu;
+        const terminal = document.getElementById("sec08-context-menu-loader-terminal");
+        const menu = document.getElementById("sec08-context-menu-loader-menu");
+        const viewport = { width: window.innerWidth, height: window.innerHeight };
+        api && api.positionContextMenu(menu, viewport.width - 1, viewport.height - 1);
+        const shownRect = menu && menu.getBoundingClientRect();
+        const shown = menu && {
+          visible: menu.classList.contains("visible"),
+          left: Number.parseFloat(menu.style.left),
+          top: Number.parseFloat(menu.style.top),
+          right: shownRect.right,
+          bottom: shownRect.bottom,
+          width: shownRect.width,
+          height: shownRect.height,
+        };
+        api && api.hideContextMenu(menu);
+        return {
+          terminal: terminal && terminal.dataset.status,
+          requireType: typeof window.require,
+          moduleType: typeof window.module,
+          processType: typeof window.process,
+          apiType: typeof api,
+          apiKeys: api && Object.keys(api).sort(),
+          shown,
+          hidden: menu && !menu.classList.contains("visible"),
+          viewport,
+        };
+      })()`,
+      true,
+    );
+    check(
+      "SEC-08 classic context-menu script runs without Node globals",
+      probe.requireType === "undefined" &&
+        probe.moduleType === "undefined" &&
+        probe.processType === "undefined",
+      JSON.stringify(probe),
+    );
+    check(
+      // This static document marker proves parsing completed independently of
+      // FoliaContextMenu, so R687 can distinguish a missing API from a failed load.
+      "SEC-08 context-menu loader document reaches its terminal DOM marker",
+      probe.terminal === "parsed",
+      JSON.stringify(probe),
+    );
+    check(
+      "SEC-08 classic context-menu script clamps, shows, and hides its menu",
+      probe.apiType === "object" &&
+        JSON.stringify(probe.apiKeys) ===
+          JSON.stringify(["hideContextMenu", "positionContextMenu"]) &&
+        probe.shown &&
+        probe.shown.visible === true &&
+        probe.shown.left === probe.viewport.width - probe.shown.width - 10 &&
+        probe.shown.top === probe.viewport.height - probe.shown.height - 10 &&
+        probe.shown.right <= probe.viewport.width - 10 &&
+        probe.shown.bottom <= probe.viewport.height - 10 &&
+        probe.hidden === true,
+      JSON.stringify(probe),
+    );
+
+    const alive = await proveSentinelAlive(loaderWin, sentinel);
+    check(
+      "SEC-08 context-menu loader error sentinel was demonstrably watching both channels",
+      alive.console === true && alive.dom === true,
+      JSON.stringify(alive),
+    );
+  } finally {
+    const sentinelReport = await sentinel.stop();
+    check(
+      "SEC-08 context-menu loader fixture emits no unexpected errors",
+      sentinelReport.hits.length === 0 && sentinelReport.stalls.length === 0,
+      JSON.stringify(sentinelReport),
+    );
+    if (!loaderWin.isDestroyed()) loaderWin.destroy();
+  }
+}
+
 async function runFocusedLoaderProbes() {
   // Without main.js, Electron exits as soon as a probe destroys its only
   // BrowserWindow. Keep this no-Node window alive until both independent
@@ -292,6 +394,7 @@ async function runFocusedLoaderProbes() {
   try {
     await runUtilsLoaderProbe();
     await runMermaidConfigLoaderProbe();
+    await runContextMenuLoaderProbe();
   } finally {
     if (!keepAliveWin.isDestroyed()) keepAliveWin.destroy();
   }
@@ -5079,6 +5182,7 @@ app.whenReady().then(async () => {
 
       await runUtilsLoaderProbe();
       await runMermaidConfigLoaderProbe();
+      await runContextMenuLoaderProbe();
       await win.webContents.executeJavaScript(E2E_SENTINEL);
       await run(win);
     }

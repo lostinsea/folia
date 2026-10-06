@@ -1,3 +1,4 @@
+(function () {
 // ============================================
 // context-menu-utils.js - Context Menu Helpers
 // ============================================
@@ -39,7 +40,15 @@ function hideContextMenu(menuElement) {
 }
 
 // Export for use in other modules
-module.exports = {
+const contextMenuUtils = {
   positionContextMenu,
   hideContextMenu
 };
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = contextMenuUtils;
+}
+if (typeof window !== 'undefined') {
+  window.FoliaContextMenu = contextMenuUtils;
+}
+})();

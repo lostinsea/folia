@@ -613,10 +613,14 @@ async function main() {
   const indexHtml = read("src/index.html");
   const utilsScript = '<script src="utils.js"></script>';
   const mermaidConfigScript = '<script src="mermaid-config.js"></script>';
+  const contextMenuScript = '<script src="context-menu-utils.js"></script>';
   const rendererScript = '<script src="renderer.js"></script>';
+  const customTabsScript = '<script src="custom-tabs.js"></script>';
   const utilsScriptAt = indexHtml.indexOf(utilsScript);
   const mermaidConfigScriptAt = indexHtml.indexOf(mermaidConfigScript);
+  const contextMenuScriptAt = indexHtml.indexOf(contextMenuScript);
   const rendererScriptAt = indexHtml.indexOf(rendererScript);
+  const customTabsScriptAt = indexHtml.indexOf(customTabsScript);
   check(
     "SEC-08 utils.js loads exactly once before renderer.js",
     utilsScriptAt >= 0 &&
@@ -635,6 +639,24 @@ async function main() {
         mermaidConfigScriptAt + mermaidConfigScript.length,
       ) === -1,
     JSON.stringify({ utilsScriptAt, mermaidConfigScriptAt, rendererScriptAt }),
+  );
+  check(
+    "SEC-08 context-menu-utils.js loads exactly once after mermaid-config.js and before both consumers",
+    mermaidConfigScriptAt >= 0 &&
+    contextMenuScriptAt > mermaidConfigScriptAt &&
+    rendererScriptAt > contextMenuScriptAt &&
+    customTabsScriptAt > contextMenuScriptAt &&
+    customTabsScriptAt > rendererScriptAt &&
+    indexHtml.indexOf(
+      contextMenuScript,
+      contextMenuScriptAt + contextMenuScript.length,
+    ) === -1,
+    JSON.stringify({
+    mermaidConfigScriptAt,
+    contextMenuScriptAt,
+    rendererScriptAt,
+    customTabsScriptAt,
+    }),
   );
   check(
     "SEC-08 utils.js is packaged for its classic-script consumer",
@@ -671,6 +693,52 @@ async function main() {
     "SEC-08 renderer consumes window.FoliaMermaidConfig without a CommonJS fallback",
     mermaidConfigBinding && !mermaidConfigRequire,
     JSON.stringify({ mermaidConfigBinding, mermaidConfigRequire }),
+  );
+  check(
+    "SEC-08 context-menu-utils.js is packaged for its classic-script consumers",
+    isPackaged(files, "src/context-menu-utils.js"),
+    JSON.stringify({ packaged: isPackaged(files, "src/context-menu-utils.js") }),
+  );
+  const contextMenuBinding =
+    /const\s*\{\s*positionContextMenu\s*,\s*hideContextMenu\s*:\s*hideContextMenuHelper\s*\}\s*=\s*window\.FoliaContextMenu\s*;/.test(
+      rendererSource,
+    );
+  const contextMenuRequire =
+    /require\s*\(\s*["'](?:\.\/)?context-menu-utils(?:\.js)?["']\s*\)/.test(
+      rendererSource,
+    );
+  const rendererContextMenuGuard =
+    /if\s*\(\s*!window\.FoliaContextMenu\s*\)\s*\{\s*throw\s+new\s+Error\s*\(\s*["']FoliaContextMenu must load before renderer\.js["']\s*\)\s*;\s*\}/.test(
+      rendererSource,
+    );
+  check(
+    "SEC-08 renderer consumes window.FoliaContextMenu and fails loudly without a CommonJS fallback",
+    contextMenuBinding && !contextMenuRequire && rendererContextMenuGuard,
+    JSON.stringify({ contextMenuBinding, contextMenuRequire, rendererContextMenuGuard }),
+  );
+  const customTabsSource = stripJsComments(read("src/custom-tabs.js"));
+  const customTabsContextMenuBinding =
+    /const\s*\{\s*positionContextMenu\s*:\s*positionTabMenu\s*,\s*hideContextMenu\s*:\s*hideTabMenuEl\s*,?\s*\}\s*=\s*window\.FoliaContextMenu\s*;/.test(
+      customTabsSource,
+    );
+  const customTabsContextMenuRequire =
+    /require\s*\(\s*["'](?:\.\/)?context-menu-utils(?:\.js)?["']\s*\)/.test(
+      customTabsSource,
+    );
+  const customTabsContextMenuGuard =
+    /if\s*\(\s*!window\.FoliaContextMenu\s*\)\s*\{\s*throw\s+new\s+Error\s*\(\s*["']FoliaContextMenu must load before custom-tabs\.js["']\s*\)\s*;\s*\}/.test(
+      customTabsSource,
+    );
+  check(
+    "SEC-08 custom-tabs consumes window.FoliaContextMenu and fails loudly without a CommonJS fallback",
+    customTabsContextMenuBinding &&
+      !customTabsContextMenuRequire &&
+      customTabsContextMenuGuard,
+    JSON.stringify({
+      customTabsContextMenuBinding,
+      customTabsContextMenuRequire,
+      customTabsContextMenuGuard,
+    }),
   );
   const srcRe = /<(?:script[^>]*\ssrc|link[^>]*\shref)=["']([^"':]+)["']/gi;
   while ((m = srcRe.exec(indexHtml))) {
@@ -1784,9 +1852,21 @@ async function main() {
           `const mermaidConfig = '<script src=\\"mermaid-config.js\\"></script>';`,
         ) &&
         script.includes("mermaidConfigAt > utilsAt") &&
-        script.includes("rendererAt > mermaidConfigAt");
+        script.includes("contextMenuAt > mermaidConfigAt");
+      const contextMenuOrderGuard =
+        script.includes(
+          `const contextMenu = '<script src=\\"context-menu-utils.js\\"></script>';`,
+        ) &&
+        script.includes("contextMenuAt > mermaidConfigAt") &&
+        script.includes("rendererAt > contextMenuAt") &&
+        script.includes("customTabsAt > contextMenuAt") &&
+        script.includes("customTabsAt > rendererAt");
       const mermaidPackageGate =
-        /check_build_file "mermaid-config\.js"\s*\n\s*\nif \[ "\$MISSING_BUILD" -eq 1 \]; then[\s\S]*?exit 1\s*\nfi/.test(
+        /check_build_file "mermaid-config\.js"\s*\ncheck_build_file "context-menu-utils\.js"\s*\n\s*\nif \[ "\$MISSING_BUILD" -eq 1 \]; then[\s\S]*?exit 1\s*\nfi/.test(
+          script,
+        );
+      const contextMenuPackageGate =
+        /check_build_file "context-menu-utils\.js"\s*\n\s*\nif \[ "\$MISSING_BUILD" -eq 1 \]; then[\s\S]*?exit 1\s*\nfi/.test(
           script,
         );
       check(
@@ -1800,6 +1880,19 @@ async function main() {
           buildChecks,
           mermaidOrderGuard,
           mermaidPackageGate,
+        }),
+      );
+      check(
+        "post-upstream-merge.sh preserves context-menu loader recovery guards",
+        scriptTags.includes("context-menu-utils.js") &&
+          buildChecks.includes("context-menu-utils.js") &&
+          contextMenuOrderGuard &&
+          contextMenuPackageGate,
+        JSON.stringify({
+          scriptTags,
+          buildChecks,
+          contextMenuOrderGuard,
+          contextMenuPackageGate,
         }),
       );
 

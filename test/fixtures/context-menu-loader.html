@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>SEC-08 context-menu loader fixture</title>
+    <style>
+      #sec08-context-menu-loader-menu {
+        display: none;
+        height: 40px;
+        position: absolute;
+        width: 80px;
+      }
+
+      #sec08-context-menu-loader-menu.visible {
+        display: block;
+      }
+    </style>
+    <script src="../../src/context-menu-utils.js"></script>
+  </head>
+  <body>
+    <div id="sec08-context-menu-loader-terminal" data-status="parsed"></div>
+    <div id="sec08-context-menu-loader-menu"></div>
+  </body>
+</html>
