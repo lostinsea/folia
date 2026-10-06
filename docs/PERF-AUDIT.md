@@ -808,6 +808,56 @@ sources were restored. Raw ordered samples, snapshots and
 monitor summary are in
 `files/sec08-emoji-loader-fcp-20261005/`.
 
+### SEC-08 browser-safe file-helper core — real-file startup check
+
+This unit extracts the pure shared normalizers and render-cost
+estimator into `file-helpers-core.js`, loaded before the renderer
+and tabs; the original main-process `file-helpers.js` retains
+its Node I/O. The main window remains Node-privileged. The
+fixed material-regression rule was candidate worse by **both
+>10% and >25 ms** at p50 or p95 of entry-to-FCP or
+entry-to-`did-finish-load`. One disposable real-file app path
+alternated immutable baseline `04e1d14` and the reviewed
+candidate's four changed source files. The baseline did
+**not** contain `file-helpers-core.js`, so that file was
+absent from each A launch and restored for B. Both variants
+used the candidate `package.json` (its changed `build.files`
+list does not run at startup). On the AMD EPYC Windows 11
+host (10.0.26300), Electron **43.4.1** / Chromium
+**150.0.7871.224** launched **21 fresh isolated profiles
+per variant**, alternating AB/BA (11/10). All **42**
+reported actual buffered FCP entries within the 1.8-second
+bound; timestamps are the original paint events, not their
+collection time. No retry or excluded sample.
+
+| Entry-to metric | Baseline A p50 / p95 | Candidate B p50 / p95 | B-A p50 / p95 |
+|---|---:|---:|---:|
+| FCP | 932.1 / 1193.8 ms | 960.0 / 1004.7 ms | +27.9 ms (+2.993%) / -189.1 ms (-15.840%) |
+| `did-finish-load` | 962.334 / 1489.661 ms | 987.720 / 1033.688 ms | +25.385 ms (+2.638%) / -455.973 ms (-30.609%) |
+
+**No metric crosses both limbs of the predeclared regression
+rule.** The integration owner scheduled no competing Folia
+test, screenshot, mutation or benchmark work; preflight
+found no Electron process. An ancestry-based monitor took
+**69 process samples over 59.5 seconds**, finding 192
+observations of the probe's own Electron processes and
+zero unrelated Electron or Folia test processes. Paired
+FCP differences spanned **-619.8 to +108.7 ms** with
+median **+17.8 ms** (6/21 candidate launches faster);
+load spanned **-626.804 to +104.591 ms**, median
+**+17.574 ms**. The unpaired p95 improvements reflect
+noisy baseline tails, not demonstrated speedup. Nearest-rank
+p95 uses the second-highest of 21 launches. The monitor
+samples rather than continuously traces process lifetimes,
+and unrelated CPU work is not instrumented. This clock
+starts after process creation; an initially empty,
+nonpackaged window cannot establish document-render,
+compositor, packaged startup or full SEC-08 performance.
+Original candidate and disposable sources were restored
+and source hashes matched. Raw samples, snapshots and
+process-monitor evidence are in
+`files/sec08-file-helpers-core-fcp-20261005/`.
+
 ## Measured and found already fast
 - **Custom tab sync I/O is not the current bottleneck.**
   - `custom-tabs.js:69-111,640`

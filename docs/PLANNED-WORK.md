@@ -3572,6 +3572,153 @@ browser loader. An isolated clean worktree
 `feat/w2-sec08-file-helpers-core-20261005` was created
 from `04e1d14`. No implementation or gate result is
 claimed yet; Node integration remains enabled.
+Sol (high) completed only the four product paths in that
+isolated stream: a new IIFE-scoped dual-mode core publishes
+`FoliaFileHelpers`, the existing main-process adapter
+retains the 13-key CommonJS API and its Node I/O helpers,
+the local script precedes its consumers, and tabs use the
+fail-loud global with no BOM-only fallback. The sync
+stat/read/stat snapshot loop and fitted estimator constants
+are unchanged. A first direct probe exposed POSIX
+backslash-filename drift; Sol then made extension parsing
+follow Node's Windows/POSIX separator rules using
+`process.platform` for CommonJS and `navigator.platform`
+without Node. Its direct **4,851-case** comparison per
+OS mode passed; this is not a suite or revert proof.
+Terra now owns bounded no-Node and Node parity, tab
+normalisation, renderer-side test probe migration,
+package/order guards and individually discriminating
+reverts, including R681/R684/R688 anchor repairs.
+No targeted suite, startup verdict, review or integration
+is claimed at this handoff.
+Terra's first bounded test/proof pass exposed two product
+blockers rather than closing the unit. The 20-case Windows
+extension matrix catches `C:.mmd` classified as Mermaid
+although `path.win32.extname("C:.mmd")` is empty; focused
+security **11/13** and full security **231/233** fail only
+on that difference. Packaging **337 passed, 3 failed**
+with two absent-asar skips because `package.json` omits
+`src/file-helpers-core.js` from `build.files`. Corpus
+**316/316**, tabs **478/478**, all then-existing anchors and
+individual R702/R705/R707 proofs passed with source
+restored, but neither anchors nor selected proofs close
+the remaining individual records. Terra has frozen test
+edits and Sol now owns those two narrow product corrections;
+the required targeted rerun, remaining individual proofs,
+fresh independent full-unit reviews and startup gate remain
+open. No integration is claimed.
+Sol corrected the two product blockers in place: the
+new core is now included in `package.json`'s `build.files`,
+and the Windows extension extractor treats a bare drive
+prefix as the basename boundary (`C:.mmd` is no longer a
+Mermaid file on Windows). Direct **5,283-case** parity
+checks per OS mode and the Node packaging oracle
+**340 passed, 0 failed** with absent-asar skips; these
+do not replace Terra's targeted security rerun, remaining
+individual reversions, full-unit reviews or startup
+measurement. Terra now owns only those bounded reruns;
+no integration is claimed.
+The frozen correction then passed focused security
+**13/13**, full security **233/233** and packaging
+**340 passed, 0 failed** with two absent-asar skips;
+the anchor setups resolved. R703/R704/R706/R708
+each reported individually **PROVEN** with one intended
+failure; their retained group transcript has no separate
+before/after hash attestation.
+R702/R705/R707 were proven before the correction and
+their anchors still resolve. Retained transcripts are under
+`files/sec08-file-helpers-rerun-20261005/`. Because the
+HTML script block changed, R681/R684/R688's original
+order discrimination still needs individual execution
+before the fresh full-unit review. No benchmark,
+integration or release gate is claimed yet.
+R681/R684/R688 subsequently each proved its original
+ordered-loader failure shape against the new HTML block,
+with intended failure counts **4/3/2** and restored
+`index.html`. R702/R705/R707 were re-proven on the
+final corrected product bytes with exact failures,
+live passing controls and restored hashes. Together
+with R703/R704/R706/R708, every new core record is now
+individually **PROVEN**; the anchor audit remains
+setup-only, and the complete inventory is still open.
+Three fresh independent Sol/Terra/Luna full-unit reviews
+found no shipped-use blocker. Terra noticed that invalid
+non-string CommonJS helper paths now throw plain
+`TypeError` instead of Node `path.extname`'s incidental
+`ERR_INVALID_ARG_TYPE` code/message; Sol validated it,
+and all three reviewers agreed it is a low-priority
+internal API deviation, not a SEC-08 blocker: shipped
+callers pass strings, and preserving exact Node error
+fields would add adapter wrappers solely for unsupported
+input while breaking core/adapter function identity.
+Do not describe this as exact error-object parity.
+One operator-scheduled, process-monitored **21-pair**
+same-path startup comparison passed its predeclared
+material-regression rule (**both >10% and >25 ms**):
+FCP p50/p95 **932.1/1193.8 -> 960.0/1004.7 ms**,
+load **962.334/1489.661 -> 987.720/1033.688 ms**.
+Its A variant omitted the new core file; all **42** FCP
+entries were valid, candidate bytes restored, and 69
+process samples over 59.5 seconds found no outside
+Electron or Folia test process. The positive paired
+medians and noisy baseline tail preclude a speedup
+claim (`docs/PERF-AUDIT.md`,
+`files/sec08-file-helpers-core-fcp-20261005/`).
+The reviewed 12-file stream committed as `225baef`
+and landed serially as `cbe233f`. Post-landing security
+**233/233**, tabs **478/478**, corpus **316/316**,
+startup **11/11**, theme **363/363** passed. The
+first packaging run **350 passed, 1 failed** because
+an older `app.asar` lacked the new core. A fresh
+`npm run build-all` generated Windows portable and
+NSIS artifacts; with `PACKAGING_STRICT=1`, packaging
+then passed **352/352** against the new archive
+(`files/sec08-file-helpers-fresh-build-20261005.log`,
+`files/sec08-file-helpers-integrated-strict-packaging-20261005.log`).
+The fresh `app.asar` SHA-256 is
+`01255C5E9FCC81ACF8C0D8CE309D49E4773E2BBDDB4EB2220876B0CF4AA80CF7`.
+This proves a local Windows package, not signing,
+Linux/macOS artifacts or published release attestation.
+Main-window Node isolation, the clean-tree complete
+suite/revert inventory, regenerated-and-viewed wave
+screenshots and published-artifact verification remain
+open; no release is authorized.
+The manifest inclusion itself had no dedicated individual
+revert. Terra added R709 in the isolated file-helper stream:
+removing the browser core from `build.files` must produce
+exactly three named packaging failures while five independent
+guards continue to pass. Fresh Sol and Terra reviews found
+no issue; Luna found that exact failure names alone did not
+reject repeated failures, so Terra added the explicit count
+and extended the harness's counted-record self-check without
+weakening R319's synthetic controls. A fresh independent
+Sol/Terra/Luna round found no further issue. R709 was proven
+individually with the manifest hash restored, then committed
+as `e122da2` and landed serially as `a917faf`. The integrated
+R709 proof passed with exactly its three intended failures,
+the anchor audit resolved, and a self-attesting
+`PACKAGING_STRICT=1` run at `a917faf` against the fresh local
+asar passed **352/352** (`files/sec08-file-helpers-rerun-20261005/
+r709-post-landing-20261005.log`,
+`files/sec08-file-helpers-r709-strict-packaging-20261005.log`).
+No clean-tree full-suite, complete non-deferred revert inventory,
+viewed screenshot or published-artifact gate is claimed.
+**Next SEC-08 IPC boundary (read-only).** Opus and Luna
+independently prefer an on-demand, main-issued one-use grant
+for each extra path from the native multi-select dialog over
+eagerly reading every selected file. This preserves sequential
+per-file failures and avoids new blocking size dialogs for
+extras; the renderer must never supply an arbitrary read path.
+Opus initially proposed invalidating grants with
+`fileOpenDeliveryEpoch`; Luna identified that a failed newer
+open advances that pending-open epoch without superseding the
+renderer batch. Use a separately scoped delivered-batch identity
+and revoke on a later successful `file-opened` delivery or page
+session/generation change. Keep main's stable read and the
+existing independent disk-adoption attestation; preserve the
+current unguarded-extra behavior rather than silently adding
+per-extra main-process modals. This is design evidence only:
+no extra-file IPC migration or main-window isolation has landed.
 
 **Order of work is fixed by the audit** (each step independently shippable):
 rebuild the harnesses' renderer access on a test-only preload → give the 6 local
