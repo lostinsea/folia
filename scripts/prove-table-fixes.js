@@ -17773,6 +17773,29 @@ const REVERTS = [
           requireMustPassAssertions: true,
           requireExactFailures: true,
         },
+        {
+          id: "R709",
+          what: "omit the browser file-helper core from the package allowlist",
+          file: PKG,
+          from: '      "src/file-helpers-core.js",\n',
+          to: "",
+          suite: "test:packaging",
+          expect: [
+            /^SEC-08 file-helpers-core\.js is packaged for its classic-script consumers$/,
+            /^src\/file-helpers-core\.js is in build\.files$/,
+            /^post-upstream-merge\.sh build\.files checks all still match$/,
+          ],
+          mustPass: [
+            /^SEC-08 file-helpers-core\.js loads exactly once after context-menu-utils\.js and before both consumers$/,
+            /^SEC-08 file-helpers\.js is packaged for its main-process consumer$/,
+            /^SEC-08 custom-tabs consumes window\.FoliaFileHelpers and fails loudly without a CommonJS fallback$/,
+            /^SEC-08 file-helpers\.js remains a Node adapter over the browser core$/,
+            /^post-upstream-merge\.sh preserves file-helpers loader recovery guards$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 3,
+        },
       ];
 
 // These are release exceptions, not passing or withdrawn proofs. An explicit
@@ -18815,7 +18838,7 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R319";
+      .join(",") === "R319,R709";
   // Route the fixture through the SAME reduction and verdict helpers the
   // mutation loop uses (assertionNameOf / unlistedFailures / expect-missing /
   // requiredPassingAssertionProblems / exact-failure + count guards).
