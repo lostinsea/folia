@@ -3872,18 +3872,35 @@
         rendererFileOpenHandler,
       );
 
-      const openAdditionalFiles = async (allPaths, stillCurrent) => {
+      const openAdditionalFiles = async (
+        allPaths, extraReadGrants, stillCurrent,
+      ) => {
         if (!allPaths || allPaths.length <= 1 || !stillCurrent()) return;
-        for (const extraPath of allPaths.slice(1)) {
+        if (
+          !Array.isArray(extraReadGrants) ||
+          extraReadGrants.length !== allPaths.length - 1
+        ) {
+          throw new Error("Dialog extras have no matching read grants");
+        }
+        for (const [index, extraPath] of allPaths.slice(1).entries()) {
           if (!stillCurrent()) return;
-          if (findTabByPath(extraPath) || !window.fs) continue;
+          if (findTabByPath(extraPath)) continue;
           let extraApproval = null;
           let extraTab = null;
           let extraCompleted = false;
           try {
             const extraReservation = reserveDocumentIdentity();
             if (!extraReservation) continue;
-            const snapshot = readStableDiskSnapshot(extraPath);
+            const snapshot = await tabIpc.invoke("read-dialog-extra", {
+              grant: extraReadGrants[index],
+              pageSession: window.getReloadRequestSession(),
+              rendererGeneration: approvalRendererGeneration,
+            });
+            if (!snapshot || snapshot.path !== extraPath ||
+                typeof snapshot.content !== "string") {
+              throw new Error("Dialog extra read returned an invalid snapshot");
+            }
+            if (!stillCurrent()) return;
             extraApproval = await verifyDiskAdoption(
               null, extraPath, snapshot.content,
               snapshot.modifiedTime, snapshot.diskVersion,
@@ -3927,6 +3944,7 @@
             )) continue;
             registerTabDiskOwner(extraTab);
           } catch (error) {
+            if (!stillCurrent()) return;
             console.error(
               "[CustomTabs] Error loading file:",
               extraPath,
@@ -4023,7 +4041,9 @@
         }
         console.log("[CustomTabs] Intercepted file-opened:", openData.path);
 
-        const { content, path: filePath, allPaths } = openData;
+        const {
+          content, path: filePath, allPaths, extraReadGrants,
+        } = openData;
         const overtakenForSameDocument = () =>
           intent !== latestFileOpenIntent &&
           (filePath === latestFileOpenPath ||
@@ -4328,7 +4348,8 @@
           saveTabs();
           renderTabs();
           await openAdditionalFiles(
-            allPaths, () => intent === latestFileOpenIntent,
+            allPaths, extraReadGrants,
+            () => intent === latestFileOpenIntent,
           );
           return;
         }
@@ -4363,7 +4384,8 @@
         }
         pendingActivationTabs.delete(targetTab);
         await openAdditionalFiles(
-          allPaths, () => intent === latestFileOpenIntent,
+          allPaths, extraReadGrants,
+          () => intent === latestFileOpenIntent,
         );
         } finally {
           try {

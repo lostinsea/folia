@@ -17796,6 +17796,83 @@ const REVERTS = [
           requireExactFailures: true,
           expectedFailureCount: 3,
         },
+        {
+          id: "R710",
+          what: "leave a dialog extra read grant reusable after main has served it",
+          file: MAIN,
+          from: "  batch.grants.delete(data.grant);\n",
+          to: "  // grant remains reusable\n",
+          suite: "test:tabs",
+          expect: [
+            /^a dialog read grant cannot be replayed$/,
+          ],
+          mustPass: [
+            /^the dialog batch really issued one current read grant for each extra file$/,
+            /^a multi-select reads its extra files in main, not in the renderer$/,
+            /^a forged or foreign dialog read grant is refused$/,
+            /^an unstarted superseded dialog grant is refused before main reads it$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R711",
+          what: "perform a renderer disk read before consuming a dialog extra grant",
+          file: TABS,
+          from:
+            '            const snapshot = await tabIpc.invoke("read-dialog-extra", {\n' +
+            "              grant: extraReadGrants[index],\n" +
+            "              pageSession: window.getReloadRequestSession(),\n" +
+            "              rendererGeneration: approvalRendererGeneration,\n" +
+            "            });",
+          to:
+            "            const directSnapshot = {\n" +
+            "              path: extraPath,\n" +
+            "              ...readStableDiskSnapshot(extraPath),\n" +
+            "            };\n" +
+            "            void directSnapshot;\n" +
+            '            const snapshot = await tabIpc.invoke("read-dialog-extra", {\n' +
+            "              grant: extraReadGrants[index],\n" +
+            "              pageSession: window.getReloadRequestSession(),\n" +
+            "              rendererGeneration: approvalRendererGeneration,\n" +
+            "            });",
+          suite: "test:tabs",
+          expect: [
+            /^a multi-select reads its extra files in main, not in the renderer$/,
+          ],
+          mustPass: [
+            /^a multi-select opens every file but renders only the chosen one$/,
+            /^the dialog batch really issued one current read grant for each extra file$/,
+            /^a multi-select opens its extras in the order they were selected$/,
+            /^main confirms each large file before sending its authenticated open$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R712",
+          what: "resolve a dialog extra after its main-owned batch was superseded",
+          file: MAIN,
+          from:
+            "      if (!dialogExtraBatchIsCurrent(batch, event)) {\n" +
+            '        reject(new Error("Dialog extra read refused: batch no longer active"));\n' +
+            "      } else if (error) {",
+          to: "      if (false) {\n      } else if (error) {",
+          suite: "test:tabs",
+          expect: [
+            /^an in-flight dialog extra rechecks its batch after main reads it$/,
+          ],
+          mustPass: [
+            /^an unstarted superseded dialog grant is refused before main reads it$/,
+            /^a dialog read grant cannot be replayed$/,
+            /^a multi-select reads its extra files in main, not in the renderer$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
       ];
 
 // These are release exceptions, not passing or withdrawn proofs. An explicit
@@ -18838,7 +18915,7 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R319,R709";
+      .join(",") === "R319,R709,R710,R711,R712";
   // Route the fixture through the SAME reduction and verdict helpers the
   // mutation loop uses (assertionNameOf / unlistedFailures / expect-missing /
   // requiredPassingAssertionProblems / exact-failure + count guards).

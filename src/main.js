@@ -3589,6 +3589,49 @@ function sendFileOpenFailure(
 }
 
 let fileOpenDeliveryEpoch = 0;
+let activeDialogExtraBatch = null;
+
+function dialogExtraBatchIsCurrent(batch, event) {
+  return activeDialogExtraBatch === batch &&
+    isApprovalSender(event) &&
+    approvalRendererState === "ready" &&
+    event.sender === batch.sender &&
+    event.senderFrame.frameTreeNodeId === batch.frameTreeNodeId &&
+    batch.pageSession === approvalRendererPageSession &&
+    batch.rendererGeneration === approvalRendererGeneration;
+}
+
+ipcMain.handle("read-dialog-extra", (event, data) => {
+  const batch = activeDialogExtraBatch;
+  if (
+    !batch ||
+    !data ||
+    typeof data.grant !== "string" ||
+    data.pageSession !== batch.pageSession ||
+    data.rendererGeneration !== batch.rendererGeneration ||
+    !dialogExtraBatchIsCurrent(batch, event)
+  ) {
+    throw new Error("Dialog extra read refused: invalid document session");
+  }
+  const filePath = batch.grants.get(data.grant);
+  if (!filePath) {
+    throw new Error("Dialog extra read refused: unknown or used grant");
+  }
+  // Consume before the asynchronous read so a concurrent replay cannot start.
+  batch.grants.delete(data.grant);
+  return new Promise((resolve, reject) => {
+    readMarkdownSnapshot(filePath, (error, content, modifiedTime, diskVersion) => {
+      if (!dialogExtraBatchIsCurrent(batch, event)) {
+        reject(new Error("Dialog extra read refused: batch no longer active"));
+      } else if (error) {
+        console.error("Error reading dialog extra:", error);
+        reject(error);
+      } else {
+        resolve({ path: filePath, content, modifiedTime, diskVersion });
+      }
+    });
+  });
+});
 
 function openFile(filePath, options = {}) {
   const deliveryEpoch = ++fileOpenDeliveryEpoch;
@@ -3697,6 +3740,7 @@ function openFile(filePath, options = {}) {
       rendererGeneration,
     );
     if (!sent) return;
+    activeDialogExtraBatch = null;
   });
 }
 
@@ -3732,23 +3776,47 @@ function openFileDialog() {
               return;
             }
 
-            // Send first file content and all selected paths
+            // Send first file content and all selected paths. Extra paths stay
+            // in main; the renderer can read only the dialog's one-use grants.
             if (!confirmLargeDocument(data, firstFilePath)) return;
             rememberDocumentModifiedTime(firstFilePath, modifiedTime, {
               replace: false,
             });
-            safeSendFileOpen(
+            const frame = target && !target.isDestroyed()
+              ? target.mainFrame
+              : null;
+            if (!frame || frame.isDestroyed()) {
+              console.error("Could not deliver dialog extras: main frame unavailable");
+            }
+            const grants = new Map();
+            const extraReadGrants = filePaths.slice(1).map((extraPath) => {
+              const grant = crypto.randomBytes(32).toString("hex");
+              grants.set(grant, extraPath);
+              return grant;
+            });
+            const batch = {
+              sender: target,
+              frameTreeNodeId: frame && !frame.isDestroyed()
+                ? frame.frameTreeNodeId
+                : null,
+              rendererGeneration,
+              pageSession: approvalRendererPageSession,
+              grants,
+            };
+            const sent = safeSendFileOpen(
               target,
               "file-opened",
               {
                 content: data,
                 path: firstFilePath,
                 allPaths: filePaths,
+                extraReadGrants,
                 modifiedTime,
                 diskVersion,
               },
               rendererGeneration,
             );
+            if (sent) activeDialogExtraBatch = batch;
           },
         );
       }
@@ -11279,6 +11347,22 @@ ipcMain.on(QUIT_APPROVAL_READY, (event, data) => {
   }
   approvalRendererPageSession = data.pageSession;
   approvalRendererState = "ready";
+  if (activeDialogExtraBatch) {
+    const batch = activeDialogExtraBatch;
+    if (
+      batch.sender !== event.sender ||
+      batch.rendererGeneration !== generation ||
+      batch.frameTreeNodeId !== event.senderFrame.frameTreeNodeId ||
+      (batch.pageSession !== null &&
+        batch.pageSession !== data.pageSession)
+    ) {
+      activeDialogExtraBatch = null;
+    } else {
+      // A dialog delivered before the ownership handshake belongs to this
+      // page; queued file-opened events resume only after the handshake.
+      batch.pageSession = data.pageSession;
+    }
+  }
   if (
     overlayProbeOwner &&
     overlayProbeOwner.generation === approvalRendererGeneration
@@ -11520,6 +11604,7 @@ function attachShutdownGuards(win) {
   // after every window has closed, and an authorization granted to the last
   // one must not silently cover this one's tabs.
   revokeShutdownAuthorization();
+  activeDialogExtraBatch = null;
   // Dropping these two slots is what makes the new window a fresh session, but
   // an intent that is dropped without being told is exactly the leak
   // declineIntent exists to prevent: a portable hand-off parked on one of them
@@ -11569,6 +11654,7 @@ function attachShutdownGuards(win) {
   wc.on("did-navigate", () => {
     const pendingAtNavigation = pendingShutdown;
     revokeShutdownAuthorization();
+    activeDialogExtraBatch = null;
     approvalRendererState = "loading";
     approvalRendererGeneration += 1;
     approvalRendererPageSession = null;
@@ -11696,6 +11782,7 @@ function attachShutdownGuards(win) {
     // slot anymore. Invalidate updater work that was approved by this session
     // before any ordinary close settlement can make the empty screen visible.
     invalidateDeferredUpdaterContinuations("window-closed");
+    activeDialogExtraBatch = null;
     approvalRendererState = "unusable";
     lastRendererUnusableReason = "the document window closed";
     // Abandoned, NOT re-raised: a fresh question about a document that no

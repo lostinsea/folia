@@ -10687,6 +10687,7 @@ async function run(win) {
       })),
     ),
   );
+  let dialogSelections = [[restoreBigA, restoreBigB, restoreBigC]];
 
   const mainLargePrompts = [];
   const restoreOpenDialog = replaceMethod(
@@ -10696,7 +10697,9 @@ async function run(win) {
       if (!options || !options.properties?.includes("multiSelections")) {
         throw new Error("Unexpected open dialog during batch fixture");
       }
-      return { canceled: false, filePaths: [restoreBigA, restoreBigB, restoreBigC] };
+      const filePaths = dialogSelections.shift();
+      if (!filePaths) throw new Error("Unexpected extra dialog during batch fixture");
+      return { canceled: false, filePaths: filePaths.slice() };
     },
   );
   let restoreLargeDialog;
@@ -10721,14 +10724,24 @@ async function run(win) {
       out.smallIsLarge = helpers.isLargeDocument(window.fs.readFileSync(${jsRestoreSmall}, 'utf8')).large;
 
       const realSendSync = window.ipcRenderer.sendSync;
+      const realInvoke = window.ipcRenderer.invoke;
+      const realReadFileSync = window.fs.readFileSync;
       const realRender = window.renderMarkdown;
       let asked = 0;
       let answer = true;
       const renders = [];
       const toasts = [];
+      const extraReadCalls = [];
+      let rendererExtraReadAttempt = null;
       window.ipcRenderer.sendSync = function (channel) {
         if (channel === 'confirm-large-render') { asked++; return answer; }
         return realSendSync.apply(this, arguments);
+      };
+      window.ipcRenderer.invoke = function (channel, data) {
+        if (channel === 'read-dialog-extra') {
+          extraReadCalls.push(Object.assign({}, data));
+        }
+        return realInvoke.apply(this, arguments);
       };
       // switchToTab renders through window.renderMarkdown, so counting here
       // counts the work a restore actually performs rather than restating the
@@ -10848,6 +10861,13 @@ async function run(win) {
         // the render count and the active tab looking correct. MEASURED -
         // R253 came back WRONG-GUARD for exactly this reason.
         answer = true;
+        window.fs.readFileSync = function (filePath) {
+          if (filePath === ${JSON.stringify(restoreBigB)} ||
+              filePath === ${JSON.stringify(restoreBigC)}) {
+            rendererExtraReadAttempt = filePath;
+          }
+          return realReadFileSync.apply(this, arguments);
+        };
         window.ipcRenderer.send('open-file-dialog');
         out.multiOpenReady = await waitFor(() =>
           window.CustomTabs.getTabs().length === 3 &&
@@ -10855,9 +10875,39 @@ async function run(win) {
           renders.length >= 1);
         out.askedOnMultiOpen = asked;
         out.multiOpenTabs = window.CustomTabs.getTabs().length;
+        out.multiOpenPaths = window.CustomTabs.getTabs().map(tab => tab.filePath);
         out.multiOpenActiveIsFirst =
           (window.CustomTabs.getActiveTab() || {}).filePath === ${JSON.stringify(restoreBigA)};
         out.rendersOnMultiOpen = renders.length;
+        out.extraReadCalls = extraReadCalls.map(call => Object.assign({}, call));
+        out.rendererExtraReadAttempt = rendererExtraReadAttempt;
+        window.fs.readFileSync = realReadFileSync;
+
+        const rejectedRead = async data => {
+          try {
+            const value = await realInvoke('read-dialog-extra', data);
+            return { rejected: false, value: value && {
+              path: value.path,
+              content: value.content,
+            } };
+          } catch (error) {
+            return { rejected: true, message: String(error && error.message) };
+          }
+        };
+        const firstExtraRead = extraReadCalls[0];
+        out.replayedExtraRead = firstExtraRead
+          ? await rejectedRead(firstExtraRead)
+          : null;
+        out.forgedExtraRead = firstExtraRead
+          ? await rejectedRead(Object.assign({}, firstExtraRead, {
+            grant: '0'.repeat(64),
+          }))
+          : null;
+        out.foreignSessionExtraRead = firstExtraRead
+          ? await rejectedRead(Object.assign({}, firstExtraRead, {
+            pageSession: String(firstExtraRead.pageSession) + '-forged',
+          }))
+          : null;
 
         // The same file arriving again - a markdown link to a document that is
         // already open. main.js has asked about it on the way here, so this
@@ -10875,6 +10925,8 @@ async function run(win) {
         await clearRestoreFixture('after reopen');
       } finally {
         window.ipcRenderer.sendSync = realSendSync;
+        window.ipcRenderer.invoke = realInvoke;
+        window.fs.readFileSync = realReadFileSync;
         window.renderMarkdown = realRender;
         toastObserver.disconnect();
       }
@@ -10883,7 +10935,6 @@ async function run(win) {
   `);
   } finally {
     if (restoreLargeDialog) restoreLargeDialog();
-    restoreOpenDialog();
   }
   check(
     "main confirms each large file before sending its authenticated open",
@@ -10958,6 +11009,63 @@ async function run(win) {
     JSON.stringify(batch),
   );
   check(
+    "the dialog batch really issued one current read grant for each extra file",
+    Array.isArray(batch.extraReadCalls) &&
+      batch.extraReadCalls.length === 2 &&
+      batch.extraReadCalls.every(call =>
+        typeof call.grant === "string" &&
+        call.grant.length === 64 &&
+        call.pageSession !== null &&
+        Number.isSafeInteger(call.rendererGeneration),
+      ),
+    JSON.stringify(batch.extraReadCalls),
+  );
+  check(
+    "a multi-select reads its extra files in main, not in the renderer",
+    batch.rendererExtraReadAttempt === null,
+    JSON.stringify({
+      rendererExtraReadAttempt: batch.rendererExtraReadAttempt,
+      extraReadCalls: batch.extraReadCalls,
+    }),
+  );
+  check(
+    "a multi-select opens its extras in the order they were selected",
+    batch.multiOpenReady === true &&
+      batch.extraReadCalls.length === 2 &&
+      batch.multiOpenTabs === 3 &&
+      JSON.stringify(batch.multiOpenPaths) === JSON.stringify([
+        restoreBigA, restoreBigB, restoreBigC,
+      ]) &&
+      batch.extraReadCalls[0].grant !== batch.extraReadCalls[1].grant &&
+      batch.extraReadCalls.every(call =>
+        call.pageSession === batch.extraReadCalls[0].pageSession &&
+        call.rendererGeneration === batch.extraReadCalls[0].rendererGeneration,
+      ),
+    JSON.stringify(batch),
+  );
+  check(
+    "a dialog read grant cannot be replayed",
+    batch.replayedExtraRead &&
+      batch.replayedExtraRead.rejected === true &&
+      /unknown or used grant/i.test(batch.replayedExtraRead.message),
+    JSON.stringify(batch.replayedExtraRead),
+  );
+  check(
+    "a forged or foreign dialog read grant is refused",
+    batch.forgedExtraRead &&
+      batch.forgedExtraRead.rejected === true &&
+      /unknown or used grant|invalid document session/i.test(
+        batch.forgedExtraRead.message,
+      ) &&
+      batch.foreignSessionExtraRead &&
+      batch.foreignSessionExtraRead.rejected === true &&
+      /invalid document session/i.test(batch.foreignSessionExtraRead.message),
+    JSON.stringify({
+      forged: batch.forgedExtraRead,
+      foreignSession: batch.foreignSessionExtraRead,
+    }),
+  );
+  check(
     "re-opening a file that is already open does not ask a second time",
     batch.reopenReady === true &&
       batch.askedOnReopen === 0 &&
@@ -10965,6 +11073,353 @@ async function run(win) {
       batch.tabsAfterReopen === 3,
     JSON.stringify(batch),
   );
+
+  // The main batch must survive an unrelated open that fails before it can
+  // deliver a replacement document. A later extra can still fail on disk, but
+  // that failure is per-file: the following grant remains usable.
+  const recoveryFirst = path.join(dir, "dialog-recovery-first.md");
+  const recoveryMissing = path.join(dir, "dialog-recovery-missing.md");
+  const recoveryLast = path.join(dir, "dialog-recovery-last.md");
+  const failedLaterOpen = path.join(dir, "dialog-later-missing.md");
+  write(recoveryFirst, "# Recovery first\n\nDIALOG_RECOVERY_FIRST\n");
+  write(recoveryMissing, "# Recovery missing\n\nDIALOG_RECOVERY_MISSING\n");
+  write(recoveryLast, "# Recovery last\n\nDIALOG_RECOVERY_LAST\n");
+  dialogSelections = [[recoveryFirst, recoveryMissing, recoveryLast]];
+  await clearFixtureTabs("dialog extra recovery preflight");
+  let recoveryBatch;
+  let recoveryMute;
+  await sentinel.mute("dialog extra's controlled missing-file recovery");
+  try {
+    recoveryBatch = await exec(`
+      (async () => {
+        const ipc = window.ipcRenderer;
+        const realInvoke = ipc.invoke;
+        const realReadFileSync = window.fs.readFileSync;
+        const first = ${JSON.stringify(recoveryFirst)};
+        const missing = ${JSON.stringify(recoveryMissing)};
+        const last = ${JSON.stringify(recoveryLast)};
+        const failedLater = ${JSON.stringify(failedLaterOpen)};
+        const toast = document.getElementById('notificationMessage');
+        const toasts = [];
+        const observer = new MutationObserver(() => toasts.push(toast.textContent));
+        if (toast) observer.observe(toast, {
+          childList: true, characterData: true, subtree: true,
+        });
+        const waitFor = async predicate => {
+          const deadline = Date.now() + 8000;
+          while (Date.now() < deadline) {
+            if (predicate()) return true;
+            await new Promise(resolve => setTimeout(resolve, 25));
+          }
+          return predicate();
+        };
+        let intercepted = false;
+        let laterOpenFailed = false;
+        let rendererExtraReadAttempt = null;
+        const extraReadCalls = [];
+        window.fs.readFileSync = function (filePath) {
+          if (filePath === missing || filePath === last) {
+            rendererExtraReadAttempt = filePath;
+          }
+          return realReadFileSync.apply(this, arguments);
+        };
+        ipc.invoke = async function (channel, data) {
+          if (channel === 'read-dialog-extra' && !intercepted) {
+            intercepted = true;
+            require('fs').unlinkSync(missing);
+            const failure = new Promise(resolve => {
+              const onMissing = (_event, payload) => {
+                if (!payload || payload.path !== failedLater) return;
+                ipc.removeListener('file-not-found', onMissing);
+                resolve(true);
+              };
+              ipc.on('file-not-found', onMissing);
+              setTimeout(() => {
+                ipc.removeListener('file-not-found', onMissing);
+                resolve(false);
+              }, 5000);
+            });
+            ipc.send('open-file-path', { filePath: failedLater });
+            laterOpenFailed = await failure;
+          }
+          if (channel === 'read-dialog-extra') {
+            extraReadCalls.push(Object.assign({}, data));
+          }
+          return realInvoke.apply(this, arguments);
+        };
+        try {
+          ipc.send('open-file-dialog');
+          const settled = await waitFor(() => {
+            const tabs = window.CustomTabs.getTabs();
+            return tabs.length === 2 &&
+              tabs.some(tab => tab.filePath === first) &&
+              tabs.some(tab => tab.filePath === last);
+          });
+          const tabs = window.CustomTabs.getTabs().map(tab => tab.filePath);
+          return {
+            intercepted,
+            laterOpenFailed,
+            settled,
+            tabs,
+            active: (window.CustomTabs.getActiveTab() || {}).filePath || null,
+            toasts,
+            extraReadCalls,
+            rendererExtraReadAttempt,
+          };
+        } finally {
+          ipc.invoke = realInvoke;
+          window.fs.readFileSync = realReadFileSync;
+          observer.disconnect();
+        }
+      })()
+    `);
+    await sentinel.drain();
+    recoveryMute = sentinel.currentMute();
+  } finally {
+    await sentinel.unmute();
+  }
+  check(
+    "a failed later open really arrived while the dialog extra was held",
+    recoveryBatch &&
+      recoveryBatch.intercepted === true &&
+      recoveryBatch.laterOpenFailed === true,
+    JSON.stringify(recoveryBatch),
+  );
+  check(
+    "one unreadable extra is reported without losing the rest of the batch",
+    recoveryBatch &&
+      recoveryBatch.settled === true &&
+      JSON.stringify(recoveryBatch.tabs) === JSON.stringify([
+        recoveryFirst, recoveryLast,
+      ]) &&
+      recoveryBatch.active === recoveryFirst &&
+      Array.isArray(recoveryBatch.extraReadCalls) &&
+      recoveryBatch.extraReadCalls.length === 2 &&
+      recoveryBatch.extraReadCalls[0].grant !==
+        recoveryBatch.extraReadCalls[1].grant &&
+      recoveryBatch.toasts.some(text =>
+        /Could not open .*dialog-recovery-missing\.md\./.test(String(text)),
+      ) &&
+      recoveryMute &&
+      recoveryMute.suppressed.filter(hit =>
+        hit.kind === "console-error" &&
+        hit.detail.includes("[CustomTabs] Error loading file:") &&
+        hit.detail.includes("dialog-recovery-missing.md"),
+      ).length === 1,
+    JSON.stringify({ recoveryBatch, recoveryMute }),
+  );
+  await clearFixtureTabs("dialog extra recovery teardown");
+
+  // The renderer has not sent this grant to main yet. Once a newer open wins,
+  // main must refuse the unstarted grant rather than beginning an obsolete
+  // read. This deliberately does not claim to exercise main's separate
+  // post-read callback recheck.
+  const staleFirst = path.join(dir, "dialog-stale-first.md");
+  const staleExtra = path.join(dir, "dialog-stale-extra.md");
+  const newerOpen = path.join(dir, "dialog-newer-open.md");
+  write(staleFirst, "# Stale first\n\nDIALOG_STALE_FIRST\n");
+  write(staleExtra, "# Stale extra\n\nDIALOG_STALE_EXTRA\n");
+  write(newerOpen, "# Newer open\n\nDIALOG_NEWER_OPEN\n");
+  dialogSelections = [[staleFirst, staleExtra]];
+  const supersededBatch = await exec(`
+    (async () => {
+      const ipc = window.ipcRenderer;
+      const realInvoke = ipc.invoke;
+      const held = new Promise(resolve => { window.__releaseDialogExtra = resolve; });
+      const first = ${JSON.stringify(staleFirst)};
+      const extra = ${JSON.stringify(staleExtra)};
+      const newer = ${JSON.stringify(newerOpen)};
+      const waitFor = async predicate => {
+        const deadline = Date.now() + 8000;
+        while (Date.now() < deadline) {
+          if (predicate()) return true;
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        return predicate();
+      };
+      let heldRead = false;
+      let heldReadPromise = null;
+      ipc.invoke = function (channel, data) {
+        if (channel === 'read-dialog-extra' && !heldRead) {
+          heldRead = true;
+          heldReadPromise = held.then(() => realInvoke.call(this, channel, data));
+          return heldReadPromise;
+        }
+        return realInvoke.apply(this, arguments);
+      };
+      try {
+        ipc.send('open-file-dialog');
+        const extraReadHeld = await waitFor(() => heldRead === true);
+        if (extraReadHeld) ipc.send('open-file-path', { filePath: newer });
+        const newerLanded = extraReadHeld && await waitFor(() =>
+          window.currentFilePath === newer &&
+          (window.CustomTabs.getActiveTab() || {}).filePath === newer,
+        );
+        let heldReadResult = null;
+        if (newerLanded) {
+          window.__releaseDialogExtra();
+          heldReadResult = heldReadPromise
+            ? await heldReadPromise.then(
+              () => ({ rejected: false }),
+              error => ({
+                rejected: true,
+                message: String(error && error.message),
+              }),
+            )
+            : null;
+        }
+        return {
+          extraReadHeld,
+          newerLanded,
+          heldReadResult,
+          tabs: window.CustomTabs.getTabs().map(tab => tab.filePath),
+          active: (window.CustomTabs.getActiveTab() || {}).filePath || null,
+          firstPresent: !!window.CustomTabs.findTabByPath(first),
+          staleExtraPresent: !!window.CustomTabs.findTabByPath(extra),
+        };
+      } finally {
+        ipc.invoke = realInvoke;
+        delete window.__releaseDialogExtra;
+      }
+    })()
+  `);
+  check(
+    "an unstarted superseded dialog grant is refused before main reads it",
+    supersededBatch &&
+      supersededBatch.extraReadHeld === true &&
+      supersededBatch.newerLanded === true &&
+      supersededBatch.heldReadResult &&
+      supersededBatch.heldReadResult.rejected === true &&
+      /invalid document session/i.test(supersededBatch.heldReadResult.message) &&
+      supersededBatch.firstPresent === true &&
+      supersededBatch.staleExtraPresent === false &&
+      supersededBatch.active === newerOpen,
+    JSON.stringify(supersededBatch),
+  );
+  await clearFixtureTabs("superseded dialog batch teardown");
+
+  // Hold only readMarkdownSnapshot's second stat for this exact extra. This
+  // places main after its disk read but before read-dialog-extra's callback
+  // checks whether the batch is still current.
+  const afterReadFirst = path.join(dir, "dialog-after-read-first.md");
+  const afterReadExtra = path.join(dir, "dialog-after-read-extra.md");
+  const afterReadNewer = path.join(dir, "dialog-after-read-newer.md");
+  write(afterReadFirst, "# After read first\n\nDIALOG_AFTER_READ_FIRST\n");
+  write(afterReadExtra, "# After read extra\n\nDIALOG_AFTER_READ_EXTRA\n");
+  write(afterReadNewer, "# After read newer\n\nDIALOG_AFTER_READ_NEWER\n");
+  dialogSelections = [[afterReadFirst, afterReadExtra]];
+  const originalStat = fs.stat;
+  let afterReadExtraStatCount = 0;
+  let releaseAfterReadStat = null;
+  let afterReadStatReleased = false;
+  const restoreAfterReadStat = replaceMethod(fs, "stat", function (filePath, callback) {
+    if (filePath === afterReadExtra && ++afterReadExtraStatCount === 2) {
+      return originalStat.call(this, filePath, (...args) => {
+        releaseAfterReadStat = () => {
+          if (afterReadStatReleased) return;
+          afterReadStatReleased = true;
+          callback(...args);
+        };
+      });
+    }
+    return originalStat.apply(this, arguments);
+  });
+  let afterReadBatch;
+  try {
+    const primaryStarted = await exec(`
+      (async () => {
+        const ipc = window.ipcRenderer;
+        const realInvoke = ipc.invoke;
+        const first = ${JSON.stringify(afterReadFirst)};
+        window.__dialogAfterReadProbe = {
+          realInvoke,
+          invokeStarted: false,
+          result: null,
+        };
+        ipc.invoke = function (channel, data) {
+          const result = realInvoke.apply(this, arguments);
+          if (channel === 'read-dialog-extra') {
+            window.__dialogAfterReadProbe.invokeStarted = true;
+            result.then(
+              value => {
+                window.__dialogAfterReadProbe.result = {
+                  rejected: false,
+                  path: value && value.path,
+                };
+              },
+              error => {
+                window.__dialogAfterReadProbe.result = {
+                  rejected: true,
+                  message: String(error && error.message),
+                };
+              },
+            );
+          }
+          return result;
+        };
+        ipc.send('open-file-dialog');
+        const deadline = Date.now() + 8000;
+        while (Date.now() < deadline) {
+          if (window.CustomTabs.findTabByPath(first)) return true;
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        return !!window.CustomTabs.findTabByPath(first);
+      })()
+    `);
+    const secondStatHeld = await waitUntil(() => releaseAfterReadStat !== null);
+    if (secondStatHeld) {
+      await exec(
+        `window.ipcRenderer.send('open-file-path', { filePath: ${JSON.stringify(afterReadNewer)} }); null`,
+      );
+    }
+    const newerLanded = secondStatHeld && await waitForCondition(
+      exec,
+      `window.currentFilePath === ${JSON.stringify(afterReadNewer)} &&
+        (window.CustomTabs.getActiveTab() || {}).filePath === ${JSON.stringify(afterReadNewer)}`,
+      8000,
+    );
+    if (newerLanded && releaseAfterReadStat) releaseAfterReadStat();
+    afterReadBatch = await exec(`
+      (async () => {
+        const probe = window.__dialogAfterReadProbe;
+        const deadline = Date.now() + 8000;
+        while (probe && probe.result === null && Date.now() < deadline) {
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        const result = probe && probe.result;
+        if (probe) window.ipcRenderer.invoke = probe.realInvoke;
+        delete window.__dialogAfterReadProbe;
+        return {
+          primaryStarted: ${primaryStarted},
+          result,
+          tabs: window.CustomTabs.getTabs().map(tab => tab.filePath),
+          active: (window.CustomTabs.getActiveTab() || {}).filePath || null,
+        };
+      })()
+    `);
+    afterReadBatch.secondStatHeld = secondStatHeld;
+    afterReadBatch.newerLanded = newerLanded;
+    afterReadBatch.statCalls = afterReadExtraStatCount;
+  } finally {
+    if (releaseAfterReadStat) releaseAfterReadStat();
+    restoreAfterReadStat();
+  }
+  check(
+    "an in-flight dialog extra rechecks its batch after main reads it",
+    afterReadBatch &&
+      afterReadBatch.primaryStarted === true &&
+      afterReadBatch.secondStatHeld === true &&
+      afterReadBatch.statCalls === 2 &&
+      afterReadBatch.newerLanded === true &&
+      afterReadBatch.result &&
+      afterReadBatch.result.rejected === true &&
+      /batch no longer active/i.test(afterReadBatch.result.message) &&
+      afterReadBatch.active === afterReadNewer &&
+      !afterReadBatch.tabs.includes(afterReadExtra),
+    JSON.stringify(afterReadBatch),
+  );
+  await clearFixtureTabs("post-read dialog batch teardown");
+  restoreOpenDialog();
 
   // ---- Scenario 12b: reload replies are owned by their request -----------
   // Capture an actual main-frame request/reply, then use that opaque reply
