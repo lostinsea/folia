@@ -3504,6 +3504,74 @@ no-Node known/unknown-shortcode fixture, Node parity and
 both render paths, packaging/post-merge order controls
 and individually proven reverts. No targeted suite, revert,
 startup result or integration is claimed at this handoff.
+Terra then added one real no-Node fixture and checks for
+map/parser publication, known and unknown shortcodes,
+missing-map failure, CommonJS parity, live error sentinels,
+single-load/order packaging and post-merge guards. The
+focused security leg passed **27/27**, packaging **332
+passed** with two absent-asar skips, and the render-patch
+suite **198/198** including full/light emoji behavior
+(retained `files/sec08-emoji-loader-*-20261005.log`).
+R681/R684/R688 preserved their original distinct order
+mutations; R693-R701 each reported individually **PROVEN**
+with intended failures and passing controls in their
+per-record logs. Sol's four product-file hashes matched
+before and after the reverts. The final anchor log reports
+**640** setups resolved, not proof of all 640 behaviors.
+Three fresh independent Sol/Terra/Luna full-unit reviews
+found no significant regression. Sol observed that the
+helper's inherited-object-property lookup for certain
+unknown shortcodes already existed in baseline, not a
+defect introduced by this loader unit.
+One operator-scheduled, process-monitored, same-path
+**21-pair** real-file
+startup comparison passed the predeclared regression rule
+(**both >10% and >25 ms**): FCP p50/p95 **1288.9/1571.1
+-> 1224.2/1431.5 ms**, load **1321.728/1624.677 ->
+1266.897/1475.644 ms**. Preflight had zero Electron
+processes; 76 ancestry-based process samples across 82.7
+seconds found no external Electron or Folia test process.
+No other Folia harness, screenshot, suite or benchmark was
+scheduled during that window; unrelated machine workloads
+and sub-sample process lifetimes were not instrumented.
+All 42 FCP entries were valid and candidate bytes restored.
+This is a bounded noisy startup gate, not proof of a speedup
+or the full SEC-08 matrix (`docs/PERF-AUDIT.md`,
+`files/sec08-emoji-loader-fcp-20261005/`).
+The reviewed nine-file stream committed as `3444485` and
+landed serially via cherry-pick `04e1d14`. Post-landing
+security **220/220**, render patch **198/198**, tabs
+**478/478**, startup **11/11**, theme **363/363**,
+packaging **341 passed, 0 failed** with one
+packaged-update-feed SKIP, and all **640** anchor setups
+passed (retained `files/sec08-emoji-integrated-*-20261005.log`).
+The packaging run inspected an existing asar, not a newly
+built strict artifact. Main-window isolation, the complete
+clean-tree release suite and revert inventory, fresh
+strict asar and viewed screenshots remain open.
+**Next SEC-08 boundary design (read-only, 2026-10-05).**
+Opus and Luna independently selected a renderer-safe
+`file-helpers` core split before IPC migration, preserving
+the audit's fixed module-loader-first order. Only
+`custom-tabs.js` still imports a local Node-backed module;
+its BOM/Mermaid normalisation must not drift from the main
+process during refresh, restore or multi-open. The pure
+shared logic and extension checks belong in a browser-safe
+core; `readMarkdownFile` and `sendIPCResult` stay in the
+main-process adapter with its existing CommonJS API.
+The extension helper must match Windows and POSIX
+`path.extname` cases, including dotfiles and trailing dots.
+Do not turn the tabs' synchronous stat/read/stat snapshot
+loop into async IPC in this loader unit or retain its
+silent BOM-only fallback. Luna suggested moving two
+renderer-side test probes from Node `require` to the new
+global now; Opus said they can wait until the flag flip.
+The integration owner chose to migrate those two test
+probes with this unit, so they cannot mask a missing
+browser loader. An isolated clean worktree
+`feat/w2-sec08-file-helpers-core-20261005` was created
+from `04e1d14`. No implementation or gate result is
+claimed yet; Node integration remains enabled.
 
 **Order of work is fixed by the audit** (each step independently shippable):
 rebuild the harnesses' renderer access on a test-only preload → give the 6 local

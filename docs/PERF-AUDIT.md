@@ -762,6 +762,52 @@ and after, and the disposable app was restored to its candidate
 bytes. Ordered samples, snapshots and the monitor summary are
 in `files/sec08-context-loader-fcp-lineage-20261005/`.
 
+### SEC-08 emoji dependency-chain loader — real-file startup check
+
+This unit loads `emoji-map.js` then `emoji-parser.js` as local
+classic scripts before `renderer.js`, removing the renderer's
+last non-builtin local CommonJS import. It does not change the
+main window's Node privileges. The predeclared material rule
+was candidate worse by **both >10% and >25 ms** at p50 or
+p95 of entry-to-FCP or entry-to-`did-finish-load`. One
+disposable real-file app path alternated immutable baseline
+`b039eb7` and the reviewed candidate's four changed product
+files. On the AMD EPYC Windows 11 host (10.0.26300),
+Electron **43.4.1** / Chromium **150.0.7871.224** launched
+**21 fresh isolated profiles per variant**, alternating
+AB/BA (11/10). All **42** produced a buffered Chromium FCP
+entry within the 1.8-second bound; its original timestamp,
+not collection time, is reported. No sample was excluded
+or retried.
+
+| Entry-to metric | Baseline A p50 / p95 | Candidate B p50 / p95 | B-A p50 / p95 |
+|---|---:|---:|---:|
+| FCP | 1288.9 / 1571.1 ms | 1224.2 / 1431.5 ms | -64.7 ms (-5.020%) / -139.6 ms (-8.885%) |
+| `did-finish-load` | 1321.728 / 1624.677 ms | 1266.897 / 1475.644 ms | -54.831 ms (-4.148%) / -149.033 ms (-9.173%) |
+
+**No material regression under the fixed rule.** The
+integration owner scheduled no competing Folia Electron
+suite, mutation harness, screenshot or benchmark run.
+Preflight found no Electron process; an ancestry-based
+monitor took **76 process samples over 82.7 seconds**,
+finding 210 observations of the probe's own Electron
+processes, no unrelated Electron and no other Folia test
+or benchmark Node process. Paired FCP differences ranged
+**-384.0 to +130.7 ms**, median **-37.7 ms** (15/21
+candidate launches faster); load ranged **-573.985 to
++150.769 ms**, median **-32.081 ms**. These noisy
+observations do not establish that the loader made startup
+faster. Nearest-rank p95 is the second-highest of only 21
+launches; process sampling may miss brief competitors and
+does not instrument unrelated CPU activity. The probe
+clock starts after Electron process creation and measures
+an initially empty, nonpackaged window, not file rendering,
+compositor presentation or the full SEC-08 matrix.
+Candidate source hashes matched before and after; disposable
+sources were restored. Raw ordered samples, snapshots and
+monitor summary are in
+`files/sec08-emoji-loader-fcp-20261005/`.
+
 ## Measured and found already fast
 - **Custom tab sync I/O is not the current bottleneck.**
   - `custom-tabs.js:69-111,640`
