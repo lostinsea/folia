@@ -114,6 +114,12 @@ const CLEAN_PASSING_SHUTDOWN_TAIL = Object.freeze([
 const R454_POPUP_POLICY_WIRING_TAIL = Object.freeze([
   "Shutdown approval renderer unusable: webContents destroyed",
 ]);
+// R319's mutation keeps test:theme's own shutdown teardown line and nothing
+// else. Frozen separately from the clean tail above on purpose: a mutation
+// transcript must stay record-specific and fail closed.
+const R319_MERMAID_SCOPE_TAIL = Object.freeze([
+  "Shutdown approval renderer unusable: webContents destroyed",
+]);
 const VIRTUAL_SUITES = Object.freeze({
   [F22_NEWLINE_EVIDENCE_SUITE]: Object.freeze({
     npmScript: "test:tabs",
@@ -8552,8 +8558,17 @@ const REVERTS = [
     from: "    themeVariables: isDark ? MERMAID_DARK_THEME : MERMAID_LIGHT_THEME,",
     to: "    themeVariables: Object.assign({}, isDark ? MERMAID_DARK_THEME : MERMAID_LIGHT_THEME, (typeof document !== 'undefined' && document.body && document.body.getAttribute('data-theme')) ? { primaryColor: '#123456' } : {}),",
     suite: "test:theme",
-    expect: [/10i: mermaid's configuration is decided by the mode alone, never by the scheme/],
-    mustPass: [/10i: mermaid really does distinguish the two modes/],
+    expect: [
+      /^10i: mermaid's configuration is decided by the mode alone, never by the scheme$/,
+      /^10i: the configuration the product really hands to mermaid\.initialize is chosen by the mode alone$/,
+    ],
+    mustPass: [
+      /^10i: mermaid really does distinguish the two modes \(positive control\)$/,
+      /^10i: the mermaid bundle really loaded, so its initialisation path is reachable at all \(control\)$/,
+    ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
+    expectedFailureCount: 2,
   },
   {
     id: "R320",
@@ -17513,12 +17528,13 @@ function suiteTranscriptHealth(
       requirePassingFooter &&
       footer.failures === 0 &&
       isExactShutdownTail(trailing, CLEAN_PASSING_SHUTDOWN_TAIL);
-    if (
-      trailing.length &&
-      !isLegitimateShutdownTeardown(trailing) &&
-      !isExactShutdownTail(trailing, exactShutdownTail) &&
-      !isAllowedCleanLoneShutdownTail
-    ) {
+    const requiresStrictExactTail = exactShutdownTail === R319_MERMAID_SCOPE_TAIL;
+    const tailAccepted = requiresStrictExactTail
+      ? isExactShutdownTail(trailing, exactShutdownTail)
+      : isLegitimateShutdownTeardown(trailing) ||
+        isExactShutdownTail(trailing, exactShutdownTail) ||
+        isAllowedCleanLoneShutdownTail;
+    if (trailing.length && !tailAccepted) {
       reasons.push("unprefixed transcript followed its terminal parent-suite footer");
     }
     if (!Number.isSafeInteger(footer.failures) || footer.failures < 0) {
@@ -17717,6 +17733,29 @@ function hasExactFailureViolation(r, unlisted) {
   return r.requireExactFailures === true && unlisted.length > 0;
 }
 
+// This opt-in count rejects duplicate expected failures without changing the
+// existing no-unlisted-failure policy for other records.
+function hasExactFailureCountViolation(r, fails) {
+  return (
+    r.requireExactFailures === true &&
+    Number.isSafeInteger(r.expectedFailureCount) &&
+    fails.length !== r.expectedFailureCount
+  );
+}
+
+function mutationVerdictKind(
+  r,
+  { fails, unlisted, missing, collateral, evidenceProblems },
+) {
+  if (evidenceProblems.length) return "EVIDENCE";
+  if (fails.length === 0) return "VACUOUS";
+  if (missing.length) return "WRONG-GUARD";
+  if (collateral.length) return "COLLATERAL-MUSTPASS";
+  if (hasExactFailureViolation(r, unlisted)) return "COLLATERAL-UNLISTED";
+  if (hasExactFailureCountViolation(r, fails)) return "COLLATERAL-COUNT";
+  return "PROVEN";
+}
+
 function regexFingerprint(list) {
   return (list || []).map((re) => [re.source, re.flags]);
 }
@@ -17741,6 +17780,9 @@ function revertFingerprint(r) {
     mustPass: regexFingerprint(r.mustPass),
     requireMustPassAssertions: r.requireMustPassAssertions === true,
     requireExactFailures: r.requireExactFailures === true,
+    ...(Number.isSafeInteger(r.expectedFailureCount)
+      ? { expectedFailureCount: r.expectedFailureCount }
+      : {}),
     expectedFailureEvidence: evidence
       ? {
           assertion: [evidence.assertion.source, evidence.assertion.flags],
@@ -17959,6 +18001,7 @@ function exactShutdownTailForMutation(r) {
   // These are mutation-only transcripts. Clean runs, every other record, any
   // reordered or added line, and every fatal marker remain health failures.
   if (r.id === "R454") return R454_POPUP_POLICY_WIRING_TAIL;
+  if (r.id === "R319") return R319_MERMAID_SCOPE_TAIL;
   return r.id === "R660" &&
     r.proofOnly?.exactShutdownTail === R660_PROOF_ONLY_SHUTDOWN_TAIL
     ? R660_PROOF_ONLY_SHUTDOWN_TAIL
@@ -18038,6 +18081,45 @@ function proveCompanionTranscriptRoles() {
     r454PopupPolicyTail + "unexpected diagnostic after footer\n";
   const r454TailWithFatalLine =
     r454PopupPolicyTail + "FAIL  harness threw after footer\n";
+  // The R319 mutation transcript as the real suite prints it: BOTH expected
+  // failures, BOTH mustPass controls still passing, and a footer whose count
+  // agrees with exactly two failures (363 - 2 = 361).
+  const r319MermaidScopeBody =
+    "PASS  10i: mermaid really does distinguish the two modes (positive control)\n" +
+    "PASS  10i: the mermaid bundle really loaded, so its initialisation path is reachable at all (control)\n" +
+    "FAIL  10i: mermaid's configuration is decided by the mode alone, never by the scheme  -> detail\n" +
+    "FAIL  10i: the configuration the product really hands to mermaid.initialize is chosen by the mode alone  -> detail\n" +
+    "=== 361/363 passed ===\n";
+  const r319MermaidScopeTail =
+    r319MermaidScopeBody +
+    "Shutdown approval renderer unusable: webContents destroyed\n";
+  const r319DuplicateTranscript =
+    r319MermaidScopeBody.replace(
+      "=== 361/363 passed ===\n",
+      "FAIL  10i: mermaid's configuration is decided by the mode alone, never by the scheme  -> duplicate detail\n" +
+      "=== 360/363 passed ===\n",
+    ) +
+    "Shutdown approval renderer unusable: webContents destroyed\n";
+  const r319TailWithArbitraryLine =
+    r319MermaidScopeTail + "unexpected diagnostic after footer\n";
+  const r319TailWithFatalLine =
+    r319MermaidScopeTail + "FAIL  harness threw after footer\n";
+  const r319TailReordered =
+    r319MermaidScopeBody +
+    "unexpected diagnostic before shutdown\n" +
+    "Shutdown approval renderer unusable: webContents destroyed\n";
+  const r319TailDuplicated =
+    r319MermaidScopeTail +
+    "Shutdown approval renderer unusable: webContents destroyed\n";
+  const r319TailWithGenericTeardown =
+    r319MermaidScopeBody +
+    "Stopped file watching\n" +
+    "Shutdown approval renderer unusable: webContents destroyed\n";
+  const r319CleanMermaidTail =
+    "PASS  10i: mermaid really does distinguish the two modes (positive control)\n" +
+    "PASS  10i: the mermaid bundle really loaded, so its initialisation path is reachable at all (control)\n" +
+    "=== 413/413 passed ===\n" +
+    "Shutdown approval renderer unusable: webContents destroyed\n";
   const unterminatedCompanionNames = assertionNames(
     "[companion stdout] FAIL  unterminated companion record  -> detail",
   );
@@ -18112,6 +18194,15 @@ function proveCompanionTranscriptRoles() {
       exactShutdownTail: R454_POPUP_POLICY_WIRING_TAIL,
     },
   );
+  const legacyExactTailsAllowGenericTeardown = [
+    R454_POPUP_POLICY_WIRING_TAIL,
+    R660_PROOF_ONLY_SHUTDOWN_TAIL,
+  ].every((exactShutdownTail) =>
+    suiteTranscriptHealth(legitimateShutdownTeardown, {
+      requirePassingFooter: true,
+      exactShutdownTail,
+    }).healthy,
+  );
   const r454TailWithArbitraryLineHealth = suiteTranscriptHealth(
     r454TailWithArbitraryLine,
     {
@@ -18133,6 +18224,115 @@ function proveCompanionTranscriptRoles() {
       exactShutdownTail: R454_POPUP_POLICY_WIRING_TAIL,
     },
   );
+  const configuredR319ShutdownTailHealth = suiteTranscriptHealth(
+    r319MermaidScopeTail,
+    { requirePassingFooter: false, exactShutdownTail: R319_MERMAID_SCOPE_TAIL },
+  );
+  const r319TailWithArbitraryLineHealth = suiteTranscriptHealth(
+    r319TailWithArbitraryLine,
+    { requirePassingFooter: false, exactShutdownTail: R319_MERMAID_SCOPE_TAIL },
+  );
+  const r319TailWithFatalLineHealth = suiteTranscriptHealth(
+    r319TailWithFatalLine,
+    { requirePassingFooter: false, exactShutdownTail: R319_MERMAID_SCOPE_TAIL },
+  );
+  const r319ReorderedTailHealth = suiteTranscriptHealth(r319TailReordered, {
+    requirePassingFooter: false,
+    exactShutdownTail: R319_MERMAID_SCOPE_TAIL,
+  });
+  const r319DuplicatedTailHealth = suiteTranscriptHealth(r319TailDuplicated, {
+    requirePassingFooter: false,
+    exactShutdownTail: R319_MERMAID_SCOPE_TAIL,
+  });
+  const r319GenericTeardownTailHealth = suiteTranscriptHealth(
+    r319TailWithGenericTeardown,
+    { requirePassingFooter: false, exactShutdownTail: R319_MERMAID_SCOPE_TAIL },
+  );
+  const r319CleanTailHealth = suiteTranscriptHealth(r319CleanMermaidTail, {
+    requirePassingFooter: true,
+    allowCleanLoneShutdownTail: true,
+  });
+  const r319Record = REVERTS.find((r) => r.id === "R319");
+  const fp = (list) => JSON.stringify(regexFingerprint(list));
+  const r319RecordIsPinned =
+    !!r319Record &&
+    r319Record.suite === "test:theme" &&
+    r319Record.file === MERMAID_CFG &&
+    r319Record.requireExactFailures === true &&
+    r319Record.requireMustPassAssertions === true &&
+    r319Record.expectedFailureCount === 2 &&
+    fp(r319Record.expect) ===
+      JSON.stringify([
+        ["^10i: mermaid's configuration is decided by the mode alone, never by the scheme$", ""],
+        ["^10i: the configuration the product really hands to mermaid\\.initialize is chosen by the mode alone$", ""],
+      ]) &&
+    fp(r319Record.mustPass) ===
+      JSON.stringify([
+        ["^10i: mermaid really does distinguish the two modes \\(positive control\\)$", ""],
+        ["^10i: the mermaid bundle really loaded, so its initialisation path is reachable at all \\(control\\)$", ""],
+      ]);
+  const r319AllowanceIsRecordScoped =
+    exactShutdownTailForMutation(r319Record) === R319_MERMAID_SCOPE_TAIL &&
+    exactShutdownTailForMutation(REVERTS.find((r) => r.id === "R320")) === undefined &&
+    exactShutdownTailForMutation(REVERTS.find((r) => r.id === "R454")) ===
+      R454_POPUP_POLICY_WIRING_TAIL &&
+    exactShutdownTailForMutation(REVERTS.find((r) => r.id === "R660")) ===
+      R660_PROOF_ONLY_SHUTDOWN_TAIL &&
+    REVERTS.filter((r) => exactShutdownTailForMutation(r) === R319_MERMAID_SCOPE_TAIL)
+      .map((r) => r.id)
+      .join(",") === "R319" &&
+    REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
+      .map((r) => r.id)
+      .join(",") === "R319";
+  // Route the fixture through the SAME reduction and verdict helpers the
+  // mutation loop uses (assertionNameOf / unlistedFailures / expect-missing /
+  // requiredPassingAssertionProblems / exact-failure + count guards).
+  const r319Fails = mutationFailureNames({ stdout: r319MermaidScopeTail, stderr: "" });
+  const r319FailNames = r319Fails.map(assertionNameOf);
+  const r319Missing = (r319Record?.expect || []).filter(
+    (re) => !r319FailNames.some((f) => re.test(f)),
+  );
+  const r319Collateral = (r319Record?.mustPass || []).filter((re) =>
+    r319FailNames.some((f) => re.test(f)),
+  );
+  const r319Unlisted = unlistedFailures(r319Record, r319Fails);
+  const r319MustPassProblems = requiredPassingAssertionProblems(
+    r319Record,
+    r319MermaidScopeTail,
+  );
+  const r319ExactViolation = hasExactFailureViolation(r319Record, r319Unlisted);
+  // Negative control: drop one expected FAIL and the count guard must trip.
+  const r319OneFailureOnly = mutationFailureNames({
+    stdout:
+      "PASS  10i: mermaid really does distinguish the two modes (positive control)\n" +
+      "PASS  10i: the mermaid bundle really loaded, so its initialisation path is reachable at all (control)\n" +
+      "FAIL  10i: mermaid's configuration is decided by the mode alone, never by the scheme  -> detail\n" +
+      "=== 362/363 passed ===\n",
+    stderr: "",
+  });
+  const r319Verdict = mutationVerdictKind(r319Record, {
+    fails: r319Fails,
+    unlisted: r319Unlisted,
+    missing: r319Missing,
+    collateral: r319Collateral,
+    evidenceProblems: [],
+  });
+  const r319DuplicatedFails = mutationFailureNames({
+    stdout: r319DuplicateTranscript,
+    stderr: "",
+  });
+  const r319DuplicatedNames = r319DuplicatedFails.map(assertionNameOf);
+  const r319DuplicatedVerdict = mutationVerdictKind(r319Record, {
+    fails: r319DuplicatedFails,
+    unlisted: unlistedFailures(r319Record, r319DuplicatedFails),
+    missing: (r319Record.expect || []).filter(
+      (re) => !r319DuplicatedNames.some((name) => re.test(name)),
+    ),
+    collateral: (r319Record.mustPass || []).filter((re) =>
+      r319DuplicatedNames.some((name) => re.test(name)),
+    ),
+    evidenceProblems: [],
+  });
   const untaggedCompanionImpostorHealth = suiteTranscriptHealth(
     untaggedCompanionImpostor,
     { requirePassingFooter: true },
@@ -18212,6 +18412,61 @@ function proveCompanionTranscriptRoles() {
     "test:popups",
     { mutationRun: true, exactShutdownTail: R454_POPUP_POLICY_WIRING_TAIL },
   );
+  const configuredR319Mutation = suiteRunHealth(
+    {
+      stdout: r319MermaidScopeTail,
+      stderr: "",
+      exitCode: 1,
+      signal: null,
+      executionError: null,
+    },
+    "test:theme",
+    { mutationRun: true, exactShutdownTail: R319_MERMAID_SCOPE_TAIL },
+  );
+  const r319DuplicateMutation = suiteRunHealth(
+    {
+      stdout: r319DuplicateTranscript,
+      stderr: "",
+      exitCode: 1,
+      signal: null,
+      executionError: null,
+    },
+    "test:theme",
+    { mutationRun: true, exactShutdownTail: R319_MERMAID_SCOPE_TAIL },
+  );
+  const r319MutationWithoutAllowance = suiteRunHealth(
+    {
+      stdout: r319MermaidScopeTail,
+      stderr: "",
+      exitCode: 1,
+      signal: null,
+      executionError: null,
+    },
+    "test:theme",
+    { mutationRun: true },
+  );
+  const r319MutationWithFatalStderr = suiteRunHealth(
+    {
+      stdout: r319MermaidScopeTail,
+      stderr: "FAIL  harness threw after footer\n",
+      exitCode: 1,
+      signal: null,
+      executionError: null,
+    },
+    "test:theme",
+    { mutationRun: true, exactShutdownTail: R319_MERMAID_SCOPE_TAIL },
+  );
+  const r319GenericTeardownMutation = suiteRunHealth(
+    {
+      stdout: r319TailWithGenericTeardown,
+      stderr: "",
+      exitCode: 1,
+      signal: null,
+      executionError: null,
+    },
+    "test:theme",
+    { mutationRun: true, exactShutdownTail: R319_MERMAID_SCOPE_TAIL },
+  );
   const cleanRunAllowsLoneShutdownTail = suiteRunHealth(
     {
       stdout: r660OnlyShutdownTail,
@@ -18266,6 +18521,7 @@ function proveCompanionTranscriptRoles() {
       "fatal suite marker: FAIL  harness threw after footer",
     ) ||
     !configuredR454ShutdownTailHealth.healthy ||
+    !legacyExactTailsAllowGenericTeardown ||
     r454TailWithArbitraryLineHealth.healthy ||
     !r454TailWithArbitraryLineHealth.reasons.includes(
       "unprefixed transcript followed its terminal parent-suite footer",
@@ -18278,6 +18534,55 @@ function proveCompanionTranscriptRoles() {
     !r454ReorderedTailHealth.reasons.includes(
       "unprefixed transcript followed its terminal parent-suite footer",
     ) ||
+    !configuredR319ShutdownTailHealth.healthy ||
+    r319TailWithArbitraryLineHealth.healthy ||
+    !r319TailWithArbitraryLineHealth.reasons.includes(
+      "unprefixed transcript followed its terminal parent-suite footer",
+    ) ||
+    r319TailWithFatalLineHealth.healthy ||
+    !r319TailWithFatalLineHealth.reasons.includes(
+      "fatal suite marker: FAIL  harness threw after footer",
+    ) ||
+    r319ReorderedTailHealth.healthy ||
+    !r319ReorderedTailHealth.reasons.includes(
+      "unprefixed transcript followed its terminal parent-suite footer",
+    ) ||
+    r319DuplicatedTailHealth.healthy ||
+    !r319DuplicatedTailHealth.reasons.includes(
+      "unprefixed transcript followed its terminal parent-suite footer",
+    ) ||
+    r319GenericTeardownTailHealth.healthy ||
+    !r319GenericTeardownTailHealth.reasons.includes(
+      "unprefixed transcript followed its terminal parent-suite footer",
+    ) ||
+    !r319CleanTailHealth.healthy ||
+    !r319RecordIsPinned ||
+    !r319AllowanceIsRecordScoped ||
+    r319FailNames.length !== 2 ||
+    r319Missing.length !== 0 ||
+    r319Collateral.length !== 0 ||
+    r319Unlisted.length !== 0 ||
+    r319MustPassProblems.length !== 0 ||
+    r319ExactViolation ||
+    r319Verdict !== "PROVEN" ||
+    r319OneFailureOnly.length !== 1 ||
+    !r319DuplicateMutation.healthy ||
+    r319DuplicatedVerdict !== "COLLATERAL-COUNT" ||
+    requiredPassingAssertionProblems(r319Record, r319CleanMermaidTail).length !== 0 ||
+    requiredPassingAssertionProblems(
+      r319Record,
+      r319MermaidScopeTail.replace(
+        "PASS  10i: mermaid really does distinguish the two modes (positive control)\n",
+        "",
+      ),
+    ).length !== 1 ||
+    !configuredR319Mutation.healthy ||
+    r319MutationWithoutAllowance.healthy ||
+    r319MutationWithFatalStderr.healthy ||
+    !r319MutationWithFatalStderr.reasons.includes(
+      "fatal suite marker: FAIL  harness threw after footer",
+    ) ||
+    r319GenericTeardownMutation.healthy ||
     !configuredR660Mutation.healthy ||
     !mutationAllowsLegitimateShutdownTeardown.healthy ||
     mutationCannotUseCleanLoneShutdownTail.healthy ||
@@ -18428,7 +18733,20 @@ function proveExactFailurePolicy() {
   const ordinary = {
     expect: [/^expected assertion$/],
   };
+  const exactCounted = {
+    expect: [/^expected assertion$/, /^second expected assertion$/],
+    requireExactFailures: true,
+    expectedFailureCount: 2,
+  };
   const expectedOnly = ["FAIL  expected assertion  -> expected detail"];
+  const bothExpected = [
+    "FAIL  expected assertion  -> expected detail",
+    "FAIL  second expected assertion  -> expected detail",
+  ];
+  const duplicatedExpected = [
+    ...bothExpected,
+    "FAIL  expected assertion  -> repeated detail",
+  ];
   const withUnrelated = [
     ...expectedOnly,
     "FAIL  unrelated updater assertion  -> unrelated detail",
@@ -18436,10 +18754,15 @@ function proveExactFailurePolicy() {
   if (
     hasExactFailureViolation(exact, unlistedFailures(exact, expectedOnly)) ||
     !hasExactFailureViolation(exact, unlistedFailures(exact, withUnrelated)) ||
-    hasExactFailureViolation(ordinary, unlistedFailures(ordinary, withUnrelated))
+    hasExactFailureViolation(ordinary, unlistedFailures(ordinary, withUnrelated)) ||
+    hasExactFailureCountViolation(exactCounted, bothExpected) ||
+    !hasExactFailureCountViolation(exactCounted, duplicatedExpected) ||
+    !hasExactFailureCountViolation(exactCounted, expectedOnly) ||
+    hasExactFailureCountViolation(exact, duplicatedExpected) ||
+    hasExactFailureCountViolation(ordinary, duplicatedExpected)
   ) {
     console.error(
-      "SELF-CHECK FAILED: requireExactFailures must reject only unlisted failures in opt-in records.",
+      "SELF-CHECK FAILED: exact-failure records must reject unlisted and unexpected-count failures only when configured.",
     );
     process.exit(2);
   }
@@ -19125,16 +19448,23 @@ for (const r of chosen) {
     fails,
     checkedRun.transcript.parentLines,
   );
-  if (evidenceProblems.length) {
+  const verdictKind = mutationVerdictKind(r, {
+    fails,
+    unlisted,
+    missing,
+    collateral,
+    evidenceProblems,
+  });
+  if (verdictKind === "EVIDENCE") {
     console.log(
       `${r.id}  COLLATERAL    the sentinel evidence policy was not satisfied: ${evidenceProblems.join("; ")}, so this exact record proves nothing.`,
     );
     printFailures(r, fails);
     bad += 1;
-  } else if (fails.length === 0) {
+  } else if (verdictKind === "VACUOUS") {
     console.log(`${r.id}  VACUOUS       suite stayed green with the fix removed  (${r.what})`);
     bad += 1;
-  } else if (missing.length) {
+  } else if (verdictKind === "WRONG-GUARD") {
     console.log(
       `${r.id}  WRONG-GUARD   failed, but not on the expected assertions. missing=${missing}`,
     );
@@ -19149,7 +19479,7 @@ for (const r of chosen) {
     // marked the same way as COLLATERAL and PROVEN do.
     printFailures(r, fails);
     bad += 1;
-  } else if (collateral.length) {
+  } else if (verdictKind === "COLLATERAL-MUSTPASS") {
     console.log(
       `${r.id}  COLLATERAL    the expected assertion failed, but so did its own setup, so it proves nothing. broke=${collateral}`,
     );
@@ -19162,9 +19492,15 @@ for (const r of chosen) {
     // the PROVEN branch below: the verdict is the summary, not the record.
     printFailures(r, fails);
     bad += 1;
-  } else if (hasExactFailureViolation(r, unlisted)) {
+  } else if (verdictKind === "COLLATERAL-UNLISTED") {
     console.log(
       `${r.id}  COLLATERAL    the expected assertion failed, but ${unlisted.length} failure(s) fell outside expect, so this exact record proves nothing.`,
+    );
+    printFailures(r, fails);
+    bad += 1;
+  } else if (verdictKind === "COLLATERAL-COUNT") {
+    console.log(
+      `${r.id}  COLLATERAL    the expected assertions failed, but the suite reported ${fails.length} failure(s) where this exact record allows ${r.expectedFailureCount}, so it proves nothing.`,
     );
     printFailures(r, fails);
     bad += 1;
