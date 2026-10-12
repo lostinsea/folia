@@ -2397,6 +2397,8 @@ function readMarkdownSnapshot(filePath, callback, attempt = 1) {
 // WINDOW MANAGEMENT
 // ============================================
 
+let testPreloadRegistered = false;
+
 function createWindow() {
   const savedState = loadWindowState();
   const testPreloadPreferences =
@@ -2409,6 +2411,13 @@ function createWindow() {
   ) {
     fs.writeSync(2, `Missing test preload: ${testPreloadPreferences.preload}\n`);
     process.exit(1);
+  }
+  if (testPreloadPreferences.preload && !testPreloadRegistered) {
+    session.defaultSession.registerPreloadScript({
+      type: "frame",
+      filePath: testPreloadPreferences.preload,
+    });
+    testPreloadRegistered = true;
   }
 
   mainWindow = new BrowserWindow({
@@ -2423,7 +2432,10 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
-      ...testPreloadPreferences,
+      preload: path.join(__dirname, "main-preload.js"),
+      additionalArguments: testPreloadPreferences.preload
+        ? ["--folia-test-pdf-restore"]
+        : [],
       enableRemoteModule: true,
       backgroundThrottling: true, // Throttle background renderers to save CPU
     },

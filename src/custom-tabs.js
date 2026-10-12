@@ -2019,7 +2019,7 @@
     let snapshot;
     let reservation;
     const readAndVerify = async () => {
-      snapshot = await tabIpc.invoke("read-owned-tab-disk-snapshot", {
+      snapshot = await window.folia.readOwnedTabDiskSnapshot({
         filePath,
         pageSession: session,
         rendererGeneration: identity.rendererGeneration,

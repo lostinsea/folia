@@ -82,6 +82,7 @@
     "files": [
       "src/index.html",
       "src/main.js",
+      "src/main-preload.js",
       "src/renderer.js",
       "src/popup-preload.js",
       "src/styles.css",

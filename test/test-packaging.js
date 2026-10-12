@@ -608,6 +608,25 @@ async function main() {
       packaged: isPackaged(files, "test/test-preload.js"),
     }),
   );
+  check(
+    "main windows always load the packaged production bridge, including marked tests",
+    fs.existsSync(path.join(SRC, "main-preload.js")) &&
+      isPackaged(files, "src/main-preload.js") &&
+      /preload:\s*path\.join\(__dirname,\s*"main-preload\.js"\)/.test(mainJs) &&
+      !mainJs.includes("...testPreloadPreferences") &&
+      /if \(testPreloadPreferences\.preload && !testPreloadRegistered\)/.test(mainJs) &&
+      /filePath: testPreloadPreferences\.preload/.test(mainJs) &&
+      /additionalArguments: testPreloadPreferences\.preload\s*\?\s*\["--folia-test-pdf-restore"\]\s*:\s*\[\]/.test(mainJs),
+  );
+  check(
+    "changed clean-tab reads use the fixed production bridge instead of renderer raw IPC",
+    read("src/custom-tabs.js").includes(
+      "snapshot = await window.folia.readOwnedTabDiskSnapshot({",
+    ) &&
+      !read("src/custom-tabs.js").includes(
+        'tabIpc.invoke("read-owned-tab-disk-snapshot"',
+      ),
+  );
 
   // 2. Scripts and stylesheets loaded by the renderer document.
   const indexHtml = read("src/index.html");

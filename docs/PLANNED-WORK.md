@@ -68,6 +68,35 @@ being current and stable.
 
 ## Status legend
 
+**2026-10-12 release priority correction (explicit user decision).** The
+identified Save-alias edge case, hosted shutdown failure and ordinary hosted
+CI repair/full-green run are P2, deferred and nonblocking for this release.
+This narrows the earlier all-Wave2 release contract only for those cases; it
+does not mark their evidence passed or the historical register complete.
+The native cross-check remains 501/506, separately from the retained alias
+506/506 result. The unfinished alias implementation/tests/reverts are preserved
+outside the shipping tree in the continuation's
+`wave2-identity-p2-retained-20261012.patch`; its interrupted proof has no verdict.
+The mutation was restored and the renderer again matches the committed Mermaid
+source. Primary checkouts and failed/skipped hosted evidence are unchanged.
+
+**Renderer isolation remains release-blocking, including responsiveness.**
+The user explicitly retained isolation and required no visible performance
+regression. The first production bridge consumer is implemented: existing
+owned clean-tab disk read, fixed validated method, unchanged main authority and
+synchronous no-read fast path. Focused real-Electron baseline is 26/26,
+source packaging 360/0; R714-R718 and R735-R737 are individually exact PROVEN,
+and the changed test-publication anchor's R675 retains its declared two failures
+with product controls passing. Evidence: `owned-bridge-focused-r3-20261012.log`,
+`owned-bridge-packaging-r2-20261012.log`,
+`owned-bridge-exact-proofs-r2-20261012.log` in the continuation artifacts.
+Fresh Sol/Luna reviews converge after Sol identified and the writer corrected
+malformed/positive probe counter coupling. Main-window Node/isolation/sandbox
+flags are not yet changed; remaining authority/browser/harness transitions and
+final-source representative performance measurements are still pending.
+Neither functional passes nor the skipped historical comparison certify final
+isolation performance. Existing numerical contracts are unchanged.
+
 | Status | Meaning |
 |---|---|
 | **ACTIVE** | Being implemented right now. **At most one ACTIVE item per delivery stream** (see *Parallel delivery without reducing quality*); the number of ACTIVE items equals the number of live streams. Today that is one. |

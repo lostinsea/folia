@@ -469,6 +469,35 @@ The table popup at `main.js:1856-1868` shows the correct configuration — the d
 
 ### PARTIALLY FIXED — all four popups done; the main window deferred, with a plan
 
+**2026-10-12 production bridge migration, still not isolation completion.**
+Main windows now always load the packaged `src/main-preload.js`. Its first
+fixed method, `folia.readOwnedTabDiskSnapshot`, copies and validates the
+request/owner envelope and the returned snapshot; main still authorizes the
+sender, session, registered physical target and stable descriptor. Explicit
+authorization refusal remains `null`; malformed envelopes/responses and
+authorized I/O errors reject. The changed clean-tab caller uses this method,
+without adding a read IPC on its existing synchronous unchanged path.
+Marked unpackaged PDF tests augment the production entry through a separately
+gated session preload, published only to their marked main frame.
+
+The focused real-Electron controls pass 26/26, including a genuine
+Node-off/context-isolated/sandboxed probe, valid/refused reads, malformed
+boundaries, unchanged fast path, supersession and atomic replacement.
+R714-R718 and R735-R737 are individually exact PROVEN; the publication change's
+R675 still fails its two declared test-witness assertions while product
+controls pass. Source packaging is 360/0, not a fresh installed-artifact claim.
+Both fresh Sol/Luna reviews clear the corrected unit. These measurements are
+retained as `owned-bridge-focused-r3-20261012.log`,
+`owned-bridge-packaging-r2-20261012.log` and
+`owned-bridge-exact-proofs-r2-20261012.log` in the continuation evidence.
+
+The **production main window still has Node enabled and isolation disabled**.
+Renderer registration remains provisional authority; remaining callers,
+main-owned authority and the test harness must migrate before the final
+Node-off/isolation/sandbox transition. That transition and its user-visible
+performance acceptance remain release requirements. No final-source
+performance qualification is claimed.
+
 **Done.** Every popup now runs `nodeIntegration: false, contextIsolation: true`
 behind its own minimal preload, exposing only that popup's own bridge API. Four
 assertions in `test-popup-security.js` pin it ("*popup exposes only its own

@@ -132,6 +132,10 @@ const R319_MERMAID_SCOPE_TAIL = Object.freeze([
   "Shutdown approval renderer unusable: webContents destroyed",
 ]);
 const VIRTUAL_SUITES = Object.freeze({
+  "test:sec08-owned-read-evidence": Object.freeze({
+    npmScript: "test:tabs",
+    environment: Object.freeze({ SEC08_OWNED_READ_FOCUSED_HARNESS: "1" }),
+  }),
   [F22_NEWLINE_EVIDENCE_SUITE]: Object.freeze({
     npmScript: "test:tabs",
     environment: Object.freeze({ F22_NEWLINE_FOCUSED_HARNESS: "1" }),
@@ -17064,8 +17068,8 @@ const REVERTS = [
           // controls remain green.
           what: "remove the marked PDF-restore bridge while leaving the product export handshake intact",
           file: TEST_PRELOAD,
-          from: "globalThis.__foliaTestPdfRestore = Object.freeze({",
-          to: "globalThis.__foliaTestPdfRestoreUnavailable = Object.freeze({",
+          from: '  const capability = "__foliaTestPdfRestore";',
+          to: '  const capability = "__foliaTestPdfRestoreUnavailable";',
           suite: "test:mermaid",
           expect: [
             /^the marked test-only PDF restore preload exposes its PDF restore capability$/,
@@ -17877,7 +17881,7 @@ const REVERTS = [
           what: "read a changed clean-tab refresh in the renderer before its owner-bound main request",
           file: TABS,
           from:
-            '      snapshot = await tabIpc.invoke("read-owned-tab-disk-snapshot", {\n' +
+            '      snapshot = await window.folia.readOwnedTabDiskSnapshot({\n' +
             "        filePath,\n" +
             "        pageSession: session,\n" +
             "        rendererGeneration: identity.rendererGeneration,\n" +
@@ -17885,13 +17889,13 @@ const REVERTS = [
             "      });",
           to:
             '      void window.fs.readFileSync(filePath, "utf8");\n' +
-            '      snapshot = await tabIpc.invoke("read-owned-tab-disk-snapshot", {\n' +
+            '      snapshot = await window.folia.readOwnedTabDiskSnapshot({\n' +
             "        filePath,\n" +
             "        pageSession: session,\n" +
             "        rendererGeneration: identity.rendererGeneration,\n" +
             "        owner: identity,\n" +
             "      });",
-          suite: "test:tabs",
+          suite: "test:sec08-owned-read-evidence",
           expect: [
             /^SEC-08 changed clean-tab refresh reads through main without renderer content reads or a modal$/,
           ],
@@ -17928,7 +17932,7 @@ const REVERTS = [
             "            known.spelling === exact.spelling &&\n" +
             "            isKnownDocumentOwner(known),\n" +
             "        ));",
-          suite: "test:tabs",
+          suite: "test:sec08-owned-read-evidence",
           expect: [
             /^SEC-08 main-owned tab reads refuse forged paths and foreign owners without denying the valid owner$/,
           ],
@@ -17948,7 +17952,7 @@ const REVERTS = [
           file: TABS,
           from: "      if (!current) return null;",
           to: "      if (false) return null;",
-          suite: "test:tabs",
+          suite: "test:sec08-owned-read-evidence",
           expect: [
             /^SEC-08 a tab switch superseded during the held main read keeps its prior cache and refuses disk adoption$/,
           ],
@@ -17970,7 +17974,7 @@ const REVERTS = [
             "        ? pathStats\n" +
             "        : await fs.promises.stat(owner.readTarget);",
           to: "      const targetStats = pathStats;",
-          suite: "test:tabs",
+          suite: "test:sec08-owned-read-evidence",
           expect: [
             /^SEC-08 case-preserved owned reads open the logical spelling and compare its registered physical target$/,
           ],
@@ -18006,7 +18010,7 @@ const REVERTS = [
             "          ) return null;\n" +
             "          return null;\n" +
             "        }",
-          suite: "test:tabs",
+          suite: "test:sec08-owned-read-evidence",
           expect: [
             /^SEC-08 main snapshot retries same-path inode replacement and returns only replacement bytes$/,
           ],
@@ -18327,6 +18331,62 @@ const REVERTS = [
             /^Mermaid stale staged output neither replaces a live SVG nor enters adopted results$/,
             /^Mermaid labels retain native geometry through zoom, reload, theme and insertion$/,
             /^Mermaid measurement restores detached-node inline styles after a real rejection$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R735",
+          what: "forward an owned-read request whose copied owner generation disagrees with its envelope",
+          file: path.join(SRC, "main-preload.js"),
+          from: "        identity.rendererGeneration !== payload.rendererGeneration ||",
+          to: "        // Mismatched envelope and owner generations are forwarded.",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 owned bridge rejects malformed request identities before main IPC$/,
+          ],
+          mustPass: [
+            /^SEC-08 owned bridge forwards only its fixed request fields and preserves the valid main snapshot$/,
+            /^SEC-08 main-owned tab reads refuse forged paths and foreign owners without denying the valid owner$/,
+            /^SEC-08 unchanged clean-tab refresh remains synchronous with zero main IPC$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R736",
+          what: "return a non-string document body from the owned-read production bridge",
+          file: path.join(SRC, "main-preload.js"),
+          from: '    if (!snapshot || typeof snapshot.content !== "string" ||',
+          to: "    if (!snapshot ||",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 owned bridge rejects undefined and malformed main responses instead of returning success-shaped data$/,
+          ],
+          mustPass: [
+            /^SEC-08 owned bridge rejects malformed request identities before main IPC$/,
+            /^SEC-08 owned bridge forwards only its fixed request fields and preserves the valid main snapshot$/,
+            /^SEC-08 main-owned tab reads refuse forged paths and foreign owners without denying the valid owner$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R737",
+          what: "bypass the production bridge in the changed clean-tab read caller",
+          file: TABS,
+          from: "      snapshot = await window.folia.readOwnedTabDiskSnapshot({",
+          to: '      snapshot = await tabIpc.invoke("read-owned-tab-disk-snapshot", {',
+          suite: "test:packaging",
+          expect: [
+            /^changed clean-tab reads use the fixed production bridge instead of renderer raw IPC$/,
+          ],
+          mustPass: [
+            /^main windows always load the packaged production bridge, including marked tests$/,
+            /^the test-only preload is gated to unpackaged marked main launches$/,
           ],
           requireMustPassAssertions: true,
           requireExactFailures: true,
@@ -19374,7 +19434,7 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732";
+      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737";
   // Route the fixture through the SAME reduction and verdict helpers the
   // mutation loop uses (assertionNameOf / unlistedFailures / expect-missing /
   // requiredPassingAssertionProblems / exact-failure + count guards).

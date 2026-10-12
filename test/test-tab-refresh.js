@@ -142,6 +142,10 @@ const f22CtimeR660ProofHarness = process.env.F22_CTIME_R660_PROOF_HARNESS === "1
 const newlineFocusedHarness = process.env.F22_NEWLINE_FOCUSED_HARNESS === "1";
 const focusedCommitHarness = process.env.F22_COMMIT_FOCUSED_HARNESS === "1";
 const queueFocusedHarness = process.env.F22_QUEUE_FOCUSED_HARNESS === "1";
+const ownedReadFocusedHarness = process.env.SEC08_OWNED_READ_FOCUSED_HARNESS === "1";
+if (ownedReadFocusedHarness && !process.argv.includes("--folia-test-preload")) {
+  process.argv.push("--folia-test-preload");
+}
 const companionSelfcheck = process.env.F22_COMPANION_SELFCHECK === "1";
 // One window-destroying teardown case per child process. See
 // runTeardownScenario(): main.js nulls its own `mainWindow` on `closed`, so a
@@ -7078,6 +7082,86 @@ async function run(win) {
   const consoleAttribution = startConsoleAttributionSidecar(win, sentinel);
   // No suite may reach the user's browser. See trapExternalOpens().
   await trapExternalOpens(win);
+  const bridgeExposure = await exec(`(async () => {
+    const iframe = document.createElement('iframe');
+    const loaded = new Promise(resolve => { iframe.onload = resolve; });
+    iframe.srcdoc = '<p>Marked main subframe</p>';
+    document.body.appendChild(iframe);
+    try {
+      await loaded;
+      return {
+        methods: Object.keys(window.folia || {}),
+        pdfRestore: typeof window.__foliaTestPdfRestore?.signal,
+        subframePdfRestore: typeof iframe.contentWindow.__foliaTestPdfRestore,
+      };
+    } finally { iframe.remove(); }
+  })()`);
+  const expectsPdfSignal =
+    !app.isPackaged && process.argv.includes("--folia-test-preload");
+  check(
+    "SEC-08 main launch retains production owned-read and only its explicitly marked PDF test signal",
+    bridgeExposure.methods.join(",") === "readOwnedTabDiskSnapshot" &&
+      bridgeExposure.pdfRestore === (expectsPdfSignal ? "function" : "undefined") &&
+      bridgeExposure.subframePdfRestore === "undefined",
+    JSON.stringify(bridgeExposure),
+  );
+  const isolatedBridgeWindow = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, "../src/main-preload.js"),
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
+    },
+  });
+  try {
+    await isolatedBridgeWindow.loadURL("data:text/html,<p>Owned bridge boundary</p>");
+    const isolatedBoundary = await isolatedBridgeWindow.webContents.executeJavaScript(`
+      (async () => {
+        let rejected = false;
+        try { await window.folia.readOwnedTabDiskSnapshot(null); }
+        catch (error) { rejected = error.message.includes('Invalid owned tab disk snapshot request'); }
+        const refused = await window.folia.readOwnedTabDiskSnapshot({
+          filePath: ${jsA},
+          pageSession: 'foreign-window',
+          rendererGeneration: 1,
+          owner: {
+            pageSession: 'foreign-window', rendererGeneration: 1,
+            tabId: 1, documentGeneration: 1, pathKey: ${jsA},
+          },
+        });
+        const iframe = document.createElement('iframe');
+        const loaded = new Promise(resolve => { iframe.onload = resolve; });
+        iframe.srcdoc = '<p>Subframe boundary</p>';
+        document.body.appendChild(iframe);
+        await loaded;
+        return {
+          methods: Object.keys(window.folia || {}),
+          require: typeof require,
+          rejected,
+          refused,
+          pdfRestore: typeof window.__foliaTestPdfRestore,
+          subframePdfRestore: typeof iframe.contentWindow.__foliaTestPdfRestore,
+        };
+      })()
+    `, true);
+    check(
+      "SEC-08 production bridge works under Node-off isolation and sandbox without exposing Node or arbitrary IPC",
+      isolatedBoundary.methods.join(",") === "readOwnedTabDiskSnapshot" &&
+        isolatedBoundary.require === "undefined" &&
+        isolatedBoundary.rejected === true &&
+        isolatedBoundary.refused === null,
+      JSON.stringify(isolatedBoundary),
+    );
+    check(
+      "SEC-08 session test preload does not expose the PDF signal to an unmarked window or subframe",
+      isolatedBoundary.pdfRestore === "undefined" &&
+        isolatedBoundary.subframePdfRestore === "undefined",
+      JSON.stringify(isolatedBoundary),
+    );
+  } finally {
+    isolatedBridgeWindow.destroy();
+  }
 
   write(fileA, "# Alpha\n\nALPHA_V1\n");
   write(fileB, "# Beta\n\nBETA_V1\n");
@@ -7322,6 +7406,7 @@ async function run(win) {
         const tab = window.CustomTabs.getTabs().find(t => t.id === ${ids.b});
         const session = window.getReloadRequestSession();
         const owner = window.CustomTabs.getActiveDocumentIdentity(target, session);
+        ipc.invoke = realInvoke;
         if (validPayload && owner) {
           const settledPayload = {
             ...validPayload,
@@ -7330,16 +7415,13 @@ async function run(win) {
             owner,
           };
           validPayload = settledPayload;
-          const valid = await realInvoke.call(ipc,
-            'read-owned-tab-disk-snapshot', settledPayload);
+          const valid = await window.folia.readOwnedTabDiskSnapshot(settledPayload);
           validSnapshot = valid && { content: valid.content };
-          forgedPath = await realInvoke.call(ipc,
-            'read-owned-tab-disk-snapshot', {
+          forgedPath = await window.folia.readOwnedTabDiskSnapshot({
               ...settledPayload,
               filePath: ${jsA},
             });
-          forgedOwner = await realInvoke.call(ipc,
-            'read-owned-tab-disk-snapshot', {
+          forgedOwner = await window.folia.readOwnedTabDiskSnapshot({
               ...settledPayload,
               owner: { ...owner, tabId: owner.tabId + 1000 },
             });
@@ -7389,6 +7471,89 @@ async function run(win) {
       mainOwnedRefresh.validSnapshot &&
       String(mainOwnedRefresh.validSnapshot.content).includes("SEC08_MAIN_OWNED_READ"),
     JSON.stringify(mainOwnedRefresh),
+  );
+  const bridgeValidation = await exec(`
+    (async () => {
+      const request = ${JSON.stringify(mainOwnedRefresh.validPayload)};
+      const ipc = window.ipcRenderer;
+      const invoke = ipc.invoke;
+      let calls = 0;
+      let forwarded = null;
+      ipc.invoke = function (channel, data) {
+        if (channel === 'read-owned-tab-disk-snapshot') {
+          calls += 1;
+          forwarded = data;
+        }
+        return invoke.apply(this, arguments);
+      };
+      try {
+        const invalid = [
+          { ...request, filePath: 'bad\\0path' },
+          { ...request, owner: { ...request.owner, pageSession: 'other-session' } },
+          { ...request, owner: { ...request.owner, rendererGeneration: request.rendererGeneration + 1 } },
+          { ...request, owner: { ...request.owner, documentGeneration: NaN } },
+        ];
+        const rejected = [];
+        for (const input of invalid) {
+          try {
+            await window.folia.readOwnedTabDiskSnapshot(input);
+            rejected.push(false);
+          } catch (error) {
+            rejected.push(error.message.includes('Invalid owned tab disk snapshot request'));
+          }
+        }
+        const malformedCalls = calls;
+        calls = 0;
+        const positive = await window.folia.readOwnedTabDiskSnapshot({
+          ...request, ignored: true, owner: { ...request.owner, ignored: true },
+        });
+        const forwarding = {
+          calls,
+          requestKeys: Object.keys(forwarded || {}).sort(),
+          ownerKeys: Object.keys(forwarded?.owner || {}).sort(),
+          content: positive?.content,
+        };
+        const badResponses = [];
+        const version = positive.diskVersion;
+        for (const response of [
+          undefined,
+          { content: 3, modifiedTime: positive.modifiedTime, diskVersion: version },
+          { ...positive, diskVersion: { ...version, ino: Infinity } },
+        ]) {
+          ipc.invoke = () => Promise.resolve(response);
+          try {
+            await window.folia.readOwnedTabDiskSnapshot(request);
+            badResponses.push(false);
+          } catch (error) {
+            badResponses.push(error.message.includes('Invalid owned tab disk snapshot response'));
+          }
+        }
+        return { rejected, malformedCalls, forwarding, badResponses };
+      } finally { ipc.invoke = invoke; }
+    })()
+  `);
+  check(
+    "SEC-08 owned bridge rejects malformed request identities before main IPC",
+    bridgeValidation.rejected.length === 4 &&
+      bridgeValidation.rejected.every(Boolean) &&
+      bridgeValidation.malformedCalls === 0,
+    JSON.stringify(bridgeValidation),
+  );
+  check(
+    "SEC-08 owned bridge forwards only its fixed request fields and preserves the valid main snapshot",
+    bridgeValidation.forwarding.calls === 1 &&
+      bridgeValidation.forwarding.requestKeys.join(",") ===
+        "filePath,owner,pageSession,rendererGeneration" &&
+      bridgeValidation.forwarding.ownerKeys.join(",") ===
+        "documentGeneration,pageSession,pathKey,rendererGeneration,tabId" &&
+      bridgeValidation.forwarding.content.includes("SEC08_MAIN_OWNED_READ"),
+    JSON.stringify(bridgeValidation),
+  );
+  check(
+    "SEC-08 owned bridge rejects undefined and malformed main responses instead of returning success-shaped data",
+    bridgeValidation.badResponses.length === 3 &&
+      bridgeValidation.badResponses.every(Boolean),
+    JSON.stringify(bridgeValidation),
   );
 
   const casePreservedTarget = fs.realpathSync.native(fileB);
@@ -7449,13 +7614,10 @@ async function run(win) {
       casePreservedRead = await exec(`
         (async () => {
           try {
-            const snapshot = await window.ipcRenderer.invoke(
-              "read-owned-tab-disk-snapshot",
-              {
+            const snapshot = await window.folia.readOwnedTabDiskSnapshot({
                 ...${JSON.stringify(mainOwnedRefresh.validPayload)},
                 filePath: ${JSON.stringify(casePreservedLogicalPath)},
-              },
-            );
+              });
             return { status: "fulfilled", snapshot };
           } catch (error) {
             return { status: "rejected", message: String(error && error.message) };
@@ -7853,6 +8015,23 @@ async function run(win) {
       })()`),
     await viewerText(),
   );
+
+  if (ownedReadFocusedHarness) {
+    const alive = await proveSentinelAlive(win, sentinel);
+    check(
+      "the error sentinel was demonstrably watching both channels",
+      alive.console === true && alive.dom === true,
+      JSON.stringify(alive),
+    );
+    const report = await sentinel.stop();
+    consoleAttribution.stop(report);
+    check(
+      "nothing rendered a visible error at any point during the suite",
+      report.hits.length === 0,
+      JSON.stringify(report.hits),
+    );
+    return;
+  }
 
   // ---- Scenario 3: unsaved edits are never clobbered --------------------
   await exec(`
@@ -33409,7 +33588,7 @@ app.whenReady().then(async () => {
   // companion and the full suite keep exactly the budgets they had.
   const watchdogMs = focusedF22Harness
     ? 150000
-    : newlineFocusedHarness || focusedCommitHarness || queueFocusedHarness
+    : newlineFocusedHarness || focusedCommitHarness || queueFocusedHarness || ownedReadFocusedHarness
     ? 90000
     : portableHarness
       ? COMPANION_WATCHDOG_MS.portable
@@ -33524,6 +33703,8 @@ app.whenReady().then(async () => {
     } else if (queueFocusedHarness) {
       await runF22QueueFocusedScenario((code) =>
         win.webContents.executeJavaScript(code, true));
+    } else if (ownedReadFocusedHarness) {
+      await run(win);
     } else if (companionSelfcheck) {
       await runCompanionSettlementScenarios();
     } else {
