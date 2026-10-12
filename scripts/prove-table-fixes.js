@@ -18167,6 +18167,56 @@ const REVERTS = [
           requireExactFailures: true,
           expectedFailureCount: 9,
         },
+        {
+          id: "R725",
+          what: "shallow-checkout the ordinary CI test job despite its frozen theme baseline",
+          file: CI_YML,
+          from:
+            "          # The theme oracle reads frozen pre-refactor styles with git show.\n" +
+            "          fetch-depth: 0",
+          to:
+            "          # The theme oracle reads frozen pre-refactor styles with git show.\n" +
+            "          fetch-depth: 1",
+          suite: "test:packaging",
+          expect: [
+            /^CI test checks out full history for the frozen theme oracle$/,
+          ],
+          mustPass: [
+            /^the CI history parser found both ordinary job checkout steps$/,
+            /^CI revert-audit checks out full history for the frozen theme oracle$/,
+            /^the CI history oracle rejects shallow, missing and misplaced checkout depth$/,
+            /^every workflow action uses an immutable SHA with a release-version comment$/,
+            /^CI runs every Electron test suite, not just the node-only ones$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R726",
+          what: "shallow-checkout the CI assertion audit despite its frozen theme baseline",
+          file: CI_YML,
+          from:
+            "          # --expects also executes the historical theme oracle.\n" +
+            "          fetch-depth: 0",
+          to:
+            "          # --expects also executes the historical theme oracle.\n" +
+            "          fetch-depth: 1",
+          suite: "test:packaging",
+          expect: [
+            /^CI revert-audit checks out full history for the frozen theme oracle$/,
+          ],
+          mustPass: [
+            /^the CI history parser found both ordinary job checkout steps$/,
+            /^CI test checks out full history for the frozen theme oracle$/,
+            /^the CI history oracle rejects shallow, missing and misplaced checkout depth$/,
+            /^every workflow action uses an immutable SHA with a release-version comment$/,
+            /^CI runs every Electron test suite, not just the node-only ones$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
       ];
 
 // These are release exceptions, not passing or withdrawn proofs. An explicit
@@ -19209,7 +19259,7 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724";
+      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726";
   // Route the fixture through the SAME reduction and verdict helpers the
   // mutation loop uses (assertionNameOf / unlistedFailures / expect-missing /
   // requiredPassingAssertionProblems / exact-failure + count guards).

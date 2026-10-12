@@ -2219,6 +2219,86 @@ async function main() {
     );
   }
 
+  // Both ordinary CI jobs execute the theme oracle, which reads a frozen commit.
+  {
+    function checkoutHistory(text, job) {
+      const lines = text.split(/\r?\n/);
+      const jobsAt = lines.findIndex((line) => /^jobs:\s*$/.test(line));
+      if (jobsAt === -1) return null;
+      const starts = lines.flatMap((line, index) =>
+        index > jobsAt && line === `  ${job}:` ? [index] : [],
+      );
+      if (starts.length !== 1) return null;
+      const end = lines.findIndex(
+        (line, index) => index > starts[0] && /^  [\w-]+:\s*$/.test(line),
+      );
+      const body = lines.slice(starts[0] + 1, end === -1 ? undefined : end).join("\n");
+      const checkouts = body.split(/^      - /m).slice(1).filter(
+        (step) => /^        uses:\s*actions\/checkout@/m.test(step),
+      );
+      if (checkouts.length !== 1) return null;
+      const step = checkouts[0].split("\n");
+      const withFields = step.flatMap((line, index) =>
+        /^        with:\s*$/.test(line) ? [index] : [],
+      );
+      if (withFields.length !== 1) return { fullHistory: false };
+      const inputs = [];
+      for (const line of step.slice(withFields[0] + 1)) {
+        if (/^\s*(?:#.*)?$/.test(line)) continue;
+        if (!/^          \S/.test(line)) break;
+        inputs.push(line);
+      }
+      const depths = inputs.filter((line) => /^          fetch-depth:/.test(line));
+      return {
+        fullHistory: depths.length === 1 &&
+          /^          fetch-depth:\s*0\s*(?:#.*)?$/.test(depths[0]),
+      };
+    }
+    const ciText = read(".github/workflows/ci.yml");
+    const jobs = ["test", "revert-audit"];
+    check(
+      "the CI history parser found both ordinary job checkout steps",
+      jobs.every((job) => checkoutHistory(ciText, job) !== null),
+    );
+    for (const job of jobs) {
+      check(
+        `CI ${job} checks out full history for the frozen theme oracle`,
+        checkoutHistory(ciText, job)?.fullHistory === true,
+      );
+    }
+    const fixture = [
+      "jobs:",
+      "  test:",
+      "    steps:",
+      "      - name: DATA checkout",
+      "        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "        with:",
+      "          fetch-depth: 0",
+      "      - name: DATA unrelated step",
+      "        with:",
+      "          fetch-depth: 0",
+      "  other:",
+      "    steps:",
+      "      - name: DATA unrelated job",
+      "        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "        with:",
+      "          fetch-depth: 0",
+    ].join("\n");
+    check(
+      "the CI history oracle rejects shallow, missing and misplaced checkout depth",
+      checkoutHistory(fixture, "test")?.fullHistory === true &&
+        checkoutHistory(fixture.replace("fetch-depth: 0", "fetch-depth: 1"), "test")?.fullHistory === false &&
+        checkoutHistory(fixture.replace("          fetch-depth: 0\n", ""), "test")?.fullHistory === false &&
+        checkoutHistory(fixture.replace("        with:\n", "        env:\n"), "test")?.fullHistory === false &&
+        checkoutHistory(fixture.replace("fetch-depth: 0", "fetch-depth: false"), "test")?.fullHistory === false &&
+        checkoutHistory(fixture.replace("        with:\n", "        with:\n        with:\n"), "test")?.fullHistory === false &&
+        checkoutHistory(fixture.replace("          fetch-depth: 0\n", "          fetch-depth: 0\n          fetch-depth: 0\n"), "test")?.fullHistory === false &&
+        checkoutHistory(fixture.replace("      - name: DATA unrelated step\n", "      - name: DATA unrelated step\n        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n"), "test") === null &&
+        checkoutHistory(fixture.replace("  other:", "  test:"), "test") === null &&
+        checkoutHistory(fixture, "absent") === null,
+    );
+  }
+
   // The revert harness has TWO read-only audits and one destructive mode, and
   // CI ran only the first audit. `--anchors` proves the text a record perturbs
   // still exists; `--expects` proves the assertion NAMES it pairs with still

@@ -116,6 +116,17 @@ Active integration work: **`w2-sec08`** and the concrete hosted-CI failures.
 `w2-privacy` implementation/proof is closed; final integrated release checks
 remain pending. SEC-08 is incomplete and has no new performance certificate.
 
+**2026-10-12 hosted-CI history repair — implementation/proof reviewed.** The
+failed frozen run could not read the theme oracle's historical CSS commit.
+Both ordinary CI jobs now request full checkout history; the frozen golden
+bytes and commit remain unchanged. The packaging oracle binds depth to each
+job's own checkout, with bad-input controls; R725 and R726 individually prove
+the corresponding shallow-checkout failure without losing the mate job or
+action-pin controls. Source packaging passed 356/356; fresh independent Sol and
+Luna reviews found no blockers or disagreements. This is source-config
+evidence, not a successful hosted fetch: other observed ownership/setup and
+shutdown failures remain open, and the old comparison run is not repeated.
+
 ---
 
 ## A. Active

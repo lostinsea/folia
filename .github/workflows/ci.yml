@@ -50,9 +50,11 @@ jobs:
       # a mutable pointer controlled by someone else. The trailing comment
       # records the human-readable version, and .github/dependabot.yml keeps
       # these moving.
-      - name: Check out Git repository
+      - name: Check out full test history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The theme oracle reads frozen pre-refactor styles with git show.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install Node.js
@@ -108,9 +110,11 @@ jobs:
     timeout-minutes: 60
 
     steps:
-      - name: Check out Git repository
+      - name: Check out full audit history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # --expects also executes the historical theme oracle.
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install Node.js
