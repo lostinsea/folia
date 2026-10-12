@@ -17976,6 +17976,7 @@ const REVERTS = [
             /^SEC-08 case-preserved owned reads open the logical spelling and compare its registered physical target$/,
           ],
           mustPass: [
+            /^SEC-08 owned-read case probe changes only its registered logical spelling's case$/,
             /^SEC-08 main-owned tab reads refuse forged paths and foreign owners without denying the valid owner$/,
             /^SEC-08 changed clean-tab refresh reads through main without renderer content reads or a modal$/,
             /^SEC-08 main snapshot retries a disk version that changes between read and second stat$/,
@@ -18212,6 +18213,28 @@ const REVERTS = [
             /^the CI history oracle rejects shallow, missing and misplaced checkout depth$/,
             /^every workflow action uses an immutable SHA with a release-version comment$/,
             /^CI runs every Electron test suite, not just the node-only ones$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R727",
+          what: "truncate an extra-open failure's parent path before its identifying filename",
+          file: TABS,
+          from:
+            "    const filename = String(name).split(/[\\\\/]/).pop();\n" +
+            '    return filename.replace(/\\s+/g, " ").slice(0, 120);',
+          to: '    return String(name).replace(/\\s+/g, " ").slice(0, 120);',
+          suite: "test:tabs",
+          expect: [
+            /^the unreadable-extra notification identifies its bounded filename$/,
+          ],
+          mustPass: [
+            /^the unreadable-extra fixture's filename follows more than the bounded label length$/,
+            /^a failed later open really arrived while the dialog extra was held$/,
+            /^one unreadable extra is reported without losing the rest of the batch$/,
+            /^SEC-08 owned-read case probe changes only its registered logical spelling's case$/,
           ],
           requireMustPassAssertions: true,
           requireExactFailures: true,
@@ -19259,7 +19282,7 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726";
+      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727";
   // Route the fixture through the SAME reduction and verdict helpers the
   // mutation loop uses (assertionNameOf / unlistedFailures / expect-missing /
   // requiredPassingAssertionProblems / exact-failure + count guards).

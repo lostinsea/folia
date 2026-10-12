@@ -7394,16 +7394,16 @@ async function run(win) {
   const casePreservedTarget = fs.realpathSync.native(fileB);
   const casePreservedLogicalPath = process.platform === "win32"
     ? (() => {
-      const index = casePreservedTarget.search(/[A-Za-z]/);
+      const index = fileB.search(/[A-Za-z]/);
       if (index < 0) return null;
-      const character = casePreservedTarget[index];
+      const character = fileB[index];
       const alternate = character === character.toLowerCase()
         ? character.toUpperCase()
         : character.toLowerCase();
       return (
-        casePreservedTarget.slice(0, index) +
+        fileB.slice(0, index) +
         alternate +
-        casePreservedTarget.slice(index + 1)
+        fileB.slice(index + 1)
       );
     })()
     : null;
@@ -7412,11 +7412,17 @@ async function run(win) {
   let casePreservedTargetStatCalls = 0;
   if (
     casePreservedLogicalPath &&
-    casePreservedLogicalPath !== casePreservedTarget &&
+    casePreservedLogicalPath !== fileB &&
     fs.realpathSync.native(casePreservedLogicalPath) === casePreservedTarget &&
     mainOwnedRefresh &&
     mainOwnedRefresh.validPayload
   ) {
+    check(
+      "SEC-08 owned-read case probe changes only its registered logical spelling's case",
+      mainOwnedRefresh.validPayload.filePath === fileB &&
+        casePreservedLogicalPath.toLowerCase() === fileB.toLowerCase(),
+      JSON.stringify({ fileB, casePreservedLogicalPath, casePreservedTarget }),
+    );
     const originalCasePreservedOpen = fs.promises.open;
     const originalCasePreservedStat = fs.promises.stat;
     const caseTargetWitness = "SEC08_CASE_PRESERVED_TARGET_STAT";
@@ -11700,9 +11706,20 @@ async function run(win) {
   // deliver a replacement document. A later extra can still fail on disk, but
   // that failure is per-file: the following grant remains usable.
   const recoveryFirst = path.join(dir, "dialog-recovery-first.md");
-  const recoveryMissing = path.join(dir, "dialog-recovery-missing.md");
+  const recoveryParent = path.join(
+    dir,
+    "dialog-recovery-parent-" +
+      "p".repeat(Math.max(1, 121 - dir.replace(/\s+/g, " ").length)),
+  );
+  fs.mkdirSync(recoveryParent, { recursive: true });
+  const recoveryMissing = path.join(recoveryParent, "dialog-recovery-missing.md");
   const recoveryLast = path.join(dir, "dialog-recovery-last.md");
   const failedLaterOpen = path.join(dir, "dialog-later-missing.md");
+  check(
+    "the unreadable-extra fixture's filename follows more than the bounded label length",
+    recoveryMissing.replace(/\s+/g, " ").indexOf("dialog-recovery-missing.md") > 120,
+    recoveryMissing,
+  );
   write(recoveryFirst, "# Recovery first\n\nDIALOG_RECOVERY_FIRST\n");
   write(recoveryMissing, "# Recovery missing\n\nDIALOG_RECOVERY_MISSING\n");
   write(recoveryLast, "# Recovery last\n\nDIALOG_RECOVERY_LAST\n");
@@ -11819,9 +11836,6 @@ async function run(win) {
       recoveryBatch.extraReadCalls.length === 2 &&
       recoveryBatch.extraReadCalls[0].grant !==
         recoveryBatch.extraReadCalls[1].grant &&
-      recoveryBatch.toasts.some(text =>
-        /Could not open .*dialog-recovery-missing\.md\./.test(String(text)),
-      ) &&
       recoveryMute &&
       recoveryMute.suppressed.filter(hit =>
         hit.kind === "console-error" &&
@@ -11829,6 +11843,12 @@ async function run(win) {
         hit.detail.includes("dialog-recovery-missing.md"),
       ).length === 1,
     JSON.stringify({ recoveryBatch, recoveryMute }),
+  );
+  check(
+    "the unreadable-extra notification identifies its bounded filename",
+    recoveryBatch &&
+      recoveryBatch.toasts.some(text => text === "Could not open dialog-recovery-missing.md."),
+    JSON.stringify(recoveryBatch && recoveryBatch.toasts),
   );
   await clearFixtureTabs("dialog extra recovery teardown");
 

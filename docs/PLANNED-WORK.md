@@ -127,6 +127,39 @@ Luna reviews found no blockers or disagreements. This is source-config
 evidence, not a successful hosted fetch: other observed ownership/setup and
 shutdown failures remain open, and the old comparison run is not repeated.
 
+**2026-10-12 logical/physical CI probe and filename corrections — reviewed.**
+The owned-read case probe now varies the registered logical spelling, not
+its physical realpath; the synchronous delivery witness independently resolves
+its expected physical identity. A fresh private junction-alias correctness
+run reached and passed the case probe; render-patch passed 198/198 through
+that alias. Tabs reached 496/501, reproducing the separate deleted-owner Save
+identity failure, cropped failure notification and companion scratch-accounting
+failure. The latest R717 reproof refused COLLATERAL because the notification
+failure accompanied its intended target; main source was restored. The
+basename-first notification correction retains the bounded, sanitized filename,
+with a deliberately long parent-path regression. Final native-root tabs passed
+503/503; R717 and R727 each individually PROVEN with exactly their intended
+failure, and both product sources restored. Source packaging passed 356/356.
+Fresh independent Sol and Luna design/implementation reviews found no blockers
+or disagreements. The earlier alias deleted-owner and companion failures,
+and the hosted shutdown failure, stay open; this is not a green CI or performance
+result.
+
+**2026-10-12 user-added Mermaid release requirement — reproduction active.**
+Full labels and compact, normally padded boxes/decision shapes are in this
+release; balanced multiline wrapping is preferred when it shrinks a decision
+node. This does not absorb the remaining Mermaid backlog. Representative
+captures were opened: at 150% app zoom, Mermaid confuses viewport-scaled HTML
+measurements with SVG coordinates and clips labels; the same cold fixture fits
+at 100%. The user's add/reload/reset journey is now also reproduced: add
+diagrams to a plain document, reload successfully at 150%, repeat reloads, then
+return to 100% without restarting. The opened capture still clips full text
+against the invalid foreignObject geometry and shows a left-offset, oversized
+decision diamond; a fresh reopening of the same source at 100% fits. This
+connects the scaled-measurement defect to that transition, without claiming a
+separate cache or font cause. Zoom-neutral measurement and compact, balanced
+wrapping remain to implement and verify, without post-layout polygon shrinking.
+
 ---
 
 ## A. Active

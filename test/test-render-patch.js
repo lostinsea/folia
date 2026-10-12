@@ -2590,7 +2590,9 @@ async function run(win) {
                 !!tab &&
                 tab.filePath === expectedPath &&
                 !!identity &&
-                identity.pathKey === fileTrackingPathKey(expectedPath),
+                identity.pathKey === fileTrackingPathKey(
+                  fs.realpathSync.native(expectedPath),
+                ),
               customTabsClean:
                 !!tab &&
                 tab.hasUnsavedChanges === false &&

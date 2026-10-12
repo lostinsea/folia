@@ -2959,7 +2959,8 @@
   // otherwise forge the text of the confirm() the reader is about to answer,
   // and an absurdly long one pushes the buttons out of reach.
   function safeDocumentLabel(name) {
-    return String(name).replace(/\s+/g, " ").slice(0, 120);
+    const filename = String(name).split(/[\\/]/).pop();
+    return filename.replace(/\s+/g, " ").slice(0, 120);
   }
 
   function consultDocumentDeletionState(filePath, identity) {
