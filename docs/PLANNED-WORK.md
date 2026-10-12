@@ -145,7 +145,7 @@ or disagreements. The earlier alias deleted-owner and companion failures,
 and the hosted shutdown failure, stay open; this is not a green CI or performance
 result.
 
-**2026-10-12 user-added Mermaid release requirement — reproduction active.**
+**2026-10-12 user-added Mermaid release requirement — implementation/proof reviewed.**
 Full labels and compact, normally padded boxes/decision shapes are in this
 release; balanced multiline wrapping is preferred when it shrinks a decision
 node. This does not absorb the remaining Mermaid backlog. Representative
@@ -157,8 +157,39 @@ return to 100% without restarting. The opened capture still clips full text
 against the invalid foreignObject geometry and shows a left-offset, oversized
 decision diamond; a fresh reopening of the same source at 100% fits. This
 connects the scaled-measurement defect to that transition, without claiming a
-separate cache or font cause. Zoom-neutral measurement and compact, balanced
-wrapping remain to implement and verify, without post-layout polygon shrinking.
+separate cache or font cause. Drawing now uses hidden, inert, unzoomed staging
+with the original logical width and typography, generation/source/identity
+checks and adopted-only caching. Actual SVG children move intact so native
+bindings survive. Live zoom-cancellation prototypes were rejected for measured
+theme-scroll displacement; they are not the implementation. The supported
+160px flowchart wrapping budget keeps the decision balanced, with existing
+font/padding and emergency wrapping for identifiers; longer prose and explicit
+breaks can gain lines, without post-layout polygon shrinking.
+
+The final targeted Mermaid baseline passed 139/139
+(`mermaid-staging-final-independent-scroll-suite-20261012.log`). Complete roomy 100% and
+constrained/130% captures were opened: full labels, centered multiline decision,
+modest shape padding and connected, labeled edges are visible. Fresh Sol and
+Luna feedback agreed on the staged native-output witness for rejected batches.
+Sol also found a Gantt test selector that excluded legitimate outside-bar
+labels; the corrected baseline verifies both task labels and matching native
+dimensions. Sol identified those proof/test blockers where Luna's review did
+not; both final focused correction reviews are clear.
+
+R103, R104 and R110 are individually PROVEN with the staged producer witness
+separate from live adoption. R728-R732 are individually exact PROVEN. The first
+R728/R730 run refused COLLATERAL: incorrect zoom also displaced the reading
+point, while an unwrapped identifier made the split-view scroll setup vacuous.
+R728 now names exactly both coordinate-related behavioral failures; independent
+ordinary paragraphs keep the scroll setup live regardless of identifier width,
+and R730 retains its single intended failure with that setup required to pass.
+The corrected records passed in
+`mermaid-staging-r728-r730-corrected-20261012.log`; other records are in
+`mermaid-staging-final-reverts-20261012.log`. Product bytes were restored.
+Source packaging passed 356/356; anchors and CRLF audit are clean. Preserved,
+opened final visual evidence is `mermaid-label-fit-final-roomy100.png` and
+`mermaid-label-fit-final-constrained130.png`. This is isolated-stream closeout,
+not completion of Wave 2, performance acceptance, integration or publication.
 
 ---
 

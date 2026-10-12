@@ -82,7 +82,9 @@ const MERMAID_FLOWCHART = {
   padding: 6,
   nodeSpacing: 32, // default 50
   rankSpacing: 38, // default 50
-  wrappingWidth: 200,
+  // 160 keeps the representative decision label on two balanced lines without
+  // the near-single-word wrapping measured at 128.
+  wrappingWidth: 160,
   htmlLabels: true,
 };
 
@@ -114,6 +116,7 @@ function getMermaidConfig(isDark) {
     // their own default (sequence diagrams rendered at 16px while flowcharts
     // rendered at 13px, an inconsistency visible side by side in one document).
     fontSize: MERMAID_FONT_PX,
+    themeCSS: '.nodeLabel { overflow-wrap: anywhere; }',
     themeVariables: isDark ? MERMAID_DARK_THEME : MERMAID_LIGHT_THEME,
     flowchart: MERMAID_FLOWCHART,
     sequence: MERMAID_SEQUENCE

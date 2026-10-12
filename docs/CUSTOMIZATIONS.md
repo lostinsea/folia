@@ -233,6 +233,38 @@ Regression coverage: `npm run test:tabs` (see below).
 
 **Important**: If an upstream merge resets `package.json` electron to `^27`, run `./scripts/post-upstream-merge.sh` to restore `^43.2.0`. Electron 43+ requires Node >= 22.12, which is pinned in `.nvmrc` and enforced by `engine-strict`, so the Electron pin and the Node pin must be raised together.
 
+### 7. Mermaid label measurement and compact wrapping (renderer.js + mermaid-config.js)
+
+Mermaid's HTML-label measurements use viewport coordinates, but its SVG layout
+uses document coordinates. Folia's reader zoom previously mixed those units:
+adding diagrams and manually reloading at 150% could produce clipped labels
+that stayed clipped after returning to 100%, while reopening the same document
+fresh rendered correctly.
+
+All three drawing paths now measure in a hidden, inert staging container
+outside the zoomed reader. Each staged diagram retains its logical width and
+typography, including the width-dependent Gantt layout. The live diagram stays
+in place until the new SVG is ready; cancelling zoom on the live reader instead
+was rejected because it moved the reading position during theme changes.
+Adoption checks the caller's generation and the original node's source and
+identity. Moving actual child nodes preserves Mermaid's native bindings; stale
+output is neither adopted nor cached, and the staging container is always
+removed, including after a rejected batch.
+
+Flowchart labels use a 160px wrapping budget, the existing 14px font and 6px
+padding, plus emergency wrapping for unbroken identifiers. This makes the
+representative decision label wrap as "Each query or" / "stage language"
+instead of growing a wide square diamond. It is a global wrapping choice, not
+a per-shape sizing override: longer prose can gain lines, and explicit line
+breaks can wrap further. Short labels remain intrinsic. Mermaid still owns
+shape geometry and connector placement; no polygons are resized after layout.
+
+The targeted suite covers the real add/reload/zoom-reset journey, theme and
+insertion paths, full-label geometry, compact decisions, bindings, stale
+adoption, scrolling in normal/split view and width-dependent layouts. Its
+roomy 100% and constrained/zoomed captures must be opened when checking visual
+changes; merely writing PNGs is not visual verification.
+
 ## How to Maintain After Upstream Merge
 
 **After every upstream merge, run the post-merge script:**

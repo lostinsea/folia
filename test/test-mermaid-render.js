@@ -1991,7 +1991,24 @@ async function run(win) {
   try {
     await exec(`
       (async () => {
-        await window.renderMarkdown(window.fs.readFileSync(${jsMixed}, 'utf8'), 'full');
+        const realRun = mermaid.run;
+        window.__mixedStagedGood = 0;
+        mermaid.run = async function(options) {
+          try {
+            return await realRun.call(this, options);
+          } finally {
+            window.__mixedStagedGood = [...options.nodes].filter(node => {
+              const labels = [...node.querySelectorAll('svg .nodeLabel')].map(n => n.textContent);
+              return /MixedGood/.test(node.dataset.mermaidSrc || '') &&
+                labels.includes('Good one') && labels.includes('Good two');
+            }).length;
+          }
+        };
+        try {
+          await window.renderMarkdown(window.fs.readFileSync(${jsMixed}, 'utf8'), 'full');
+        } finally {
+          mermaid.run = realRun;
+        }
         return null;
       })()
     `).catch(() => {});
@@ -2003,8 +2020,9 @@ async function run(win) {
         const blocks = [...document.querySelectorAll('#viewer .mermaid')];
         return {
           blocks: blocks.length,
+          stagedGood: window.__mixedStagedGood,
           items: blocks.map(b => ({
-            good: /MixedGood/.test(b.textContent) || /MixedGood/.test(b.innerHTML),
+            good: /MixedGood/.test(b.dataset.mermaidSrc || ''),
             hasSvg: !!b.querySelector('svg'),
             inContainer: !!b.closest('.mermaid-container'),
             hasMaxBtn: !!(b.closest('.mermaid-container') &&
@@ -2028,8 +2046,9 @@ async function run(win) {
   }
   const goodBlocks = (mixed.items || []).filter((x) => x.good && x.hasSvg);
   check(
-    "13a fixture really does mix one rendered diagram with one failure",
-    mixed.blocks === 2 && goodBlocks.length === 1,
+    "13a native engine really renders the good diagram before reporting its invalid sibling",
+    mixed.blocks === 2 && mixed.stagedGood === 1 &&
+      mixed.items.filter(x => x.good).length === 1,
     JSON.stringify(mixed),
   );
   check(
@@ -3421,6 +3440,376 @@ async function run(win) {
     preview.errorClass === true && preview.prefixed === true,
     JSON.stringify(preview),
   );
+
+  // Label geometry must describe unscaled content even when a diagram first
+  // arrives through reload at a higher zoom and is later viewed at 100%.
+  const fitPath = path.join(dir, "label-fit.md");
+  const fitSource = [
+    "flowchart TD",
+    'A["`Resolve trusted resource bindings and authorize access to every requested query input`"]',
+    'B("Bind each query and stage using its language grammar and validate type constraints")',
+    'C{"`Each query or stage language`"}',
+    'D["First explicit line<br/>Second explicit line"]',
+    'E["Done"]',
+    'F["VeryLongUnbrokenStageIdentifierWithoutWhitespaceThatStillMustRemainVisible"]',
+    "A --> B --> C",
+    "C -->|CHaaS SQL| D",
+    "C -->|ICEQL| E",
+    "D --> F",
+  ].join("\n");
+  const fitDoc = "# Label fit\n\n```mermaid\n" + fitSource + "\n```\n";
+  const fitPlain = "# Before label fit\n\nNo diagrams yet.\n";
+  fs.writeFileSync(fitPath, fitPlain);
+  await exec(`(async () => {
+    closeMermaidTemplateDialog();
+    CustomTabs.getTabs().forEach(t => { t.hasUnsavedChanges = false; });
+    CustomTabs.getTabs().slice().forEach(t => CustomTabs.closeTab(t.id));
+    document.body.classList.remove('dark-mode');
+    await updateMermaidTheme(false);
+    zoomLevel = 150; updateZoom();
+    CustomTabs.createTab(${JSON.stringify(fitPath)}, ${JSON.stringify(fitPlain)});
+  })()`);
+  await waitFor(exec, "the diagram-free label-fit document",
+    `document.querySelector('#viewer h1')?.textContent === 'Before label fit'`);
+  check("Mermaid label-fit journey starts with a real diagram-free document",
+    await exec(`currentFilePath === ${JSON.stringify(fitPath)} &&
+      document.querySelectorAll('#viewer .mermaid').length === 0`), fitPath);
+
+  await exec(`window.__fitReplies = [];
+    window.__fitReplyListener = (_event, data) => window.__fitReplies.push(data);
+    ipcRenderer.on('file-reload-result', window.__fitReplyListener); null`);
+  async function reloadFit() {
+    const before = await exec(`window.__fitReplies.length`);
+    await exec(`document.getElementById('reloadFileBtn').click(); null`);
+    await waitFor(exec, "the real label-fit manual reload result",
+      `window.__fitReplies.length > ${before}`);
+    return exec(`window.__fitReplies[${before}].success === true`);
+  }
+  fs.writeFileSync(fitPath, fitDoc);
+  const firstFitReload = await reloadFit();
+  await waitFor(exec, "all label-fit nodes to render",
+    `document.querySelectorAll('#viewer .mermaid g.node').length === 6`);
+
+  const fitProbe = `(() => {
+    const rect = r => ({ x:r.x, y:r.y, width:r.width, height:r.height });
+    return [...document.querySelectorAll('#viewer .mermaid g.node')].map(node => {
+      const shape = node.querySelector('rect, polygon, path');
+      const foreign = node.querySelector('foreignObject');
+      const label = node.querySelector('.nodeLabel');
+      const bounds = foreign.getBoundingClientRect();
+      const fragments = [];
+      const walker = document.createTreeWalker(label, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        if (!walker.currentNode.textContent.trim()) continue;
+        const range = document.createRange();
+        range.selectNodeContents(walker.currentNode);
+        fragments.push(...[...range.getClientRects()].map(rect));
+      }
+      const box = shape.getBBox();
+      const shapeScreen = shape.getBoundingClientRect();
+      return {
+        key: /flowchart-([A-F])-/.exec(node.id)?.[1],
+        text: label.textContent,
+        width: box.width, height: box.height,
+        foreign: rect(bounds), shape: rect(shapeScreen), fragments,
+        font: parseFloat(getComputedStyle(label).fontSize),
+        fits: fragments.length > 0 && fragments.every(r =>
+          r.x >= bounds.x - 1 && r.y >= bounds.y - 1 &&
+          r.x + r.width <= bounds.right + 1 &&
+          r.y + r.height <= bounds.bottom + 1),
+      };
+    }).sort((a,b) => a.key.localeCompare(b.key));
+  })()`;
+  const fitRecords = [];
+  async function recordFit(stage) {
+    await exec(`(async () => {
+      await mermaidWorkQueue; await document.fonts.ready;
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+    })()`);
+    const nodes = await exec(fitProbe);
+    fitRecords.push({ stage, nodes });
+    return nodes;
+  }
+  const firstFit = await recordFit("added-at-150");
+  const fitSetup = firstFit.length === 6 &&
+    firstFit.map(n => n.key).join("") === "ABCDEF" &&
+    firstFit.every(n => n.fragments.length > 0) &&
+    firstFit.find(n => n.key === "A").text.includes("every requested query input") &&
+    firstFit.find(n => n.key === "F").text.length > 60;
+  check("Mermaid label-fit probe measures complete real labels and every shape",
+    fitSetup, JSON.stringify(firstFit));
+  const fitConnectors = await exec(`(() => {
+    const svg = viewer.querySelector('.mermaid svg');
+    const links = [...svg.querySelectorAll('.flowchart-link')];
+    return {
+      count:links.length,
+      intact:links.every(link => {
+        const marker = /#([^)'"]+)/.exec(link.getAttribute('marker-end') || '');
+        return link.getTotalLength() > 1 && marker &&
+          !!svg.querySelector('[id="' + CSS.escape(marker[1]) + '"]');
+      }),
+      labels:svg.textContent.includes('CHaaS SQL') && svg.textContent.includes('ICEQL'),
+    };
+  })()`);
+  check("Mermaid fitted shapes retain every native connector, marker and edge label",
+    fitConnectors.count === 5 && fitConnectors.intact && fitConnectors.labels,
+    JSON.stringify(fitConnectors));
+  const repeatFitReloads = [await reloadFit(), await reloadFit()];
+  await recordFit("repeated-reloads-at-150");
+  await exec(`zoomResetBtn.click(); null`);
+  await recordFit("returned-100-without-restart");
+  check("Mermaid label-fit journey receives successful real manual reload replies",
+    firstFitReload && repeatFitReloads.every(Boolean), JSON.stringify(repeatFitReloads));
+
+  for (const zoom of [100, 110, 130, 150, 200]) {
+    const freshFitDoc = fitDoc.replace("flowchart TD", "flowchart TD\n%% fresh zoom " + zoom);
+    await exec(`(async () => {
+      zoomLevel = ${zoom}; updateZoom();
+      await renderMarkdown(${JSON.stringify(freshFitDoc)}, 'full');
+    })()`);
+    await recordFit("fresh-" + zoom);
+  }
+  const nativeFit = fitRecords.find(r => r.stage === "fresh-100").nodes;
+  const decision = nativeFit.find(n => n.key === "C");
+  const lineTops = [...new Set(decision.fragments.map(r => Math.round(r.y)))];
+  check("Mermaid decision labels wrap into a compact centered diamond",
+    decision.width <= 225 && decision.height <= 225 && lineTops.length === 2 &&
+      Math.abs(decision.foreign.x + decision.foreign.width / 2 -
+        decision.shape.x - decision.shape.width / 2) <= 1 &&
+      Math.abs(decision.foreign.y + decision.foreign.height / 2 -
+        decision.shape.y - decision.shape.height / 2) <= 1,
+    JSON.stringify(decision));
+  check("Mermaid short labels stay intrinsic and prose avoids near-single-word columns",
+    nativeFit.find(n => n.key === "E").width < 100 &&
+      nativeFit.find(n => n.key === "A").height <= 160 &&
+      nativeFit.every(n => n.font === 14),
+    JSON.stringify(nativeFit));
+  check("Mermaid unbroken identifiers wrap within their measured label",
+    nativeFit.find(n => n.key === "F").fits &&
+      nativeFit.find(n => n.key === "F").width <= 225,
+    JSON.stringify(nativeFit.find(n => n.key === "F")));
+  win.setSize(1100, 1400);
+  await exec(`zoomLevel = 100; updateZoom(); null`);
+  await recordFit("roomy-capture-100");
+  await captureScreenshot(win, "mermaid-label-fit-roomy-after");
+  win.setSize(800, 1600);
+  await exec(`zoomLevel = 130; updateZoom(); null`);
+  await recordFit("constrained-130");
+  await captureScreenshot(win, "mermaid-label-fit-constrained-after");
+  await exec(`(async () => {
+    document.body.classList.add('dark-mode');
+    await updateMermaidTheme(true); await whenMermaidSettled();
+  })()`);
+  await recordFit("dark-retheme");
+  await exec(`(async () => {
+    document.body.classList.remove('dark-mode');
+    await updateMermaidTheme(false); await whenMermaidSettled();
+    await renderMarkdown(${JSON.stringify(fitDoc)}, 'full');
+  })()`);
+  await recordFit("light-cache");
+  await exec(`(async () => {
+    await renderMarkdown(${JSON.stringify(fitPlain)}, 'full');
+    await renderMermaidInDOM(${JSON.stringify(fitSource)}, 'insert', null);
+  })()`);
+  await recordFit("insert");
+
+  const restoration = await exec(`(async () => {
+    const realRun = mermaid.run;
+    const styled = document.createElement('div');
+    styled.style.cssText = 'width:100px;padding:0;border:0;zoom:1.2!important';
+    const bare = document.createElement('div');
+    styled.dataset.mermaidSrc = 'flowchart TD\\nS --> T';
+    bare.dataset.mermaidSrc = 'flowchart TD\\nU --> V';
+    viewer.append(styled, bare);
+    const bareBefore = bare.getAttribute('style');
+    let widths;
+    let staged;
+    let stagingReached = false;
+    let receiverPreserved = false;
+    let rejected = false;
+    mermaid.run = async function(options) {
+      staged = [...options.nodes];
+      receiverPreserved = this === mermaid && options.suppressErrors === false;
+      stagingReached = staged.length === 2 &&
+        staged.every(n => document.body.contains(n) && !viewer.contains(n)) &&
+        document.querySelectorAll('.mermaid-measurement').length === 1;
+      const before = staged[0].getBoundingClientRect().width;
+      zoomLevel = 200; updateZoom();
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+      widths = [before, staged[0].getBoundingClientRect().width];
+      styled.remove(); bare.remove();
+      throw new Error('label-fit-restoration');
+    };
+    try {
+      await runMermaidAtDocumentScale({nodes:[styled,bare],suppressErrors:false});
+    } catch (error) {
+      if (error.message !== 'label-fit-restoration') throw error;
+      rejected = true;
+    } finally {
+      mermaid.run = realRun; styled.remove(); bare.remove();
+      zoomLevel = 100; updateZoom();
+    }
+    return {
+      widths, rejected, stagingReached, receiverPreserved,
+      stagingRemoved:document.querySelectorAll('.mermaid-measurement').length === 0 &&
+        staged.every(n => !n.isConnected),
+      zoom:styled.style.getPropertyValue('zoom'),
+      priority:styled.style.getPropertyPriority('zoom'),
+      bareStyle:bare.hasAttribute('style'),
+      bareBefore,
+      bareAfter:bare.getAttribute('style'),
+    };
+  })()`);
+  check("Mermaid measurement restores detached-node inline styles after a real rejection",
+    restoration.rejected && restoration.zoom === "1.2" &&
+      restoration.priority === "important" && !restoration.bareStyle &&
+      restoration.stagingReached && restoration.stagingRemoved &&
+      restoration.receiverPreserved,
+    JSON.stringify(restoration));
+  check("Mermaid labels retain native geometry through zoom, reload, theme and insertion",
+    fitRecords.every(record => record.nodes.length === 6 &&
+      record.nodes.every((n, i) => n.fits &&
+        Math.abs(n.width - nativeFit[i].width) <= 0.1 &&
+        Math.abs(n.height - nativeFit[i].height) <= 0.1)) &&
+      restoration.widths.every(width => Math.abs(width - 100) <= 0.1),
+    JSON.stringify({ fitRecords, restoration }));
+
+  const readingPositions = [];
+  const scrollDoc = "Paragraph before the diagram.\n\n".repeat(20) +
+    fitDoc + "\n## Reading position\n\n" +
+    "Paragraph after the diagram.\n\n".repeat(80);
+  for (const split of [false, true]) {
+    const reading = await exec(`(async () => {
+      contentWrapper.classList.toggle('split-view', ${split});
+      zoomLevel = 150; updateZoom();
+      await renderMarkdown(${JSON.stringify(scrollDoc)}, 'full');
+      const anchor = [...viewer.querySelectorAll('h2')].find(h => h.textContent === 'Reading position');
+      const frames = () => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+      await frames();
+      const scroller = getViewerScroller();
+      const viewport = scroller.getBoundingClientRect();
+      scroller.scrollTop += (anchor.getBoundingClientRect().top -
+        viewport.top - viewport.height / 2) / scrollerScale(scroller);
+      await frames();
+      const before = anchor.getBoundingClientRect().top;
+      const setup = {
+        overflowing:scroller.scrollHeight > scroller.clientHeight,
+        scrolled:scroller.scrollTop > 0,
+        onScreen:before >= Math.max(0, scroller.getBoundingClientRect().top) &&
+          before < Math.min(window.innerHeight, scroller.getBoundingClientRect().bottom),
+        split:contentWrapper.classList.contains('split-view'),
+        beforeTop:before,
+        scrollBefore:scroller.scrollTop,
+        heightBefore:scroller.scrollHeight,
+      };
+      const realRun = mermaid.run;
+      let calls = 0;
+      mermaid.run = async function(options) {
+        calls++; await frames();
+        return realRun.call(this, options);
+      };
+      try {
+        await updateMermaidTheme(true); await whenMermaidSettled();
+        await frames();
+        return {...setup, calls, delta:anchor.getBoundingClientRect().top - before,
+          connected:anchor.isConnected, scrollAfter:scroller.scrollTop,
+          heightAfter:scroller.scrollHeight};
+      } finally {
+        mermaid.run = realRun;
+        await updateMermaidTheme(false); await whenMermaidSettled();
+      }
+    })()`);
+    readingPositions.push(reading);
+  }
+  check("Mermaid reading-position cases really scroll and run delayed native layout",
+    readingPositions.length === 2 && readingPositions.every((p, i) =>
+      p.overflowing && p.scrolled && p.onScreen && p.calls > 0 && p.split === Boolean(i)),
+    JSON.stringify(readingPositions));
+  check("Mermaid theme measurement preserves the reading position in normal and split view",
+    readingPositions.every(p => Math.abs(p.delta) <= 2), JSON.stringify(readingPositions));
+  await exec(`contentWrapper.classList.remove('split-view'); zoomLevel = 100; updateZoom(); null`);
+
+  const binding = await exec(`(async () => {
+    const node = document.createElement('div');
+    node.className = 'mermaid';
+    node.id = 'label-fit-binding';
+    node.dataset.mermaidSrc = 'flowchart LR\\nBoundA --> BoundB';
+    viewer.append(node);
+    let hits = 0;
+    let callbackFoundSvg = false;
+    let current = true;
+    try {
+      const first = await runMermaidAtDocumentScale({
+        nodes:[node], suppressErrors:false,
+        postRenderCallback:id => {
+          const svg = document.getElementById(id);
+          callbackFoundSvg = !!svg && !viewer.contains(svg);
+          svg.addEventListener('click', () => { hits++; });
+        },
+      });
+      const originalSvg = node.querySelector('svg');
+      originalSvg.dispatchEvent(new MouseEvent('click', {bubbles:true}));
+      const stale = await runMermaidAtDocumentScale({
+        nodes:[node], suppressErrors:false,
+        postRenderCallback:() => { current = false; },
+      }, () => current);
+      return {
+        firstCount:first.length, hits, callbackFoundSvg,
+        staleCount:stale.length, originalRetained:node.querySelector('svg') === originalSvg,
+        noStage:document.querySelectorAll('.mermaid-measurement').length === 0,
+      };
+    } finally {
+      node.remove();
+    }
+  })()`);
+  check("Mermaid staged native output retains its post-render bindings",
+    binding.firstCount === 1 && binding.callbackFoundSvg && binding.hits === 1,
+    JSON.stringify(binding));
+  check("Mermaid stale staged output neither replaces a live SVG nor enters adopted results",
+    binding.staleCount === 0 && binding.originalRetained && binding.noStage,
+    JSON.stringify(binding));
+
+  const widthContexts = [];
+  const ganttSource = "# Width-dependent diagram\n\n```mermaid\n" +
+    "gantt\n  dateFormat YYYY-MM-DD\n  section Work\n" +
+    "  First task :a1, 2026-01-01, 3d\n" +
+    "  Second task :a2, after a1, 2d\n```\n";
+  for (const split of [false, true]) {
+    const dimensions = [];
+    for (const staged of [false, true]) {
+      const contextDoc = ganttSource.replace("gantt\n", "gantt\n%% " + split + "-" + staged + "\n");
+      dimensions.push(await exec(`(async () => {
+        contentWrapper.classList.toggle('split-view', ${split});
+        const realHelper = runMermaidAtDocumentScale;
+        if (!${staged}) runMermaidAtDocumentScale = async options => {
+          await mermaid.run(options);
+          return [...options.nodes].filter(n => n.querySelector('svg'));
+        };
+        try {
+          await renderMarkdown(${JSON.stringify(contextDoc)}, 'full');
+          const svg = viewer.querySelector('.mermaid svg');
+          return {
+            width:svg.viewBox.baseVal.width,
+            height:svg.viewBox.baseVal.height,
+            labels:[...svg.querySelectorAll('.taskText, .taskTextOutsideLeft, .taskTextOutsideRight')]
+              .map(node => node.textContent.trim()),
+          };
+        } finally {
+          runMermaidAtDocumentScale = realHelper;
+        }
+      })()`));
+    }
+    widthContexts.push({ split, native:dimensions[0], staged:dimensions[1] });
+  }
+  check("Mermaid staging preserves native width-dependent layout in normal and split view",
+    widthContexts.every(c => c.native.labels.length === 2 && c.staged.labels.length === 2 &&
+      ["First task", "Second task"].every(label =>
+        c.native.labels.includes(label) && c.staged.labels.includes(label)) &&
+      c.native.width > 100 && Math.abs(c.native.width - c.staged.width) <= 1 &&
+      Math.abs(c.native.height - c.staged.height) <= 1),
+    JSON.stringify(widthContexts));
+  await exec(`contentWrapper.classList.remove('split-view'); null`);
+  await exec(`ipcRenderer.removeListener('file-reload-result', window.__fitReplyListener); null`);
 
   // Everything above ran with the sentinel watching. This is the assertion the
   // end-of-run screenshot could never make: nothing visibly broke at any point

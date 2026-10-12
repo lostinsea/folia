@@ -1150,13 +1150,12 @@ const REVERTS = [
     suite: "test:mermaid",
     what: "let one invalid diagram abort the whole render batch again",
     file: RENDERER,
-    from: "          await mermaid.run({ nodes: toRender, suppressErrors: true });",
-    to: "          await mermaid.run({ nodes: toRender, suppressErrors: false });",
+    from: "          const adopted = await runMermaidAtDocumentScale({ nodes: toRender, suppressErrors: true },",
+    to: "          const adopted = await runMermaidAtDocumentScale({ nodes: toRender, suppressErrors: false },",
     expect: [/keeps its pop-out button when a sibling fails/],
-    // If mermaid.run happens to throw BEFORE the good diagram is drawn, the good
-    // one has no SVG, the fix assertion short-circuits, and R103 would report
-    // PROVEN having demonstrated nothing about pop-out buttons.
-    mustPass: [/13a fixture really does mix one rendered diagram with one failure/],
+    // A rejected stage is discarded atomically. Witness the native good SVG
+    // before rejection, independently of whether it reached the live document.
+    mustPass: [/13a native engine really renders the good diagram before reporting its invalid sibling/],
   },
   {
     // The theme path's catch falls back to a FULL re-render, so the same throw
@@ -1167,10 +1166,10 @@ const REVERTS = [
     file: RENDERER,
     from:
       "    // theme toggle for as long as the bad diagram is in the document.\n" +
-      "    await mermaid.run({ nodes: toRender, suppressErrors: true });",
+      "    const adopted = await runMermaidAtDocumentScale({ nodes: toRender, suppressErrors: true },",
     to:
       "    // theme toggle for as long as the bad diagram is in the document.\n" +
-      "    await mermaid.run({ nodes: toRender, suppressErrors: false });",
+      "    const adopted = await runMermaidAtDocumentScale({ nodes: toRender, suppressErrors: false },",
     expect: [
       /does not re-render the whole document just because a diagram is invalid/,
     ],
@@ -1257,8 +1256,8 @@ const REVERTS = [
     suite: "test:mermaid",
     what: "suppress errors at the single-diagram site too (the catch then never reports the failure)",
     file: RENDERER,
-    from: "      await mermaid.run({ nodes: [mermaidEl], suppressErrors: false });",
-    to: "      await mermaid.run({ nodes: [mermaidEl], suppressErrors: true });",
+    from: "      const adopted = await runMermaidAtDocumentScale({ nodes: [mermaidEl], suppressErrors: false },",
+    to: "      const adopted = await runMermaidAtDocumentScale({ nodes: [mermaidEl], suppressErrors: true },",
     expect: [/13e the invalid diagram really reached the single-diagram error path/],
     mustPass: [
       // 13e2 must NOT fail here, and that is a measured property rather than an
@@ -18240,6 +18239,99 @@ const REVERTS = [
           requireExactFailures: true,
           expectedFailureCount: 1,
         },
+        {
+          id: "R728",
+          what: "measure staged Mermaid labels in zoom-scaled rather than document coordinates",
+          file: RENDERER,
+          from: "      clone.style.setProperty('zoom', '1', 'important');",
+          to: "      clone.style.setProperty('zoom', String(zoomLevel / 100), 'important');",
+          suite: "test:mermaid",
+          // Wrong coordinate units also move the real reading point when the
+          // themed SVG replaces the old one. Both effects belong to this revert.
+          expect: [
+            /^Mermaid labels retain native geometry through zoom, reload, theme and insertion$/,
+            /^Mermaid theme measurement preserves the reading position in normal and split view$/,
+          ],
+          mustPass: [
+            /^Mermaid label-fit probe measures complete real labels and every shape$/,
+            /^Mermaid label-fit journey receives successful real manual reload replies$/,
+            /^Mermaid decision labels wrap into a compact centered diamond$/,
+            /^Mermaid measurement restores detached-node inline styles after a real rejection$/,
+            /^Mermaid reading-position cases really scroll and run delayed native layout$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 2,
+        },
+        {
+          id: "R729",
+          what: "restore the wider Mermaid wrapping budget that leaves the representative decision oversized",
+          file: MERMAID_CFG,
+          from: "  wrappingWidth: 160,",
+          to: "  wrappingWidth: 200,",
+          suite: "test:mermaid",
+          expect: [/^Mermaid decision labels wrap into a compact centered diamond$/],
+          mustPass: [
+            /^Mermaid label-fit probe measures complete real labels and every shape$/,
+            /^Mermaid labels retain native geometry through zoom, reload, theme and insertion$/,
+            /^Mermaid short labels stay intrinsic and prose avoids near-single-word columns$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R730",
+          what: "omit Mermaid's emergency wrapping for long unbroken identifiers",
+          file: MERMAID_CFG,
+          from: "    themeCSS: '.nodeLabel { overflow-wrap: anywhere; }',",
+          to: "    themeCSS: '',",
+          suite: "test:mermaid",
+          expect: [/^Mermaid unbroken identifiers wrap within their measured label$/],
+          mustPass: [
+            /^Mermaid label-fit probe measures complete real labels and every shape$/,
+            /^Mermaid decision labels wrap into a compact centered diamond$/,
+            /^Mermaid measurement restores detached-node inline styles after a real rejection$/,
+            /^Mermaid reading-position cases really scroll and run delayed native layout$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R731",
+          what: "adopt staged Mermaid output after its caller's generation is superseded",
+          file: RENDERER,
+          from: "    if (!isCurrent()) return adopted;",
+          to: "    // Superseded staged output is incorrectly admitted.",
+          suite: "test:mermaid",
+          expect: [/^Mermaid stale staged output neither replaces a live SVG nor enters adopted results$/],
+          mustPass: [
+            /^Mermaid staged native output retains its post-render bindings$/,
+            /^Mermaid labels retain native geometry through zoom, reload, theme and insertion$/,
+            /^Mermaid measurement restores detached-node inline styles after a real rejection$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R732",
+          what: "serialize staged Mermaid output and lose its native post-render bindings",
+          file: RENDERER,
+          from: "      node.replaceChildren(...clone.childNodes);",
+          to: "      node.innerHTML = clone.innerHTML;",
+          suite: "test:mermaid",
+          expect: [/^Mermaid staged native output retains its post-render bindings$/],
+          mustPass: [
+            /^Mermaid stale staged output neither replaces a live SVG nor enters adopted results$/,
+            /^Mermaid labels retain native geometry through zoom, reload, theme and insertion$/,
+            /^Mermaid measurement restores detached-node inline styles after a real rejection$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
       ];
 
 // These are release exceptions, not passing or withdrawn proofs. An explicit
@@ -19282,7 +19374,7 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727";
+      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732";
   // Route the fixture through the SAME reduction and verdict helpers the
   // mutation loop uses (assertionNameOf / unlistedFailures / expect-missing /
   // requiredPassingAssertionProblems / exact-failure + count guards).

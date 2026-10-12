@@ -2686,6 +2686,65 @@ function queueMermaidWork(fn) {
   return mermaidWorkQueue;
 }
 
+async function runMermaidAtDocumentScale(options, isCurrent = () => true) {
+  if (!isCurrent()) return [];
+  // Mermaid writes viewport measurements into SVG coordinates. Measure outside
+  // the zoomed viewer, without shrinking live diagrams and disturbing its
+  // scroll anchoring. Keep each diagram's layout-space width and typography.
+  const entries = [...options.nodes].filter(node => viewer.contains(node)).map(node => {
+    const style = getComputedStyle(node);
+    const source = node.dataset.mermaidSrc;
+    if (typeof source !== 'string' || !source) {
+      throw new Error('Mermaid source is unavailable for measurement');
+    }
+    return {
+      node,
+      source,
+      id: node.id,
+      width: node.offsetWidth || viewer.clientWidth,
+      font: style.font,
+      lineHeight: style.lineHeight,
+    };
+  });
+  const stage = document.createElement('div');
+  stage.className = 'markdown-body mermaid-measurement';
+  stage.inert = true;
+  stage.setAttribute('aria-hidden', 'true');
+  stage.style.cssText = 'position:fixed;inset:0;overflow:clip;visibility:hidden;opacity:0;pointer-events:none';
+  try {
+    for (const entry of entries) {
+      const clone = entry.node.cloneNode(false);
+      clone.id = `mermaid-measure-${mermaidNodeIdSeq++}`;
+      clone.removeAttribute('data-processed');
+      clone.textContent = entry.source;
+      clone.style.setProperty('zoom', '1', 'important');
+      clone.style.setProperty('transform', 'none', 'important');
+      clone.style.boxSizing = 'border-box';
+      clone.style.width = `${entry.width}px`;
+      clone.style.font = entry.font;
+      clone.style.lineHeight = entry.lineHeight;
+      entry.clone = clone;
+      stage.appendChild(clone);
+    }
+    if (entries.length === 0) return [];
+    document.body.appendChild(stage);
+    await mermaid.run({ ...options, nodes: entries.map(entry => entry.clone) });
+    const adopted = [];
+    if (!isCurrent()) return adopted;
+    for (const { node, clone, source, id } of entries) {
+      if (!viewer.contains(node) || node.dataset.mermaidSrc !== source ||
+          node.id !== id || !clone.querySelector('svg')) continue;
+      noteViewerMutation();
+      node.replaceChildren(...clone.childNodes);
+      node.setAttribute('data-processed', 'true');
+      adopted.push(node);
+    }
+    return adopted;
+  } finally {
+    stage.remove();
+  }
+}
+
 function updateMermaidTheme(isDark) {
   return queueMermaidWork(() => applyMermaidTheme(isDark));
 }
@@ -2749,6 +2808,7 @@ function isMermaidNodeVisible(el) {
 // nodes actually handed to mermaid.
 async function renderMermaidBatch(nodes, seq) {
   if (seq !== mermaidRunSeq || !window.mermaid) return 0;
+  const generation = renderGeneration;
 
   const toRender = [];
   for (const el of nodes) {
@@ -2756,8 +2816,6 @@ async function renderMermaidBatch(nodes, seq) {
     if (!el.isConnected) continue;
     const src = el.dataset.mermaidSrc;
     if (!src) continue;
-    el.textContent = src;
-    el.removeAttribute('data-processed');
     el.id = `mermaid-${seq}-${mermaidNodeIdSeq++}`;
     toRender.push(el);
   }
@@ -2768,11 +2826,12 @@ async function renderMermaidBatch(nodes, seq) {
     // re-theme batch. Without it the throw skips the cache-write loop below AND
     // drops into the catch, which triggers a FULL document re-render on every
     // theme toggle for as long as the bad diagram is in the document.
-    await mermaid.run({ nodes: toRender, suppressErrors: true });
+    const adopted = await runMermaidAtDocumentScale({ nodes: toRender, suppressErrors: true },
+      () => seq === mermaidRunSeq && generation === renderGeneration);
     // A newer toggle may have landed while mermaid was working; its SVGs are
     // the wrong colour now, so they must not enter the cache.
     if (seq !== mermaidRunSeq) return toRender.length;
-    toRender.forEach((el) => {
+    adopted.forEach((el) => {
       if (el.dataset.mermaidSrc && el.querySelector('svg')) {
         mermaidSvgCache.set(el.dataset.mermaidSrc, el.innerHTML);
       }
@@ -6560,9 +6619,10 @@ async function renderMarkdownFull(content, generation) {
           // it false, a document holding one valid and one invalid diagram left
           // the VALID diagram with no .mermaid-container and no pop-out button,
           // because the throw skipped the maximize-button loop further down.
-          await mermaid.run({ nodes: toRender, suppressErrors: true });
+          const adopted = await runMermaidAtDocumentScale({ nodes: toRender, suppressErrors: true },
+            () => generation === renderGeneration);
           // Store newly rendered SVGs in cache
-          toRender.forEach(el => {
+          adopted.forEach(el => {
             if (el.querySelector('svg')) {
               mermaidSvgCache.set(el.dataset.mermaidSrc, el.innerHTML);
             }
@@ -11524,6 +11584,7 @@ function getDomInsertAnchor() {
 // mode='insert': inserts after the right-click anchor child of viewer
 // mode='replace': replaces replaceTarget (a .mermaid-container element)
 async function renderMermaidInDOM(code, mode, replaceTarget) {
+  const generation = renderGeneration;
   const mermaidEl = document.createElement('div');
   mermaidEl.className = 'mermaid';
   mermaidEl.textContent = code;
@@ -11582,8 +11643,9 @@ async function renderMermaidInDOM(code, mode, replaceTarget) {
       // it cannot pin this FLAG, because it replaces mermaid.run wholesale and
       // the option is then never consulted. 13e reaches the flag directly with
       // outright invalid source, as any future non-dialog caller would.
-      await mermaid.run({ nodes: [mermaidEl], suppressErrors: false });
-      if (mermaidEl.querySelector('svg')) {
+      const adopted = await runMermaidAtDocumentScale({ nodes: [mermaidEl], suppressErrors: false },
+        () => generation === renderGeneration);
+      if (adopted.includes(mermaidEl)) {
         mermaidSvgCache.set(code, mermaidEl.innerHTML);
       }
     });
