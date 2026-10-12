@@ -70,3 +70,11 @@ rewritten. GitHub discards the temporary filesystem after the job; retained raw
 records are not a promise of permanent fixture/profile custody. A green normal CI/build or native runner exit is not performance
 qualification. No merge/tag/release follows unless the real release scope and
 remaining repository requirements are also resolved.
+
+Actual sole dispatch: [CI run 38290764561](https://github.com/lostinsea/folia/actions/runs/38290764561),
+candidate `cf48b0d15b492d140a29d3b8f473b9aada00b72f`, attempt 1.
+The normal test and revert-audit jobs failed; the comparison job was skipped.
+Neither AA nor AB started, so this run supplies no performance observations or
+qualification. The failed run is retained; no replacement or rerun is scheduled
+for this attempt.
+Later Wave-2 source changes are not covered by this frozen early-unit attempt.

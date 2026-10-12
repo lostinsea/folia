@@ -18021,6 +18021,152 @@ const REVERTS = [
           requireExactFailures: true,
           expectedFailureCount: 1,
         },
+        {
+          id: "R719",
+          what: "restore unconditional diagnostic file logging for every default profile",
+          file: MAIN,
+          from: 'const diagnosticLoggingEnabled = process.env.FOLIA_DIAGNOSTIC_LOG === "1";',
+          to: "const diagnosticLoggingEnabled = true;",
+          suite: "test:profile",
+          expect: [
+            /^disabled diagnostic logging \(.+\) opens no sink$/,
+            /^disabled diagnostic logging \(.+\) leaves its log state unchanged$/,
+            /^disabled diagnostic logging \(.+\) skips file serialization$/,
+          ],
+          mustPass: [
+            /^the diagnostic logging block was located uniquely$/,
+            /^exact diagnostic opt-in \(packaged-fresh\) opens one native sink$/,
+            /^exact diagnostic opt-in \(development-existing\) retains startup and controlled output$/,
+            /^an already-relocated profile is left exactly where it was$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 24,
+        },
+        {
+          id: "R720",
+          what: "treat any nonempty diagnostic environment value as an opt-in",
+          file: MAIN,
+          from: 'const diagnosticLoggingEnabled = process.env.FOLIA_DIAGNOSTIC_LOG === "1";',
+          to: "const diagnosticLoggingEnabled = Boolean(process.env.FOLIA_DIAGNOSTIC_LOG);",
+          suite: "test:profile",
+          expect: [
+            /^disabled diagnostic logging \(packaged-(?:zero|unrecognized|leading-zero|whitespace)-fresh\) opens no sink$/,
+            /^disabled diagnostic logging \(packaged-(?:zero|unrecognized|leading-zero|whitespace)-fresh\) leaves its log state unchanged$/,
+            /^disabled diagnostic logging \(packaged-(?:zero|unrecognized|leading-zero|whitespace)-fresh\) skips file serialization$/,
+          ],
+          mustPass: [
+            /^disabled diagnostic logging \(packaged-unset-existing\) leaves its log state unchanged$/,
+            /^disabled diagnostic logging \(development-unset-fresh\) opens no sink$/,
+            /^exact diagnostic opt-in \(packaged-fresh\) retains startup and controlled output$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 12,
+        },
+        {
+          id: "R721",
+          what: "disable the diagnostic sink even when support logging is explicitly requested",
+          file: MAIN,
+          from: 'const diagnosticLoggingEnabled = process.env.FOLIA_DIAGNOSTIC_LOG === "1";',
+          to: "const diagnosticLoggingEnabled = false;",
+          suite: "test:profile",
+          expect: [
+            /^exact diagnostic opt-in \(.+\) opens one native sink$/,
+            /^exact diagnostic opt-in \(.+\) retains startup and controlled output$/,
+            /^the diagnostic error sentinel saw a real native open failure$/,
+            /^diagnostic file failures are explicitly reported to the console$/,
+          ],
+          mustPass: [
+            /^disabled diagnostic logging \(packaged-unset-fresh\) opens no sink$/,
+            /^disabled diagnostic logging \(packaged-unset-existing\) leaves its log state unchanged$/,
+            /^diagnostic logging \(development-unset-fresh\) preserves development-only console output$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 10,
+        },
+        {
+          id: "R722",
+          what: "suppress existing development console output while gating the diagnostic file",
+          file: MAIN,
+          from:
+            "  // Only log in development mode to improve performance\n" +
+            "  if (!app.isPackaged) {",
+          to:
+            "  // Only log in development mode to improve performance\n" +
+            "  if (false) {",
+          suite: "test:profile",
+          expect: [
+            /^diagnostic logging \(development-unset-(?:fresh|existing)\) preserves development-only console output$/,
+          ],
+          mustPass: [
+            /^disabled diagnostic logging \(development-unset-existing\) leaves its log state unchanged$/,
+            /^exact diagnostic opt-in \(development-fresh\) retains startup and controlled output$/,
+            /^diagnostic file failures are explicitly reported to the console$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 2,
+        },
+        {
+          id: "R723",
+          what: "mute an opted-in diagnostic file failure despite the live native error sentinel",
+          file: MAIN,
+          from: '    console.error("Diagnostic file logging failed:", err);',
+          to: "    void err;",
+          suite: "test:profile",
+          expect: [
+            /^diagnostic file failures are explicitly reported to the console$/,
+          ],
+          mustPass: [
+            /^the diagnostic open-failure fixture is a real directory$/,
+            /^the diagnostic error sentinel saw a real native open failure$/,
+            /^exact diagnostic opt-in \(packaged-fresh\) retains startup and controlled output$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R724",
+          what: "format private diagnostic arguments before checking whether the file sink is enabled",
+          file: MAIN,
+          from:
+            "  if (!logStream || logStream.destroyed) return;\n\n" +
+            "  const message = args\n" +
+            "    .map((arg) =>\n" +
+            '      typeof arg === "object" ? JSON.stringify(arg, null, 2) : String(arg),\n' +
+            "    )\n" +
+            '    .join(" ");\n' +
+            "  const timestamp = new Date().toISOString();\n" +
+            "  const logMessage = `[${timestamp}] ${message}\\n`;\n" +
+            "  logStream.write(logMessage);",
+          to:
+            "  const message = args\n" +
+            "    .map((arg) =>\n" +
+            '      typeof arg === "object" ? JSON.stringify(arg, null, 2) : String(arg),\n' +
+            "    )\n" +
+            '    .join(" ");\n' +
+            "  const timestamp = new Date().toISOString();\n" +
+            "  const logMessage = `[${timestamp}] ${message}\\n`;\n" +
+            "  if (!logStream || logStream.destroyed) return;\n" +
+            "  logStream.write(logMessage);",
+          suite: "test:profile",
+          expect: [
+            /^disabled diagnostic logging \(.+\) skips file serialization$/,
+            /^a failed diagnostic sink skips subsequent file serialization$/,
+          ],
+          mustPass: [
+            /^disabled diagnostic logging \(packaged-unset-fresh\) opens no sink$/,
+            /^disabled diagnostic logging \(packaged-unset-existing\) leaves its log state unchanged$/,
+            /^exact diagnostic opt-in \(development-fresh\) retains startup and controlled output$/,
+            /^the diagnostic error sentinel saw a real native open failure$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 9,
+        },
       ];
 
 // These are release exceptions, not passing or withdrawn proofs. An explicit
@@ -19063,7 +19209,7 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718";
+      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724";
   // Route the fixture through the SAME reduction and verdict helpers the
   // mutation loop uses (assertionNameOf / unlistedFailures / expect-missing /
   // requiredPassingAssertionProblems / exact-failure + count guards).

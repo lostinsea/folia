@@ -467,7 +467,17 @@ function getAutoUpdater() {
 // LOGGING
 // ============================================
 const logFilePath = path.join(app.getPath("userData"), "debug.log");
-const logStream = fs.createWriteStream(logFilePath, { flags: "a" });
+// Gate opening the sink, not just writes: even an empty file leaks that logging
+// was enabled and opening an existing log must require the same explicit opt-in.
+const diagnosticLoggingEnabled = process.env.FOLIA_DIAGNOSTIC_LOG === "1";
+const logStream = diagnosticLoggingEnabled
+  ? fs.createWriteStream(logFilePath, { flags: "a" })
+  : null;
+if (logStream) {
+  logStream.on("error", (err) => {
+    console.error("Diagnostic file logging failed:", err);
+  });
+}
 
 function log(...args) {
   // Only log in development mode to improve performance
@@ -475,7 +485,8 @@ function log(...args) {
     console.log(...args);
   }
 
-  // Always write to file for troubleshooting
+  if (!logStream || logStream.destroyed) return;
+
   const message = args
     .map((arg) =>
       typeof arg === "object" ? JSON.stringify(arg, null, 2) : String(arg),
@@ -488,7 +499,11 @@ function log(...args) {
 
 log("=== Application started ===");
 log("User data path:", app.getPath("userData"));
-log("Log file:", logFilePath);
+if (logStream) {
+  log("Diagnostic log requested:", logFilePath);
+} else {
+  log("Diagnostic file logging is disabled.");
+}
 
 // ============================================
 // APPLICATION STATE

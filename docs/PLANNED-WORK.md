@@ -100,14 +100,21 @@ reconciling against the tracker.
 
 **Wave 2 — close the remaining audit findings, then release once.**
 
-The standing disposition is to *work the full register and release once*, rather
-than shipping each fix as it lands. `w2-release` is the milestone's exit and is
+**Maintainer scope decision, 2026-10-12:** "Complete all of Wave2 before
+releasing" supersedes the earlier clean-refresh-only scope: complete the
+canonical Wave-2 release obligations, then merge and publish one usable
+application release, with no interim release or performance-threshold waiver.
+This records scope and authorization, not completion of any acceptance or
+release gate; explicitly deferred and non-blocking register items retain
+their recorded disposition. `w2-release` is the milestone's exit and is
 blocked on the five open `w2-*` items **and on `fullrun`, `shots` and
 `final-cleanup`** — eight blockers in total, listed under *Dependencies and
 order*. `w2-f03` and `w2-kbscroll` are `w2-*` items that are deliberately **not**
 release blockers — do not infer the dependency from the ID prefix.
 
-Active right now: **`w2-f22`**.
+Active integration work: **`w2-sec08`** and the concrete hosted-CI failures.
+`w2-privacy` implementation/proof is closed; final integrated release checks
+remain pending. SEC-08 is incomplete and has no new performance certificate.
 
 ---
 
@@ -3907,7 +3914,28 @@ validation belongs to `w2-sec08` — see the note there.
 proves an unexpected sender is rejected; reverts pin it; the audit's handler
 count is corrected to the measured one.
 
-### `w2-privacy` — turn the packaged diagnostic log off by default · PENDING · wave-2 release blocker
+### `w2-privacy` — turn the packaged diagnostic log off by default · ACTIVE · wave-2 release blocker
+
+**2026-10-12 implementation handoff — ACTIVE.** The isolated integration
+owner selected the existing minimal privacy contract while the frozen hosted
+clean-refresh validation runs, before the next SEC-08 Node-operation migration.
+Live `main.js` opened an append stream unconditionally, including packaged
+defaults. The implementation now gates sink creation on exact opt-in, preserves
+existing logs when disabled, and keeps development console output.
+
+**2026-10-12 product/proof handoff — IMPLEMENTED / PROVEN.** The existing
+plain-Node profile suite executes the shipped logging block and startup calls
+against native file streams: 52/52 passed, including fresh and retained logs,
+strict opt-in, stream-close/error sentinels and disabled serialization. R719–R724
+are individually PROVEN with exact intended failures and independent passing
+controls; source bytes were restored. Live isolated Electron startup passed
+11/11 and source packaging passed 352/352. Fresh independent Sol and Luna
+implementation reviews found no significant issues; BUILD documents temporary
+use and unredacted-log limitations. No active diagnostic-file-dependent launcher
+was identified, so normal launches were not opted in. Final rebuilt/installed
+application and integrated Wave-2 checks remain release obligations, not evidence
+supplied by these source-level results. No performance, integration or release
+gate is claimed. Diagnostic-log hardening remains deferred.
 
 > **Folia uploads no logs. There is no telemetry, and this item does not add
 > any.** No first-party code sends document content, usage data, or log content

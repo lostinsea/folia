@@ -21,6 +21,7 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const vm = require("vm");
 
 const src = fs.readFileSync(path.join(__dirname, "..", "src", "main.js"), "utf8");
 
@@ -163,5 +164,190 @@ check(
 
 // root is removed by the process.on("exit") hook registered beside its mkdtemp.
 
-console.log("\n=== " + pass + "/" + (pass + fail) + " passed ===");
-process.exit(fail ? 1 : 0);
+async function checkDiagnosticLogging() {
+  const starts = [...src.matchAll(/^const logFilePath = /gm)];
+  const ends = [...src.matchAll(/^\/\/ APPLICATION STATE\r?$/gm)];
+  const located =
+    starts.length === 1 &&
+    ends.length === 1 &&
+    ends[0].index > starts[0].index;
+  check("the diagnostic logging block was located uniquely", located);
+  if (!located) return;
+  const code = src.slice(starts[0].index, ends[0].index);
+  check(
+    "the extracted diagnostic logger includes real startup calls",
+    code.includes('log("=== Application started ===");') &&
+      code.includes('log("User data path:", app.getPath("userData"));'),
+  );
+
+  function load(label, packaged, value, existing = false, failOpen = false) {
+    const profile = path.join(root, label);
+    fs.mkdirSync(profile);
+    const file = path.join(profile, "debug.log");
+    if (existing) fs.writeFileSync(file, "retained private diagnostic\n");
+    if (failOpen) fs.mkdirSync(file);
+    const before = existing
+      ? { bytes: fs.readFileSync(file), stat: fs.statSync(file) }
+      : null;
+    const observed = { opens: 0, messages: [], errors: [], nativeErrors: [] };
+    const env = value === undefined ? {} : { FOLIA_DIAGNOSTIC_LOG: value };
+    const runtime = vm.runInNewContext(
+      code + "\n({ log, logStream });",
+      {
+        app: { isPackaged: packaged, getPath: () => profile },
+        path,
+        process: { env },
+        fs: {
+          createWriteStream(...args) {
+            observed.opens++;
+            const stream = fs.createWriteStream(...args);
+            stream.on("error", (err) => observed.nativeErrors.push(err));
+            return stream;
+          },
+        },
+        console: {
+          log: (...args) => observed.messages.push(args),
+          error: (...args) => observed.errors.push(args),
+        },
+      },
+    );
+    return { ...runtime, profile, file, before, observed, packaged };
+  }
+
+  function closed(stream) {
+    if (!stream || stream.closed) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("diagnostic test stream did not close within 5 seconds")),
+        5000,
+      );
+      stream.once("close", () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+  }
+
+  function skipsFormatting(runtime) {
+    let serializations = 0;
+    let error = null;
+    try {
+      runtime.log({
+        toJSON() {
+          serializations++;
+          throw new Error("disabled file serialization must be unreachable");
+        },
+      });
+    } catch (err) {
+      error = err;
+    }
+    return { passed: serializations === 0 && error === null, error };
+  }
+
+  const disabled = [
+    ["packaged-unset-fresh", true, undefined, false],
+    ["development-unset-fresh", false, undefined, false],
+    ["packaged-zero-fresh", true, "0", false],
+    ["packaged-unrecognized-fresh", true, "true", false],
+    ["packaged-leading-zero-fresh", true, "01", false],
+    ["packaged-whitespace-fresh", true, " 1 ", false],
+    ["packaged-unset-existing", true, undefined, true],
+    ["development-unset-existing", false, undefined, true],
+  ];
+  for (const [label, packaged, value, existing] of disabled) {
+    const runtime = load(label, packaged, value, existing);
+    const skipped = skipsFormatting(runtime);
+    const close = closed(runtime.logStream);
+    if (runtime.logStream) runtime.logStream.end();
+    await close;
+    check(
+      `disabled diagnostic logging (${label}) opens no sink`,
+      runtime.observed.opens === 0,
+    );
+    const after = existing ? fs.statSync(runtime.file) : null;
+    check(
+      `disabled diagnostic logging (${label}) leaves its log state unchanged`,
+      existing
+        ? fs.readFileSync(runtime.file).equals(runtime.before.bytes) &&
+            after.dev === runtime.before.stat.dev &&
+            after.ino === runtime.before.stat.ino &&
+            after.size === runtime.before.stat.size &&
+            after.mtimeMs === runtime.before.stat.mtimeMs
+        : !fs.existsSync(runtime.file),
+    );
+    check(
+      `disabled diagnostic logging (${label}) skips file serialization`,
+      skipped.passed,
+      skipped.error && skipped.error.message,
+    );
+    check(
+      `diagnostic logging (${label}) preserves development-only console output`,
+      packaged
+        ? runtime.observed.messages.length === 0
+        : runtime.observed.messages.some((args) => args[0] === "=== Application started ==="),
+    );
+  }
+
+  for (const packaged of [true, false]) {
+    for (const existing of [false, true]) {
+      const mode = `${packaged ? "packaged" : "development"}-${existing ? "existing" : "fresh"}`;
+      const runtime = load(`${mode}-enabled`, packaged, "1", existing);
+      runtime.log("controlled diagnostic marker");
+      const close = closed(runtime.logStream);
+      if (runtime.logStream) runtime.logStream.end();
+      await close;
+      check(
+        `exact diagnostic opt-in (${mode}) opens one native sink`,
+        runtime.observed.opens === 1 && runtime.logStream && runtime.logStream.closed,
+      );
+      const body = fs.existsSync(runtime.file) ? fs.readFileSync(runtime.file, "utf8") : null;
+      check(
+        `exact diagnostic opt-in (${mode}) retains startup and controlled output`,
+        body !== null &&
+          (!existing || body.startsWith("retained private diagnostic\n")) &&
+          body.includes("=== Application started ===") &&
+          body.includes("controlled diagnostic marker"),
+      );
+    }
+  }
+
+  const failed = load("enabled-open-failure", true, "1", false, true);
+  check(
+    "the diagnostic open-failure fixture is a real directory",
+    fs.statSync(failed.file).isDirectory(),
+  );
+  await closed(failed.logStream);
+  check(
+    "the diagnostic error sentinel saw a real native open failure",
+    failed.observed.opens === 1 &&
+      failed.observed.nativeErrors.length === 1 &&
+      failed.logStream &&
+      failed.logStream.closed &&
+      failed.logStream.destroyed,
+  );
+  check(
+    "diagnostic file failures are explicitly reported to the console",
+    failed.observed.errors.some(
+      (args) =>
+        args[0] === "Diagnostic file logging failed:" &&
+        args[1] === failed.observed.nativeErrors[0],
+    ),
+  );
+  const skipped = skipsFormatting(failed);
+  check(
+    "a failed diagnostic sink skips subsequent file serialization",
+    skipped.passed,
+    skipped.error && skipped.error.message,
+  );
+}
+
+checkDiagnosticLogging().then(
+  () => {
+    console.log("\n=== " + pass + "/" + (pass + fail) + " passed ===");
+    process.exit(fail ? 1 : 0);
+  },
+  (err) => {
+    console.error("FAIL  diagnostic logging controls could not complete  -> " + err.stack);
+    process.exit(1);
+  },
+);

@@ -237,6 +237,38 @@ proxy's CA into the trust store instead.
   preload bridge), after which a console in the renderer is no longer a console
   in Node.
 
+**Need a diagnostic log for support?**
+
+Diagnostic file logging is off by default in installed and development runs.
+Folia neither opens nor creates `debug.log` while disabled, and leaves any
+retained log untouched. Development console output is unchanged. To request a
+file temporarily, close any existing Folia process and set the exact value `1`
+in the terminal that starts the new process:
+
+```powershell
+$env:FOLIA_DIAGNOSTIC_LOG = "1"
+& "C:\path\to\Folia.exe"
+```
+
+The file is in the process's actual `userData` directory: normally
+`%APPDATA%\Folia\debug.log` for an installed app and
+`%APPDATA%\Folia-dev\debug.log` for `npm start`; an explicitly relocated profile
+keeps its own location. Opt-in appends rather than erasing an existing log.
+This is an unbounded, unredacted troubleshooting log: it can contain local
+paths, arguments and raw updater errors. Review it before sharing; Folia adds
+no automatic log-upload path. Rotation and redaction remain separate work.
+
+Reproduce the issue, close Folia, then remove the switch from that terminal:
+
+```powershell
+Remove-Item Env:\FOLIA_DIAGNOSTIC_LOG -ErrorAction SilentlyContinue
+```
+
+Restart without the switch to stop file logging; removing it cannot change
+the environment of an already-running process. After saving only the evidence
+needed for support, manually delete just that profile's `debug.log` while
+Folia is closed. Do not enable the switch globally or leave it on routinely.
+
 ## Code Signing (Optional)
 
 For production distribution, consider code signing to avoid Windows SmartScreen
