@@ -6,6 +6,21 @@ The existing ordinary Node/Electron runner, unchanged worker
 unchanged statistical protocol and functionally tested PowerShell capture are
 transported to one standard `windows-latest` Actions job. Hosted hardware is
 not promised to be quiet, exclusive at the hypervisor level, or stationary.
+Dispatch the already-registered `ci.yml` on the candidate branch with
+`clean_refresh=true`; its unchanged normal test and revert-audit jobs must
+succeed before its comparison job runs at the same revision.
+Direct dispatch of the new filename was rejected before execution because
+GitHub requires that entry file on the default branch. No AA was started by
+that rejected request. Existing CI validation has its existing 45/60-minute
+job limits; the comparison's separate fixed job/phase budgets remain unchanged.
+The comparison has a separate non-cancelling CI concurrency group; ordinary CI
+cannot replace it. Only the registered CI entry contains the job, so there is
+no separate direct-dispatch route that skips those normal jobs. Keeping the job
+there also preserves the existing packaging oracle's remote-action-only,
+immutable-SHA pin contract without weakening that oracle for a local workflow.
+One dispatch is the authorized
+operator bound, not automated cross-run replay prevention: the attempt guard
+rejects reruns of the same run, not a separately requested new workflow run.
 
 Before measurement, preparation records the exact dispatched commit, source
 and tooling hashes, schedules and a fresh private physical OS-temp storage root.

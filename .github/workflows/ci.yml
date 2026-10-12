@@ -19,12 +19,19 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      clean_refresh:
+        description: Run the single fixed hosted clean-refresh comparison after normal CI
+        type: boolean
+        required: false
+        default: false
 
 # A superseded run tells you nothing you want to wait for. Pushes to main land
 # in bursts here, and the full chain is not cheap.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # Ordinary CI must not cancel the finite comparison attempt.
+  group: ${{ inputs.clean_refresh && format('clean-refresh-{0}', github.ref) || format('ci-{0}', github.ref) }}
+  cancel-in-progress: ${{ !inputs.clean_refresh }}
 
 permissions:
   contents: read
@@ -117,3 +124,60 @@ jobs:
 
       - name: Verify every expect/mustPass regex names a live assertion
         run: node scripts/prove-table-fixes.js --expects
+
+  clean-refresh:
+    if: github.event_name == 'workflow_dispatch' && inputs.clean_refresh
+    needs: [test, revert-audit]
+    runs-on: windows-latest
+    timeout-minutes: 205
+    env:
+      GIT_CONFIG_COUNT: '1'
+      GIT_CONFIG_KEY_0: core.autocrlf
+      GIT_CONFIG_VALUE_0: 'true'
+    steps:
+      - name: Check out the exact dispatched candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+
+      - name: Install the pinned dependencies
+        run: npm ci
+
+      - name: Run DATA-only transport controls
+        run: node --test bench/clean-refresh/test-ci-integration.js
+
+      - name: Predeclare the new environment and unchanged fixed method
+        run: node bench/clean-refresh/prepare-ci.js
+
+      - name: Run and qualify the sole AA attempt
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'folia-sec08-ci-results'
+          & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -NonInteractive -File (Join-Path $root 'invoke-phase.ps1') -Mode aa
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node (Join-Path $root 'verify-phase.js') aa
+
+      - name: Run and verify the sole eligible AB attempt
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'folia-sec08-ci-results'
+          & (Join-Path $PSHOME 'pwsh.exe') -NoProfile -NonInteractive -File (Join-Path $root 'invoke-phase.ps1') -Mode ab
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node (Join-Path $root 'verify-phase.js') ab
+
+      - name: Retain actual outcomes, including failed or partial phases
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: clean-refresh-comparison
+          path: |
+            ${{ runner.temp }}/folia-sec08-ci-results/*
+            !${{ runner.temp }}/folia-sec08-ci-results/**/app/**
+          if-no-files-found: error
