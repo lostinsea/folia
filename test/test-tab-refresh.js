@@ -7226,6 +7226,628 @@ async function run(win) {
     await viewerText(),
   );
 
+  // ---- Scenario 2a: clean-tab reads stay main-owned ---------------------
+  // Start from the ordinary clean-tab path. The unchanged case must not even
+  // start an IPC request; otherwise every tab switch pays an avoidable async
+  // round trip. The changed case then captures the real owner envelope at the
+  // IPC boundary, so forged variants are judged by the real main handler.
+  const cleanRefreshFastPath = await exec(`
+    (async () => {
+      const ipc = window.ipcRenderer;
+      const realInvoke = ipc.invoke;
+      let ownedReads = 0;
+      ipc.invoke = function (channel) {
+        if (channel === 'read-owned-tab-disk-snapshot') ownedReads += 1;
+        return realInvoke.apply(this, arguments);
+      };
+      try {
+        window.CustomTabs.switchToTab(${ids.a});
+        await new Promise(resolve => setTimeout(resolve, 250));
+        window.CustomTabs.switchToTab(${ids.b});
+        const deadline = Date.now() + 5000;
+        while (Date.now() < deadline &&
+          window.CustomTabs.getActiveTabId() !== ${ids.b}) {
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        return {
+          active: window.CustomTabs.getActiveTabId(),
+          ownedReads,
+          beta: (window.CustomTabs.getTabs().find(t => t.id === ${ids.b}) || {}).content,
+        };
+      } finally {
+        ipc.invoke = realInvoke;
+      }
+    })()
+  `);
+  check(
+    "SEC-08 unchanged clean-tab refresh remains synchronous with zero main IPC",
+    cleanRefreshFastPath &&
+      cleanRefreshFastPath.active === ids.b &&
+      cleanRefreshFastPath.ownedReads === 0 &&
+      String(cleanRefreshFastPath.beta).includes("BETA_V3"),
+    JSON.stringify(cleanRefreshFastPath),
+  );
+
+  write(fileB, "# Beta\n\nSEC08_MAIN_OWNED_READ\n");
+  const mainOwnedRefresh = await exec(`
+    (async () => {
+      const ipc = window.ipcRenderer;
+      const realInvoke = ipc.invoke;
+      const realReadFileSync = window.fs.readFileSync;
+      const realSendSync = ipc.sendSync;
+      const target = ${jsB};
+      let rendererReads = 0;
+      let modalCalls = 0;
+      let ownedReads = 0;
+      let forgedPath = null;
+      let forgedOwner = null;
+      let validSnapshot = null;
+      let validPayload = null;
+      let validAttestationCalls = 0;
+      const realPrepare = window.prepareDocumentDiskAdoption;
+      window.fs.readFileSync = function (filePath) {
+        if (filePath === target) rendererReads += 1;
+        return realReadFileSync.apply(this, arguments);
+      };
+      window.prepareDocumentDiskAdoption = async function (preparation) {
+        if (preparation && preparation.filePath === target) {
+          validAttestationCalls += 1;
+        }
+        return realPrepare.apply(this, arguments);
+      };
+      ipc.sendSync = function (channel) {
+        if (channel === 'confirm-large-render') modalCalls += 1;
+        return realSendSync.apply(this, arguments);
+      };
+      ipc.invoke = function (channel, data) {
+        if (channel !== 'read-owned-tab-disk-snapshot' || !data ||
+            data.filePath !== target) {
+          return realInvoke.apply(this, arguments);
+        }
+        ownedReads += 1;
+        validPayload = { ...data, owner: { ...data.owner } };
+        return realInvoke.apply(this, arguments);
+      };
+      try {
+        window.CustomTabs.switchToTab(${ids.a});
+        await new Promise(resolve => setTimeout(resolve, 250));
+        window.CustomTabs.switchToTab(${ids.b});
+        const deadline = Date.now() + 8000;
+        while (Date.now() < deadline) {
+          const tab = window.CustomTabs.getTabs().find(t => t.id === ${ids.b});
+          if (window.CustomTabs.getActiveTabId() === ${ids.b} &&
+              tab && String(tab.content).includes('SEC08_MAIN_OWNED_READ')) break;
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        const tab = window.CustomTabs.getTabs().find(t => t.id === ${ids.b});
+        const session = window.getReloadRequestSession();
+        const owner = window.CustomTabs.getActiveDocumentIdentity(target, session);
+        if (validPayload && owner) {
+          const settledPayload = {
+            ...validPayload,
+            pageSession: session,
+            rendererGeneration: owner.rendererGeneration,
+            owner,
+          };
+          validPayload = settledPayload;
+          const valid = await realInvoke.call(ipc,
+            'read-owned-tab-disk-snapshot', settledPayload);
+          validSnapshot = valid && { content: valid.content };
+          forgedPath = await realInvoke.call(ipc,
+            'read-owned-tab-disk-snapshot', {
+              ...settledPayload,
+              filePath: ${jsA},
+            });
+          forgedOwner = await realInvoke.call(ipc,
+            'read-owned-tab-disk-snapshot', {
+              ...settledPayload,
+              owner: { ...owner, tabId: owner.tabId + 1000 },
+            });
+        }
+        return {
+          active: window.CustomTabs.getActiveTabId(),
+          ownedReads,
+          rendererReads,
+          modalCalls,
+          validSnapshot,
+          validPayload,
+          forgedPath,
+          forgedOwner,
+          validAttestationCalls,
+          content: tab && tab.content,
+          original: tab && tab.originalContent,
+          dirty: tab && tab.hasUnsavedChanges,
+        };
+      } finally {
+        ipc.invoke = realInvoke;
+        ipc.sendSync = realSendSync;
+        window.fs.readFileSync = realReadFileSync;
+        window.prepareDocumentDiskAdoption = realPrepare;
+      }
+    })()
+  `);
+  check(
+    "SEC-08 changed clean-tab refresh reads through main without renderer content reads or a modal",
+    mainOwnedRefresh &&
+      mainOwnedRefresh.active === ids.b &&
+      mainOwnedRefresh.ownedReads === 1 &&
+      mainOwnedRefresh.rendererReads === 0 &&
+      mainOwnedRefresh.modalCalls === 0 &&
+      mainOwnedRefresh.validSnapshot &&
+      String(mainOwnedRefresh.validSnapshot.content).includes("SEC08_MAIN_OWNED_READ") &&
+      mainOwnedRefresh.validAttestationCalls > 0 &&
+      String(mainOwnedRefresh.content).includes("SEC08_MAIN_OWNED_READ") &&
+      mainOwnedRefresh.original === mainOwnedRefresh.content &&
+      mainOwnedRefresh.dirty === false,
+    JSON.stringify(mainOwnedRefresh),
+  );
+  check(
+    "SEC-08 main-owned tab reads refuse forged paths and foreign owners without denying the valid owner",
+    mainOwnedRefresh &&
+      mainOwnedRefresh.forgedPath === null &&
+      mainOwnedRefresh.forgedOwner === null &&
+      mainOwnedRefresh.validSnapshot &&
+      String(mainOwnedRefresh.validSnapshot.content).includes("SEC08_MAIN_OWNED_READ"),
+    JSON.stringify(mainOwnedRefresh),
+  );
+
+  const casePreservedTarget = fs.realpathSync.native(fileB);
+  const casePreservedLogicalPath = process.platform === "win32"
+    ? (() => {
+      const index = casePreservedTarget.search(/[A-Za-z]/);
+      if (index < 0) return null;
+      const character = casePreservedTarget[index];
+      const alternate = character === character.toLowerCase()
+        ? character.toUpperCase()
+        : character.toLowerCase();
+      return (
+        casePreservedTarget.slice(0, index) +
+        alternate +
+        casePreservedTarget.slice(index + 1)
+      );
+    })()
+    : null;
+  let casePreservedRead = null;
+  let casePreservedOpenPaths = [];
+  let casePreservedTargetStatCalls = 0;
+  if (
+    casePreservedLogicalPath &&
+    casePreservedLogicalPath !== casePreservedTarget &&
+    fs.realpathSync.native(casePreservedLogicalPath) === casePreservedTarget &&
+    mainOwnedRefresh &&
+    mainOwnedRefresh.validPayload
+  ) {
+    const originalCasePreservedOpen = fs.promises.open;
+    const originalCasePreservedStat = fs.promises.stat;
+    const caseTargetWitness = "SEC08_CASE_PRESERVED_TARGET_STAT";
+    const restoreCasePreservedOpen = replaceMethod(
+      fs.promises,
+      "open",
+      async function (filePath) {
+        casePreservedOpenPaths.push(filePath);
+        return originalCasePreservedOpen.apply(this, arguments);
+      },
+    );
+    const restoreCasePreservedStat = replaceMethod(
+      fs.promises,
+      "stat",
+      async function (filePath) {
+        if (filePath === casePreservedTarget) {
+          casePreservedTargetStatCalls += 1;
+          throw new Error(caseTargetWitness);
+        }
+        return originalCasePreservedStat.apply(this, arguments);
+      },
+    );
+    try {
+      casePreservedRead = await exec(`
+        (async () => {
+          try {
+            const snapshot = await window.ipcRenderer.invoke(
+              "read-owned-tab-disk-snapshot",
+              {
+                ...${JSON.stringify(mainOwnedRefresh.validPayload)},
+                filePath: ${JSON.stringify(casePreservedLogicalPath)},
+              },
+            );
+            return { status: "fulfilled", snapshot };
+          } catch (error) {
+            return { status: "rejected", message: String(error && error.message) };
+          }
+        })()
+      `);
+    } finally {
+      restoreCasePreservedStat();
+      restoreCasePreservedOpen();
+    }
+    check(
+      "SEC-08 case-preserved owned reads open the logical spelling and compare its registered physical target",
+      casePreservedRead &&
+        casePreservedRead.status === "rejected" &&
+        casePreservedRead.message.includes(caseTargetWitness) &&
+        casePreservedOpenPaths.length === 1 &&
+        casePreservedOpenPaths[0] === casePreservedLogicalPath &&
+        casePreservedTargetStatCalls === 1,
+      JSON.stringify({
+        casePreservedTarget,
+        casePreservedLogicalPath,
+        casePreservedRead,
+        casePreservedOpenPaths,
+        casePreservedTargetStatCalls,
+      }),
+    );
+  } else {
+    unavailable(
+      "SEC-08 case-preserved owned-read target comparison is unavailable on this filesystem",
+      JSON.stringify({
+        platform: process.platform,
+        casePreservedTarget,
+        casePreservedLogicalPath,
+        hasPayload: !!(mainOwnedRefresh && mainOwnedRefresh.validPayload),
+      }),
+    );
+  }
+
+  await switchToTabAndWait(ids.a);
+  write(fileB, "# Beta\n\nSEC08_STABLE_READ_ONE\n");
+  const ownedReaderPath = fileB;
+  const originalStableReadOpen = fs.promises.open;
+  let stableReadOpenCalls = 0;
+  let releaseStableReadSecondStat = null;
+  let stableReadHoldArmed = true;
+  let stableReadLateHold = false;
+  let supersededPreparationCalls = 0;
+  const restoreStableReadOpen = replaceMethod(fs.promises, "open", async function (filePath) {
+    const handle = await originalStableReadOpen.apply(this, arguments);
+    if (filePath !== ownedReaderPath) return handle;
+    const attempt = ++stableReadOpenCalls;
+    const realStat = handle.stat.bind(handle);
+    let handleStatCalls = 0;
+    handle.stat = async function () {
+      handleStatCalls += 1;
+      if (attempt === 1 && handleStatCalls === 2) {
+        if (!stableReadHoldArmed) {
+          stableReadLateHold = true;
+          return realStat.apply(null, arguments);
+        }
+        await new Promise((resolve) => {
+          releaseStableReadSecondStat = resolve;
+        });
+      }
+      return realStat.apply(null, arguments);
+    };
+    return handle;
+  });
+  let midReadRefresh;
+  try {
+    await exec(`
+      (() => {
+        const ipc = window.ipcRenderer;
+        const realInvoke = ipc.invoke;
+        const realPrepare = window.prepareDocumentDiskAdoption;
+        window.__sec08SupersededPreparation = {
+          realInvoke,
+          realPrepare,
+          calls: 0,
+          snapshot: null,
+        };
+        ipc.invoke = function (channel, data) {
+          const result = realInvoke.apply(this, arguments);
+          if (channel !== 'read-owned-tab-disk-snapshot' ||
+              !data || data.filePath !== ${jsB}) return result;
+          return Promise.resolve(result).then((snapshot) => {
+            window.__sec08SupersededPreparation.snapshot = snapshot && {
+              content: snapshot.content,
+              diskVersion: snapshot.diskVersion,
+            };
+            return snapshot;
+          });
+        };
+        window.prepareDocumentDiskAdoption = async function (preparation) {
+          if (preparation && preparation.filePath === ${jsB}) {
+            window.__sec08SupersededPreparation.calls += 1;
+          }
+          return realPrepare.apply(this, arguments);
+        };
+        window.__sec08MidReadRefresh = Promise.resolve(
+          window.CustomTabs.switchToTab(${ids.b}),
+        ).then(
+          () => ({ settled: true }),
+          error => ({ settled: false, error: String(error && error.message) }),
+        );
+        return null;
+      })()
+    `);
+    const secondStatHeld = await waitUntil(() => releaseStableReadSecondStat !== null, 8000);
+    // Once the bounded setup wait has elapsed, a late descriptor hook must
+    // not create a hold that the completion wait cannot release.
+    stableReadHoldArmed = false;
+    const preHold = secondStatHeld && await exec(`
+      (() => {
+        const probe = window.__sec08SupersededPreparation;
+        return probe && { calls: probe.calls, snapshot: probe.snapshot };
+      })()
+    `);
+    let superseded = false;
+    const stableOneMtime = fs.statSync(fileB).mtimeMs;
+    let stableTwoMtime = null;
+    if (secondStatHeld) {
+      write(fileB, "# Beta\n\nSEC08_STABLE_READ_TWO\n");
+      stableTwoMtime = fs.statSync(fileB).mtimeMs;
+      superseded = await exec(`
+        (() => {
+          window.CustomTabs.switchToTab(${ids.a});
+          return true;
+        })()
+      `);
+      releaseStableReadSecondStat();
+    }
+    midReadRefresh = await Promise.race([
+      exec(`
+      (async () => {
+        const completion = await window.__sec08MidReadRefresh;
+        delete window.__sec08MidReadRefresh;
+        const preparation = window.__sec08SupersededPreparation;
+        if (preparation) {
+          window.ipcRenderer.invoke = preparation.realInvoke;
+          window.prepareDocumentDiskAdoption = preparation.realPrepare;
+          delete window.__sec08SupersededPreparation;
+        }
+        const tab = window.CustomTabs.getTabs().find(t => t.id === ${ids.b});
+        return {
+          completion,
+          active: window.CustomTabs.getActiveTabId(),
+          content: tab && tab.content,
+          original: tab && tab.originalContent,
+          dirty: tab && tab.hasUnsavedChanges,
+          viewer: document.getElementById('viewer').textContent,
+          preparationCalls: preparation && preparation.calls,
+          snapshot: preparation && preparation.snapshot,
+        };
+      })()
+      `),
+      sleep(3000).then(() => ({ completionTimedOut: true })),
+    ]);
+    midReadRefresh.secondStatHeld = secondStatHeld;
+    midReadRefresh.openCalls = stableReadOpenCalls;
+    midReadRefresh.superseded = superseded;
+    midReadRefresh.preHold = preHold;
+    midReadRefresh.lateHold = stableReadLateHold;
+    midReadRefresh.stableMtimeAdvanced =
+      stableTwoMtime !== null && stableTwoMtime > stableOneMtime;
+    supersededPreparationCalls = midReadRefresh.preparationCalls;
+  } finally {
+    if (releaseStableReadSecondStat) releaseStableReadSecondStat();
+    restoreStableReadOpen();
+    await exec(`
+      (() => {
+        const preparation = window.__sec08SupersededPreparation;
+        if (preparation) {
+          window.ipcRenderer.invoke = preparation.realInvoke;
+          window.prepareDocumentDiskAdoption = preparation.realPrepare;
+          delete window.__sec08SupersededPreparation;
+        }
+        delete window.__sec08MidReadRefresh;
+        return null;
+      })()
+    `);
+  }
+  check(
+    "SEC-08 main snapshot retries a disk version that changes between read and second stat",
+    midReadRefresh &&
+    midReadRefresh.secondStatHeld === true &&
+    midReadRefresh.completionTimedOut !== true &&
+    midReadRefresh.lateHold === false &&
+    midReadRefresh.preHold &&
+    midReadRefresh.preHold.calls === 0 &&
+    midReadRefresh.preHold.snapshot === null &&
+    midReadRefresh.stableMtimeAdvanced === true &&
+    midReadRefresh.openCalls >= 2 &&
+    midReadRefresh.superseded === true &&
+    midReadRefresh.completion &&
+    midReadRefresh.completion.settled === true &&
+    midReadRefresh.snapshot &&
+    String(midReadRefresh.snapshot.content).includes("SEC08_STABLE_READ_TWO") &&
+    midReadRefresh.snapshot.diskVersion,
+    JSON.stringify(midReadRefresh),
+  );
+  check(
+    "SEC-08 a tab switch superseded during the held main read keeps its prior cache and refuses disk adoption",
+    midReadRefresh &&
+    midReadRefresh.active === ids.a &&
+    supersededPreparationCalls === 0 &&
+    midReadRefresh.dirty === false &&
+    String(midReadRefresh.content).includes("SEC08_MAIN_OWNED_READ") &&
+    String(midReadRefresh.viewer).includes("ALPHA_V2") &&
+    !String(midReadRefresh.original).includes("SEC08_STABLE_READ_TWO"),
+    JSON.stringify(midReadRefresh),
+  );
+
+  // Keep the watcher on A. Replace B's inode while its old descriptor is held;
+  // an in-place rewrite would exercise the different stability retry. Windows
+  // refuses rename-over-open, so move the old inode aside and install the new
+  // one before releasing the hold. This proves the replacement boundary, not
+  // the atomicity of that Windows installation.
+  write(fileB, "# Beta\n\nSEC08_ATOMIC_READ_ONE\n");
+  const atomicReplacementPath = path.join(dir, "sec08-atomic-replacement.md");
+  const atomicParkedPath = path.join(dir, "sec08-atomic-parked.md");
+  const originalAtomicOpen = fs.promises.open;
+  let atomicOpenCalls = 0;
+  let atomicHoldArmed = true;
+  let atomicLateHold = false;
+  let releaseAtomicSecondStat = null;
+  let atomicFirstStats = null;
+  let atomicHeldStats = null;
+  let atomicFirstBytes = null;
+  let atomicReplacementStats = null;
+  let atomicSettledStats = null;
+  let atomicPreHold = null;
+  let atomicSecondStatHeld = false;
+  const atomicClosedAttempts = [];
+  let atomicReadResult;
+  let atomicSetupError = null;
+  const restoreAtomicOpen = replaceMethod(fs.promises, "open", async function (filePath) {
+    const handle = await originalAtomicOpen.apply(this, arguments);
+    if (filePath !== fileB) return handle;
+    const attempt = ++atomicOpenCalls;
+    const realStat = handle.stat.bind(handle);
+    const realRead = handle.readFile.bind(handle);
+    const realClose = handle.close.bind(handle);
+    let statCalls = 0;
+    handle.readFile = async function () {
+      const content = await realRead.apply(null, arguments);
+      if (attempt === 1) atomicFirstBytes = content;
+      return content;
+    };
+    handle.stat = async function () {
+      statCalls += 1;
+      if (attempt === 1 && statCalls === 2) {
+        if (atomicHoldArmed) {
+          await new Promise((resolve) => {
+            releaseAtomicSecondStat = resolve;
+          });
+        } else {
+          atomicLateHold = true;
+        }
+      }
+      const stats = await realStat.apply(null, arguments);
+      if (attempt === 1 && statCalls === 1) atomicFirstStats = stats;
+      if (attempt === 1 && statCalls === 2) atomicHeldStats = stats;
+      return stats;
+    };
+    handle.close = async function () {
+      await realClose.apply(null, arguments);
+      atomicClosedAttempts.push(attempt);
+    };
+    return handle;
+  });
+  try {
+    await exec(`
+      (() => {
+        const probe = window.__sec08AtomicReadProbe = { settled: false };
+        probe.completion = window.ipcRenderer.invoke(
+          "read-owned-tab-disk-snapshot",
+          ${JSON.stringify(mainOwnedRefresh.validPayload)},
+        ).then(
+          snapshot => {
+            probe.settled = true;
+            return { status: "fulfilled", snapshot };
+          },
+          error => {
+            probe.settled = true;
+            return { status: "rejected", message: String(error && error.message) };
+          },
+        );
+        return null;
+      })()
+    `);
+    atomicSecondStatHeld = await waitUntil(() => releaseAtomicSecondStat !== null, 8000);
+    atomicHoldArmed = false;
+    if (atomicSecondStatHeld) {
+      atomicPreHold = await exec(`({
+        settled: window.__sec08AtomicReadProbe.settled,
+      })`);
+      write(atomicReplacementPath, "# Beta\n\nSEC08_ATOMIC_READ_TWO\n");
+      if (process.platform === "win32") fs.renameSync(fileB, atomicParkedPath);
+      fs.renameSync(atomicReplacementPath, fileB);
+      atomicReplacementStats = fs.statSync(fileB);
+      releaseAtomicSecondStat();
+    }
+    atomicReadResult = await Promise.race([
+      exec(`window.__sec08AtomicReadProbe.completion`),
+      sleep(8000).then(() => ({ completionTimedOut: true })),
+    ]);
+  } catch (error) {
+    atomicSetupError = error;
+  } finally {
+    atomicHoldArmed = false;
+    if (releaseAtomicSecondStat) releaseAtomicSecondStat();
+    // Drain after release even when installation failed, before the suite can
+    // remove the files that the real main read still owns.
+    if (!atomicReadResult) {
+      atomicReadResult = await Promise.race([
+        exec(`window.__sec08AtomicReadProbe && window.__sec08AtomicReadProbe.completion`),
+        sleep(8000).then(() => ({ completionTimedOut: true })),
+      ]);
+    }
+    restoreAtomicOpen();
+    await exec(`delete window.__sec08AtomicReadProbe; null;`);
+    if (fs.existsSync(atomicReplacementPath)) fs.unlinkSync(atomicReplacementPath);
+    if (fs.existsSync(atomicParkedPath)) fs.unlinkSync(atomicParkedPath);
+  }
+  if (atomicSetupError) throw atomicSetupError;
+  // On Windows, opening the replacement can advance ctime. Compare the
+  // returned full version to the settled file, not its pre-open metadata.
+  atomicSettledStats = fs.statSync(fileB);
+  const atomicEvidence = {
+    secondStatHeld: atomicSecondStatHeld,
+    lateHold: atomicLateHold,
+    preHold: atomicPreHold,
+    firstBytes: atomicFirstBytes,
+    firstIdentity: atomicFirstStats && {
+      dev: atomicFirstStats.dev,
+      ino: atomicFirstStats.ino,
+    },
+    heldIdentity: atomicHeldStats && {
+      dev: atomicHeldStats.dev,
+      ino: atomicHeldStats.ino,
+    },
+    replacementIdentity: atomicReplacementStats && {
+      dev: atomicReplacementStats.dev,
+      ino: atomicReplacementStats.ino,
+    },
+    installedCtimeMs: atomicReplacementStats && atomicReplacementStats.ctimeMs,
+    settledCtimeMs: atomicSettledStats.ctimeMs,
+    openCalls: atomicOpenCalls,
+    closedAttempts: atomicClosedAttempts,
+    result: atomicReadResult,
+    replacementMethod: process.platform === "win32" ? "move-aside/install" : "atomic-rename",
+  };
+  check(
+    "SEC-08 atomic replacement setup holds the original descriptor before a distinct same-path replacement",
+    atomicSecondStatHeld &&
+      !atomicLateHold &&
+      atomicPreHold && atomicPreHold.settled === false &&
+      String(atomicFirstBytes).includes("SEC08_ATOMIC_READ_ONE") &&
+      atomicFirstStats && atomicHeldStats && atomicReplacementStats &&
+      atomicFirstStats.dev === atomicHeldStats.dev &&
+      atomicFirstStats.ino === atomicHeldStats.ino &&
+      (atomicFirstStats.dev !== atomicReplacementStats.dev ||
+        atomicFirstStats.ino !== atomicReplacementStats.ino),
+    JSON.stringify(atomicEvidence),
+  );
+  const atomicSnapshot = atomicReadResult && atomicReadResult.snapshot;
+  check(
+    "SEC-08 main snapshot retries same-path inode replacement and returns only replacement bytes",
+    atomicReadResult &&
+      atomicReadResult.status === "fulfilled" &&
+      atomicSnapshot &&
+      atomicSnapshot.content === "# Beta\n\nSEC08_ATOMIC_READ_TWO\n" &&
+      atomicSettledStats &&
+      ["dev", "ino", "size", "mtimeMs", "ctimeMs"].every(
+        key => atomicSnapshot.diskVersion &&
+          atomicSnapshot.diskVersion[key] === atomicSettledStats[key],
+      ) &&
+      atomicOpenCalls === 2 &&
+      atomicClosedAttempts.join(",") === "1,2",
+    JSON.stringify(atomicEvidence),
+  );
+  if (atomicReadResult && atomicReadResult.completionTimedOut) {
+    throw new Error("SEC-08 atomic owned read did not settle after releasing its descriptor");
+  }
+  await switchToTabAndWait(ids.b);
+  check(
+    "SEC-08 ordinary tab switching adopts the replacement document after the held read",
+    (await viewerText()).includes("SEC08_ATOMIC_READ_TWO") &&
+      await exec(`(() => {
+        const tab = window.CustomTabs.getTabs().find(t => t.id === ${ids.b});
+        return tab.content === tab.originalContent &&
+          tab.hasUnsavedChanges === false &&
+          tab.content.includes("SEC08_ATOMIC_READ_TWO");
+      })()`),
+    await viewerText(),
+  );
+
   // ---- Scenario 3: unsaved edits are never clobbered --------------------
   await exec(`
     (() => {

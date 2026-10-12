@@ -1122,10 +1122,23 @@ function documentOwnerTableHasRoomFor(owner, consumedCapability = null) {
 
 function rememberDocumentOwner(
   owner,
-  { diskVersion = null, modifiedTime = null, adopted = false } = {},
+  {
+    diskVersion = null,
+    modifiedTime = null,
+    adopted = false,
+    readPath = null,
+  } = {},
 ) {
   if (!canRememberDocumentOwner(owner)) return false;
   const key = documentOwnerKey(owner);
+  const previousReadTarget = knownDocumentOwners.get(key)?.readTarget;
+  const resolvedReadTarget = readPath && (adopted || !previousReadTarget)
+    ? resolveCanonicalFilePath(readPath)
+    : null;
+  const readTarget = resolvedReadTarget &&
+    canonicalKeyFromPath(resolvedReadTarget) === owner.pathKey
+    ? resolvedReadTarget
+    : null;
   // SUPERSESSION DEAUTHORIZES, BUT ONLY ONCE THE REPLACEMENT IS ADMITTED, AND
   // IT FORGETS ONLY WHAT IT MAY. An older generation in this tab that nothing
   // is holding is collected here: "forgettable" already means no save is
@@ -1213,7 +1226,13 @@ function rememberDocumentOwner(
       invalidatedSaveScopes.add(scope);
     }
   }
-  knownDocumentOwners.set(key, owner);
+  // A renderer registration is not main-issued path authority. Retain the
+  // physical target it first named rather than letting a case-only sibling
+  // or a later registration with the same folded key silently rebind it.
+  knownDocumentOwners.set(key, Object.freeze({
+    ...owner,
+    readTarget: adopted ? readTarget : previousReadTarget || readTarget,
+  }));
   const suppliedVersion = normaliseDiskVersion(diskVersion);
   const previousBaseline = ownerDocumentBaselines.get(key);
   if (!previousBaseline || adopted) {
@@ -2019,19 +2038,26 @@ function normaliseFilePath(filePath) {
   });
 }
 
-function resolveCanonicalFileKey(filePath) {
+function resolveCanonicalFilePath(filePath) {
   const normalised = normaliseFilePath(filePath);
   if (!normalised) return null;
-  let canonical = normalised.resolved;
   try {
-    canonical = fs.realpathSync.native(normalised.resolved);
+    return fs.realpathSync.native(normalised.resolved);
   } catch (error) {
     if (error.code !== "ENOENT" && error.code !== "ENOTDIR") {
       console.error("Error resolving canonical file path:", error);
     }
     return null;
   }
+}
+
+function canonicalKeyFromPath(canonical) {
   return process.platform === "win32" ? canonical.toLowerCase() : canonical;
+}
+
+function resolveCanonicalFileKey(filePath) {
+  const canonical = resolveCanonicalFilePath(filePath);
+  return canonical ? canonicalKeyFromPath(canonical) : null;
 }
 
 // A path spelling keeps the physical target it adopted. Re-resolving and
@@ -3095,6 +3121,7 @@ function selectWatchedDocument(
         diskVersion: suppliedVersion,
         modifiedTime,
         adopted: verifiedAdoption,
+        readPath: filePath,
       })) return false;
   const changedSpelling = watchedFilePath !== filePath;
   const changedDocument = watchedFileKey !== key;
@@ -5734,6 +5761,133 @@ function authorisedWatcherEnvelope(
   });
 }
 
+// A background tab need not own the active watcher. Its retained owner, not
+// the watch or the adoption baseline, is the authority to read its own file.
+function authorisedTabDiskRead(event, data) {
+  if (
+    !isApprovalSender(event) ||
+    approvalRendererState !== "ready" ||
+    !data ||
+    typeof data !== "object" ||
+    typeof data.filePath !== "string" ||
+    !data.filePath ||
+    data.filePath.includes("\0") ||
+    data.pageSession !== approvalRendererPageSession ||
+    !Number.isSafeInteger(data.rendererGeneration) ||
+    data.rendererGeneration !== approvalRendererGeneration
+  ) return null;
+  const identity = normaliseDocumentIdentity(data.owner, data.filePath, {
+    useCurrentPathIdentity: true,
+  });
+  const owner = identity && knownDocumentOwners.get(documentOwnerKey(identity));
+  return owner &&
+    identity.pageSession === data.pageSession &&
+    identity.rendererGeneration === data.rendererGeneration &&
+    sameDocumentOwner(owner, identity) &&
+    isKnownDocumentOwner(owner) &&
+    owner.readTarget &&
+    resolveCanonicalFilePath(data.filePath) === owner.readTarget
+    ? owner
+    : null;
+}
+
+async function readOwnedTabDiskSnapshot(owner, filePath, event, data) {
+  for (let attempt = 1; attempt <= MAX_STABLE_FILE_READ_ATTEMPTS; attempt += 1) {
+    if (attempt > 1) {
+      const currentOwner = authorisedTabDiskRead(event, data);
+      if (
+        !sameDocumentOwner(owner, currentOwner) ||
+        owner.readTarget !== currentOwner.readTarget
+      ) return null;
+    }
+    let handle;
+    try {
+      // Follow the logical spelling once, then check the opened descriptor
+      // against both that spelling and the owner's registered physical target.
+      // A symlink that goes A -> B -> A during the read cannot bless B's bytes.
+      handle = await fs.promises.open(filePath, "r");
+      const before = await handle.stat();
+      if (!before.isFile()) {
+        throw new Error(`Owned tab target is not a file: ${filePath}`);
+      }
+      const raw = await handle.readFile({ encoding: "utf8" });
+      const after = await handle.stat();
+      const pathStats = await fs.promises.stat(filePath);
+      const targetStats = filePath === owner.readTarget
+        ? pathStats
+        : await fs.promises.stat(owner.readTarget);
+      if (
+        before.dev !== pathStats.dev ||
+        before.ino !== pathStats.ino ||
+        before.dev !== targetStats.dev ||
+        before.ino !== targetStats.ino
+      ) {
+        // An editor may atomically replace the authorised path while its old
+        // descriptor is being read. Retry only when both authorised spellings
+        // now name that same regular replacement and the request still owns it.
+        if (
+          !pathStats.isFile() ||
+          !targetStats.isFile() ||
+          pathStats.dev !== targetStats.dev ||
+          pathStats.ino !== targetStats.ino
+        ) return null;
+        if (attempt < MAX_STABLE_FILE_READ_ATTEMPTS) {
+          const currentOwner = authorisedTabDiskRead(event, data);
+          if (
+            !sameDocumentOwner(owner, currentOwner) ||
+            owner.readTarget !== currentOwner.readTarget
+          ) return null;
+          continue;
+        }
+      }
+      if (
+        after.isFile() &&
+        pathStats.isFile() &&
+        targetStats.isFile() &&
+        sameDiskVersion(before, after) &&
+        sameDiskVersion(before, pathStats) &&
+        sameDiskVersion(before, targetStats)
+      ) {
+        return Object.freeze({
+          content: wrapMermaidContent(removeBOM(raw), filePath),
+          modifiedTime: after.mtimeMs,
+          diskVersion: diskVersionFromStats(after),
+        });
+      }
+    } finally {
+      if (handle) await handle.close();
+    }
+  }
+  throw new Error(`File changed repeatedly while being read: ${filePath}`);
+}
+
+ipcMain.handle("read-owned-tab-disk-snapshot", async (event, data) => {
+  const owner = authorisedTabDiskRead(event, data);
+  if (!owner) return null;
+  try {
+    const snapshot = await readOwnedTabDiskSnapshot(
+      owner,
+      data.filePath,
+      event,
+      data,
+    );
+    const currentOwner = authorisedTabDiskRead(event, data);
+    return sameDocumentOwner(owner, currentOwner) &&
+      owner.readTarget === currentOwner.readTarget
+      ? snapshot
+      : null;
+  } catch (error) {
+    const currentOwner = authorisedTabDiskRead(event, data);
+    // A failure after the request lost its owner or path is a refusal, not an
+    // I/O error belonging to the document that now occupies that spelling.
+    if (
+      !sameDocumentOwner(owner, currentOwner) ||
+      owner.readTarget !== currentOwner.readTarget
+    ) return null;
+    throw error;
+  }
+});
+
 ipcMain.on("register-document-owner", (event, data) => {
   if (
     !isApprovalSender(event) ||
@@ -5785,6 +5939,7 @@ ipcMain.on("register-document-owner", (event, data) => {
   if (!rememberDocumentOwner(owner, {
     diskVersion: version,
     modifiedTime: version.mtimeMs,
+    readPath: data.filePath,
   })) {
     if (sealRefused) {
       // The seal already announced itself once inside the admission test and
@@ -7288,6 +7443,7 @@ function completeDocumentDiskAdoption(data) {
     diskVersion: grant.version,
     modifiedTime: grant.version.mtimeMs,
     adopted: true,
+    readPath: grant.sourcePath,
   })) {
     committedDiskAdoptions.set(data.capability, grant);
     markDocumentChangedExternally(grant.sourcePath);

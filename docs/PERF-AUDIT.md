@@ -917,6 +917,205 @@ fixture manifests, process monitors, failed diagnostic
 and restoration evidence are under
 `files/sec08-dialog-ipc-perf-20261006/`.
 
+### SEC-08 clean-tab refresh — practical diagnosis (isolated, not integrated)
+
+**2026-10-11: performance acceptance remains inconclusive/blocked.** Under
+the maintainer's revised ordinary-case validation contract, the isolated
+stream used established Node/Electron tooling, fresh profiles/fixtures and
+successful native runner outcomes rather than continuing recursive launcher
+qualification. Stronger historical assurance requirements remain unmet; no
+old stage, E attempt or contaminated P6 namespace was replayed or qualified.
+
+Product bytes are unchanged: baseline `790c1bc` and candidate `main.js`
+`5F636290...` / `custom-tabs.js` `EC72BDD9...`. A focused, symmetrically traced
+2 MiB/10-tab ABBA diagnostic completed four workers/168 timings. Changed
+pooled median was **425.2 -> 431.8 ms**; unchanged **402.3 -> 404.1 ms**.
+Chromium Layout event durations totalled **11.18-11.29 seconds per worker**
+in both arms; these nested durations are not additive wall-clock accounting.
+The large historical candidate slowdown was not reproduced, and no
+candidate-specific defect supporting a product fix was established. This
+focused traced block is **not acceptance evidence** or proof of the old cause.
+
+One complete untraced A/A matrix retained the original nine cells, AB/BA
+schedule, 21 changed/unchanged samples per arm/cell, heading endpoint and
+nearest-rank statistics. All 18 workers/756 timings completed with native
+runner exit 0 and the common coordination lock released. Identical baseline
+inputs nevertheless crossed the retained **absolute unchanged p95 noise
+limit of 2 ms**: 500 KiB/1, /10, /25 differed by **2.7, 2.7, 8.1 ms**;
+2 MiB/1, /10 by **7.5, 3.5 ms**. This is measured calibration variability,
+not demonstrated external-load causation or a candidate regression.
+
+The already-started untraced A/B matrix completed normally with all
+18 workers/756 timings, native runner exit 0 and the common lock released.
+Its raw numbers crossed no regression thresholds, but it is explicitly
+**diagnostic/nonacceptance in every cell** because A/A failed its prerequisite.
+No noise subtraction,
+threshold waiver, traced-ABBA substitution or repeat-until-green is allowed.
+All seven historical refresh-performance failures remain **FAILED/OPEN**.
+The ordinary tab/refresh suite returned **500/500, native exit 0**; correctness
+success does not clear performance. Raw runs, native execution records and
+the bounded diagnosis are retained under session
+`b0e6dcc1-20b9-4d91-8e8b-f8069c36b9ac`,
+`files/sec08-practical-performance-20261011/`. No integration/release claim.
+Independent latest Sol/high and Luna/high method/result assessments agree
+with the blocked conclusion. They identified two small DATA-reader issues
+(both: A/A filename; Luna additionally: exact candidate/source checks);
+these were corrected and confirmed without a benchmark rerun.
+
+**2026-10-12: existing-data tail-noise follow-up; no new benchmark.**
+The five A/A failures do not have one common distribution shape:
+
+| Cell | B-A unchanged p50 / p95 ms | Retained distribution |
+|---|---:|---|
+| 500 KiB / 1 | -0.9 / +2.7 | Faster B centre, slower upper tail. |
+| 500 KiB / 10 | +1.3 / +2.7 | Small centre shift and upper-tail spread. |
+| 500 KiB / 25 | +0.1 / +8.1 | Nearly equal centres, multiple early high B values. |
+| 2 MiB / 1 | -9.1 / -7.5 | Broad faster B shift, not one isolated extreme. |
+| 2 MiB / 10 | -3.4 / +3.5 | Faster B centre, early slower upper tail. |
+
+With 21 samples, nearest-rank p95 is the **second-largest** observation.
+At 500 KiB/25 the maxima differ by only 0.7 ms, but the second-largest
+values differ by 8.1 ms; removing the maximum would not explain away
+the retained failure. At 2 MiB/1 the quartiles and mean also shift:
+B is faster at 19 of 21 same repetition indices. These are descriptive
+sequential-worker comparisons, not randomized concurrent pairs.
+
+Exact initial fixture bytes, source/worker/static assets and per-repetition
+A/A setup/measured I/O and watcher counts match; the measured ledger spans
+the switch through post-heading completion/quiescence checks, not only the
+heading timer. The timing predicate requires the distinct heading in the
+active viewer's DOM, not loading-overlay removal or compositor presentation.
+The timer includes observer setup before the click; this unmeasured
+interval is not a demonstrated cause of these tails. Full `innerText`/layout
+cost belongs to the frozen endpoint. Counter stability is not a CPU-idle/GC/
+compositor witness, and no per-leg focus, load or A/A trace was retained.
+The existing traced A/B block cannot identify the causes of individual
+A/A tails. No verified material product or measurement defect justifies
+rerunning unchanged benchmarks. The decision required is to retain/defer
+the blocker, or separately approve a revised precision/experimental contract
+before new measurements; this entry adopts no such change. All samples,
+numerical rules, diagnostic-only A/B status and seven **FAILED/OPEN** gates
+remain unchanged. Bounded analysis is retained in the same session under
+`files/sec08-tail-noise-analysis-20261012/`.
+
+### Prospective repeated-worker calibration (2026-10-12): attempted, invalid/incomplete
+
+The user subsequently authorized a prospective redesign, not another rerun of
+the old method. The fixed declaration uses eight fresh-worker pairs per cell,
+four AB/four BA orientations, all original 21 changed/21 unchanged observations,
+and the original cells, fixtures, heading endpoint and material thresholds.
+Inference is over paired empirical worker-quantile material margins, with
+conditional extrema bounds and all-cell/observed-pair/pooled vetoes. It is not
+a population-p95 or rare-regression certificate. The original 2 ms precision
+goal is explicitly nonblocking under this new policy; a missed goal is reported,
+not described as the old prerequisite passed. The phase budget is 60 minutes
+admissibility, one attempt, no outcome-driven extension/replacement.
+
+Independent current-policy Sol/high and Luna/high reviews supported that
+limited model. Before data, corrections closed strict floating-boundary,
+complete/continuous freeze, bounded-command and composed-cleanup defects.
+Actual premeasurement declaration: SHA-256
+`356f402a806c4c419f438a5b2d9aac753ace618987554ea33cfb06b0b4144a4d`.
+The worker and product bytes were unchanged.
+
+The one AA attempt ran from 05:27:52.308 to caller return 05:29:23.828 UTC.
+Three complete workers retained 126 successful worker timings; the fourth,
+baseline 2 MiB/1 A, returned native worker exit 1 on changed repetition 1.
+Its heading appeared at 521 ms, but the required completion returned false and
+the tab was protected as dirty/conflicted. That leg is not a successful sample.
+Observed file metadata changed between recorded checks; the precise reason
+for the completion rejection and the metadata change is not established.
+No candidate execution, candidate regression or external actor is inferred.
+
+The only completed 500 KiB/10 BA pair had no material predicate crossing;
+unchanged p95 was 134.4/137.0 ms (2.6 ms difference), missing the original 2 ms
+goal for that pair. It cannot qualify the incomplete eight-pair/all-cell phase.
+Separately, the caller recorded native runner exit as null/capture false:
+its local LASTEXITCODE reset shadows the status scope. The outer tool/caller
+exit 1 is not retroactively substituted for the missing Node runner exit.
+Readback found no Electron process or common lock. No complete AA result,
+acceptance AB, replacement attempt or product fix followed.
+
+This is **invalid/incomplete calibration**, not statistical non-regression or
+regression evidence. Seven historical gates remain **FAILED/OPEN** and SEC08
+**INCOMPLETE**. Frozen tooling/data/review pins and the concrete completion/
+capture blockers are retained under the same session at
+`files/sec08-prospective-calibration-20261012/`; no old evidence was requalified.
+
+### Concrete capture correction and completion diagnosis (2026-10-12)
+
+A separately authorized corrective unit used a **new** ordinary PowerShell
+wrapper with explicit global `LASTEXITCODE` capture; the frozen executed wrapper
+and old invalid AA were not changed. Real benign Node controls captured exits
+0/7 and an owned worker-7/runner-23 distinction. Under `-Command`, captured Node
+7 and enclosing PowerShell caller 1 were kept distinct. A local-variable
+mutation captured zero under `-File` but lost the known benign zero under
+`-Command`, supporting an invocation-dependent scope mechanism. It does not
+recover the old Node status, which stays **UNKNOWN**.
+
+Exactly one new **nonacceptance** baseline 2 MiB/1 diagnostic retained the
+original schedule, heading endpoint, comparisons, completion/protection and
+watcher behavior. The caller ran 06:03:59.848-06:04:08.868 UTC (8.996 s):
+captured Node exit 1, capture success true; worker exit 1, no signal, no timeout.
+Known native status was recorded before cleanup; ordinary cleanup settled and
+released its exact shared lock. No process was killed. After three accepted
+changed and three accepted unchanged legs, changed repetition 4 reached the
+heading at 444.3 ms but its completion was correctly refused.
+
+The per-leg trace identifies the refusal: paths still matched and the active
+sequence/generation agreed, but the late disk mtime was **1791785044783.797**
+against approved **1791785047497.6616**, with identical dev/inode/size and finite
+ctimes. Tabs' post-render source-version check returned false and protected the
+tab; renderer completion then refused the same mtime mismatch. The older value
+exactly matched the producer's repetition-2 write. Later readback still matched
+all changed-4 bytes while retaining that older mtime. This is observed metadata
+rollback, **not** ctime-only drift or proof of who changed the metadata.
+
+No timestamp setter was found in the inspected staged app/worker route, but
+that is not an exhaustive writer/OS proof. The actor/provenance and the old AA's
+unrecorded decisive predicate remain unknown. No product fix or relaxation of
+mtime/approval/dirty-state guards is justified. Fresh independent Sol/Luna
+reviews converged after targeted capture-retention and per-leg attribution
+corrections; native controls and narrowly scoped DATA guard/cursor/cleanup
+controls are retained at
+`files/sec08-capture-completion-correction-20261012/` in the continuation session.
+No further reproduction, AA/AB or statistical claim followed. Seven gates
+remain **FAILED/OPEN**, SEC08 **INCOMPLETE**; capture is corrected, but the
+baseline runtime completion prerequisite remains blocked.
+
+### Corrected private-OS-temp AA (2026-10-12): performance acceptance DEFERRED
+
+A separately authorized prospective attempt reused the selected eight-pair
+method and original worker/product bytes, with corrected native-exit capture
+and fresh measured fixtures **and profiles** under a new physical OS-temp root.
+Both arms used baseline `790c1bc`; no diagnostic renderer instrumentation was
+timed. The new fixed 90-minute phase budget was declared before data, not an
+extension of the closed invalid attempt.
+
+The caller ran 07:16:25.986-07:23:18.608 UTC (412.627 s). Actual Node,
+wrapper and caller exits were **0**, capture succeeded and ordinary cleanup
+released the lock. The first round retained **18 workers / 9 pairs / 756
+accepted legs** (378 changed, 378 unchanged), not the planned complete
+144-worker / 72-pair matrix. Native success is not calibration qualification.
+
+The predeclared first material veto stopped AA at **50 KiB / one tab, BA**:
+unchanged p50 was **27.7 -> 33.0 ms**, **+5.3 ms / +19.13%**, exceeding
+the unchanged **>2 ms AND >10%** boundary. Both arms were identical baseline
+source, so this is observed calibration variability, not candidate causation.
+AA was incomplete/nonqualified; **AB did not start**. The original unchanged-p95
+2 ms precision goal was also missed in four observed cells (worst 8.1 ms).
+No current non-regression, global typical-pair or population-p95 certificate
+was established; no external actor or impossibility under other conditions
+is inferred. Raw outcome and method details remain in the continuation session
+at `files/sec08-corrected-prospective-20261012/handoff.md`.
+
+**Closeout decision: performance acceptance is DEFERRED on the current setup.**
+No more local benchmark, method-redesign or tracing campaigns; no threshold
+waiver or green reclassification. Historical sections and consumed attempts
+remain unchanged. Product-correctness evidence is retained, the seven
+historical gates remain **FAILED/OPEN**, and SEC08 remains **INCOMPLETE**.
+No delivery or release is authorized.
+
 ## Measured and found already fast
 - **Custom tab sync I/O is not the current bottleneck.**
   - `custom-tabs.js:69-111,640`

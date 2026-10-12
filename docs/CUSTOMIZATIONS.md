@@ -105,6 +105,28 @@ raw-byte witness design is tracked after wave 2 as `ctime-byte-witness` in
 `docs/PLANNED-WORK.md`; do not silently restore a strict ctime comparison
 without resolving the original false conflicts and measuring the result.
 
+**Clean-tab refresh read boundary (SEC-08, 2026-10-07, unintegrated).** The
+changed-disk content read now crosses an owner-bound main-process IPC rather
+than reading content in the renderer. Main retains a case-preserving physical
+target, pins the read to an opened descriptor and checks both pathname
+identities before replying. The lowercased Windows owner key is not an I/O
+pathname. Ordinary inode replacement and in-place changes can retry within
+the existing stable-read bound, but only while the owner/target remain
+authorized. An unchanged clean tab still returns synchronously without a new
+snapshot IPC. The renderer rechecks live edits, mutation revision, ownership
+and switch currentness before its separate disk-adoption attestation, so a
+held read cannot bless a superseded tab's new cache.
+
+This is a preparatory boundary, not completed Node isolation: renderer owner
+registration and restored paths remain provisional. Preserve the fail-closed
+case-only-rename limitation rather than folding physical pathnames; explicit
+reload recovery is source-traced but not runtime-proven. The real-main
+replacement regression distinguishes the old descriptor from the replacement
+inode and requires replacement-only bytes plus descriptor cleanup. On Windows
+the controlled move-aside/install fixture exercises that boundary without
+claiming OS-level atomicity. R714-R718 individually protect this slice;
+broader Wave 2 and release gates remain separate.
+
 **"File Updated" prompt behaviour.** The bottom-left toast
 (`#fileUpdateToast`) is only appropriate for the tab the user is actually
 looking at, because that is the only one we deliberately do *not* reload

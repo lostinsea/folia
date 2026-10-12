@@ -17873,6 +17873,154 @@ const REVERTS = [
           requireExactFailures: true,
           expectedFailureCount: 1,
         },
+        {
+          id: "R714",
+          what: "read a changed clean-tab refresh in the renderer before its owner-bound main request",
+          file: TABS,
+          from:
+            '      snapshot = await tabIpc.invoke("read-owned-tab-disk-snapshot", {\n' +
+            "        filePath,\n" +
+            "        pageSession: session,\n" +
+            "        rendererGeneration: identity.rendererGeneration,\n" +
+            "        owner: identity,\n" +
+            "      });",
+          to:
+            '      void window.fs.readFileSync(filePath, "utf8");\n' +
+            '      snapshot = await tabIpc.invoke("read-owned-tab-disk-snapshot", {\n' +
+            "        filePath,\n" +
+            "        pageSession: session,\n" +
+            "        rendererGeneration: identity.rendererGeneration,\n" +
+            "        owner: identity,\n" +
+            "      });",
+          suite: "test:tabs",
+          expect: [
+            /^SEC-08 changed clean-tab refresh reads through main without renderer content reads or a modal$/,
+          ],
+          mustPass: [
+            /^SEC-08 unchanged clean-tab refresh remains synchronous with zero main IPC$/,
+            /^SEC-08 main-owned tab reads refuse forged paths and foreign owners without denying the valid owner$/,
+            /^SEC-08 main snapshot retries a disk version that changes between read and second stat$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R715",
+          what: "accept an unknown requester tab identity as an otherwise exact known owner",
+          file: MAIN,
+          from:
+            "  const identity = normaliseDocumentIdentity(data.owner, data.filePath, {\n" +
+            "    useCurrentPathIdentity: true,\n" +
+            "  });",
+          to:
+            "  const exact = normaliseDocumentIdentity(data.owner, data.filePath, {\n" +
+            "    useCurrentPathIdentity: true,\n" +
+            "  });\n" +
+            "  const identity = exact &&\n" +
+            "    (knownDocumentOwners.has(documentOwnerKey(exact))\n" +
+            "      ? exact\n" +
+            "      : Array.from(knownDocumentOwners.values()).find(\n" +
+            "          (known) =>\n" +
+            "            known.pageSession === exact.pageSession &&\n" +
+            "            known.rendererGeneration === exact.rendererGeneration &&\n" +
+            "            known.documentGeneration === exact.documentGeneration &&\n" +
+            "            known.pathKey === exact.pathKey &&\n" +
+            "            known.spelling === exact.spelling &&\n" +
+            "            isKnownDocumentOwner(known),\n" +
+            "        ));",
+          suite: "test:tabs",
+          expect: [
+            /^SEC-08 main-owned tab reads refuse forged paths and foreign owners without denying the valid owner$/,
+          ],
+          mustPass: [
+            /^SEC-08 changed clean-tab refresh reads through main without renderer content reads or a modal$/,
+            /^SEC-08 unchanged clean-tab refresh remains synchronous with zero main IPC$/,
+            /^SEC-08 main snapshot retries a disk version that changes between read and second stat$/,
+            /^nothing rendered a visible error at any point during the suite$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R716",
+          what: "continue a superseded clean-tab refresh after its post-main-read currentness refusal",
+          file: TABS,
+          from: "      if (!current) return null;",
+          to: "      if (false) return null;",
+          suite: "test:tabs",
+          expect: [
+            /^SEC-08 a tab switch superseded during the held main read keeps its prior cache and refuses disk adoption$/,
+          ],
+          mustPass: [
+            /^SEC-08 main snapshot retries a disk version that changes between read and second stat$/,
+            /^SEC-08 changed clean-tab refresh reads through main without renderer content reads or a modal$/,
+            /^SEC-08 main-owned tab reads refuse forged paths and foreign owners without denying the valid owner$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R717",
+          what: "skip the registered physical-target comparison after opening a case-preserved logical spelling",
+          file: MAIN,
+          from:
+            "      const targetStats = filePath === owner.readTarget\n" +
+            "        ? pathStats\n" +
+            "        : await fs.promises.stat(owner.readTarget);",
+          to: "      const targetStats = pathStats;",
+          suite: "test:tabs",
+          expect: [
+            /^SEC-08 case-preserved owned reads open the logical spelling and compare its registered physical target$/,
+          ],
+          mustPass: [
+            /^SEC-08 main-owned tab reads refuse forged paths and foreign owners without denying the valid owner$/,
+            /^SEC-08 changed clean-tab refresh reads through main without renderer content reads or a modal$/,
+            /^SEC-08 main snapshot retries a disk version that changes between read and second stat$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R718",
+          what: "refuse an authorised atomic same-path replacement instead of retrying its new descriptor",
+          file: MAIN,
+          from:
+            "        if (attempt < MAX_STABLE_FILE_READ_ATTEMPTS) {\n" +
+            "          const currentOwner = authorisedTabDiskRead(event, data);\n" +
+            "          if (\n" +
+            "            !sameDocumentOwner(owner, currentOwner) ||\n" +
+            "            owner.readTarget !== currentOwner.readTarget\n" +
+            "          ) return null;\n" +
+            "          continue;\n" +
+            "        }",
+          to:
+            "        if (attempt < MAX_STABLE_FILE_READ_ATTEMPTS) {\n" +
+            "          const currentOwner = authorisedTabDiskRead(event, data);\n" +
+            "          if (\n" +
+            "            !sameDocumentOwner(owner, currentOwner) ||\n" +
+            "            owner.readTarget !== currentOwner.readTarget\n" +
+            "          ) return null;\n" +
+            "          return null;\n" +
+            "        }",
+          suite: "test:tabs",
+          expect: [
+            /^SEC-08 main snapshot retries same-path inode replacement and returns only replacement bytes$/,
+          ],
+          mustPass: [
+            /^SEC-08 atomic replacement setup holds the original descriptor before a distinct same-path replacement$/,
+            /^SEC-08 ordinary tab switching adopts the replacement document after the held read$/,
+            /^SEC-08 main snapshot retries a disk version that changes between read and second stat$/,
+            /^SEC-08 main-owned tab reads refuse forged paths and foreign owners without denying the valid owner$/,
+            /^nothing rendered a visible error at any point during the suite$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
       ];
 
 // These are release exceptions, not passing or withdrawn proofs. An explicit
@@ -18915,7 +19063,7 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R319,R709,R710,R711,R712";
+      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718";
   // Route the fixture through the SAME reduction and verdict helpers the
   // mutation loop uses (assertionNameOf / unlistedFailures / expect-missing /
   // requiredPassingAssertionProblems / exact-failure + count guards).

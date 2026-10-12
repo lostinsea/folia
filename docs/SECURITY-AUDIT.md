@@ -493,6 +493,40 @@ closed. This preparatory unit is integrated but unreleased, and the
 historical inventory below must be
 recounted before the broader migration.
 
+**2026-10-07 clean-tab refresh slice (isolated, not integrated).** A changed
+clean tab now obtains its content through `read-owned-tab-disk-snapshot`
+instead of a renderer content read. Main checks the current main frame,
+page/generation and retained tab owner; opens the case-preserving logical
+pathname; and compares that descriptor with both the logical pathname and
+the owner's retained physical target. The folded owner key is an identity
+key, never an I/O pathname. Stable-read retries are bounded and reauthorize
+the owner/target before another read. Renderer supersession, dirty/live
+content and mutation-revision checks precede independent disk-adoption
+attestation. The unchanged-file early-out adds no snapshot IPC.
+
+This is **not main-issued path authority**: the current Node-privileged
+renderer can register owners, and restored paths still originate in renderer
+state. Main-window Node isolation and the coordinated read/write path
+authorization migration remain open. Do not flip the isolation flags on the
+strength of this owner lookup. A Windows case-only rename can fail the strict
+physical-target check; explicit-reload recovery is source-traced, not
+runtime-proven, and the case-distinct-target protection is not relaxed.
+
+The final product bytes (`main.js` SHA-256 `5F636290...`, `custom-tabs.js`
+`EC72BDD9...`) passed tabs **500/500**. R714, R715, R716, R717 and R718 were
+individually **PROVEN**, each with its exact intended failure, independent
+passing controls and source-hash restoration. R718 exercises a real inode
+replacement while the original descriptor is held, requires only replacement
+bytes/version, and witnesses both descriptor closures. Windows refuses
+rename-over-open, so its fixture moves the old inode aside and installs the
+prepared replacement before releasing the hold; that proves the descriptor/
+pathname replacement boundary, **not OS-level atomic installation**.
+The returned full version is compared with settled real metadata because
+opening the replacement can advance Windows ctime. This does not change the
+maintainer's separate ctime-only change-detection policy. Final-byte
+performance and independent full-unit review are recorded separately before
+stream completion; this entry does not authorize integration or release.
+
 | What has to move | Count |
 |---|---|
 | Distinct `ipcRenderer` channels to re-expose over `contextBridge` | 40 |

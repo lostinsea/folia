@@ -1724,6 +1724,8 @@
     const retargeted = !!boundKey && boundKey !== freshKey;
     const tabState = tab && documentState.get(tab);
     const previousGeneration = tabState && tabState.generation;
+    const previousMutationRevision =
+      tabState && tabState.mutationRevision;
     const previousContent = tab && tab.content;
     const previousLive = tab && tab.id === activeTabId
       ? liveDocument()
@@ -1815,6 +1817,7 @@
           (tab && (
             !tabs.includes(tab) ||
             tabState.generation !== previousGeneration ||
+            tabState.mutationRevision !== previousMutationRevision ||
             tab.content !== previousContent ||
             (previousLive !== null && liveDocument() !== previousLive)
           )) ||
@@ -1881,6 +1884,7 @@
       (tab && (
         !tabs.includes(tab) ||
         tabState.generation !== previousGeneration ||
+        tabState.mutationRevision !== previousMutationRevision ||
         tab.content !== previousContent ||
         (previousLive !== null && liveDocument() !== previousLive) ||
         ((hasUnsavedMutation(tab) || tabState.saveFailure) &&
@@ -1923,6 +1927,7 @@
       (tab && (
         !tabs.includes(tab) ||
         tabState.generation !== previousGeneration ||
+        tabState.mutationRevision !== previousMutationRevision ||
         tab.content !== previousContent ||
         (previousLive !== null && liveDocument() !== previousLive) ||
         ((hasUnsavedMutation(tab) || tabState.saveFailure) &&
@@ -1968,31 +1973,92 @@
     if (!observedVersion) return false; // missing or unreadable - keep the cache
     if (sameDiskVersion(tab.diskVersion, observedVersion)) return false;
 
-    let snapshot;
-    try {
-      snapshot = readStableDiskSnapshot(tab.filePath);
-    } catch (error) {
-      console.error("[CustomTabs] Failed to reload:", tab.filePath, error);
+    const filePath = tab.filePath;
+    const session = window.getReloadRequestSession?.();
+    const identity = getDocumentIdentityForTab(tab.id, filePath, session);
+    if (!identity) {
+      console.error("[CustomTabs] Cannot refresh a tab without document ownership");
       return false;
     }
-    const reservation = reserveDocumentIdentity(tab);
-    if (!reservation) return false;
-    return verifyDiskAdoption(
-      tab,
-      tab.filePath,
-      snapshot.content,
-      snapshot.modifiedTime,
-      snapshot.diskVersion,
-      { stillCurrent, reservedIdentity: reservation },
-    ).then((approval) => {
+    // The renderer remains live while the owned read crosses IPC. The tab
+    // cache was folded before this refresh began, so neither its dirty bit nor
+    // its generation can witness an edit made in that gap. Keep both the live
+    // value and its mutation revision: the value catches an outstanding edit,
+    // while the revision catches edit-then-undo back to the same text.
+    const activeReadWitness = tab.id === activeTabId && state
+      ? Object.freeze({
+          live: liveDocument(),
+          mutationRevision: state.mutationRevision,
+        })
+      : null;
+    const refreshRequestStillCurrent = () => {
+      const stillOwned =
+        getDocumentIdentityForTab(tab.id, filePath, session);
+      return !(
+        isDocumentFrozen() ||
+        (stillCurrent && !stillCurrent()) ||
+        !tabs.includes(tab) ||
+        tab.filePath !== filePath ||
+        !state ||
+        state.generation !== startingGeneration ||
+        state.deletionTombstone ||
+        isDirty(tab) ||
+        (adoptedPath && resolveTabPath(filePath) !== adoptedPath) ||
+        (activeReadWitness && (
+          activeTabId !== tab.id ||
+          liveDocument() !== activeReadWitness.live ||
+          state.mutationRevision !== activeReadWitness.mutationRevision
+        )) ||
+        !stillOwned ||
+        stillOwned.pageSession !== identity.pageSession ||
+        stillOwned.rendererGeneration !== identity.rendererGeneration ||
+        stillOwned.documentGeneration !== identity.documentGeneration ||
+        stillOwned.pathKey !== identity.pathKey
+      );
+    };
+    let snapshot;
+    let reservation;
+    const readAndVerify = async () => {
+      snapshot = await tabIpc.invoke("read-owned-tab-disk-snapshot", {
+        filePath,
+        pageSession: session,
+        rendererGeneration: identity.rendererGeneration,
+        owner: identity,
+      });
+      const current = refreshRequestStillCurrent();
+      if (!snapshot) {
+        if (current && stillCurrent) {
+          state.reloadConflict = true;
+          bumpDocumentRevision(tab);
+          tab.hasUnsavedChanges = isDirty(tab);
+          if (typeof window.markReloadConflict === "function") {
+            window.markReloadConflict(filePath);
+          }
+          console.error("[CustomTabs] Owned read refused for current changed tab:", filePath);
+          renderTabs();
+          saveTabs();
+          notify("The disk refresh was refused. The earlier copy is protected; retry the reload.", 8000);
+        }
+        return null;
+      }
+      if (!current) return null;
+      reservation = reserveDocumentIdentity(tab);
+      if (!reservation) return null;
+      return verifyDiskAdoption(
+        tab,
+        filePath,
+        snapshot.content,
+        snapshot.modifiedTime,
+        snapshot.diskVersion,
+        { stillCurrent, reservedIdentity: reservation },
+      );
+    };
+    return readAndVerify().then((approval) => {
+      if (!snapshot || !reservation) return false;
       let grantCompleted = false;
       let handedOff = false;
       try {
-      if (
-        isDocumentFrozen() ||
-        (stillCurrent && !stillCurrent()) ||
-        (state && state.generation !== startingGeneration)
-      ) return false;
+      if (!refreshRequestStillCurrent()) return false;
       if (
         !approval ||
         !matchesDiskAdoptionApproval(
@@ -2054,7 +2120,7 @@
         }
       }
     }).catch((error) => {
-      console.error("[CustomTabs] Failed to reload:", tab.filePath, error);
+      console.error("[CustomTabs] Failed to reload:", filePath, error);
       notify("The disk refresh failed. The in-memory copy was kept.", 6000);
       return false;
     });
