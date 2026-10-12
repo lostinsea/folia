@@ -34,6 +34,7 @@ const { execSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const { stripJsComments } = require("./test-source-utils.js");
+const { captureScreenshot } = require("./test-visual-utils.js");
 
 const {
   GOLDEN_PATH,
@@ -8218,6 +8219,364 @@ app.whenReady().then(async () => {
       `  note: menu e2e: ${clickResults.length}/${MENU_CLICKS.length} rows driven from #menuBtn; ` +
         `${menuOpenReach.reachable.length} reachable open, ${menuClosedReach.reachable.length} closed`,
     );
+
+    // ── 10j-overflow: viewport bounds, not an assumed minimum window size ──
+    function toolbarOverflowProbe(action, recents) {
+      const byId = (id) => document.getElementById(id);
+      const faults = [];
+      const rect = (el) => {
+        const r = el.getBoundingClientRect();
+        return { left: r.left, top: r.top, right: r.right, bottom: r.bottom,
+          width: r.width, height: r.height };
+      };
+      const reach = (el, scroll = true) => {
+        if (!el) return false;
+        if (scroll) el.scrollIntoView({ block: "nearest", inline: "nearest" });
+        const r = rect(el);
+        if (r.width < 1 || r.height < 1 || r.left < -1 || r.top < -1 ||
+            r.right > innerWidth + 1 || r.bottom > innerHeight + 1) return false;
+        for (let p = el.parentElement; p; p = p.parentElement) {
+          const s = getComputedStyle(p);
+          const b = rect(p);
+          if (/auto|scroll|hidden|clip/.test(s.overflowX) &&
+              (r.left < b.left + p.clientLeft - 1 ||
+               r.right > b.left + p.clientLeft + p.clientWidth + 1)) return false;
+          if (/auto|scroll|hidden|clip/.test(s.overflowY) &&
+              (r.top < b.top + p.clientTop - 1 ||
+               r.bottom > b.top + p.clientTop + p.clientHeight + 1)) return false;
+        }
+        const hit = document.elementFromPoint(
+          r.left + r.width / 2, r.top + r.height / 2,
+        );
+        return !!hit && (hit === el || el.contains(hit));
+      };
+      const click = (id) => {
+        const el = byId(id);
+        if (!reach(el)) { faults.push(id + ":unreachable"); return false; }
+        el.click();
+        return true;
+      };
+      const open = (kind) => {
+        document.body.click();
+        if (!click("menuBtn") || !click(kind === "file" ? "fileBtn" : "viewBtn")) return;
+        if (kind === "theme") {
+          const item = byId("customThemeMenuItem");
+          // In flow the parent includes the whole panel: hover its label,
+          // not the centre of a box that can be taller than the scrollport.
+          if (!reach(item.querySelector("span"))) faults.push("Theme:unreachable");
+          else item.dispatchEvent(new MouseEvent("mouseenter"));
+        }
+      };
+      if (action === "file") {
+        localStorage.setItem("recentFiles", JSON.stringify(recents));
+        open("file");
+      } else if (action === "theme") open("theme");
+      else if (action === "closed") document.body.click();
+
+      const root = byId("mainMenu");
+      const panelIds = ["mainMenu", "fileMenu", "viewMenu", "customThemeSubmenu"];
+      const panels = Object.fromEntries(panelIds.map((id) => [id, rect(byId(id))]));
+      const rows = [...document.querySelectorAll(
+        ".custom-theme-option, .custom-scheme-option",
+      )];
+      const out = {
+        faults, panels, width: innerWidth, height: innerHeight,
+        compact: document.body.classList.contains("compact-header"),
+        focus: document.activeElement.id,
+        rootOverflow: getComputedStyle(root).overflowY,
+        zoom: Number(getComputedStyle(byId("viewer")).zoom),
+        headerZoom: Number(getComputedStyle(document.querySelector(".header")).zoom),
+        choices: rows.map((row) => row.dataset.mode || row.dataset.scheme),
+      };
+      if (action === "theme" || action === "inspect") {
+        root.scrollTop = 0;
+        out.rootOverflows = root.scrollHeight > root.clientHeight + 1;
+        out.rows = rows.map((row) => ({
+          id: row.dataset.mode || row.dataset.scheme,
+          reachable: reach(row), rect: rect(row),
+        }));
+        out.rootScrolled = root.scrollTop > 0;
+        out.panels.mainMenu = rect(root);
+      } else if (action === "file") {
+        const list = byId("fileMenuRecent");
+        const entries = [...list.querySelectorAll(".tools-menu-recent-item")];
+        out.recents = entries.map((entry, i) => ({
+          exact: !!recents[i] &&
+            entry.querySelector(".tools-menu-recent-name").textContent === recents[i].name &&
+            entry.querySelector(".tools-menu-recent-path").textContent === recents[i].path,
+          ellipsized: [...entry.querySelectorAll("span")].every((span) =>
+            span.clientWidth > 0 && span.scrollWidth > span.clientWidth + 1 &&
+            getComputedStyle(span).textOverflow === "ellipsis"),
+        }));
+        root.scrollTop = 0;
+        list.scrollTop = 0;
+        out.rootOverflows = root.scrollHeight > root.clientHeight + 1;
+        out.listOverflows = list.scrollHeight > list.clientHeight + 1;
+        out.lastRecentReachable = reach(entries[entries.length - 1]);
+        out.rootScrolled = root.scrollTop > 0;
+        out.listScrolled = list.scrollTop > 0;
+      } else if (action === "exclusion") {
+        const visible = (id) => byId(id).classList.contains("visible");
+        out.fileInitiallyOpen = visible("fileMenu") && !visible("viewMenu");
+        click("viewBtn");
+        out.onlyView = visible("mainMenu") && visible("viewMenu") &&
+          !visible("fileMenu") && byId("fileBtn").getAttribute("aria-expanded") === "false";
+        click("fileBtn");
+        out.onlyFile = visible("mainMenu") && visible("fileMenu") &&
+          !visible("viewMenu") && byId("viewBtn").getAttribute("aria-expanded") === "false";
+      } else if (action === "closed") {
+        out.closed = panelIds.every((id) => rect(byId(id)).width === 0);
+        out.hiddenChoices = rows.length === 9 && rows.every((row) => !reach(row, false));
+      }
+      return out;
+    }
+
+    const overflowProbe = (action, recents = []) =>
+      exec(`(${toolbarOverflowProbe.toString()})(${JSON.stringify(action)}, ${JSON.stringify(recents)})`);
+    const originalBounds = win.getBounds();
+    const originalContentSize = win.getContentSize();
+    const overflowSaved = await exec(`({
+      recents: localStorage.getItem("recentFiles"),
+      zoomLabel: document.getElementById("zoomReset").textContent,
+      focus: document.activeElement.id,
+      themeOpen: document.getElementById("customThemeMenuItem").classList.contains("theme-open"),
+      scrolls: ["mainMenu", "fileMenuRecent"].map((id) =>
+        [id, document.getElementById(id).scrollTop]),
+    })`);
+    const overflowRecents = Array.from({ length: 12 }, (_, i) => ({
+      name: `toolbar-${i}-<literal&name>-${"long-name-".repeat(30)}.md`,
+      path: `C:\\toolbar-overflow\\${"long-directory\\".repeat(60)}file-${i}.md`,
+      timestamp: Date.now() - i,
+    }));
+    const overflowStates = [];
+    const overflowShots = [];
+    const shotPrefix = `theme-toolbar-overflow-${process.pid}-${Date.now()}`;
+    const resizeToolbar = async (width, height, alignBoundary = false) => {
+      let requestedWidth = width;
+      let measured;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        win.setContentSize(requestedWidth, height);
+        let achieved;
+        let previous = "";
+        let stable = 0;
+        // At 125% display scale the same client area measured 701 DIP in
+        // getContentSize() and 702 CSS px in the renderer. Integer rounding
+        // must not prevent testing the actual viewport or its resize listener.
+        try {
+          // The callback adapts waitFor's exec slot to a cross-process predicate;
+          // two stable framed samples also reject the preceding viewport.
+          await waitFor(async () => {
+            await exec(`new Promise(r => requestAnimationFrame(() =>
+              requestAnimationFrame(() => r(true))))`);
+            achieved = win.getContentSize();
+            measured = await exec(`({ width: innerWidth, height: innerHeight,
+              dpr: devicePixelRatio, compact: document.body.classList.contains("compact-header") })`);
+            const current = JSON.stringify({ achieved, measured });
+            stable = current === previous ? stable + 1 : 0;
+            previous = current;
+            return stable >= 1 &&
+              Math.abs(measured.width - achieved[0]) <= 1 &&
+              Math.abs(measured.height - achieved[1]) <= 1 &&
+              measured.compact === (measured.width < 780);
+          }, "true",
+          "toolbar resize reaches the renderer and its compact-header state", 4000);
+        } catch (error) {
+          const failedResize = await exec(`({
+            width: innerWidth, height: innerHeight, outerWidth, outerHeight,
+            dpr: devicePixelRatio, compact: document.body.classList.contains("compact-header"),
+            hidden: document.hidden, ready: document.readyState,
+          })`);
+          console.log(`  note: failed toolbar resize: ${JSON.stringify({
+            requested: [requestedWidth, height], achieved, bounds: win.getBounds(), failedResize,
+          })}`);
+          throw error;
+        }
+        console.log(`  note: toolbar resize: ${JSON.stringify({
+          requested: [requestedWidth, height], native: achieved, measured,
+        })}`);
+        // Some display scales skip a CSS integer width. Exercise the actual
+        // viewport on each side of 780, rather than demand an unavailable 779.
+        if (!alignBoundary || (measured.width < 780) === (width < 780)) {
+          return [measured.width, measured.height];
+        }
+        requestedWidth += width - measured.width;
+      }
+      throw new Error(`cannot achieve toolbar boundary ${width}: ${JSON.stringify(measured)}`);
+    };
+    const boundedPanels = (state) => {
+      const root = state.panels.mainMenu;
+      const visible = Object.values(state.panels).filter((r) => r.width > 0);
+      return root.width > 0 && root.height > 0 && root.top >= 0 &&
+        root.bottom <= state.height + 1 && visible.every((r) =>
+          r.height > 0 && r.left >= -1 && r.right <= state.width + 1 &&
+          (state.compact || (r.top >= -1 && r.bottom <= state.height + 1)));
+    };
+    const nineChoicesReachable = (state) =>
+      state.rows.length === 9 && state.rows.every((r) => r.reachable);
+    const zoomToolbar = async () => {
+      const before = await overflowProbe("inspect");
+      const zoomWitness = await exec(`(() => {
+        document.getElementById("zoomReset").click();
+        for (let i = 0; i < 60 &&
+          document.getElementById("zoomReset").textContent !== "400%"; i++) {
+          document.getElementById("zoomIn").click();
+        }
+        return {
+          label: document.getElementById("zoomReset").textContent,
+          viewerZoom: Number(getComputedStyle(document.getElementById("viewer")).zoom),
+        };
+      })()`);
+      const after = await overflowProbe("inspect");
+      const same = ["mainMenu", "viewMenu", "customThemeSubmenu"].every((id) =>
+        ["left", "top", "width", "height"].every((key) =>
+          Math.abs(before.panels[id][key] - after.panels[id][key]) <= 1));
+      await exec(`document.getElementById("zoomReset").click()`);
+      return { zoomWitness, before, after, same };
+    };
+    try {
+      await exec(`document.getElementById("zoomReset").click()`);
+      await resizeToolbar(1000, 700);
+      const wideFile = await overflowProbe("file", overflowRecents);
+      overflowStates.push(wideFile);
+      check(
+        "10j-overflow: long recent paths cannot expand the wide File flyout beyond the viewport",
+        !wideFile.compact && wideFile.faults.length === 0 &&
+          boundedPanels(wideFile) && wideFile.lastRecentReachable &&
+          wideFile.recents.length === overflowRecents.length &&
+          wideFile.recents.every((r) => r.exact && r.ellipsized),
+        JSON.stringify(wideFile),
+      );
+      overflowShots.push(await captureScreenshot(win, `${shotPrefix}-wide-file`));
+      const wide = await overflowProbe("theme");
+      overflowStates.push(wide);
+      await exec(`document.getElementById("viewBtn").focus()`);
+      const wideZoom = await zoomToolbar();
+      const boundaries = [];
+      for (const width of [780, 779]) {
+        await resizeToolbar(width, 700, true);
+        const state = await overflowProbe("inspect");
+        boundaries.push(state);
+        overflowStates.push(state);
+      }
+      check(
+        "10j-overflow: the achieved wide/compact boundary preserves open panels and focused View",
+        wide.width >= 780 && boundaries[0].width >= 780 && !boundaries[0].compact &&
+          boundaries[1].width < 780 && boundaries[1].compact &&
+          boundaries.every((s) => s.focus === "viewBtn" &&
+            boundedPanels(s) && nineChoicesReachable(s)),
+        JSON.stringify(boundaries),
+      );
+
+      const minimum = await resizeToolbar(1, 340);
+      const repeatedMinimum = await resizeToolbar(2, 340);
+      const minimumState = await overflowProbe("inspect");
+      overflowStates.push(minimumState);
+      check(
+        "10j-overflow: the OS minimum viewport is measured by two clamped requests (control)",
+        minimum[0] > 2 && minimum[0] === repeatedMinimum[0] &&
+          minimumState.width === minimum[0] && minimumState.height === minimum[1] &&
+          minimumState.compact && minimumState.focus === "viewBtn",
+        JSON.stringify({ requested: [1, 2], minimum, repeatedMinimum, minimumState }),
+      );
+      check(
+        "10j-overflow: all nine Theme choices remain hit-testable at the achieved minimum viewport",
+        minimumState.faults.length === 0 && boundedPanels(minimumState) &&
+          nineChoicesReachable(minimumState),
+        JSON.stringify(minimumState),
+      );
+      check(
+        "10j-overflow: the compact Theme root really overflows and scrolls to its last choice",
+        minimumState.rootOverflows && minimumState.rootScrolled &&
+          minimumState.rows.at(-1).reachable,
+        JSON.stringify(minimumState),
+      );
+      overflowShots.push(await captureScreenshot(win, `${shotPrefix}-minimum-theme`));
+      const narrowZoom = await zoomToolbar();
+      check(
+        "10j-overflow: real 100-to-400 percent document zoom leaves wide and compact toolbar geometry unchanged",
+        [wideZoom, narrowZoom].every((z) => z.before.zoom === 1 &&
+          z.zoomWitness.label === "400%" && z.zoomWitness.viewerZoom === 4 &&
+          z.after.zoom === 4 && z.after.headerZoom === 1 &&
+          z.same && boundedPanels(z.after) && nineChoicesReachable(z.after)) &&
+          win.webContents.getZoomFactor() === 1,
+        JSON.stringify({ wideZoom, narrowZoom }),
+      );
+
+      const file = await overflowProbe("file", overflowRecents);
+      overflowStates.push(file);
+      check(
+        "10j-overflow: long recent filenames and paths stay literal and ellipsized in the bounded File panel",
+        file.faults.length === 0 && boundedPanels(file) &&
+          file.recents.length === overflowRecents.length &&
+          file.recents.every((r) => r.exact && r.ellipsized),
+        JSON.stringify(file),
+      );
+      check(
+        "10j-overflow: both real scrollports move and the final recent path remains hit-testable",
+        file.rootOverflows && file.listOverflows && file.rootScrolled &&
+          file.listScrolled && file.lastRecentReachable,
+        JSON.stringify(file),
+      );
+      overflowShots.push(await captureScreenshot(win, `${shotPrefix}-minimum-file`));
+      const exclusion = await overflowProbe("exclusion");
+      check(
+        "10j-overflow: compact File and View remain mutually exclusive without closing the root",
+        exclusion.faults.length === 0 && exclusion.fileInitiallyOpen &&
+          exclusion.onlyView && exclusion.onlyFile,
+        JSON.stringify(exclusion),
+      );
+      const closed = await overflowProbe("closed");
+      check(
+        "10j-overflow: outside dismissal removes every panel and all nine hit targets (negative control)",
+        closed.closed && closed.hiddenChoices,
+        JSON.stringify(closed),
+      );
+
+      await resizeToolbar(320, 340);
+      const narrow = await overflowProbe("theme");
+      overflowStates.push(narrow);
+      await exec(`document.getElementById("viewBtn").focus()`);
+      await resizeToolbar(1000, 700);
+      const returnedWide = await overflowProbe("inspect");
+      overflowStates.push(returnedWide);
+      check(
+        "10j-overflow: compact-to-wide resize restores left-opening flyouts without losing focus or reachability",
+        narrow.compact && boundedPanels(narrow) && nineChoicesReachable(narrow) &&
+          !returnedWide.compact && returnedWide.focus === "viewBtn" &&
+          boundedPanels(returnedWide) && nineChoicesReachable(returnedWide) &&
+          returnedWide.rootOverflow === "visible" &&
+          returnedWide.panels.viewMenu.right <= returnedWide.panels.mainMenu.left + 1 &&
+          returnedWide.panels.customThemeSubmenu.right <= returnedWide.panels.viewMenu.left + 1,
+        JSON.stringify({ narrow, returnedWide }),
+      );
+      overflowShots.push(await captureScreenshot(win, `${shotPrefix}-returned-wide-theme`));
+    } finally {
+      await exec(`(() => {
+        document.body.click();
+        const saved = ${JSON.stringify(overflowSaved)};
+        if (saved.recents === null) localStorage.removeItem("recentFiles");
+        else localStorage.setItem("recentFiles", saved.recents);
+        document.getElementById("customThemeMenuItem").classList.toggle("theme-open", saved.themeOpen);
+        document.getElementById("zoomReset").click();
+        const target = Number.parseInt(saved.zoomLabel, 10);
+        const id = target >= 100 ? "zoomIn" : "zoomOut";
+        for (let i = 0; i < 60 &&
+          Number.parseInt(document.getElementById("zoomReset").textContent, 10) !== target; i++) {
+          document.getElementById(id).click();
+        }
+      })()`);
+      win.setBounds(originalBounds);
+      await resizeToolbar(...originalContentSize);
+      await exec(`(() => {
+        const saved = ${JSON.stringify(overflowSaved)};
+        for (const [id, top] of saved.scrolls) document.getElementById(id).scrollTop = top;
+        const el = document.getElementById(saved.focus);
+        if (el) el.focus(); else document.activeElement.blur();
+      })()`);
+    }
+    console.log(`  note: toolbar overflow achieved viewports: ${
+      overflowStates.map((s) => `${s.width}x${s.height}:${s.compact ? "flow" : "flyout"}`).join(", ")
+    }; screenshots awaiting review: ${overflowShots.filter(Boolean).join(", ")}`);
 
     /* ── 10k. ONE STORED-MODE RESOLVER ─────────────────────────────────────
        The legacy-'darkMode' migration rule used to be written down five times:

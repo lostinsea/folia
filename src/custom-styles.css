@@ -91,6 +91,85 @@ body.compact-header .header .btn {
   padding: 3px 6px !important;
 }
 
+/* Anchor the root to the header, whose actual height is also the percentage
+   base of its compact height budget. A button-relative budget misses the
+   header's padding and can leave the final row below the viewport. */
+#menuDropdown {
+  position: static;
+}
+
+#mainMenu {
+  right: 16px;
+  width: 180px;
+}
+
+/* Wide menus keep their native left-opening descendants unclipped. Reserve
+   the root's 180px, both 4px flyout gaps, and 32px of viewport inset before
+   sharing the remaining width between View and its Theme panel. */
+#viewMenu,
+#customThemeSubmenu {
+  max-width: min(260px, calc((100vw - 220px) / 2));
+}
+
+/* Scrolling the root is safe only after EVERY flyout has entered normal flow.
+   Otherwise overflow-y:auto also clips the left-opening positioned panels. */
+body.compact-header #mainMenu {
+  right: 8px;
+  width: min(380px, calc(100vw - 16px));
+  min-width: 0;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 100% - 12px);
+  overflow-y: auto;
+}
+
+body.compact-header #fileMenu,
+body.compact-header #viewMenu,
+body.compact-header #customThemeSubmenu {
+  position: static;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  /* At the measured 100px OS minimum, nested side chrome plus both scrollbars
+     left recent-name/path spans zero-width. Keep that space for their text. */
+  padding: 4px 0;
+  border-left: 0;
+  border-right: 0;
+}
+
+body.compact-header #customThemeMenuItem {
+  flex-wrap: wrap;
+  padding: 8px 4px;
+}
+
+body.compact-header #customThemeSubmenu {
+  flex: 0 0 100%;
+}
+
+/* The OS, not 780px, sets the smallest achievable window. Let the controls and
+   labels wrap there instead of introducing a second implicit minimum width. */
+body.compact-header #viewMenu .tools-menu-item,
+body.compact-header #fileMenu .tools-menu-item,
+body.compact-header .tools-zoom-controls {
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+body.compact-header .tools-zoom-controls {
+  max-width: 100%;
+  margin-left: 0;
+}
+
+body.compact-header .tools-menu-item,
+body.compact-header .tools-submenu-item {
+  overflow-wrap: anywhere;
+}
+
+body.compact-header #customThemeSubmenu .tools-submenu-item {
+  padding: 8px 4px;
+  gap: 2px;
+  white-space: normal;
+}
+
 /* Make buttons more compact */
 .header .btn {
   padding: 3px 8px !important; /* More compact */

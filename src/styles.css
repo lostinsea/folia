@@ -3308,6 +3308,7 @@ body.dark-mode .context-menu {
   top: calc(100% + 4px);
   right: 0;
   min-width: 180px;
+  max-width: min(380px, calc(100vw - 32px));
   background: var(--bg-primary);
   border: 1px solid var(--border-color);
   border-radius: 8px;
@@ -3449,6 +3450,7 @@ body.dark-mode .context-menu {
   right: calc(100% + 4px);
   top: -4px;
   min-width: 160px;
+  max-width: min(380px, calc(100vw - 32px));
   background: var(--bg-primary);
   border: 1px solid var(--border-color);
   border-radius: 8px;

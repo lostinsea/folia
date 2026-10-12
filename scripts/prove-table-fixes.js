@@ -131,6 +131,11 @@ const R454_POPUP_POLICY_WIRING_TAIL = Object.freeze([
 const R319_MERMAID_SCOPE_TAIL = Object.freeze([
   "Shutdown approval renderer unusable: webContents destroyed",
 ]);
+// The toolbar proof runs share the theme suite's already retained teardown
+// diagnostic. This exact tail does not certify the deferred shutdown behavior.
+const TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL = Object.freeze([
+  "Shutdown approval renderer unusable: webContents destroyed",
+]);
 const VIRTUAL_SUITES = Object.freeze({
   "test:sec08-dialog-extra-evidence": Object.freeze({
     npmScript: "test:tabs",
@@ -18452,6 +18457,113 @@ const REVERTS = [
           requireExactFailures: true,
           expectedFailureCount: 1,
         },
+        {
+          id: "R741",
+          what: "let long recent paths expand both wide menu classes beyond the viewport",
+          file: CSS,
+          from: "  min-width: 180px;\n  max-width: min(380px, calc(100vw - 32px));\n",
+          to: "  min-width: 180px;\n",
+          also: {
+            from: "  min-width: 160px;\n  max-width: min(380px, calc(100vw - 32px));\n",
+            to: "  min-width: 160px;\n",
+          },
+          suite: "test:theme",
+          expect: [
+            /^10j-overflow: long recent paths cannot expand the wide File flyout beyond the viewport$/,
+          ],
+          mustPass: [
+            /^10j: no scheme row is reachable while the menu is closed \(positive control\)$/,
+            /^10j-overflow: outside dismissal removes every panel and all nine hit targets \(negative control\)$/,
+            /^10m: every baseline declaration that kept its selector still paints the baseline value$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R742",
+          what: "remove the compact in-flow menu layout and its bounded root scrolling",
+          file: CUSTOM_CSS,
+          from: [
+            "body.compact-header #mainMenu {",
+            "  right: 8px;",
+            "  width: min(380px, calc(100vw - 16px));",
+            "  min-width: 0;",
+            "  max-width: calc(100vw - 16px);",
+            "  max-height: calc(100vh - 100% - 12px);",
+            "  overflow-y: auto;",
+            "}",
+            "",
+            "body.compact-header #fileMenu,",
+            "body.compact-header #viewMenu,",
+            "body.compact-header #customThemeSubmenu {",
+            "  position: static;",
+            "  width: 100%;",
+            "  min-width: 0;",
+            "  max-width: 100%;",
+            "  /* At the measured 100px OS minimum, nested side chrome plus both scrollbars",
+            "     left recent-name/path spans zero-width. Keep that space for their text. */",
+            "  padding: 4px 0;",
+            "  border-left: 0;",
+            "  border-right: 0;",
+            "}",
+            "",
+            "body.compact-header #customThemeMenuItem {",
+            "  flex-wrap: wrap;",
+            "  padding: 8px 4px;",
+            "}",
+            "",
+            "body.compact-header #customThemeSubmenu {",
+            "  flex: 0 0 100%;",
+            "}",
+            "",
+            "/* The OS, not 780px, sets the smallest achievable window. Let the controls and",
+            "   labels wrap there instead of introducing a second implicit minimum width. */",
+            "body.compact-header #viewMenu .tools-menu-item,",
+            "body.compact-header #fileMenu .tools-menu-item,",
+            "body.compact-header .tools-zoom-controls {",
+            "  flex-wrap: wrap;",
+            "  min-width: 0;",
+            "}",
+            "",
+            "body.compact-header .tools-zoom-controls {",
+            "  max-width: 100%;",
+            "  margin-left: 0;",
+            "}",
+            "",
+            "body.compact-header .tools-menu-item,",
+            "body.compact-header .tools-submenu-item {",
+            "  overflow-wrap: anywhere;",
+            "}",
+            "",
+            "body.compact-header #customThemeSubmenu .tools-submenu-item {",
+            "  padding: 8px 4px;",
+            "  gap: 2px;",
+            "  white-space: normal;",
+            "}",
+            "",
+            "",
+          ].join("\n"),
+          to: "",
+          suite: "test:theme",
+          expect: [
+            /^10j-overflow: all nine Theme choices remain hit-testable at the achieved minimum viewport$/,
+            /^10j-overflow: the compact Theme root really overflows and scrolls to its last choice$/,
+            /^10j-overflow: real 100-to-400 percent document zoom leaves wide and compact toolbar geometry unchanged$/,
+            /^10j-overflow: long recent filenames and paths stay literal and ellipsized in the bounded File panel$/,
+            /^10j-overflow: both real scrollports move and the final recent path remains hit-testable$/,
+            /^10j-overflow: compact File and View remain mutually exclusive without closing the root$/,
+            /^10j-overflow: compact-to-wide resize restores left-opening flyouts without losing focus or reachability$/,
+          ],
+          mustPass: [
+            /^10j: no scheme row is reachable while the menu is closed \(positive control\)$/,
+            /^10j-overflow: outside dismissal removes every panel and all nine hit targets \(negative control\)$/,
+            /^10m: every baseline declaration that kept its selector still paints the baseline value$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 7,
+        },
       ];
 
 // These are release exceptions, not passing or withdrawn proofs. An explicit
@@ -18739,7 +18851,9 @@ function suiteTranscriptHealth(
       requirePassingFooter &&
       footer.failures === 0 &&
       isExactShutdownTail(trailing, CLEAN_PASSING_SHUTDOWN_TAIL);
-    const requiresStrictExactTail = exactShutdownTail === R319_MERMAID_SCOPE_TAIL;
+    const requiresStrictExactTail =
+      exactShutdownTail === R319_MERMAID_SCOPE_TAIL ||
+      exactShutdownTail === TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL;
     const tailAccepted = requiresStrictExactTail
       ? isExactShutdownTail(trailing, exactShutdownTail)
       : isLegitimateShutdownTeardown(trailing) ||
@@ -19213,6 +19327,9 @@ function exactShutdownTailForMutation(r) {
   // reordered or added line, and every fatal marker remain health failures.
   if (r.id === "R454") return R454_POPUP_POLICY_WIRING_TAIL;
   if (r.id === "R319") return R319_MERMAID_SCOPE_TAIL;
+  if ((r.id === "R741" || r.id === "R742") && r.suite === "test:theme") {
+    return TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL;
+  }
   return r.id === "R660" &&
     r.proofOnly?.exactShutdownTail === R660_PROOF_ONLY_SHUTDOWN_TAIL
     ? R660_PROOF_ONLY_SHUTDOWN_TAIL
@@ -19494,7 +19611,23 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740";
+      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742";
+  const toolbarAllowanceIsRecordScoped =
+    REVERTS.filter((r) =>
+      exactShutdownTailForMutation(r) === TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL,
+    ).map((r) => r.id).join(",") === "R741,R742" &&
+    exactShutdownTailForMutation({ id: "R741", suite: "test:tabs" }) === undefined;
+  const toolbarTailHealth = (out) => suiteTranscriptHealth(out, {
+    requirePassingFooter: false,
+    exactShutdownTail: TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL,
+  }).healthy;
+  const toolbarTailControls =
+    toolbarTailHealth(r319MermaidScopeTail) &&
+    !toolbarTailHealth(r319TailWithArbitraryLine) &&
+    !toolbarTailHealth(r319TailWithFatalLine) &&
+    !toolbarTailHealth(r319TailReordered) &&
+    !toolbarTailHealth(r319TailDuplicated) &&
+    !toolbarTailHealth(r319TailWithGenericTeardown);
   // Route the fixture through the SAME reduction and verdict helpers the
   // mutation loop uses (assertionNameOf / unlistedFailures / expect-missing /
   // requiredPassingAssertionProblems / exact-failure + count guards).
@@ -19769,6 +19902,8 @@ function proveCompanionTranscriptRoles() {
     !r319CleanTailHealth.healthy ||
     !r319RecordIsPinned ||
     !r319AllowanceIsRecordScoped ||
+    !toolbarAllowanceIsRecordScoped ||
+    !toolbarTailControls ||
     r319FailNames.length !== 2 ||
     r319Missing.length !== 0 ||
     r319Collateral.length !== 0 ||

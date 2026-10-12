@@ -4403,7 +4403,7 @@ profile at 256 KB / 512 KB / 1 MB, reported with the harness's own numbers; the
 class census and `.table-breakout` counts unchanged; `bench/BASELINE.md` updated
 with the method as well as the result.
 
-### `upstream-toolbar-overflow` — menus must not escape a narrow window · PENDING
+### `upstream-toolbar-overflow` — menus must not escape a narrow window · REVIEWED / PROVEN; integration pending
 
 Menus extend outside the window at narrow widths. The fix must handle overflow
 **without clipping nested flyouts** — the naive `overflow: hidden` fix trades one
@@ -4412,6 +4412,27 @@ visible defect for a worse, less obvious one.
 **Completion criteria.** At the narrowest supported window width, no menu escapes
 the window and every nested flyout is fully reachable; verified by *looking* at
 the screenshots, not by capturing them.
+
+**2026-10-12 isolated implementation closeout.** Both wide menu classes have a
+viewport cap without changing their frozen minimum-width declarations or
+clipping nested flyouts. Compact File/View/Theme panels flow inside one bounded,
+scrollable root; labels wrap at the actual OS minimum instead of adding an
+implicit minimum window size. The runtime fixture measures settled native and
+renderer dimensions separately: DPR 1.25 produced 701 versus 702 height, not a
+missing compact-state update. No timeout increase or forced body class was used.
+Measured boundary is 780 wide / 778 compact and minimum viewport 100 by 342.
+Final theme run is 374/374 (`files/toolbar-compact-runtime-r5-20261012.log`).
+Wide File, minimum Theme/File and returned-wide Theme screenshots were opened
+and inspected by both owner and integration writer. Fresh Sol/Luna implementation
+reviews and the parent proof-integration reviews have no remaining blockers.
+R741 and R742 are exact PROVEN in
+`toolbar-compact-exact-proofs-r2-20261012.log` and
+`toolbar-compact-exact-proofs-r3-20261012.log`; reverted sources were restored.
+Their only accepted post-footer line is the existing theme-suite shutdown
+diagnostic, narrowly scoped to those mutants with bad-tail controls. It does not
+clear the user-deferred hosted shutdown issue. Failed earlier runs remain intact.
+This completes the toolbar source/proof dependency for upstream classification
+in this feature branch; it is not a claim of main integration or publication.
 
 ### `perf-node-count` — fewer Prism token spans on very large code blocks · PENDING · GATE
 

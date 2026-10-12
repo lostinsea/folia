@@ -138,6 +138,16 @@ synchronous and makes no snapshot IPC. These are consumer migrations, not a
 claim that main-window Node access, provisional registration or restore
 authority are already removed.
 
+**Narrow-window menus (2026-10-12, unintegrated).** The upstream viewport-cap
+fix is adapted without its nested-flyout clipping. Wide menus preserve their
+original minimum widths and cap content expansion; compact menus put nested
+File/View/Theme panels in normal flow under a bounded scrolling root.
+The supported lower bound is the OS-achievable window, not the compact-header
+threshold. Labels and controls wrap at that bound; returning wide restores
+left-opening flyouts. Document zoom does not resize the toolbar. Preserve the
+wide frozen declarations as well as compact reachability when picking later
+upstream menu changes; R741/R742 protect the two layouts.
+
 **"File Updated" prompt behaviour.** The bottom-left toast
 (`#fileUpdateToast`) is only appropriate for the tab the user is actually
 looking at, because that is the only one we deliberately do *not* reload
