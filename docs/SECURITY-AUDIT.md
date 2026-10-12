@@ -491,6 +491,20 @@ retained as `owned-bridge-focused-r3-20261012.log`,
 `owned-bridge-packaging-r2-20261012.log` and
 `owned-bridge-exact-proofs-r2-20261012.log` in the continuation evidence.
 
+**Second consumer, one-use dialog extras.** `folia.readDialogExtra` accepts
+only the main-issued grant/session/generation envelope, not a caller-selected
+path. Its response shares the owned-read snapshot validation and adds path
+validation. Main consumes the grant before I/O, refuses replay/foreign/stale
+batches and rechecks the batch after reading; authorized I/O errors still
+reject and the existing bounded notification still identifies the file.
+The focused actual multi-select/recovery/stale-read journey passes, including
+malformed boundary controls and genuine isolated publication/empty-batch
+refusal. The latter does not establish rejection of a valid live grant from
+a different sender; that coverage remains part of full isolation acceptance.
+R710-R712, shared-guard R736 and R738-R740 are exact PROVEN on this slice;
+evidence is `dialog-bridge-exact-proofs-r3-20261012.log`. This migration adds
+no content-read IPC and does not establish latency or full isolation.
+
 The **production main window still has Node enabled and isolation disabled**.
 Renderer registration remains provisional authority; remaining callers,
 main-owned authority and the test harness must migrate before the final

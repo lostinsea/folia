@@ -97,6 +97,26 @@ final-source representative performance measurements are still pending.
 Neither functional passes nor the skipped historical comparison certify final
 isolation performance. Existing numerical contracts are unchanged.
 
+**Second production bridge consumer — IMPLEMENTED / PROVEN.** One-use
+main-issued multi-select extra-file grants now cross fixed `readDialogExtra`;
+main's grant/session/sender and post-read checks remain authoritative.
+The original batch/replay/stale-read scenarios are reused in a bounded focused
+route, with malformed-envelope/response, fixed-field and subsequent ordinary
+open controls. Baseline evidence is `dialog-bridge-focused-r1-20261012.log`
+and the final split-stream run; R710-R712, R736 and R738-R740 are exact PROVEN
+in `dialog-bridge-exact-proofs-r3-20261012.log`, with source restored.
+Source packaging is 361/0. Final unmutated focused baseline is 59/59
+(`dialog-bridge-focused-final-20261012.log`). Initial review disagreement:
+Sol caught a virtual suite property typo that Luna missed; the writer corrected
+it. Luna subsequently identified that the isolated probe's missing-batch
+refusal did not prove live-grant sender isolation; that evidence claim is
+corrected, and live-grant cross-sender coverage remains an isolation gate.
+The first
+mutation attempt exposed the already deferred lone shutdown diagnostic after
+an empty-window teardown. The focused route now also verifies an ordinary
+authenticated open after the refusals; no transcript rule was relaxed for it.
+Main-window security flags and performance qualification are still pending.
+
 | Status | Meaning |
 |---|---|
 | **ACTIVE** | Being implemented right now. **At most one ACTIVE item per delivery stream** (see *Parallel delivery without reducing quality*); the number of ACTIVE items equals the number of live streams. Today that is one. |
@@ -141,7 +161,8 @@ blocked on the five open `w2-*` items **and on `fullrun`, `shots` and
 order*. `w2-f03` and `w2-kbscroll` are `w2-*` items that are deliberately **not**
 release blockers — do not infer the dependency from the ID prefix.
 
-Active integration work: **`w2-sec08`** and the concrete hosted-CI failures.
+Active integration work: **`w2-sec08`**; the identified Save/shutdown/ordinary
+hosted-CI campaigns are deferred by the explicit priority decision above.
 `w2-privacy` implementation/proof is closed; final integrated release checks
 remain pending. SEC-08 is incomplete and has no new performance certificate.
 

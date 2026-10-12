@@ -627,6 +627,15 @@ async function main() {
         'tabIpc.invoke("read-owned-tab-disk-snapshot"',
       ),
   );
+  check(
+    "dialog extras use the grant-only production bridge instead of renderer raw IPC",
+    read("src/custom-tabs.js").includes(
+      "const snapshot = await window.folia.readDialogExtra({",
+    ) &&
+      !read("src/custom-tabs.js").includes(
+        'tabIpc.invoke("read-dialog-extra"',
+      ),
+  );
 
   // 2. Scripts and stylesheets loaded by the renderer document.
   const indexHtml = read("src/index.html");

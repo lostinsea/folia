@@ -3958,7 +3958,7 @@
           try {
             const extraReservation = reserveDocumentIdentity();
             if (!extraReservation) continue;
-            const snapshot = await tabIpc.invoke("read-dialog-extra", {
+            const snapshot = await window.folia.readDialogExtra({
               grant: extraReadGrants[index],
               pageSession: window.getReloadRequestSession(),
               rendererGeneration: approvalRendererGeneration,

@@ -132,6 +132,10 @@ const R319_MERMAID_SCOPE_TAIL = Object.freeze([
   "Shutdown approval renderer unusable: webContents destroyed",
 ]);
 const VIRTUAL_SUITES = Object.freeze({
+  "test:sec08-dialog-extra-evidence": Object.freeze({
+    npmScript: "test:tabs",
+    environment: Object.freeze({ SEC08_DIALOG_EXTRA_FOCUSED_HARNESS: "1" }),
+  }),
   "test:sec08-owned-read-evidence": Object.freeze({
     npmScript: "test:tabs",
     environment: Object.freeze({ SEC08_OWNED_READ_FOCUSED_HARNESS: "1" }),
@@ -17805,7 +17809,7 @@ const REVERTS = [
           file: MAIN,
           from: "  batch.grants.delete(data.grant);\n",
           to: "  // grant remains reusable\n",
-          suite: "test:tabs",
+          suite: "test:sec08-dialog-extra-evidence",
           expect: [
             /^a dialog read grant cannot be replayed$/,
           ],
@@ -17824,7 +17828,7 @@ const REVERTS = [
           what: "perform a renderer disk read before consuming a dialog extra grant",
           file: TABS,
           from:
-            '            const snapshot = await tabIpc.invoke("read-dialog-extra", {\n' +
+            "            const snapshot = await window.folia.readDialogExtra({\n" +
             "              grant: extraReadGrants[index],\n" +
             "              pageSession: window.getReloadRequestSession(),\n" +
             "              rendererGeneration: approvalRendererGeneration,\n" +
@@ -17835,12 +17839,12 @@ const REVERTS = [
             "              ...readStableDiskSnapshot(extraPath),\n" +
             "            };\n" +
             "            void directSnapshot;\n" +
-            '            const snapshot = await tabIpc.invoke("read-dialog-extra", {\n' +
+            "            const snapshot = await window.folia.readDialogExtra({\n" +
             "              grant: extraReadGrants[index],\n" +
             "              pageSession: window.getReloadRequestSession(),\n" +
             "              rendererGeneration: approvalRendererGeneration,\n" +
             "            });",
-          suite: "test:tabs",
+          suite: "test:sec08-dialog-extra-evidence",
           expect: [
             /^a multi-select reads its extra files in main, not in the renderer$/,
           ],
@@ -17863,7 +17867,7 @@ const REVERTS = [
             '        reject(new Error("Dialog extra read refused: batch no longer active"));\n' +
             "      } else if (error) {",
           to: "      if (false) {\n      } else if (error) {",
-          suite: "test:tabs",
+          suite: "test:sec08-dialog-extra-evidence",
           expect: [
             /^an in-flight dialog extra rechecks its batch after main reads it$/,
           ],
@@ -18359,8 +18363,8 @@ const REVERTS = [
           id: "R736",
           what: "return a non-string document body from the owned-read production bridge",
           file: path.join(SRC, "main-preload.js"),
-          from: '    if (!snapshot || typeof snapshot.content !== "string" ||',
-          to: "    if (!snapshot ||",
+          from: '  if (!snapshot || typeof snapshot.content !== "string" ||',
+          to: "  if (!snapshot ||",
           suite: "test:sec08-owned-read-evidence",
           expect: [
             /^SEC-08 owned bridge rejects undefined and malformed main responses instead of returning success-shaped data$/,
@@ -18387,6 +18391,62 @@ const REVERTS = [
           mustPass: [
             /^main windows always load the packaged production bridge, including marked tests$/,
             /^the test-only preload is gated to unpackaged marked main launches$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R738",
+          what: "forward an empty dialog extra grant through the production bridge",
+          file: path.join(SRC, "main-preload.js"),
+          from: '    if (typeof payload.grant !== "string" || !payload.grant ||',
+          to: '    if (typeof payload.grant !== "string" ||',
+          suite: "test:sec08-dialog-extra-evidence",
+          expect: [
+            /^SEC-08 dialog bridge rejects malformed envelopes before main IPC$/,
+          ],
+          mustPass: [
+            /^SEC-08 dialog bridge forwards only its grant envelope and preserves the valid snapshot$/,
+            /^SEC-08 dialog bridge rejects malformed snapshots without hiding authorized read failures$/,
+            /^a dialog read grant cannot be replayed$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R739",
+          what: "accept a NUL-containing dialog extra path from the production bridge",
+          file: path.join(SRC, "main-preload.js"),
+          from: '        !snapshot.path || snapshot.path.includes("\\0")) {',
+          to: "        !snapshot.path) {",
+          suite: "test:sec08-dialog-extra-evidence",
+          expect: [
+            /^SEC-08 dialog bridge rejects malformed snapshots without hiding authorized read failures$/,
+          ],
+          mustPass: [
+            /^SEC-08 dialog bridge rejects malformed envelopes before main IPC$/,
+            /^SEC-08 dialog bridge forwards only its grant envelope and preserves the valid snapshot$/,
+            /^a multi-select opens its extras in the order they were selected$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R740",
+          what: "bypass the production bridge when reading main-issued dialog extras",
+          file: TABS,
+          from: "            const snapshot = await window.folia.readDialogExtra({",
+          to: '            const snapshot = await tabIpc.invoke("read-dialog-extra", {',
+          suite: "test:packaging",
+          expect: [
+            /^dialog extras use the grant-only production bridge instead of renderer raw IPC$/,
+          ],
+          mustPass: [
+            /^changed clean-tab reads use the fixed production bridge instead of renderer raw IPC$/,
+            /^main windows always load the packaged production bridge, including marked tests$/,
           ],
           requireMustPassAssertions: true,
           requireExactFailures: true,
@@ -19434,7 +19494,7 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737";
+      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740";
   // Route the fixture through the SAME reduction and verdict helpers the
   // mutation loop uses (assertionNameOf / unlistedFailures / expect-missing /
   // requiredPassingAssertionProblems / exact-failure + count guards).

@@ -1,5 +1,27 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
+function copyDiskSnapshot(snapshot, kind) {
+  if (!snapshot || typeof snapshot.content !== "string" ||
+      !Number.isFinite(snapshot.modifiedTime) || !snapshot.diskVersion) {
+    throw new TypeError(`Invalid ${kind} response`);
+  }
+  const diskVersion = {
+    dev: snapshot.diskVersion.dev,
+    ino: snapshot.diskVersion.ino,
+    size: snapshot.diskVersion.size,
+    mtimeMs: snapshot.diskVersion.mtimeMs,
+    ctimeMs: snapshot.diskVersion.ctimeMs,
+  };
+  if (!Object.values(diskVersion).every(Number.isFinite)) {
+    throw new TypeError(`Invalid ${kind} response`);
+  }
+  return Object.freeze({
+    content: snapshot.content,
+    modifiedTime: snapshot.modifiedTime,
+    diskVersion: Object.freeze(diskVersion),
+  });
+}
+
 const api = Object.freeze({
   async readOwnedTabDiskSnapshot(request) {
     if (!request || typeof request !== "object" || Array.isArray(request)) {
@@ -41,24 +63,33 @@ const api = Object.freeze({
       "read-owned-tab-disk-snapshot", payload,
     );
     if (snapshot === null) return null;
-    if (!snapshot || typeof snapshot.content !== "string" ||
-        !Number.isFinite(snapshot.modifiedTime) || !snapshot.diskVersion) {
-      throw new TypeError("Invalid owned tab disk snapshot response");
+    return copyDiskSnapshot(snapshot, "owned tab disk snapshot");
+  },
+  async readDialogExtra(request) {
+    if (!request || typeof request !== "object" || Array.isArray(request)) {
+      throw new TypeError("Invalid dialog extra request");
     }
-    const diskVersion = {
-      dev: snapshot.diskVersion.dev,
-      ino: snapshot.diskVersion.ino,
-      size: snapshot.diskVersion.size,
-      mtimeMs: snapshot.diskVersion.mtimeMs,
-      ctimeMs: snapshot.diskVersion.ctimeMs,
+    const payload = {
+      grant: request.grant,
+      pageSession: request.pageSession,
+      rendererGeneration: request.rendererGeneration,
     };
-    if (!Object.values(diskVersion).every(Number.isFinite)) {
-      throw new TypeError("Invalid owned tab disk snapshot response");
+    if (typeof payload.grant !== "string" || !payload.grant ||
+        payload.grant.length > 128 || payload.grant.includes("\0") ||
+        typeof payload.pageSession !== "string" || !payload.pageSession ||
+        payload.pageSession.length > 128 ||
+        !Number.isSafeInteger(payload.rendererGeneration) ||
+        payload.rendererGeneration <= 0) {
+      throw new TypeError("Invalid dialog extra request");
+    }
+    const snapshot = await ipcRenderer.invoke("read-dialog-extra", payload);
+    if (!snapshot || typeof snapshot.path !== "string" ||
+        !snapshot.path || snapshot.path.includes("\0")) {
+      throw new TypeError("Invalid dialog extra snapshot response");
     }
     return Object.freeze({
-      content: snapshot.content,
-      modifiedTime: snapshot.modifiedTime,
-      diskVersion: Object.freeze(diskVersion),
+      path: snapshot.path,
+      ...copyDiskSnapshot(snapshot, "dialog extra snapshot"),
     });
   },
 });

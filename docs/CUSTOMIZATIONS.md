@@ -127,6 +127,17 @@ the controlled move-aside/install fixture exercises that boundary without
 claiming OS-level atomicity. R714-R718 individually protect this slice;
 broader Wave 2 and release gates remain separate.
 
+**Production preload consumers (2026-10-12, unintegrated).** Main windows
+always load `main-preload.js`; marked unpackaged test preloads augment rather
+than replace it. Clean-tab snapshots and one-use multi-select extras use fixed,
+validated methods. Dialog extras carry an opaque main-issued grant, never an
+arbitrary read path; main retains sender/session/batch authorization and its
+post-read recheck. Response copying validates the existing version tuple
+without changing its comparison policy. The unchanged tab path remains
+synchronous and makes no snapshot IPC. These are consumer migrations, not a
+claim that main-window Node access, provisional registration or restore
+authority are already removed.
+
 **"File Updated" prompt behaviour.** The bottom-left toast
 (`#fileUpdateToast`) is only appropriate for the tab the user is actually
 looking at, because that is the only one we deliberately do *not* reload
