@@ -14851,13 +14851,13 @@ const REVERTS = [
   },
   {
     id: "R572",
-    suite: "test:tabs",
+    suite: "test:sec08-owned-read-evidence",
     what: "recompute a duplicate shutdown request instead of replaying its first answer",
     file: TABS,
     from:
       "    const cached = shutdownResponses.get(id);\n" +
       "    if (cached) {\n" +
-      '      tabIpc.send("quit-approval-response", cached);\n' +
+      "      window.folia.respondToQuitApproval(cached);\n" +
       "      return;\n" +
       "    }",
     to: "    const cached = null; /* reverted for proof: duplicate answer is recomputed */",
@@ -14866,7 +14866,9 @@ const REVERTS = [
     ],
     mustPass: [
       /^the renderer answers a fresh shutdown request and ignores a stale one$/,
+      /^the same-id response cache starts from the selected clean physical owner$/,
     ],
+    requireMustPassAssertions: true, requireExactFailures: true,
   },
   {
     id: "R573",
@@ -19848,6 +19850,124 @@ const REVERTS = [
           mustPass: [
             /^SEC-08 renderer uses all fixed UI request and response ports without raw channel access$/,
             /^every Electron test suite establishes an isolated userData profile$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R812",
+          what: "erase malformed or absent shutdown refusal identities at the fixed port",
+          file: path.join(SRC, "main-preload.js"),
+          from: "  return projectDocumentEventRecord(request, fields);",
+          to: "  const copied = projectDocumentEventRecord(request, fields);\n" +
+            "  if (!Number.isSafeInteger(copied.id)) delete copied.id;\n" +
+            "  return copied;",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 fixed shutdown and diagnostic requests preserve synchronous channels and refusal correlations$/,
+          ],
+          mustPass: [
+            /^SEC-08 control queries use existing invokes and validate replies without swallowing query failures$/,
+            /^the renderer replays its cached response for a duplicate same-id request$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R813",
+          what: "turn an unreadable dirty-file snapshot into a clean empty shutdown response",
+          file: path.join(SRC, "main-preload.js"),
+          from: 'copyControlMessage(request, ["id", "gen", "dirtyFiles", "revision", "pendingSaves"])',
+          to: 'copyControlMessage({ ...request, dirtyFiles: request?.dirtyFiles ?? [] }, ["id", "gen", "dirtyFiles", "revision", "pendingSaves"])',
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 fixed shutdown and diagnostic requests preserve synchronous channels and refusal correlations$/,
+            /^SEC-08 control ports reject malformed envelopes before IPC and surface same-stack send failures$/,
+          ],
+          mustPass: [
+            /^SEC-08 control queries use existing invokes and validate replies without swallowing query failures$/,
+            /^the renderer replays its cached response for a duplicate same-id request$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R814",
+          what: "make a shutdown commit response asynchronous and hide same-stack transport refusal",
+          file: path.join(SRC, "main-preload.js"),
+          from: "  respondToQuitCommit(request) {",
+          to: "  async respondToQuitCommit(request) {",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 fixed shutdown and diagnostic requests preserve synchronous channels and refusal correlations$/,
+            /^SEC-08 control ports reject malformed envelopes before IPC and surface same-stack send failures$/,
+          ],
+          mustPass: [
+            /^SEC-08 control queries use existing invokes and validate replies without swallowing query failures$/,
+            /^the renderer replays its cached response for a duplicate same-id request$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R815",
+          what: "drop nested deletion ownership from the fixed notice projection",
+          file: path.join(SRC, "main-preload.js"),
+          from: '  delivery: ["eventId", "pageSession", "rendererGeneration",\n' +
+            '    "selectionGeneration", "watcherGeneration", "attempt", "owner"],',
+          to: '  delivery: ["eventId", "pageSession", "rendererGeneration",\n' +
+            '    "selectionGeneration", "watcherGeneration", "attempt"],',
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 control projection retains malformed correlations and complete nested deletion ownership$/,
+          ],
+          mustPass: [
+            /^SEC-08 isolated control subscriptions deliver exact payload-only channels and native open tickets$/,
+            /^SEC-08 ordinary reload remains usable after a refused transport dispatch$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R816",
+          what: "accept nonboolean diagnostic opt-in query results",
+          file: path.join(SRC, "main-preload.js"),
+          from: '    if (typeof enabled !== "boolean") throw new TypeError("Invalid diagnostics response");',
+          to: "",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 control queries use existing invokes and validate replies without swallowing query failures$/,
+          ],
+          mustPass: [
+            /^SEC-08 fixed shutdown and diagnostic requests preserve synchronous channels and refusal correlations$/,
+            /^the renderer replays its cached response for a duplicate same-id request$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R817",
+          what: "restore renderer Electron access for deletion acknowledgement",
+          file: RENDERER,
+          from: "  window.folia.acknowledgeFileDeletion({",
+          to: "  ipcRenderer.send('file-deleted-ack', {",
+          suite: "test:packaging",
+          expect: [
+            /^SEC-08 renderer uses every fixed control and notice port without raw channels$/,
+          ],
+          mustPass: [
+            /^SEC-08 custom-tabs uses every fixed control and notice port without raw channels$/,
+            /^SEC-08 production shutdown subscribers precede the single readiness query$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R818",
+          what: "convert a scalar Main error notice into an object at the browser boundary",
+          file: path.join(SRC, "main-preload.js"),
+          from: '    return subscribeDocumentEvent("show-error", callback);',
+          to: '    return subscribeDocumentEvent("show-error", data => callback({ message: data }));',
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 isolated control subscriptions deliver exact payload-only channels and native open tickets$/,
+          ],
+          mustPass: [
+            /^SEC-08 control projection retains malformed correlations and complete nested deletion ownership$/,
+            /^SEC-08 control unsubscribe removes only its own listener without suppressing another subscriber$/,
           ],
           requireMustPassAssertions: true, requireExactFailures: true,
         },

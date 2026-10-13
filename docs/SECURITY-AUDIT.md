@@ -579,6 +579,22 @@ preserving all diagnostics and strict transcript rules; the deferred product
 shutdown campaign remains deferred. Main authority, remaining privileged
 consumers, production flags and actual responsiveness still need closure.
 
+**Shutdown, notice and diagnostic ports (2026-10-13).** Actual shutdown
+subscribers/responses, deletion acknowledgement/notices, native-open tickets,
+scalar errors, update notices and newline diagnostics now cross fixed preload
+methods. Main correlation/sender checks are unchanged; the port preserves
+malformed refusal identities, unreadable versus empty dirty snapshots and
+complete nested deletion ownership. Startup keeps its single generation query
+and installs subscribers before readiness. No filesystem read, document scan
+or extra authorization round trip is added. The original cached-response
+scenario is shared by the focused and full harness; the F22 observer now
+recognizes the unique production preload wrapper instead of requiring the
+removed raw renderer callback. Independent Sol/Luna reviews converge after a
+test-only rejected-Promise correction, confirmed by the exact mutation controls.
+Precise passing and retained failed evidence is in `docs/PLANNED-WORK.md`.
+Clipboard/folder/path consumers, provisional authority and production flags
+remain open; these results do not establish measured responsiveness.
+
 The **production main window still has Node enabled and isolation disabled**.
 Preparation, commit, completion and abandonment of disk-adoption capabilities
 now use fixed copied/validated preload methods; main's actual authority,

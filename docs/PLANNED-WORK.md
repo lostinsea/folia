@@ -459,17 +459,41 @@ its waiter and reports directly without synthesizing a shared PDF result.
 Clipboard/path/physical-metadata/quit consumers, final Main admission gates and
 production flags remain subsequent work; no responsiveness conclusion follows.
 
-**Remaining shutdown/notice ports — design accepted, implementation NEXT.**
-Independent Sol/Luna feedback agrees on fixed payload-only subscriptions and
-synchronous copied responses, retaining Main's validators and the existing
-single generation invoke. Malformed commit/verify and deletion-refusal
-correlations must survive projection rather than become throwing callbacks.
-Keep all subscribers before readiness, including the actual
-`external-file-open-request` ticket channel; preserve freeze/replay, durable
-layout settlement, diagnostics coalescing and scalar error messages.
+**Remaining shutdown/notice ports — IMPLEMENTED / PROVEN, unintegrated.**
+Actual shutdown request/commit/verify/thaw consumers, their synchronous replies,
+deletion acknowledgement/notices, native-open tickets, error/update notices and
+newline diagnostics now use fixed production methods. Main's validators and
+existing single startup generation invoke remain unchanged. Malformed/absent
+refusal identities, null versus empty dirty-file snapshots, nested deletion
+ownership, subscriber-before-readiness order and scalar errors are preserved.
 No new filesystem work, document-string scan or authorization handshake is
-planned. Clipboard/folder/history/path authority and final production flags
-remain subsequent, with actual responsiveness still unqualified.
+introduced. Actual startup readiness and the extracted original same-id cache
+scenario run in the final owned focused route, measured 76/76
+(`remaining-control-owned-r8.log`); source packaging is 376/0
+(`remaining-control-packaging-r2.log`). The corrected actual F22 route and the
+pre-unit product archive both pass 75/75 (`remaining-control-f22-r3.log`,
+`remaining-control-f22-pre-unit-r2.log`). This is a functional comparison,
+not responsiveness evidence. Earlier 72/75 evidence remains red: two mixed-
+newline Save timeouts are retained without an asserted cause, and stale
+raw-listener introspection was corrected to select the unique preload wrapper.
+The first archive attempt lacked generated vendor runtime and failed before
+scenario setup; it is not comparison evidence.
+Fresh independent Sol/Luna implementation feedback converges. Sol found a
+test-created unhandled rejection in the async-response mutant; Luna initially
+did not. The exact campaign confirmed the collateral failure. Its probe now
+consumes the rejected Promise while still requiring a same-stack refusal,
+without muting the sentinel or widening expected failures; both reviewers
+accept the correction. R572 and R812-R818 are individually exact PROVEN in the grouped final campaign
+(`remaining-control-exact-proofs-r3.log`), with source hashes restored exactly.
+The later positive r6 run remains red (24/26): its tab switch timed out and
+fixture cleanup reported EPERM. A bounded diagnostic run passed 76/76
+(`remaining-control-owned-r7.log`); no cause or product fix is asserted for the
+earlier timeout. Switch diagnostics now observe the actual Promise without
+silencing a rejection. Both reviewers accept those diagnostics and the factual
+evidence disposition; there is no outstanding review disagreement.
+Clipboard and large-render confirmation are the next bounded browser
+transition; folder/history/physical metadata, final authority gates and
+production flags remain subsequent, with responsiveness still unqualified.
 
 **Browser primitive transition — IMPLEMENTED / PROVEN, unintegrated.** Removed
 renderer Node crypto and Buffer dependencies using native Web Crypto/TextEncoder for the existing

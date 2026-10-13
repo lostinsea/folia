@@ -8496,7 +8496,7 @@ function acknowledgeDeletionDelivery(delivery, consumed, why) {
           Number.isSafeInteger(delivery.owner.rendererGeneration)
         ? delivery.owner.rendererGeneration
         : currentDocumentRendererGeneration();
-  ipcRenderer.send('file-deleted-ack', {
+  window.folia.acknowledgeFileDeletion({
     eventId,
     consumed: consumed === true,
     why,
@@ -8821,7 +8821,7 @@ function classifyDeletionDelivery(data) {
   return null;
 }
 
-ipcRenderer.on('file-deleted', (event, data) => {
+window.folia.onFileDeleted(data => {
   const delivery = data && data.delivery;
   const tabs = window.CustomTabs;
   const currentRendererGeneration = currentDocumentRendererGeneration();
@@ -8892,7 +8892,7 @@ ipcRenderer.on('file-deleted', (event, data) => {
 });
 
 // Handle file not found (from recent files or links)
-ipcRenderer.on('file-not-found', (event, data) => {
+window.folia.onFileNotFound(data => {
   console.log('File not found:', data.path);
   showNotification(i18n('notif.fileNotFound') + path.basename(data.path), 4000);
 
@@ -9038,7 +9038,7 @@ documentEvents.on('file-reload-result', async (event, data) => {
 });
 
 // Handle external file open request (from double-clicking a file when app is already open)
-ipcRenderer.on('external-file-open-request', (event, data) => {
+window.folia.onExternalFileOpenRequest(data => {
   if (!mayMutateRendererDocument('ipc-external-file-open')) {
     if (data.documentOpenTicket) {
       window.folia.cancelDocumentOpenTicket({ ticket: data.documentOpenTicket });
@@ -9076,7 +9076,7 @@ ipcRenderer.on('external-file-open-request', (event, data) => {
 });
 
 // Handle error messages from main process
-ipcRenderer.on('show-error', (event, message) => {
+window.folia.onError(message => {
   showNotification(message, 5000);
 });
 
@@ -9112,7 +9112,7 @@ function hideUpdateToast() {
 // formatBytes is imported from utils.js
 
 // Update status handler
-ipcRenderer.on('update-status', (event, data) => {
+window.folia.onUpdateStatus(data => {
   switch (data.status) {
     case 'checking':
       // Silent check, don't show UI

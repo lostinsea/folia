@@ -221,6 +221,16 @@ const DOCUMENT_EVENT_FIELDS = {
   "pdf-export-result": ["success", "path", "error", "saveBlocked",
     "saveBlockedStage", "saveBlockedWhy"],
   "image-selected": ["base64", "mimeType", "fileName", "error"],
+  "quit-approval-request": ["id", "gen", "reason", "retainFreeze"],
+  "quit-approval-commit": ["id", "gen", "revision"],
+  "quit-approval-verify": ["id", "gen", "revision"],
+  "quit-approval-thaw": [],
+  "file-deleted": ["path", "delivery"],
+  "file-not-found": ["path"],
+  "external-file-open-request": ["filePath", "documentOpenTicket"],
+  "show-error": [],
+  "update-status": ["status", "version", "transferred", "total", "percent",
+    "error", "message"],
 };
 const DOCUMENT_EVENT_RECORD_FIELDS = {
   diskVersion: ["dev", "ino", "size", "mtimeMs", "ctimeMs"],
@@ -234,6 +244,8 @@ const DOCUMENT_EVENT_RECORD_FIELDS = {
   watcher: ["pageSession", "rendererGeneration", "selectionGeneration",
     "watcherGeneration", "owner"],
   owner: ["pageSession", "rendererGeneration", "tabId", "documentGeneration", "pathKey"],
+  delivery: ["eventId", "pageSession", "rendererGeneration",
+    "selectionGeneration", "watcherGeneration", "attempt", "owner"],
 };
 
 function projectDocumentEventRecord(value, fields) {
@@ -276,6 +288,15 @@ function copyPopupRequest(request, textFields) {
   }
   return Object.fromEntries([...textFields, "isDarkMode"]
     .map(field => [field, request[field]]));
+}
+
+function copyControlMessage(request, fields) {
+  if (!request || typeof request !== "object" || Array.isArray(request)) {
+    throw new TypeError("Invalid app control request");
+  }
+  // Main owns correlation validation. Refusal replies deliberately echo bad
+  // or absent identities; repairing/rejecting them here can strand a request.
+  return projectDocumentEventRecord(request, fields);
 }
 
 function copyReloadTransport(request) {
@@ -461,6 +482,78 @@ function copyDocumentQueryReply(result, fields) {
 }
 
 const api = Object.freeze({
+  async getQuitApprovalGeneration() {
+    const generation = await ipcRenderer.invoke("quit-approval-generation");
+    if (!positiveInteger(generation)) throw new TypeError("Invalid renderer generation response");
+    return generation;
+  },
+  announceQuitApprovalReady(request) {
+    ipcRenderer.send("quit-approval-ready",
+      copyControlMessage(request, ["gen", "pageSession"]));
+  },
+  respondToQuitApproval(request) {
+    ipcRenderer.send("quit-approval-response",
+      copyControlMessage(request, ["id", "gen", "dirtyFiles", "revision", "pendingSaves"]));
+  },
+  respondToQuitCommit(request) {
+    ipcRenderer.send("quit-approval-committed",
+      copyControlMessage(request, ["id", "gen", "committed", "why", "revision", "dirtyFiles"]));
+  },
+  respondToQuitVerification(request) {
+    ipcRenderer.send("quit-approval-verified",
+      copyControlMessage(request, ["id", "gen", "revision", "valid"]));
+  },
+  requestQuitApprovalRetry(request) {
+    ipcRenderer.send("quit-approval-retry",
+      copyControlMessage(request, ["id", "gen", "revision"]));
+  },
+  reportQuitApprovalOverflow(request) {
+    ipcRenderer.send("quit-approval-overflow", copyControlMessage(request, ["id", "gen"]));
+  },
+  onQuitApprovalRequest(callback) {
+    return subscribeDocumentEvent("quit-approval-request", callback);
+  },
+  onQuitApprovalCommit(callback) {
+    return subscribeDocumentEvent("quit-approval-commit", callback);
+  },
+  onQuitApprovalVerification(callback) {
+    return subscribeDocumentEvent("quit-approval-verify", callback);
+  },
+  onQuitApprovalThaw(callback) {
+    return subscribeDocumentEvent("quit-approval-thaw", callback);
+  },
+  acknowledgeFileDeletion(request) {
+    ipcRenderer.send("file-deleted-ack", copyControlMessage(request, [
+      "eventId", "consumed", "why", "pageSession", "rendererGeneration", "tabId",
+      "documentGeneration", "pathKey", "selectionGeneration", "watcherGeneration", "attempt",
+    ]));
+  },
+  onFileDeleted(callback) {
+    return subscribeDocumentEvent("file-deleted", callback);
+  },
+  onFileNotFound(callback) {
+    return subscribeDocumentEvent("file-not-found", callback);
+  },
+  onExternalFileOpenRequest(callback) {
+    return subscribeDocumentEvent("external-file-open-request", callback);
+  },
+  onError(callback) {
+    return subscribeDocumentEvent("show-error", callback);
+  },
+  onUpdateStatus(callback) {
+    return subscribeDocumentEvent("update-status", callback);
+  },
+  async getNewlineAlignmentDiagnosticsEnabled() {
+    const enabled = await ipcRenderer.invoke("newline-alignment-diagnostics-enabled");
+    if (typeof enabled !== "boolean") throw new TypeError("Invalid diagnostics response");
+    return enabled;
+  },
+  reportNewlineAlignmentWitness(request) {
+    ipcRenderer.send("newline-alignment-witness", copyControlMessage(request, [
+      "callId", "callCount", "restoredSpans", "bytesScanned", "degradedCount",
+      "ambiguousBoundaries", "mode",
+    ]));
+  },
   openFileDialog() {
     ipcRenderer.send("open-file-dialog");
   },

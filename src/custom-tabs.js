@@ -36,8 +36,8 @@
   let pendingNewlineAlignmentWitness = null;
   let newlineAlignmentFlushScheduled = false;
   try {
-    tabIpc
-      .invoke("newline-alignment-diagnostics-enabled")
+    window.folia
+      .getNewlineAlignmentDiagnosticsEnabled()
       .then((enabled) => {
         newlineAlignmentDiagnosticsEnabled = enabled === true;
       })
@@ -56,7 +56,7 @@
     if (newlineAlignmentWitnessSequence >= Number.MAX_SAFE_INTEGER) return;
     newlineAlignmentWitnessSequence += 1;
     try {
-      tabIpc.send("newline-alignment-witness", {
+      window.folia.reportNewlineAlignmentWitness({
         callId: newlineAlignmentWitnessSequence,
         ...witness,
       });
@@ -359,7 +359,7 @@
           "Check your open documents before relying on them.",
         6000,
       );
-      tabIpc.send("quit-approval-overflow", {
+      window.folia.reportQuitApprovalOverflow({
         id: shutdownFreeze.id,
         gen: shutdownFreeze.gen,
       });
@@ -5949,7 +5949,7 @@
     }
     if (status.pending) return;
     pendingSaveShutdownRetry.sent = true;
-    tabIpc.send("quit-approval-retry", {
+    window.folia.requestQuitApprovalRetry({
       id: pendingSaveShutdownRetry.id,
       gen: pendingSaveShutdownRetry.gen,
       revision: documentRevision,
@@ -6050,7 +6050,7 @@
     return true;
   }
 
-  tabIpc.on("quit-approval-commit", async (event, data) => {
+  window.folia.onQuitApprovalCommit(async data => {
     const id = data && data.id;
     const generation = data && data.gen;
     const revision = data && data.revision;
@@ -6059,7 +6059,7 @@
     // throw inside the one handler that must always answer.
     let recheckedDirtyFiles = null;
     const reply = (committed, why) =>
-      tabIpc.send("quit-approval-committed", {
+      window.folia.respondToQuitCommit({
         id: id,
         gen: generation,
         committed: committed,
@@ -6132,11 +6132,11 @@
     reply(true, "committed");
   });
 
-  tabIpc.on("quit-approval-thaw", () => {
+  window.folia.onQuitApprovalThaw(() => {
     thawDocument("main-released");
   });
 
-  tabIpc.on("quit-approval-verify", (event, data) => {
+  window.folia.onQuitApprovalVerification(data => {
     const valid = !!(
       data &&
       shutdownFreeze &&
@@ -6148,7 +6148,7 @@
       durableSessionLayoutRevision === sessionLayoutRevision &&
       !shutdownFreeze.deferredOperationsOverflowed
     );
-    tabIpc.send("quit-approval-verified", {
+    window.folia.respondToQuitVerification({
       id: data && data.id,
       gen: data && data.gen,
       revision: documentRevision,
@@ -6165,7 +6165,7 @@
   // strands the main process with no timeout to release it - the one failure
   // this side can cause and cannot recover from - so an unreadable state is
   // REPORTED as unreadable rather than becoming silence.
-  tabIpc.on("quit-approval-request", (event, data) => {
+  window.folia.onQuitApprovalRequest(data => {
     const id = data && data.id;
     const generation = data && data.gen;
     if (
@@ -6188,7 +6188,7 @@
     );
     const cached = shutdownResponses.get(id);
     if (cached) {
-      tabIpc.send("quit-approval-response", cached);
+      window.folia.respondToQuitApproval(cached);
       return;
     }
     if (
@@ -6221,7 +6221,7 @@
           gen: generation,
           sent: false,
         };
-        tabIpc.send("quit-approval-response", {
+        window.folia.respondToQuitApproval({
           id,
           gen: generation,
           dirtyFiles: null,
@@ -6247,7 +6247,7 @@
     // answer it displaces has become unreachable above.
     shutdownResponses.clear();
     shutdownResponses.set(id, response);
-    tabIpc.send("quit-approval-response", response);
+    window.folia.respondToQuitApproval(response);
   });
 
   // ============================================
@@ -6423,8 +6423,8 @@
   // Restored tabs are clean by construction (saveTabs persists no content and
   // loadSavedTabs re-reads from disk), so announcing before the DOMContentLoaded
   // restore below cannot under-report anything unsaved.
-  tabIpc
-    .invoke("quit-approval-generation")
+  window.folia
+    .getQuitApprovalGeneration()
     .then((generation) => {
       if (!Number.isSafeInteger(generation) || generation <= 0) {
         throw new Error("main returned an invalid renderer generation");
@@ -6441,7 +6441,7 @@
       ) {
         throw new Error("renderer page session is unavailable");
       }
-      tabIpc.send("quit-approval-ready", {
+      window.folia.announceQuitApprovalReady({
         gen: generation,
         pageSession,
       });

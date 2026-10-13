@@ -764,6 +764,39 @@ async function main() {
       !/ipcRenderer\.(?:on|once|send|invoke)\(\s*["'](?:open-file-dialog|open-image-dialog|export-pdf|pdf-export-ready|open-mermaid-popup|open-image-popup|open-table-popup|download-update|install-update|get-version|prepare-for-pdf-export|pdf-export-result|image-selected)["']/.test(rendererSource),
     JSON.stringify(uiPortObserved),
   );
+  const controlPortCounts = {
+    renderer: { acknowledgeFileDeletion: 1, onFileDeleted: 1, onFileNotFound: 1,
+      onExternalFileOpenRequest: 1, onError: 1, onUpdateStatus: 1 },
+    "custom-tabs": { getQuitApprovalGeneration: 1, announceQuitApprovalReady: 1,
+      respondToQuitApproval: 3, respondToQuitCommit: 1, respondToQuitVerification: 1,
+      requestQuitApprovalRetry: 1, reportQuitApprovalOverflow: 1,
+      onQuitApprovalRequest: 1, onQuitApprovalCommit: 1, onQuitApprovalVerification: 1,
+      onQuitApprovalThaw: 1, getNewlineAlignmentDiagnosticsEnabled: 1,
+      reportNewlineAlignmentWitness: 1 },
+  };
+  for (const [consumer, counts] of Object.entries(controlPortCounts)) {
+    const source = stripJsComments(read(`src/${consumer}.js`));
+    const observed = Object.fromEntries(Object.keys(counts).map(method => [
+      method, (source.match(new RegExp(`window\\.folia\\s*\\.\\s*${method}\\(`, "g")) || []).length,
+    ]));
+    check(
+      `SEC-08 ${consumer} uses every fixed control and notice port without raw channels`,
+      Object.entries(counts).every(([method, count]) => observed[method] === count) &&
+        !/(?:ipcRenderer|tabIpc)\.(?:on|once|send|invoke)\(\s*["'](?:quit-approval-(?:generation|ready|response|committed|verified|retry|overflow|request|commit|verify|thaw)|file-deleted(?:-ack)?|file-not-found|external-file-open-request|show-error|update-status|newline-alignment-(?:diagnostics-enabled|witness))["']/.test(source),
+      JSON.stringify(observed),
+    );
+    if (consumer === "custom-tabs") {
+      const queryAt = source.indexOf(".getQuitApprovalGeneration()");
+      check(
+        "SEC-08 production shutdown subscribers precede the single readiness query",
+        queryAt >= 0 && ["onQuitApprovalRequest", "onQuitApprovalCommit",
+          "onQuitApprovalVerification", "onQuitApprovalThaw"].every(method => {
+          const at = source.indexOf(`window.folia.${method}(`);
+          return at >= 0 && at < queryAt;
+        }),
+      );
+    }
+  }
   check(
     "SEC-08 document-events.js loads exactly once before both consumers",
     documentEventsScriptAt >= 0 &&

@@ -666,7 +666,8 @@ function deriveDeletionContracts({
     reachableDeletionOwnerIdentity(tabsSource);
   const acknowledgedDelivery = /\bfile-deleted-ack\b/.test(mainSource);
   const rendererAcknowledgementSender =
-    /ipcRenderer\.send\(\s*["']file-deleted-ack["']/.test(rendererSource);
+    /ipcRenderer\.send\(\s*["']file-deleted-ack["']/.test(rendererSource) ||
+    /window\.folia\.acknowledgeFileDeletion\(/.test(rendererSource);
   const rendererDeletionClassifier =
     sourceForNamedDeletionFunction(
       rendererSource,
@@ -7676,6 +7677,262 @@ async function runDocumentTransportValidation(exec) {
     JSON.stringify(probe));
 }
 
+async function runShutdownResponseCacheScenario(win, exec) {
+  const setup = await exec(`(() => {
+    const tab = window.CustomTabs.getActiveTab() || null;
+    const filePath = window.currentFilePath || (tab && tab.filePath) || null;
+    const owner = tab && window.CustomTabs.getActiveDocumentIdentity(
+      tab.filePath, window.getReloadRequestSession());
+    return { filePath, owner, tabId: tab && tab.id,
+      clean: !!(tab && filePath === tab.filePath &&
+        tab.content === tab.originalContent &&
+        window.originalMarkdown === tab.originalContent &&
+        tab.hasUnsavedChanges === false && !window.CustomTabs.__inEditMode()) };
+  })()`);
+  let diskVersion = null, diskVersionError = null;
+  try {
+    const stat = fs.statSync(setup.filePath);
+    diskVersion = { dev: stat.dev, ino: stat.ino, size: stat.size,
+      mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs };
+  } catch (error) { diskVersionError = String(error); }
+  const physicalReady = setup.clean && setup.owner && setup.owner.tabId === setup.tabId &&
+    diskVersion && Object.values(diskVersion).every(Number.isFinite) && !diskVersionError;
+  check("the same-id response cache starts from the selected clean physical owner",
+    physicalReady, JSON.stringify({ setup, diskVersion, diskVersionError }));
+  if (!physicalReady) throw new Error("Same-id response cache has no clean physical owner");
+  const responses = [];
+  const observe = (_event, data) => { responses.push(data); };
+  ipcMain.on("quit-approval-response", observe);
+  const original = await exec(`(() => {
+    const tab = window.CustomTabs.getActiveTab();
+    return { content: tab.content, dirty: tab.hasUnsavedChanges,
+      markdown: window.originalMarkdown };
+  })()`);
+  try {
+    const generation = await exec("window.folia.getQuitApprovalGeneration()");
+    win.webContents.send("quit-approval-request", { id: 900000, reason: "ctrl-q", gen: generation });
+    await waitUntil(() => responses.some(data => data && data.id === 900000));
+    await exec(`(() => {
+      const tab = window.CustomTabs.getActiveTab();
+      tab.content = tab.originalContent + "-edited-after-first-answer";
+      // Move the live copy too, so recomputation cannot fold pristine text
+      // over the edit and masquerade as a cached answer.
+      window.originalMarkdown = tab.content;
+      return true;
+    })()`);
+    win.webContents.send("quit-approval-request", { id: 900000, reason: "ctrl-q", gen: generation });
+    await waitUntil(() => responses.filter(data => data && data.id === 900000).length === 2);
+    const afterFresh = responses.filter(data => data && data.id === 900000).length;
+    win.webContents.send("quit-approval-request", { id: 899999, reason: "ctrl-q", gen: generation });
+    await sleep(600);
+    check("the renderer answers a fresh shutdown request and ignores a stale one",
+      afterFresh >= 1 && responses.every(data => data && data.id === 900000),
+      JSON.stringify({ afterFresh, responses }));
+    check("the renderer replays its cached response for a duplicate same-id request",
+      afterFresh === 2 &&
+        JSON.stringify(responses[0] && responses[0].dirtyFiles) ===
+        JSON.stringify(responses[1] && responses[1].dirtyFiles),
+      JSON.stringify({ afterFresh, responses }));
+  } finally {
+    ipcMain.removeListener("quit-approval-response", observe);
+    await exec(`(() => {
+      const tab = window.CustomTabs.getActiveTab();
+      const original = ${JSON.stringify(original)};
+      tab.content = original.content; tab.hasUnsavedChanges = original.dirty;
+      window.originalMarkdown = original.markdown;
+      return null;
+    })()`);
+  }
+}
+
+async function runControlTransportValidation(exec) {
+  const probe = await exec(`(async () => {
+    const ipc = window.ipcRenderer, api = window.folia;
+    const originalSend = ipc.send, originalInvoke = ipc.invoke;
+    const calls = [], invokes = [], channels = new Set([
+      'quit-approval-ready', 'quit-approval-response', 'quit-approval-committed',
+      'quit-approval-verified', 'quit-approval-retry', 'quit-approval-overflow',
+      'file-deleted-ack', 'newline-alignment-witness',
+    ]);
+    let failSend = false, failInvoke = false, generation = 17, enabled = false;
+    ipc.send = function(channel, payload) {
+      if (!channels.has(channel)) return originalSend.apply(this, arguments);
+      if (failSend) throw new Error('controlled control send failure');
+      calls.push({ channel, payload });
+    };
+    ipc.invoke = async function(channel) {
+      if (!['quit-approval-generation', 'newline-alignment-diagnostics-enabled'].includes(channel))
+        return originalInvoke.apply(this, arguments);
+      invokes.push(channel);
+      if (failInvoke) throw new Error('controlled control invoke failure');
+      return channel === 'quit-approval-generation' ? generation : enabled;
+    };
+    const requests = [
+      ['announceQuitApprovalReady', { gen: 17, pageSession: 'control-session' }],
+      ['respondToQuitApproval', { id: 1, gen: 17, dirtyFiles: null, revision: 0, pendingSaves: true }],
+      ['respondToQuitApproval', { id: 2, gen: 17, dirtyFiles: [], revision: 1 }],
+      ['respondToQuitCommit', { id: undefined, gen: -1, committed: false,
+        why: 'stale-commit-request', revision: 1, dirtyFiles: null }],
+      ['respondToQuitVerification', { id: 'malformed', gen: null, revision: 1, valid: false }],
+      ['requestQuitApprovalRetry', { id: 3, gen: 17, revision: 2 }],
+      ['reportQuitApprovalOverflow', { id: 3, gen: 17 }],
+      ['acknowledgeFileDeletion', { eventId: 4, consumed: false, why: 'stale-selection',
+        pageSession: undefined, rendererGeneration: 'malformed', tabId: null,
+        documentGeneration: -1, pathKey: '', selectionGeneration: 5, watcherGeneration: 6, attempt: 7 }],
+      ['reportNewlineAlignmentWitness', { callId: 8, callCount: 2, restoredSpans: 3,
+        bytesScanned: 400, degradedCount: 1, ambiguousBoundaries: 2, mode: 'mixed-degraded' }],
+    ];
+    try {
+      const synchronous = requests.map(([method, request], index) => {
+        try {
+          const result = api[method]({ ...request, ignored: 'drop' });
+          if (result instanceof Promise) result.catch(() => {});
+          return result === undefined && calls.length === index + 1;
+        } catch (error) { return false; }
+      });
+      const validCalls = calls.slice();
+      const refused = requests.map(([method]) => [null, [], 1].every(request => {
+        try {
+          const result = api[method](request);
+          if (result instanceof Promise) result.catch(() => {});
+          return false;
+        }
+        catch (error) { return error instanceof TypeError; }
+      }));
+      const rejectedBeforeIpc = calls.length === validCalls.length;
+      failSend = true;
+      const sendErrors = requests.map(([method, request]) => {
+        try {
+          const result = api[method](request);
+          if (result instanceof Promise) result.catch(() => {});
+          return false;
+        } catch (error) { return error.message === 'controlled control send failure'; }
+      });
+      const goodGeneration = await api.getQuitApprovalGeneration();
+      const disabled = await api.getNewlineAlignmentDiagnosticsEnabled();
+      const initialInvokes = invokes.slice();
+      const invalidGenerations = [];
+      for (const reply of [0, -1, null, '17']) {
+        generation = reply;
+        try { await api.getQuitApprovalGeneration(); invalidGenerations.push(false); }
+        catch (error) { invalidGenerations.push(error.message.includes('Invalid renderer generation response')); }
+      }
+      enabled = true;
+      const positiveDiagnostics = await api.getNewlineAlignmentDiagnosticsEnabled();
+      enabled = 'true';
+      let invalidDiagnostics = false;
+      try { await api.getNewlineAlignmentDiagnosticsEnabled(); }
+      catch (error) { invalidDiagnostics = error.message.includes('Invalid diagnostics response'); }
+      failInvoke = true;
+      const invokeErrors = [];
+      for (const method of ['getQuitApprovalGeneration', 'getNewlineAlignmentDiagnosticsEnabled']) {
+        try { await api[method](); invokeErrors.push(false); }
+        catch (error) { invokeErrors.push(error.message === 'controlled control invoke failure'); }
+      }
+      return { synchronous, refused, rejectedBeforeIpc, sendErrors, validCalls,
+        goodGeneration, disabled, positiveDiagnostics, initialInvokes, invalidGenerations,
+        invalidDiagnostics, invokeErrors };
+    } finally { ipc.send = originalSend; ipc.invoke = originalInvoke; }
+  })()`);
+  const calls = probe.validCalls;
+  check("SEC-08 fixed shutdown and diagnostic requests preserve synchronous channels and refusal correlations",
+    probe.synchronous.length === 9 && probe.synchronous.every(Boolean) &&
+      calls.map(call => call.channel).join(",") ===
+        "quit-approval-ready,quit-approval-response,quit-approval-response,quit-approval-committed,quit-approval-verified,quit-approval-retry,quit-approval-overflow,file-deleted-ack,newline-alignment-witness" &&
+      calls.every(call => !("ignored" in call.payload)) &&
+      calls[1].payload.dirtyFiles === null && calls[1].payload.pendingSaves === true &&
+      Array.isArray(calls[2].payload.dirtyFiles) && calls[2].payload.dirtyFiles.length === 0 &&
+      Object.hasOwn(calls[3].payload, "id") && calls[3].payload.id === undefined &&
+      calls[3].payload.gen === -1 && calls[3].payload.committed === false &&
+      calls[4].payload.id === "malformed" && calls[4].payload.gen === null &&
+      calls[4].payload.valid === false && calls[7].payload.rendererGeneration === "malformed" &&
+      calls[7].payload.tabId === null && calls[7].payload.attempt === 7 &&
+      calls[8].payload.callCount === 2 && calls[8].payload.mode === "mixed-degraded",
+    JSON.stringify(probe));
+  check("SEC-08 control ports reject malformed envelopes before IPC and surface same-stack send failures",
+    probe.refused.length === 9 && probe.refused.every(Boolean) && probe.rejectedBeforeIpc &&
+      probe.sendErrors.length === 9 && probe.sendErrors.every(Boolean), JSON.stringify(probe));
+  check("SEC-08 control queries use existing invokes and validate replies without swallowing query failures",
+    probe.goodGeneration === 17 && probe.disabled === false && probe.positiveDiagnostics === true &&
+      probe.initialInvokes.join(",") === "quit-approval-generation,newline-alignment-diagnostics-enabled" &&
+      probe.invalidGenerations.length === 4 && probe.invalidGenerations.every(Boolean) &&
+      probe.invalidDiagnostics && probe.invokeErrors.length === 2 && probe.invokeErrors.every(Boolean),
+    JSON.stringify(probe));
+}
+
+async function runControlEventBoundary(win) {
+  const exec = code => win.webContents.executeJavaScript(code, true);
+  const methods = [
+    ["quit-approval-request", "onQuitApprovalRequest"],
+    ["quit-approval-commit", "onQuitApprovalCommit"],
+    ["quit-approval-verify", "onQuitApprovalVerification"],
+    ["quit-approval-thaw", "onQuitApprovalThaw"],
+    ["file-deleted", "onFileDeleted"], ["file-not-found", "onFileNotFound"],
+    ["external-file-open-request", "onExternalFileOpenRequest"],
+    ["show-error", "onError"], ["update-status", "onUpdateStatus"],
+  ];
+  const setup = await exec(`(() => {
+    window.__controlEvents = []; window.__controlOther = 0;
+    window.__controlOff = ${JSON.stringify(methods)}.map(([kind, method]) =>
+      window.folia[method](function(...args) {
+        window.__controlEvents.push({ kind, argc: args.length, data: args[0] });
+      }));
+    window.__controlOtherOff = window.folia.onFileDeleted(() => { window.__controlOther += 1; });
+    return ${JSON.stringify(methods)}.every(([, method]) => {
+      try { window.folia[method](null); return false; }
+      catch (error) { return error.message.includes('Invalid document event callback'); }
+    });
+  })()`);
+  const payloads = [
+    { id: 11, gen: 17, reason: "close", retainFreeze: true, ignored: 1 },
+    { id: undefined, gen: -1, revision: 0, ignored: 1 },
+    { id: "malformed", gen: null, revision: 0, ignored: 1 },
+    undefined,
+    { path: "control-deleted.md", ignored: 1, delivery: {
+      eventId: 12, pageSession: "control-session", rendererGeneration: "malformed",
+      selectionGeneration: 3, watcherGeneration: 4, attempt: 5, ignored: 1,
+      owner: { pageSession: "control-session", rendererGeneration: 17,
+        tabId: 6, documentGeneration: 7, pathKey: "control-key", ignored: 1 },
+    } },
+    { path: "control-missing.md", ignored: 1 },
+    { filePath: "control-native.md", documentOpenTicket: "a".repeat(64), ignored: 1 },
+    "control scalar error",
+    { status: "downloading", version: "0.4.0", transferred: 25, total: 100,
+      percent: 25, error: "", message: "control status", ignored: 1 },
+  ];
+  methods.forEach(([channel], index) => win.webContents.send(channel, payloads[index]));
+  const delivered = await waitForCondition(exec, `window.__controlEvents.length === ${methods.length}`);
+  const events = await exec("window.__controlEvents");
+  const data = events.map(item => item.data);
+  const request = data[0], commit = data[1], verify = data[2], deletion = data[4];
+  const delivery = deletion && deletion.delivery;
+  const owner = delivery && delivery.owner;
+  check("SEC-08 isolated control subscriptions deliver exact payload-only channels and native open tickets",
+    setup && delivered && events.map(item => item.kind).join(",") === methods.map(([kind]) => kind).join(",") &&
+      events.every(item => item.argc === 1 && (!item.data || typeof item.data !== "object" ||
+        !("ignored" in item.data))) &&
+      request && request.reason === "close" && request.retainFreeze === true &&
+      data[3] === undefined && data[5] && data[5].path === "control-missing.md" &&
+      data[6] && data[6].documentOpenTicket === "a".repeat(64) && data[6].filePath === "control-native.md" &&
+      data[7] === "control scalar error" && data[8] && data[8].transferred === 25 &&
+      data[8].total === 100 && data[8].percent === 25 && data[8].message === "control status",
+    JSON.stringify({ setup, delivered, events }));
+  check("SEC-08 control projection retains malformed correlations and complete nested deletion ownership",
+    commit && Object.hasOwn(commit, "id") && commit.id === undefined && commit.gen === -1 &&
+      verify && verify.id === "malformed" && verify.gen === null && delivery && owner &&
+      delivery.rendererGeneration === "malformed" && delivery.attempt === 5 &&
+      delivery.selectionGeneration === 3 && delivery.watcherGeneration === 4 &&
+      owner.tabId === 6 && owner.documentGeneration === 7 && owner.pathKey === "control-key" &&
+      !("ignored" in delivery) && !("ignored" in owner),
+    JSON.stringify(events));
+  await exec("window.__controlOff[4](); window.__controlOff[4](); null;");
+  win.webContents.send("file-deleted", payloads[4]);
+  const independent = await waitForCondition(exec, "window.__controlOther === 2");
+  check("SEC-08 control unsubscribe removes only its own listener without suppressing another subscriber",
+    independent && await exec(`window.__controlEvents.length === ${methods.length}`));
+  await exec("window.__controlOff.forEach(off => off()); window.__controlOtherOff(); null;");
+}
+
 async function runUiTransportValidation(exec) {
   const probe = await exec(`(async () => {
     const ipc = window.ipcRenderer, api = window.folia;
@@ -10500,6 +10757,15 @@ async function run(win) {
   })()`);
   const expectsPdfSignal =
     !app.isPackaged && process.argv.includes("--folia-test-preload");
+  const controlReady = await waitUntil(() => __shutdown.state().renderer === "ready", 5000);
+  const controlState = __shutdown.state();
+  const controlSession = await exec("window.getReloadRequestSession()");
+  check("SEC-08 production control readiness reaches Main with the actual page session",
+    controlReady && controlState.rendererGeneration > 0 &&
+      controlState.rendererPageSession === controlSession,
+    JSON.stringify({ ready: controlReady, generation: controlState.rendererGeneration,
+      mainSession: controlState.rendererPageSession, controlSession }));
+  if (!controlReady) throw new Error("Production control readiness did not reach Main");
   const productionBridgeMethods = [
     "registerDocumentOwner", "setActiveFile", "selectFileTracking",
     "pauseFileWatching", "resumeFileWatching", "stopFileWatching",
@@ -10518,6 +10784,12 @@ async function run(win) {
     "onPrepareForPdfExport", "onPdfExportResult", "oncePdfExportResult", "onImageSelected",
     "openMermaidPopup", "openImagePopup", "openTablePopup",
     "downloadUpdate", "installUpdate", "getVersion",
+    "getQuitApprovalGeneration", "announceQuitApprovalReady", "respondToQuitApproval",
+    "respondToQuitCommit", "respondToQuitVerification", "requestQuitApprovalRetry",
+    "reportQuitApprovalOverflow", "onQuitApprovalRequest", "onQuitApprovalCommit",
+    "onQuitApprovalVerification", "onQuitApprovalThaw", "acknowledgeFileDeletion",
+    "onFileDeleted", "onFileNotFound", "onExternalFileOpenRequest", "onError", "onUpdateStatus",
+    "getNewlineAlignmentDiagnosticsEnabled", "reportNewlineAlignmentWitness",
   ].sort().join(",");
   check(
     "SEC-08 main launch retains production owned-read and only its explicitly marked PDF test signal",
@@ -10594,6 +10866,7 @@ async function run(win) {
     );
     await runDocumentEventBoundary(isolatedBridgeWindow);
     await runUiEventBoundary(isolatedBridgeWindow);
+    await runControlEventBoundary(isolatedBridgeWindow);
     check(
       "SEC-08 session test preload does not expose the PDF signal to an unmarked window or subframe",
       isolatedBoundary.pdfRestore === "undefined" &&
@@ -10635,6 +10908,7 @@ async function run(win) {
           original,
           sequence: window.getFileOpenDiagnostics().sequence + 1,
           completed: false,
+          switchOutcome: 'pending',
         };
         window.completeFileOpen = function (context, visualCompletion) {
           const accepted = original.call(this, context, visualCompletion);
@@ -10644,7 +10918,13 @@ async function run(win) {
           return accepted;
         };
         try {
-          window.CustomTabs.switchToTab(${tabId});
+          Promise.resolve(window.CustomTabs.switchToTab(${tabId})).then(
+            result => { probe.switchOutcome = { settled: true, result }; },
+            error => {
+              probe.switchOutcome = { settled: false, error: String(error) };
+              throw error;
+            },
+          );
         } catch (error) {
           window.completeFileOpen = original;
           delete window.__refreshSwitchCompletion;
@@ -10666,11 +10946,17 @@ async function run(win) {
           sequence: window.getFileOpenDiagnostics().sequence,
           expected: window.__refreshSwitchCompletion.sequence,
           completed: window.__refreshSwitchCompletion.completed,
+          switchOutcome: window.__refreshSwitchCompletion.switchOutcome,
           frozen: window.CustomTabs.isDocumentFrozen(),
           notification: document.getElementById('notificationMessage').textContent,
           reload: window.getReloadRequestDiagnostics(),
         })`);
-        throw new Error(`tab ${tabId} did not finish switching: ${JSON.stringify(state)}`);
+        const main = __shutdown.state();
+        throw new Error(`tab ${tabId} did not finish switching: ${JSON.stringify(state)}; main: ${JSON.stringify({
+          renderer: main.renderer, generation: main.rendererGeneration,
+          pageSession: main.rendererPageSession, knownOwners: main.knownDocumentOwnerCount,
+          supersededOwners: main.supersededDocumentOwnerCount,
+        })}`);
       }
     } finally {
       await exec(`(() => {
@@ -10922,6 +11208,7 @@ async function run(win) {
   await runDocumentControlBridgeValidation(exec);
   await runDocumentTransportValidation(exec);
   await runUiTransportValidation(exec);
+  await runControlTransportValidation(exec);
   await runPdfOnceValidation(exec);
   await runPopupPdfDispatchFailure(exec, sentinel);
   const bridgeValidation = await exec(`
@@ -11471,6 +11758,7 @@ async function run(win) {
   await runDocumentControlCloseJourney(exec);
   await runReloadTransportFailure(exec, sentinel);
   if (ownedReadFocusedHarness || dialogExtraFocusedHarness) {
+    if (ownedReadFocusedHarness) await runShutdownResponseCacheScenario(win, exec);
     if (dialogExtraFocusedHarness) {
       await clearFixtureTabs("dialog bridge preflight");
       await runDialogBatchScenarios(exec, sentinel, closeFixtureTabsSource, clearFixtureTabs);
@@ -22506,13 +22794,16 @@ async function runF22SaveAndReloadScenarios(
       const raw = typeof ipc.rawListeners === "function"
         ? ipc.rawListeners("file-deleted")
         : [];
-      const registration = raw.find((candidate) => {
+      const productionRegistrations = raw.filter((candidate) => {
         const source = Function.prototype.toString.call(
           candidate.listener || candidate,
         );
-        return /\\bclassifyDeletionDelivery\\b/.test(source) &&
-          /\\backnowledgeDeletionDelivery\\b/.test(source);
-      }) || null;
+        return (/\\bclassifyDeletionDelivery\\b/.test(source) &&
+          /\\backnowledgeDeletionDelivery\\b/.test(source)) ||
+          /\\bprojectDocumentEventRecord\\b/.test(source);
+      });
+      const registration = productionRegistrations.length === 1
+        ? productionRegistrations[0] : null;
       const listener = registration && (registration.listener || registration);
       const tabs = window.CustomTabs;
       const originalIdentity = tabs && tabs.getActiveDocumentIdentity;
@@ -34310,122 +34601,7 @@ async function runShutdownScenarios(win, exec, sentinel, consoleAttribution = nu
     // -- the renderer's own staleness filter -------------------------------
     __shutdown.reset();
     rig.reset();
-    const responses = [];
-    const countResponses = (event, data) => {
-      responses.push(data);
-    };
-    ipcMain.on("quit-approval-response", countResponses);
-    try {
-      const cachedAnswerPhysicalSetup = await exec(`
-        (() => {
-          const tab = window.CustomTabs.getActiveTab() || null;
-          const filePath = window.currentFilePath || (tab && tab.filePath) || null;
-          const pageSession = window.getReloadRequestSession();
-          const owner = tab && window.CustomTabs.getActiveDocumentIdentity(
-            tab.filePath,
-            pageSession,
-          );
-          let diskVersion = null;
-          let diskVersionError = null;
-          if (filePath) {
-            try {
-              const stat = window.fs.statSync(filePath);
-              diskVersion = {
-                dev: stat.dev,
-                ino: stat.ino,
-                size: stat.size,
-                mtimeMs: stat.mtimeMs,
-                ctimeMs: stat.ctimeMs,
-              };
-            } catch (error) {
-              diskVersionError = String(error && error.code ? error.code : error);
-            }
-          }
-          return {
-            tab: tab ? { id: tab.id, filePath: tab.filePath } : null,
-            currentFilePath: window.currentFilePath || null,
-            owner,
-            diskVersion,
-            diskVersionError,
-            clean: !!(
-              tab &&
-              tab.content === tab.originalContent &&
-              window.originalMarkdown === tab.originalContent &&
-              tab.hasUnsavedChanges === false &&
-              !window.CustomTabs.__inEditMode()
-            ),
-          };
-        })()
-      `);
-      const cachedAnswerPhysicalReady =
-        cachedAnswerPhysicalSetup &&
-        cachedAnswerPhysicalSetup.tab &&
-        cachedAnswerPhysicalSetup.currentFilePath ===
-          cachedAnswerPhysicalSetup.tab.filePath &&
-        cachedAnswerPhysicalSetup.owner &&
-        cachedAnswerPhysicalSetup.owner.tabId ===
-          cachedAnswerPhysicalSetup.tab.id &&
-        cachedAnswerPhysicalSetup.diskVersion &&
-        Object.values(cachedAnswerPhysicalSetup.diskVersion).every(Number.isFinite) &&
-        !cachedAnswerPhysicalSetup.diskVersionError &&
-        cachedAnswerPhysicalSetup.clean === true;
-      check(
-        "the same-id response cache starts from the selected clean physical owner",
-        cachedAnswerPhysicalReady,
-        JSON.stringify(cachedAnswerPhysicalSetup),
-      );
-      if (!cachedAnswerPhysicalReady) {
-        throw new Error(
-          "same-id response cache cannot reuse its physical owner: " +
-            JSON.stringify(cachedAnswerPhysicalSetup),
-        );
-      }
-      const generation = await exec(`window.ipcRenderer.invoke('quit-approval-generation')`);
-      win.webContents.send("quit-approval-request", {
-        id: 900000,
-        reason: "ctrl-q",
-        gen: generation,
-      });
-      await waitUntil(() => responses.some((data) => data && data.id === 900000));
-      await exec(`
-        (() => {
-          const tab = window.CustomTabs.getActiveTab();
-          tab.content = tab.originalContent + "-edited-after-first-answer";
-          // The live copy has to move with the cache or this edit is not one:
-          // the snapshot inside a RECOMPUTE would fold the pristine text back
-          // over it and answer exactly what the replay answers, leaving the
-          // comparison below unable to tell a cache hit from a recompute.
-          window.originalMarkdown = tab.content;
-          return true;
-        })()
-      `);
-      win.webContents.send("quit-approval-request", {
-        id: 900000,
-        reason: "ctrl-q",
-        gen: generation,
-      });
-      await waitUntil(
-        () => responses.filter((data) => data && data.id === 900000).length === 2,
-      );
-      const afterFresh = responses.filter((data) => data && data.id === 900000).length;
-      win.webContents.send("quit-approval-request", { id: 899999, reason: "ctrl-q", gen: generation });
-      await sleep(600);
-      check(
-        "the renderer answers a fresh shutdown request and ignores a stale one",
-        afterFresh >= 1 &&
-          responses.every((data) => data && data.id === 900000),
-        JSON.stringify({ afterFresh, responseIds: responses.map((data) => data && data.id) }),
-      );
-      check(
-        "the renderer replays its cached response for a duplicate same-id request",
-        afterFresh === 2 &&
-          JSON.stringify(responses[0] && responses[0].dirtyFiles) ===
-            JSON.stringify(responses[1] && responses[1].dirtyFiles),
-        JSON.stringify({ afterFresh, responses }),
-      );
-    } finally {
-      ipcMain.removeListener("quit-approval-response", countResponses);
-    }
+    await runShutdownResponseCacheScenario(win, exec);
     // And leave nothing open. The next block reloads this renderer again, and
     // a restored tab whose first render has not settled can answer "dirty" for
     // reasons that have nothing to do with what is being measured there. An
