@@ -137,9 +137,21 @@ const TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL = Object.freeze([
   "Shutdown approval renderer unusable: webContents destroyed",
 ]);
 const VIRTUAL_SUITES = Object.freeze({
+  "test:sec08-batch-evidence": Object.freeze({
+    npmScript: "test:tabs",
+    environment: Object.freeze({
+      SEC08_DIALOG_EXTRA_FOCUSED_HARNESS: "1", SEC08_DIALOG_BATCH_ONLY: "1",
+    }),
+  }),
   "test:sec08-dialog-extra-evidence": Object.freeze({
     npmScript: "test:tabs",
     environment: Object.freeze({ SEC08_DIALOG_EXTRA_FOCUSED_HARNESS: "1" }),
+  }),
+  "test:sec08-admission-lifecycle-evidence": Object.freeze({
+    npmScript: "test:tabs",
+    environment: Object.freeze({
+      SEC08_DIALOG_EXTRA_FOCUSED_HARNESS: "1", SEC08_ADMISSION_LIFECYCLE_ONLY: "1",
+    }),
   }),
   "test:sec08-owned-read-evidence": Object.freeze({
     npmScript: "test:tabs",
@@ -6886,23 +6898,30 @@ const REVERTS = [
   // half of the fix, so a future edit cannot quietly reinstate either.
   {
     id: "R250",
-    suite: "test:tabs",
+    suite: "test:sec08-batch-evidence",
     // createTab() switching to every tab it creates is what made a restore
     // both render N documents and ask N questions.
-    what: "make a session restore switch to every tab it creates",
+    what: "make a session restore switch to every tab it creates, neutralizing the batch's own supersession",
     file: TABS,
     from:
-      "                const tab = createTab(tabData.filePath, snapshot.content, {\n" +
-      "                  activate: false,\n" +
-      "                  modifiedTime: snapshot.modifiedTime,\n" +
-      "                  diskVersion: snapshot.diskVersion,\n" +
-      "                });",
+      "        const tab = createTab(entry.filePath, entry.content, {\n" +
+      "          activate: false,\n" +
+      "          modifiedTime: entry.modifiedTime,\n" +
+      "          diskVersion: entry.diskVersion,\n" +
+      "          documentAdmission: entry.document,\n" +
+      "        });",
     to:
-      "                const tab = createTab(tabData.filePath, snapshot.content, {\n" +
-      "                  activate: true,\n" +
-      "                  modifiedTime: snapshot.modifiedTime,\n" +
-      "                  diskVersion: snapshot.diskVersion,\n" +
-      "                });",
+      "        const tab = createTab(entry.filePath, entry.content, {\n" +
+      "          activate: true,\n" +
+      "          modifiedTime: entry.modifiedTime,\n" +
+      "          diskVersion: entry.diskVersion,\n" +
+      "          documentAdmission: entry.document,\n" +
+      "        });",
+    also: [{
+      file: TABS,
+      from: "      switchIntent === latestTabSwitchIntent && selected === activeTabId &&\n",
+      to: "",
+    }],
     expect: [
       /a session restore asks nothing, however many expensive tabs it holds/,
       /a session restore renders its active ordinary document only before any declined click/,
@@ -6942,25 +6961,20 @@ const REVERTS = [
   },
   {
     id: "R251",
-    suite: "test:tabs",
+    suite: "test:sec08-batch-evidence",
     // The single switch a restore performs. Without silent:true the reader is
     // asked about the document they were already reading, before the window is
     // usable - and the scenario answers "no", so the restore loses it.
     what: "make the one switch a restore performs raise the modal",
     file: TABS,
     from:
-      "            switchToTab(restored.id, {\n" +
-      "              silent: true,\n" +
-      "              fileOpenOptions: { adoptPathIdentity: true },\n" +
-      "            }).catch((error) => {\n" +
-      '              console.error("[CustomTabs] Could not restore active tab:", error);\n' +
-      "            });",
+      "        await switchToTab(active.id, {\n" +
+      "          silent: true, fileOpenOptions: { adoptPathIdentity: true },\n" +
+      "        });",
     to:
-      "            switchToTab(restored.id, {\n" +
-      "              fileOpenOptions: { adoptPathIdentity: true },\n" +
-      "            }).catch((error) => {\n" +
-      '              console.error("[CustomTabs] Could not restore active tab:", error);\n' +
-      "            });",
+      "        await switchToTab(active.id, {\n" +
+      "          fileOpenOptions: { adoptPathIdentity: true },\n" +
+      "        });",
     expect: [
       /restoring an expensive active document asks nothing and still renders it/,
       /restoring an expensive document says so passively, naming the file/,
@@ -6977,7 +6991,7 @@ const REVERTS = [
   },
   {
     id: "R252",
-    suite: "test:tabs",
+    suite: "test:sec08-batch-evidence",
     // main.js runs confirmLargeDocument() before it emits 'file-opened', so
     // anything the tab layer asks is the SECOND identical dialog for one open.
     what: "ask again about a document main.js has already asked about",
@@ -6991,6 +7005,7 @@ const REVERTS = [
       "            verifiedDiskAdoption: adoptionApproval,\n" +
       "            deferOwnerRegistration: true,\n" +
       "            reservedIdentity: targetReservation,\n" +
+      "            documentAdmission: openData.document,\n" +
       "          });",
     to:
       "          targetTab = createTab(filePath, content, {\n" +
@@ -7001,6 +7016,7 @@ const REVERTS = [
       "            verifiedDiskAdoption: adoptionApproval,\n" +
       "            deferOwnerRegistration: true,\n" +
       "            reservedIdentity: targetReservation,\n" +
+      "            documentAdmission: openData.document,\n" +
       "          });",
     expect: [/a file main.js already asked about is not asked about again/],
     mustPass: [
@@ -7012,7 +7028,7 @@ const REVERTS = [
   },
   {
     id: "R253",
-    suite: "test:tabs",
+    suite: "test:sec08-batch-evidence",
     // The trailing files of a multi-select are a batch: switching to each in
     // turn renders every document and asks about every expensive one, then
     // leaves the reader on the last file rather than the one they chose.
@@ -7026,6 +7042,7 @@ const REVERTS = [
       "              verifiedDiskAdoption: extraApproval,\n" +
       "              deferOwnerRegistration: true,\n" +
       "              reservedIdentity: extraReservation,\n" +
+      "              documentAdmission: snapshot.document,\n" +
       "            });",
     to:
       "            extraTab = createTab(extraPath, snapshot.content, {\n" +
@@ -7035,14 +7052,18 @@ const REVERTS = [
       "              verifiedDiskAdoption: extraApproval,\n" +
       "              deferOwnerRegistration: true,\n" +
       "              reservedIdentity: extraReservation,\n" +
+      "              documentAdmission: snapshot.document,\n" +
       "            });",
     expect: [
       /a multi-select opens every file but renders only the chosen one/,
       /a file main.js already asked about is not asked about again/,
+      /^an unreadable-extra batch keeps the originally selected document active$/,
     ],
     mustPass: [
       /main confirms each large file before sending its authenticated open/,
       /a session restore really did restore every tab/,
+      /^a multi-select opens its extras in the order they were selected$/,
+      /^one unreadable extra is reported without losing the rest of the batch$/,
     ],
     requireMustPassAssertions: true,
     requireExactFailures: true,
@@ -16492,40 +16513,54 @@ const REVERTS = [
   },
   {
     id: "R647",
-    suite: "test:tabs",
+    suite: "test:sec08-dialog-extra-evidence",
     what:
-      "continue saved-tab restoration after a frozen create refusal, allowing a null tab " +
-      "to be dereferenced and later persisted entries to mutate a retained document session",
+      "continue Main-approved async restore after a frozen create refusal; bypass the " +
+      "earlier redundant freeze check so the refused-create exit is exercised",
     file: TABS,
-    from:
-      "                if (!tab) {\n" +
-      "                  restorationRefused = true;\n" +
-      "                  break;\n" +
-      "                }",
-    to:
-      "                /* reverted for proof: restoration continues after a refused create */",
+    from: "        if (!tab) return;\n        tab.scrollPosition = entry.scrollPosition;",
+    to: "        tab.scrollPosition = entry.scrollPosition;",
+    also: [{
+      from: "      !isDocumentFrozen();",
+      to: "      true; /* proof setup: reach the frozen create refusal */",
+    }],
     expect: [
-      /^a retained launch request leaves the committed document frozen$/,
+      /^SEC-08 frozen restore refuses session IPC and creation before awaiting document reads$/,
+      /^nothing rendered a visible error at any point during the suite$/,
     ],
     mustPass: [
-      /^a committed freeze makes the whole document surface inert, not just the editor$/,
+      /^SEC-08 frozen restore observer sees real main-approved saved entries including a closed document$/,
+      /^SEC-08 frozen restore never attempts final selection after a refused creation$/,
+      /^SEC-08 normal quit durably drains only the latest coalesced layout without resending a retired background tab$/,
     ],
+    requireMustPassAssertions: true, requireExactFailures: true,
   },
   {
     id: "R648",
-    suite: "test:tabs",
+    suite: "test:sec08-dialog-extra-evidence",
     what:
-      "select a restored active tab after a frozen restore refusal, issuing a second mutation " +
-      "attempt after the batch was required to stop",
+      "select an existing active tab after frozen creation is refused; bypass earlier " +
+      "redundant exits to exercise the final-selection boundary",
     file: TABS,
-    from: "          if (!restorationRefused && tabs.length > 0) {",
-    to: "          if (tabs.length > 0) { /* reverted for proof: select after refusal */",
+    from: "      const active = restored.find(tab =>\n        documentState.get(tab).admission.entryId === saved.activeEntryId) || restored[0];",
+    to: "      const active = restored.find(tab =>\n        documentState.get(tab).admission.entryId === saved.activeEntryId) || restored[0] || tabs[0];",
+    also: [{
+      from: "      !isDocumentFrozen();",
+      to: "      true; /* proof setup: reach the frozen create refusal */",
+    }, {
+      from: "        if (!tab) return;\n        tab.scrollPosition = entry.scrollPosition;",
+      to: "        if (!tab) break;\n        tab.scrollPosition = entry.scrollPosition;",
+    }],
     expect: [
-      /^a retained launch request leaves the committed document frozen$/,
+      /^SEC-08 frozen restore refuses session IPC and creation before awaiting document reads$/,
+      /^SEC-08 frozen restore never attempts final selection after a refused creation$/,
     ],
     mustPass: [
-      /^a committed freeze makes the whole document surface inert, not just the editor$/,
+      /^SEC-08 frozen restore observer sees real main-approved saved entries including a closed document$/,
+      /^SEC-08 normal quit durably drains only the latest coalesced layout without resending a retired background tab$/,
+      /^nothing rendered a visible error at any point during the suite$/,
     ],
+    requireMustPassAssertions: true, requireExactFailures: true,
   },
   {
     id: "R649",
@@ -18911,6 +18946,414 @@ const REVERTS = [
           requireMustPassAssertions: true, requireExactFailures: true,
           expectedFailureCount: 1,
         },
+        {
+          id: "R756",
+          what: "omit private session migration and restore coverage from ordinary tests",
+          file: PKG,
+          from: " && npm run test:document-session",
+          to: "",
+          suite: "test:packaging",
+          expect: [/^the private document session suite runs through its Node phase controller in ordinary tests$/],
+          mustPass: [
+            /^the ordinary npm test aggregate does not run the machine-exclusive F22 benchmark$/,
+            /^the machine-exclusive F22 benchmark script invokes its process-isolated parent$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R757",
+          what: "defer restored-entry protection release until a durable old layout still has live refs, resurrecting a closed tab",
+          file: MAIN,
+          from: "  await persistLiveDocumentSession();\n  if (!isApprovalSender(event)) {",
+          to: "  await persistLiveDocumentSession();\n  if (data.entries.some(layout => !admittedDocumentReference(layout.documentRef))) return true;\n  for (const id of seen) protectedSessionEntries.delete(id);\n  if (!isApprovalSender(event)) {",
+          also: [{
+            from: "  for (const id of seen) {\n    protectedSessionEntries.delete(id);\n    unavailableSessionEntries.delete(id);\n  }",
+            to: "  /* reverted for proof: protection remains until after persistence */",
+          }, {
+            from: "    protectedSessionEntries.delete(admission.descriptor.entryId);\n    unavailableSessionEntries.delete(admission.descriptor.entryId);",
+            to: "    /* reverted for proof: close leaves restored entry protected */",
+          }],
+          suite: "test:sec08-dialog-extra-evidence",
+          expect: [/^SEC-08 normal quit durably drains only the latest coalesced layout without resending a retired background tab$/],
+          mustPass: [
+            /^SEC-08 layout retirement race starts with actual restored snapshots and a protected background entry$/,
+            /^SEC-08 normal quit freezes while the latest layout awaits a genuinely held durable rename$/,
+            /^SEC-08 real layout write failures remain rejected and cannot approve normal quit$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R758",
+          what: "reimport caller-mutated legacy paths when a completed private session loses its manifest",
+          file: MAIN,
+          from: '    if (fs.existsSync(files.marker)) {\n      throw new Error("Document session import was already attempted; its state is missing");\n    }',
+          to: '    /* reverted for proof: allow legacy reimport after state loss */',
+          also: [{
+            from: '    writeDocumentSessionImportMarker("attempted", null, true);\n    importAttemptStarted = true;\n    if (legacy.captureError)',
+            to: '    writeDocumentSessionImportMarker("attempted", null, false);\n    importAttemptStarted = true;\n    if (legacy.captureError)',
+          }],
+          suite: "test:document-session",
+          expect: [
+            /^missing-state: corrupt or missing state fails closed rather than reimporting page paths$/,
+            /^missing-state: post-page localStorage changes never admit the forged fixture$/,
+          ],
+          mustPass: [
+            /^legacy: private before-page import retains explicit legacy provenance and coherent complete state$/,
+            /^empty: a completed empty import is distinct from never attempted$/,
+            /^corrupt-state: corrupt or missing state fails closed rather than reimporting page paths$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R759",
+          what: "erase retained legacy session keys after private capture",
+          file: path.join(SRC, "main-preload.js"),
+          from: '  const nonce = bootstrapArgument.slice("--folia-session-bootstrap=".length);',
+          to: '  localStorage.removeItem("openTabs");\n  localStorage.removeItem("activeTabPath");\n  const nonce = bootstrapArgument.slice("--folia-session-bootstrap=".length);',
+          suite: "test:document-session",
+          expect: [/^(legacy|empty|corrupt-state|missing-state|corrupt-legacy|oversized-legacy|corrupt-unmarked): migration preserves the exact legacy value without erasing or rewriting it$/],
+          mustPass: [
+            /^legacy: actual restore preserves order, background creation, active selection and scroll metadata$/,
+            /^empty: a completed empty import is distinct from never attempted$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 7,
+        },
+        {
+          id: "R760",
+          what: "accept the exact private bootstrap nonce again after page startup",
+          file: MAIN,
+          from: "  if (!bootstrap || bootstrap.used || data?.nonce !== bootstrap.nonce ||",
+          to: "  if (!bootstrap || data?.nonce !== bootstrap.nonce ||",
+          suite: "test:document-session",
+          expect: [/^(legacy|empty|corrupt-state|missing-state|corrupt-legacy|oversized-legacy|corrupt-unmarked): even the exact live bootstrap nonce cannot import again after page startup$/],
+          mustPass: [
+            /^(legacy|empty|corrupt-state|missing-state|corrupt-legacy|oversized-legacy|corrupt-unmarked): the exact nonce replay genuinely reaches the allowed Main frame$/,
+            /^legacy: private before-page import retains explicit legacy provenance and coherent complete state$/,
+            /^empty: a completed empty import is distinct from never attempted$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 7,
+        },
+        {
+          id: "R761",
+          what: "leave a superseded bound document admission reusable after its replacement closes",
+          file: MAIN,
+          from: "      previousAdmission.retired = true;",
+          to: "      /* reverted for proof: previous admission remains live */",
+          suite: "test:sec08-dialog-extra-evidence",
+          expect: [
+            /^SEC-08 the replaced B1 owner really is forgotten after B2 closes$/,
+            /^SEC-08 a forgotten replaced reference cannot re-register or submit retired history as live layout$/,
+            /^SEC-08 repeated unused restoration admissions are superseded rather than exhausting live capability capacity$/,
+          ],
+          mustPass: [
+            /^SEC-08 native chooser genuinely issues a scoped document reference tied to its snapshot$/,
+            /^SEC-08 a completed Save to another admitted target does not invalidate the ticket read$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R762",
+          what: "permanently exhaust approved history rather than reclaim eligible closed entries",
+          file: MAIN,
+          from: '        if (!oldest) throw new Error("Document session capacity exhausted");',
+          to: '        throw new Error("Document session capacity exhausted");',
+          suite: "test:sec08-dialog-extra-evidence",
+          expect: [/^SEC-08 distinct native opens exceed the history quota without permanent exhaustion or loss of the live layout$/],
+          mustPass: [
+            /^SEC-08 admitted A to B then closing A permits a fresh history reopen without reviving A's old owner$/,
+            /^SEC-08 a completed Save to another admitted target does not invalidate the ticket read$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R763",
+          what: "retain unused delivered restore batches instead of reclaiming them on the next authenticated restore",
+          file: MAIN,
+          from: "    if (record.deliveredRestore && record.tabId === null &&\n        record.sender === event.sender && !pinnedReferences.has(ref)) {",
+          to: "    if (false && record.deliveredRestore && record.tabId === null &&\n        record.sender === event.sender && !pinnedReferences.has(ref)) {",
+          suite: "test:sec08-dialog-extra-evidence",
+          expect: [/^SEC-08 repeated unused restoration admissions are superseded rather than exhausting live capability capacity$/],
+          mustPass: [
+            /^SEC-08 distinct native opens exceed the history quota without permanent exhaustion or loss of the live layout$/,
+            /^SEC-08 a same-target Save that starts and settles inside descriptor close forces a fresh ticket read$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R764",
+          what: "accept an old open-ticket snapshot after a same-target Save starts and settles during descriptor close",
+          file: MAIN,
+          from: "    if (saveQueues.get(key) || revision !== targetRevision.revision) continue;",
+          to: "    if (saveQueues.get(key)) continue;",
+          suite: "test:sec08-dialog-extra-evidence",
+          expect: [/^SEC-08 a same-target Save that starts and settles inside descriptor close forces a fresh ticket read$/],
+          mustPass: [
+            /^SEC-08 a completed Save to another admitted target does not invalidate the ticket read$/,
+            /^SEC-08 pending reopen really receives pre-Save disk bytes while the authenticated Save is held$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R765",
+          what: "omit live viewport capture from the final quit layout while retaining successful acknowledgement",
+          file: TABS,
+          from: "      active.scrollPosition = getScroller()?.scrollTop || 0;\n      active.anchor = captureAnchor();",
+          to: "      active.anchor = captureAnchor();",
+          suite: "test:sec08-dialog-extra-evidence",
+          expect: [/^SEC-08 normal quit persists the live viewport before freezing new layout submissions$/],
+          mustPass: [
+            /^SEC-08 quit viewport setup has stale cached scroll distinct from the live scroller$/,
+            /^SEC-08 normal quit durably drains only the latest coalesced layout without resending a retired background tab$/,
+            /^SEC-08 frozen restore refuses session IPC and creation before awaiting document reads$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R766",
+          what: "open packaged README inside the excluded app archive instead of its shipped extra-resource",
+          file: MAIN,
+          from: "  openFile(getReadmePath(), {",
+          to: '  openFile(path.join(__dirname, "..", "README.md"), {',
+          suite: "test:sec08-dialog-extra-evidence",
+          expect: [/^SEC-08 packaged README opens the actual extra-resource with a main-issued document reference$/],
+          mustPass: [
+            /^SEC-08 packaged README setup uses a real extra-resource outside the excluded app archive$/,
+            /^SEC-08 executable-format directory links remain blocked before the directory allowance$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R767",
+          what: "look up an older provisional owner without its authenticated path spelling at the identity retirement fence",
+          file: MAIN,
+          from: "    const knownKey = documentOwnerKey({ ...owner, spelling });",
+          to: "    const knownKey = documentOwnerKey(owner);",
+          suite: "test:sec08-dialog-extra-evidence",
+          expect: [/^SEC-08 a retained provisional tab keeps selection Save and close authority after native retirement pruning$/],
+          mustPass: [
+            /^SEC-08 retirement fence setup retains a real older provisional owner without a page-supplied spelling$/,
+            /^SEC-08 native junction spelling opens its exact scoped tab without rebinding existing edits$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R768",
+          what: "look up an older provisional owner without its authenticated path spelling at the closing retirement fence",
+          file: MAIN,
+          from: "    const knownKey = documentOwnerKey({ ...data, spelling });",
+          to: "    const knownKey = documentOwnerKey(data);",
+          suite: "test:sec08-dialog-extra-evidence",
+          expect: [/^SEC-08 a retained provisional tab keeps selection Save and close authority after native retirement pruning$/],
+          mustPass: [
+            /^SEC-08 retirement fence setup retains a real older provisional owner without a page-supplied spelling$/,
+            /^SEC-08 native junction spelling opens its exact scoped tab without rebinding existing edits$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R769",
+          what: "reuse a canonical physical sibling instead of the exact admitted logical tab on native open",
+          file: TABS,
+          from: "        let targetTab = findTabForAdmission(filePath, openData.document);",
+          to: "        let targetTab = findTabByPath(filePath);",
+          suite: "test:sec08-admission-lifecycle-evidence",
+          expect: [
+            /^SEC-08 native junction spelling opens its exact scoped tab without rebinding existing edits$/,
+            /^SEC-08 native case spelling opens its exact scoped tab without rebinding existing edits$/,
+          ],
+          mustPass: [
+            /^SEC-08 native junction spelling setup names the same real physical file$/,
+            /^SEC-08 native dialog extras retain both exact logical entries for the same physical target$/,
+            /^SEC-08 repeated logical spelling setup has a real exact admitted tab$/,
+            /^SEC-08 reopening the same admitted logical spelling deduplicates its existing tab$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R770",
+          what: "skip a separately admitted native dialog extra because its physical sibling is already open",
+          file: TABS,
+          from: "          if (tabs.some(tab => normaliseTabPath(tab.filePath)?.resolved === logicalExtraPath)) continue;",
+          to: "          if (findTabByPath(extraPath)) continue;",
+          suite: "test:sec08-dialog-extra-evidence",
+          expect: [
+            /^SEC-08 native dialog extras retain both exact logical entries for the same physical target$/,
+            /^SEC-08 private restore keeps distinct logical aliases and selects the stored active entry$/,
+          ],
+          mustPass: [
+            /^SEC-08 native junction spelling opens its exact scoped tab without rebinding existing edits$/,
+            /^SEC-08 native case spelling opens its exact scoped tab without rebinding existing edits$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R771",
+          what: "collapse approved logical aliases during private restore through canonical deduplication",
+          file: TABS,
+          from: "        if (findTabForAdmission(entry.filePath, entry.document)) continue;",
+          to: "        if (findTabByPath(entry.filePath)) continue;",
+          suite: "test:sec08-dialog-extra-evidence",
+          expect: [/^SEC-08 private restore keeps distinct logical aliases and selects the stored active entry$/],
+          mustPass: [
+            /^SEC-08 native dialog extras retain both exact logical entries for the same physical target$/,
+            /^SEC-08 native junction spelling opens its exact scoped tab without rebinding existing edits$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R772",
+          what: "leave restore suppression active while quit tries to submit its final layout",
+          file: TABS,
+          from: "    if (sessionRestoreInProgress) {\n      sessionRestoreToken += 1;\n      sessionRestoreInProgress = false;\n    }\n    const active = getActiveTab();",
+          to: "    const active = getActiveTab();",
+          suite: "test:sec08-dialog-extra-evidence",
+          expect: [
+            /^SEC-08 quit during held restore persists final close while retaining unseen approved entries$/,
+            /^SEC-08 cancelled restore completion cannot create tabs or persist after quit freeze$/,
+          ],
+          mustPass: [
+            /^SEC-08 pending-restore quit setup holds a real approved read and refuses stale layout settlement$/,
+            /^SEC-08 normal quit persists the live viewport before freezing new layout submissions$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R773",
+          what: "report an old durable layout as settled while restore is suppressing requested updates",
+          file: TABS,
+          from: '    if (sessionLayoutRequested || sessionRestoreInProgress) {\n      throw new Error("The open tabs are still awaiting document restore");\n    }\n    return durableSessionLayoutRevision;',
+          to: "    return durableSessionLayoutRevision;",
+          suite: "test:sec08-dialog-extra-evidence",
+          expect: [/^SEC-08 pending-restore quit setup holds a real approved read and refuses stale layout settlement$/],
+          mustPass: [
+            /^SEC-08 quit during held restore persists final close while retaining unseen approved entries$/,
+            /^SEC-08 normal quit persists the live viewport before freezing new layout submissions$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R774",
+          what: "silently ignore a resolved-false native document ticket acceptance",
+          file: RENDERER,
+          from: "      .then(accepted => {\n        if (!accepted) {\n          showNotification(\n            'The file open request expired or is no longer available. Retry opening the file.',\n            6000,\n          );\n        }\n      })\n",
+          to: "",
+          suite: "test:sec08-dialog-extra-evidence",
+          expect: [/^SEC-08 the actual refused native-ticket consumer notifies without raw fallback or any document read$/],
+          mustPass: [
+            /^SEC-08 native tickets refuse foreign, forged, missing and replay use while real cancellation consumes without a document read$/,
+            /^SEC-08 an actual trusted local click opens through a main-issued ticket without renderer path IPC$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R775",
+          what: "let a provisional sibling suppress the entire approved live layout",
+          file: TABS,
+          from: "    const entries = tabs.filter(tab => documentState.get(tab)?.admission).map((tab) => ({",
+          to: "    if (tabs.some(tab => !documentState.get(tab)?.admission)) return null;\n    const entries = tabs.map((tab) => ({",
+          suite: "test:sec08-dialog-extra-evidence",
+          expect: [/^SEC-08 provisional tabs do not suppress the admitted companion's durable layout$/],
+          mustPass: [
+            /^SEC-08 a retained provisional tab keeps selection Save and close authority after native retirement pruning$/,
+            /^SEC-08 quit during held restore persists final close while retaining unseen approved entries$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R776",
+          what: "prune delivered but unbound restore references when a native open advances the epoch or shares their logical path",
+          file: MAIN,
+          from: "(!pinnedReferences.has(ref) && !record.deliveredRestore && record.tabId === null &&",
+          to: "(!pinnedReferences.has(ref) && record.tabId === null &&",
+          suite: "test:sec08-dialog-extra-evidence",
+          expect: [
+            /^SEC-08 delivered restore references survive native epoch and same-logical-path pruning until registration$/,
+            /^SEC-08 an actually registered delivered restore owner remains usable for Save close and durable layout$/,
+            /^SEC-08 a full delivered restore batch permits bounded native readmission of the same approved entry$/,
+          ],
+          mustPass: [
+            /^SEC-08 delivered restore race holds a successful Main response after same-path native admission but before renderer delivery$/,
+            /^SEC-08 ordinary same-path native opening remains usable after delivered restore registration$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R777",
+          what: "reject same-entry native readmission at a full delivered restore batch without its bounded transient slot",
+          file: MAIN,
+          from: "      !replacingLiveAdmission && !replacingDeliveredAdmission) {",
+          to: "      !replacingLiveAdmission) {",
+          suite: "test:sec08-dialog-extra-evidence",
+          expect: [/^SEC-08 a full delivered restore batch permits bounded native readmission of the same approved entry$/],
+          mustPass: [
+            /^SEC-08 full delivered batch setup has actual current unbound references without creating fixture tabs$/,
+            /^SEC-08 repeated unused restoration admissions are superseded rather than exhausting live capability capacity$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R778",
+          what: "automatically reissue a permanently failing layout commit instead of asking the explicit close-or-cancel question",
+          file: MAIN,
+          from: '    finishShutdownCommit(attempt, false, data.why || "renderer",\n      data.why === "session-layout-persistence-failed"\n        ? { fallbackCause: "session-persistence" } : {});',
+          to: '    finishShutdownCommit(attempt, false, data.why || "renderer");',
+          suite: "test:sec08-dialog-extra-evidence",
+          expect: [
+            /^SEC-08 persistent layout failure asks once and Cancel stops automatic shutdown retries$/,
+            /^SEC-08 explicit layout-loss approval exits without falsely claiming durable session persistence$/,
+          ],
+          mustPass: [
+            /^SEC-08 real layout write failures remain rejected and cannot approve normal quit$/,
+            /^SEC-08 normal quit persists the live viewport before freezing new layout submissions$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R779",
+          what: "miss a relative native tab when its absolute logical spelling is reopened",
+          file: TABS,
+          from: "      tab => normaliseTabPath(tab.filePath)?.resolved === admission.logicalPath,",
+          to: "      tab => tab.filePath === admission.logicalPath,",
+          suite: "test:sec08-dialog-extra-evidence",
+          expect: [
+            /^SEC-08 absolute reopening of the same relative logical path reuses one tab and durably settles one entry$/,
+            /^nothing rendered a visible error at any point during the suite$/,
+          ],
+          mustPass: [
+            /^SEC-08 relative native admission setup retains a relative tab spelling and an absolute Main logical path$/,
+            /^SEC-08 native junction spelling opens its exact scoped tab without rebinding existing edits$/,
+          ],
+          expectedFailureEvidence: {
+            assertion: /^nothing rendered a visible error at any point during the suite$/,
+            min: 1,
+            requireParentAssertionOutcome: true,
+            hits: [{
+              kind: "console-error",
+              detail: /^\[CustomTabs\] Could not persist open tabs: Error: Error invoking remote method 'save-document-session-layout': Error: Document layout contains an unknown or invalid entry @ file:\/\/\/.*\/src\/custom-tabs\.js:\d+$/,
+            }],
+          },
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R780",
+          what: "persist a stale heading anchor despite capturing the live final quit scroll",
+          file: TABS,
+          from: "      active.scrollPosition = getScroller()?.scrollTop || 0;\n      active.anchor = captureAnchor();",
+          to: "      active.scrollPosition = getScroller()?.scrollTop || 0;",
+          suite: "test:sec08-dialog-extra-evidence",
+          expect: [
+            /^SEC-08 normal quit replaces a stale heading anchor with the live viewport anchor$/,
+            /^SEC-08 an actual restart restores the final live viewport rather than the obsolete heading anchor$/,
+          ],
+          mustPass: [
+            /^SEC-08 quit viewport setup has a stale heading anchor and a real overflowing document$/,
+            /^SEC-08 normal quit persists the live viewport before freezing new layout submissions$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
       ];
 
 // These are release exceptions, not passing or withdrawn proofs. An explicit
@@ -19990,7 +20433,7 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755";
+      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760";
   const toolbarAllowanceIsRecordScoped =
     REVERTS.filter((r) =>
       exactShutdownTailForMutation(r) === TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL,

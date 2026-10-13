@@ -68,6 +68,12 @@ being current and stable.
 
 ## Status legend
 
+**Current continuation model policy (explicit user correction).** Latest GPT
+Sol with high reasoning implements; latest GPT Astra performs deep research;
+two independent latest GPT Sol/high and GPT Luna/high contexts review.
+This supersedes the historical Folia role table for this continuation only.
+Substantive proof, performance, source-ownership and release rules remain.
+
 **2026-10-12 release priority correction (explicit user decision).** The
 identified Save-alias edge case, hosted shutdown failure and ordinary hosted
 CI repair/full-green run are P2, deferred and nonblocking for this release.
@@ -138,6 +144,218 @@ evidence. Next is main-issued admission and restore authority: moving these
 calls alone does not authorize renderer-chosen paths. Legacy session
 compatibility and the hot-path metadata IPC must be preserved and measured,
 not renamed into an authority or performance certificate.
+
+**Main-issued admission/restore authority — IN PROGRESS (2026-10-13).**
+Independent Sol/Luna design feedback agrees that permission, a byte/version
+snapshot and deletion retirement are separate facts. The implementation must
+bind physical identity to the actual read, require admitted references at
+every authority sink, retain history separately from retired Save ownership,
+and make legacy import crash-safe and private before document processing.
+The exact legacy session may be grandfathered once with explicit provenance;
+that is compatibility, not a claim of historical main approval. No current
+page-supplied path list or corrupt-manifest fallback may reopen import.
+Restore ordering, unavailable entries and pending-Save settlement/queue tails
+remain required. Production security flags and performance acceptance are
+still open; the coding handoff is bounded and has a single product writer.
+
+**Admission implementation review — CORRECTIONS ACTIVE, not qualified.**
+The frozen real-Electron consumer run is 81/81, private startup/migration
+47/47, and source packaging 364/0 in
+`.context-viewport-evidence/admission-frozen-*`; these are pre-correction
+results, not final acceptance. Both fresh Sol/Luna reviews found permanent
+history quota exhaustion. Sol additionally identified superseded-reference
+resurrection, a Save-tail ABA window, loss of the newest queued layout on
+ordinary quit, executable-bit directory misclassification and an incomplete
+alternate-spelling read observer. Luna identified retired historical IDs
+accepted into live layout and synchronous Main persistence; Sol also requires
+persistence coalescing and measurements, without claiming an observed slowdown.
+The single writer is correcting lifecycle fences, live-layout authority and
+durable asynchronous persistence in a bounded phase. Prior profiles/evidence
+remain retained. The newly introduced quit/layout defect is in scope; it is
+not the deferred hosted-shutdown campaign. Existing restore proofs need
+equivalent new anchors and actual reproof, and the private session suite needs
+normal test wiring. Provisional path routes, remaining privileged consumers,
+production security flags and final responsiveness remain open.
+
+**Admission R2 correction — frozen for targeted validation/review.** Both
+independent reviewers found the invalid adopted-baseline cleanup and an
+unawaited legacy-localStorage frozen-restore oracle. These are corrected without
+weakening the preload validator or sentinel. Sol additionally found restored
+entry protection surviving a close during held persistence; authenticated
+live layout/retirement now consumes that protection before disk acknowledgement,
+and successful obsolete writes do not reject merely because a submitted tab
+closed. Luna additionally found packaged README incorrectly pointing inside
+the excluded archive; both handlers now share the extra-resource/dev helper.
+The focused race starts from actual Main restore snapshots, holds the rename
+and closes the protected tab. Frozen restore uses approved saved IDs and awaits
+the real consumer. Quit captures its final viewport before freezing later layout
+submissions. Initial corrected focused evidence is 101/101
+(`admission-correction-focused-r6.log`); subsequent README/viewport additions,
+equivalent R647/R648 controls, new exact proofs and fresh independent reviews
+are pending. Private migration now has a definitive controller aggregate footer.
+This is not final isolation, performance qualification or release acceptance.
+
+**Admission R3 correction — targeted baseline passed; proofs/review pending.**
+Sol additionally found older provisional owners stranded by spelling-less
+retirement-floor lookup, native alternate spellings bound to the wrong logical
+tab, and quit acknowledging an old layout while restore was pending. Luna
+found the ordinary-suite persistence fixtures still treating localStorage as
+session authority. Both reviewers support authenticated spelling lookup,
+separate exact logical tabs for differently spelled admitted opens, and
+cancelling pending restore before submitting a fresh acknowledged quit layout.
+The shared physical target and Save/deletion protections remain unchanged;
+opening an alias does not rebind or overwrite a dirty existing tab.
+The targeted real-Electron baseline is 122/122
+(`admission-r3-correction-focused-r2.log`), private startup/migration is 47/47
+(`admission-r3-private-r1.log`), and source packaging is 365/0
+(`admission-r3-packaging-r1.log`). The first corrected run was 119/122: its
+reopen wait was already true, its held-restore fixture reused historical
+approval, and a fixture junction prevented cleanup. The corrected tests await
+a new reference, use a genuinely new admitted file and unlink their owned
+junction. Neither failure nor the previous interrupted audit is qualification.
+Ordinary-suite Main-owned fixtures, exact new/affected reverts and fresh final
+reviews remain pending. The Node-enabled transitional suite is not final
+renderer isolation or responsiveness evidence.
+
+**Admission R4 correction — behavioral baseline passed; not qualified.**
+Fresh Sol found a persistent layout-write failure automatically reissuing quit,
+and already-delivered unbound restore references revoked by a concurrent native
+open. Luna found the native-ticket consumer silently ignoring a resolved-false
+acceptance. Both support explicit refusal notification and delivered-reference
+protection with bounded reclamation. Main now protects the successful returned
+batch across epoch/same-path pruning, reclaims its unused references on the next
+authenticated restore without dropping adoption-grant holders, and permits a
+bounded transient reference only for readmission of an existing batch entry.
+Binding clears the delivered marker; retired/dead-scope cleanup stays unconditional.
+The race parks the native delivery after real admission, releases the successful
+restore first, and executes actual restored-owner registration, Save and close.
+The full-batch and repeated-unused-batch controls cover retention and capacity.
+Persistence failure now enters the existing explicit Main fallback question,
+with accurate layout-loss and unsaved-work warnings and Cancel as both default
+and Escape. It does not automatically authorize exit, clear the import latch,
+overwrite a corrupt manifest or reimport legacy page state. The explicit
+fallback follows the existing document-session/continuation checks; it does
+not claim a durable layout or a normal renderer phase-two success.
+The healthy baseline is 134/134 (`admission-r4-correction-focused-r3.log`),
+private startup/migration 47/47 (`admission-r4-private-r1.log`) and source
+packaging 365/0 (`admission-r4-packaging-r1.log`). The earlier 41/42 run caught
+a misplaced helper extraction at runtime; the subsequent 132/133 run caught
+the test assuming closeTab returned a boolean. Both are retained failures,
+not qualification. The ordinary generation-matrix reset fixture now begins
+from a real native admission; its complete cross-check is pending.
+Final independent reviews and exact new/affected mutations are still pending;
+draft anchors resolving is not proof. Isolation flags, remaining ports and
+representative final-source responsiveness remain open.
+
+**Admission R5 correction — focused follow-up active.** The frozen focused run
+passed 134/134 (`admission-r5-focused-r1.log`); the ordinary cross-check ended
+346/351 (`admission-r5-ordinary-tabs-r1.log`), retaining the three deferred
+navigation/shutdown failures and aborting at a legacy unadmitted restart fixture.
+Sol found relative native arguments missing absolute logical tab matches, and
+final quit saving fresh scroll alongside an obsolete heading anchor. Luna found
+no significant issue; this is not unanimous approval of those defects.
+Logical matching now normalizes absolute spellings without resolving aliases or
+folding case. Final quit captures both position fields using the existing anchor
+helper. Controls exercise an actual relative open/reopen and an overflowing
+document restored after a real renderer restart. The affected ordinary terminal
+fixtures now obtain a native admission before testing restart recovery. R779/R780
+are drafted, not proven; R765/R770 anchors were updated with their mechanisms
+preserved. The first follow-up passed 139/140; its setup used integer equality
+against a scroll position quantized to 523.2 CSS pixels on this display. The
+one-pixel setup tolerance matches the actual-restoration control; that control
+and both corrected behaviors already passed. The failed log is retained.
+The corrected focused run passed 140/140 (`admission-r6-focused-r2.log`).
+Both the restored viewport and native refusal captures were actually viewed.
+The latest anchor audit resolves; it is not proof. Fresh independent reviews,
+the ordinary cross-check and exact proofs remain pending.
+
+R6 Sol found no new product defect, but caught the ordinary fixture creating a
+second provisional tab after its native admission (345/351, retained). Its two
+producers now reuse the actually admitted active tab; the strict restart oracle
+is unchanged. Luna found no significant issue. Sol also identified R250's
+activation mutation colliding with the new restore supersession fence, and
+R779's duplicate-layout error reaching the global sentinel. These draft-proof
+defects need bounded empirical correction, not new product behavior or blanket
+diagnostic suppression. The selected live-name audit passed for private session,
+packaging and focused controls; it does not prove a mutation.
+R250-R253 now reuse the existing focused batch journey rather than the deferred
+ordinary shutdown campaign. R250 explicitly neutralizes its own activation's
+restore supersession as a compound probe, retaining token/open-intent/freeze
+checks and the complete-batch positive control. This mechanism and R779's exact
+additional sentinel evidence are being checked empirically in a serialized
+mutation phase. No draft or failed attempt is marked proven.
+
+**Admission proof correction — serialized, product bytes restored.** The first
+mutation window qualified R251/R252, but R250/R253/R765/R780 timed out and R779
+was collateral; all product hashes were restored exactly. The batch-only
+selector reuses the same existing batch tests without the unrelated quota and
+admission journeys. Its actual window destruction now precedes the footer,
+rather than weakening transcript-tail acceptance. R250/R251/R252 subsequently
+qualified (`admission-r7-batch-proofs-r2.log`); R250 is explicitly compound.
+R253 exposed two coupled oracles: ordering wrongly depended on active selection,
+and unreadable-extra recovery combined retention with selection. Ordering and
+retention now remain independent controls; selected-document preservation has
+its own assertion. R779 constrains the observed duplicate-layout sentinel hit,
+without any mute. The restart oracle now compares against the captured live
+viewport, not mutated persisted scroll, after fonts and real paint frames settle;
+it does not wait for the desired answer to become true. Corrected exact reruns
+and independent test/proof reviews remain pending.
+
+**Admission foundation — reviewed and proven on retained product bytes
+(2026-10-13); remaining isolation sinks are still transitional.** Main-issued
+native descriptors/tickets, private one-time legacy capture, approved-ID
+restore and asynchronous coalesced layout persistence are implemented. R8
+fixed a real synchronous bootstrap defect: assigning `event.returnValue`
+at handler entry sent a refusal before the accepted branch could reply.
+Every branch now sends exactly one verdict. The private test observes the
+actual first preload request in Main, verifies the sender/frame/application
+URL/nonce setup without exposing the nonce, and R760 fails exactly its declared
+replay assertions when the one-use guard is removed. Final private startup
+and migration is 54/54 (`admission-r11-private-r1.log`); source packaging is
+365/0 (`admission-r11-packaging-r1.log`), not installed-artifact qualification.
+
+The delivered-owner Save/close oracle now owns strict live-layout checks;
+the independent same-path native-open control performs an actual owned read.
+R761/R772 accurately name their coupled consequences. R769's dedup control
+begins from its own real exact logical admission and requires an observed new
+reference, not a discarded wait result. R8/R9 exact mutation logs qualify
+the new/affected records, including R250-R253, R647/R648 and R756-R780.
+R250 and R647/R648 remain explicitly compound probes. Failed setup, vacuous,
+collateral and timed-out attempts stay retained; R733/R734 have no verdict.
+Each completed proof window verified exact source restoration.
+
+The final lifecycle-only baseline is 117/117 and R769/R102 are individually
+exact PROVEN in `admission-r11-selected-proofs-r1.log`. This selector ends before
+capacity stress and the subsequent final-quit viewport, persistence-failure and
+packaged-README scenarios; those retain their earlier full-run/proof evidence,
+not coverage from the final lifecycle run. Real ordinary-open, sentinel and
+teardown controls remain. The full focused selector's
+120s functional watchdog is unchanged: its R10 attempt timed out at quota
+open 408 after 113 passing checks and is not a pass or performance result.
+The earlier complete R9 baseline remains 143/143. All product hashes are
+unchanged since the converged R8 review; only the later oracles/selectors changed.
+
+The ordinary R9 cross-check was 514/525. Its concurrent-Save assertions sampled
+while Main still reported two pending operations; both completions arrived
+afterward. The test now proves two synchronous dispatches and awaits the
+existing correlated settlement promise with a finite bound, never desired
+content. The corrected ordinary R11 run is 524/527: all eight additional
+Save/reload/late-edit assertions and installed-restart controls pass; only
+the three explicitly deferred navigation cases fail. The intervening R10
+early-switch abort remains retained, not attributed to the environment or
+declared reproduced/fixed by the fresh passing diagnostic probes.
+Fresh Sol/Luna feedback converges on the final oracle changes; Sol's ignored
+reopen-wait finding was accepted and corrected, while Luna had not identified
+it. Sol also caught an understated description of the lifecycle selector's
+omitted scenarios; that evidence-scope wording is corrected. No outstanding
+review disagreement remains on this tranche.
+
+Next: remaining fixed Save/reload/result/event and browser path consumers,
+then production Node-off/context-isolation/sandbox and genuine live-grant
+foreign-sender coverage. Provisional/raw compatibility paths still exist;
+this foundation is not full path-authority closure. Representative final-source
+responsiveness remains unqualified. The retained old hosted comparison did not
+run and cannot certify these or future bytes. No performance contract changed.
 
 **Browser primitive transition — IMPLEMENTED / PROVEN, unintegrated.** Removed
 renderer Node crypto and Buffer dependencies using native Web Crypto/TextEncoder for the existing
@@ -3166,7 +3384,7 @@ verification or visual release inspection has yet been claimed.
 
 ## B. Security and wave-2 hardening
 
-### `w2-sec08` — context-isolated renderer · PENDING
+### `w2-sec08` — context-isolated renderer · ACTIVE
 
 Turn off `nodeIntegration` in the main window, turn on `contextIsolation`, and
 put a minimal validated `contextBridge` preload in front of it. The four popup

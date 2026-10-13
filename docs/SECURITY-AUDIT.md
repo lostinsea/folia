@@ -515,6 +515,26 @@ exact PROVEN (`browser-primitives-exact-proofs-r1-20261012.log`). This removes
 crypto/Buffer consumers only; it does not qualify responsiveness or path
 authority.
 
+**Main-issued admission foundation (2026-10-13).** Native opens carry scoped
+descriptors and one-use tickets; restore/persistence uses Main-approved entry
+IDs in a private manifest, not a page-supplied path list. Legacy capture is
+private and before page scripts, with a durable one-time import marker and
+fail-closed corrupt state. Permission, snapshot version and retired Save
+ownership remain distinct; aliases retain exact logical tabs over their shared
+physical target. Delivered restore references remain protected until binding
+or supersession, and queued layouts coalesce asynchronously before final quit.
+The corrected private bootstrap replies once per branch; R760 proves the
+one-use guard with an actual initial-request nonce setup, without publishing
+that nonce. Final private controls pass 54/54, focused lifecycle controls
+117/117, and affected exact reverts are recorded in `docs/PLANNED-WORK.md`.
+The ordinary cross-check is 524/527, with the three explicitly deferred
+navigation cases still failing; no full-green claim is made.
+
+Remaining raw/provisional compatibility sinks, browser privileged callers and
+final production flags still require migration. Functional evidence is not
+responsiveness qualification, and the old skipped comparison covers no final
+isolation bytes.
+
 The **production main window still has Node enabled and isolation disabled**.
 Preparation, commit, completion and abandonment of disk-adoption capabilities
 now use fixed copied/validated preload methods; main's actual authority,

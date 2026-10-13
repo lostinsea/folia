@@ -15,6 +15,7 @@ const path = require("path");
 const fs = require("fs");
 const os = require("os");
 const crypto = require("crypto");
+const { pathToFileURL, fileURLToPath } = require("url");
 
 // ============================================
 // DEVELOPMENT PROFILE ISOLATION
@@ -711,7 +712,7 @@ const quarantinedSaveScopes = new WeakSet();
 function normaliseDocumentIdentity(
   owner,
   filePath,
-  { useCurrentPathIdentity = false } = {},
+  { useCurrentPathIdentity = false, forAdoption = false } = {},
 ) {
   if (!owner || typeof owner !== "object") return null;
   if (
@@ -730,7 +731,28 @@ function normaliseDocumentIdentity(
   ) {
     return null;
   }
+  const admittedTabKey = [
+    owner.pageSession, owner.rendererGeneration, owner.tabId,
+  ].join("\0");
   const spelling = filePathSpellingKey(filePath);
+  const admission = owner.documentRef === undefined
+    ? null : admittedDocumentReference(owner.documentRef, owner, filePath, forAdoption);
+  if ((owner.documentRef !== undefined && !admission) ||
+      (admittedOwnerTabs.has(admittedTabKey) && !admission)) return null;
+  if (!admission && retiredAdmissionScope ===
+      `${owner.pageSession}\0${owner.rendererGeneration}` &&
+      owner.tabId <= retiredAdmissionTabFloor) {
+    const knownKey = documentOwnerKey({ ...owner, spelling });
+    const known = knownDocumentOwners.get(knownKey);
+    const provisionalAdoption = forAdoption && Array.from(knownDocumentOwners).some(
+      ([key, candidate]) => !candidate.documentRef &&
+        !supersededDocumentOwners.has(key) &&
+        candidate.pageSession === owner.pageSession &&
+        candidate.rendererGeneration === owner.rendererGeneration &&
+        candidate.tabId === owner.tabId && candidate.pathKey === owner.pathKey);
+    if (!provisionalAdoption && (!known || known.documentRef ||
+        supersededDocumentOwners.has(knownKey))) return null;
+  }
   const pathKey = useCurrentPathIdentity
     ? resolveCanonicalFileKey(filePath) || spelling
     : canonicalFileKey(filePath);
@@ -742,6 +764,7 @@ function normaliseDocumentIdentity(
     documentGeneration: owner.documentGeneration,
     pathKey,
     spelling,
+    ...(admission ? { documentRef: owner.documentRef } : {}),
   });
 }
 
@@ -1142,13 +1165,31 @@ function rememberDocumentOwner(
     modifiedTime = null,
     adopted = false,
     readPath = null,
+    acceptedReadTarget = null,
   } = {},
 ) {
+  if (!owner || typeof owner !== "object") return false;
+  const admittedTabKey = [
+    owner.pageSession, owner.rendererGeneration, owner.tabId,
+  ].join("\0");
+  if (owner.documentRef && !admittedOwnerTabs.has(admittedTabKey)) {
+    pruneAdmissionScopeFences();
+  }
   if (!canRememberDocumentOwner(owner)) return false;
+  const admission = owner.documentRef
+    ? admittedDocumentReference(owner.documentRef, owner, readPath, adopted)
+    : null;
+  const suppliedAdmissionVersion = normaliseDiskVersion(diskVersion);
+  if (owner.documentRef && (!admission ||
+      (!acceptedReadTarget && suppliedAdmissionVersion &&
+        !sameDiskVersion(admission.snapshotVersion, suppliedAdmissionVersion)) ||
+      (!acceptedReadTarget && !knownDocumentOwners.has(documentOwnerKey(owner)) &&
+        !suppliedAdmissionVersion))) return false;
   const key = documentOwnerKey(owner);
   const previousReadTarget = knownDocumentOwners.get(key)?.readTarget;
   const resolvedReadTarget = readPath && (adopted || !previousReadTarget)
-    ? resolveCanonicalFilePath(readPath)
+    ? acceptedReadTarget || admission?.descriptor.readTarget ||
+      resolveCanonicalFilePath(readPath)
     : null;
   const readTarget = resolvedReadTarget &&
     canonicalKeyFromPath(resolvedReadTarget) === owner.pathKey
@@ -1248,6 +1289,23 @@ function rememberDocumentOwner(
     ...owner,
     readTarget: adopted ? readTarget : previousReadTarget || readTarget,
   }));
+  if (admission) {
+    const previousAdmission = admittedOwnerTabs.get(admittedTabKey);
+    if (previousAdmission && previousAdmission !== admission) {
+      previousAdmission.retired = true;
+      previousAdmission.ticketUsed = true;
+    }
+    admission.tabId = owner.tabId;
+    admission.documentGeneration = owner.documentGeneration;
+    admission.deliveredRestore = false;
+    admittedOwnerTabs.set(admittedTabKey, admission);
+    if (adopted) {
+      admission.snapshotVersion = normaliseDiskVersion(diskVersion);
+      admission.descriptor = Object.freeze({
+        ...admission.descriptor, readTarget, pathKey: owner.pathKey,
+      });
+    }
+  }
   const suppliedVersion = normaliseDiskVersion(diskVersion);
   const previousBaseline = ownerDocumentBaselines.get(key);
   if (!previousBaseline || adopted) {
@@ -2214,6 +2272,9 @@ function rememberVerifiedSaveVersion(filePath, stats, expectedKey, owner = null)
     }));
     notifiedExternalVersionsByOwner.delete(ownerKey);
   }
+  const admission = owner?.documentRef
+    ? admittedDocumentReference(owner.documentRef, owner, filePath) : null;
+  if (admission) admission.snapshotVersion = version;
   return key;
 }
 
@@ -2351,6 +2412,660 @@ function readDocumentModifiedTime(filePath, operation) {
 
 const MAX_STABLE_FILE_READ_ATTEMPTS = 3;
 
+// Permission survives closing a Save owner; a live reference does not survive
+// its frame. The manifest contains entry IDs, never live capabilities.
+const documentAdmissions = new Map();
+const admittedOwnerTabs = new Map();
+const privateSessionBootstraps = new WeakMap();
+const unavailableSessionEntries = new Set();
+const protectedSessionEntries = new Set();
+const MAX_SESSION_DOCUMENTS = 512;
+const nativeDocumentOpenTickets = new Map();
+let documentSessionManifest = null;
+let documentSessionFailure = null;
+let retiredAdmissionTabFloor = 0;
+let retiredAdmissionScope = null;
+let pendingLiveSessionWrite = null;
+let liveSessionWriteRunning = false;
+
+function deliverNativeDocumentIntent(target, filePath, provenance = "native-open") {
+  if (!target || target.isDestroyed()) return false;
+  for (const [ticket, record] of nativeDocumentOpenTickets) {
+    if (record.sender.isDestroyed() || record.generation !== approvalRendererGeneration ||
+        Date.now() - record.createdAt > 60000) nativeDocumentOpenTickets.delete(ticket);
+  }
+  if (nativeDocumentOpenTickets.size >= MAX_SESSION_DOCUMENTS) return false;
+  const ticket = crypto.randomBytes(32).toString("hex");
+  nativeDocumentOpenTickets.set(ticket, {
+    sender: target, frameTreeNodeId: target.mainFrame.frameTreeNodeId,
+    generation: approvalRendererGeneration, filePath, provenance,
+    createdAt: Date.now(),
+    pageSession: approvalRendererPageSession,
+    delivered: approvalRendererState === "ready",
+  });
+  if (approvalRendererState === "ready") {
+    target.send("external-file-open-request", { filePath, documentOpenTicket: ticket });
+  }
+  return true;
+}
+
+function takeNativeDocumentTicket(event, ticket) {
+  if (!isApprovalSender(event) || approvalRendererState !== "ready") return null;
+  const record = nativeDocumentOpenTickets.get(ticket);
+  if (!record || record.sender !== event.sender ||
+      record.frameTreeNodeId !== event.senderFrame.frameTreeNodeId ||
+      record.generation !== approvalRendererGeneration ||
+      (record.pageSession !== null && record.pageSession !== approvalRendererPageSession) ||
+      Date.now() - record.createdAt > 60000) return null;
+  nativeDocumentOpenTickets.delete(ticket);
+  return record;
+}
+
+ipcMain.handle("accept-native-document-ticket", (event, data) => {
+  const record = takeNativeDocumentTicket(event, data?.ticket);
+  if (!record) return false;
+  openFile(record.filePath, {
+    sender: event.sender, rendererGeneration: record.generation,
+    provenance: record.provenance,
+  });
+  return true;
+});
+
+ipcMain.handle("cancel-native-document-ticket", (event, data) =>
+  !!takeNativeDocumentTicket(event, data?.ticket));
+
+ipcMain.handle("open-admitted-readme", (event) => {
+  if (!isApprovalSender(event) || approvalRendererState !== "ready") return false;
+  openFile(getReadmePath(), {
+    sender: event.sender, rendererGeneration: approvalRendererGeneration,
+    provenance: "native-open",
+  });
+  return true;
+});
+
+// This is the existing local-link policy, applied only to private trusted
+// gestures. Native All Files selection deliberately has no extension policy.
+const TRUSTED_LINK_EXECUTABLE_EXTS = new Set([
+  ".exe", ".msi", ".msix", ".msixbundle", ".appx", ".appxbundle", ".bat",
+  ".cmd", ".com", ".scr", ".pif", ".hta", ".cpl", ".lnk", ".url", ".reg",
+  ".msc", ".msp", ".gadget", ".inf", ".dll", ".ocx", ".sys", ".chm", ".xll",
+  ".ws", ".sct", ".jnlp", ".website", ".scf",
+  ".iso", ".img", ".vhd", ".vhdx", ".wim", ".diagcab",
+  ".settingcontent-ms", ".library-ms", ".search-ms", ".searchconnector-ms",
+  ".theme", ".themepack", ".deskthemepack",
+  ".ps1", ".psm1", ".psd1", ".vbs", ".vbe", ".wsf", ".wsh", ".js", ".jse",
+  ".mjs", ".cjs", ".py", ".pyw", ".rb", ".pl", ".php", ".jar",
+  ".sh", ".bash", ".zsh", ".fish", ".ksh", ".csh", ".run", ".bin", ".out",
+  ".command", ".app", ".desktop", ".appimage", ".deb", ".rpm", ".pkg", ".dmg",
+  ".terminal", ".workflow",
+  ".docm", ".xlsm", ".pptm", ".dotm", ".xltm", ".potm", ".xlam", ".ppam",
+]);
+const TRUSTED_LINK_SAFE_EXTS = new Set([
+  ".txt", ".text", ".log", ".csv", ".tsv", ".json", ".xml", ".yml", ".yaml",
+  ".ini", ".toml", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif",
+  ".tiff", ".ico", ".avif", ".heic", ".mp3", ".wav", ".flac", ".ogg", ".m4a",
+  ".mp4", ".webm", ".mov", ".mkv",
+]);
+const TRUSTED_LINK_MARKDOWN_EXTS = new Set([".md", ".markdown", ".mmd", ".mermaid", ".ow"]);
+const TRUSTED_DROP_EXTS = new Set([".md", ".markdown", ".mdown", ".mkd", ".mkdn", ".mmd", ".mermaid"]);
+const isTrustedNetworkPath = value => /^(\\\\|\/\/)/.test(value);
+
+ipcMain.handle("private-trusted-document-gesture", async (event, data) => {
+  const bootstrap = privateSessionBootstraps.get(event.sender);
+  if (!isApprovalSender(event) || approvalRendererState !== "ready" ||
+      !bootstrap?.used || data?.nonce !== bootstrap.nonce ||
+      event.senderFrame.url !== pathToFileURL(path.join(__dirname, "index.html")).href) {
+    return false;
+  }
+  try {
+    if (data.kind === "drop") {
+      if (typeof data.filePath !== "string" || data.filePath.includes("\0") ||
+          isTrustedNetworkPath(data.filePath) || !path.isAbsolute(data.filePath)) return false;
+      if (!TRUSTED_DROP_EXTS.has(path.extname(data.filePath).toLowerCase())) {
+        throw new Error(`Dropped file type is not supported: ${path.basename(data.filePath)}`);
+      }
+      return deliverNativeDocumentIntent(event.sender, data.filePath);
+    }
+    const admission = admittedDocumentReference(data.documentRef, watchedOwner,
+      watchedFilePath);
+    if (data.kind !== "link" || !admission || typeof data.href !== "string" ||
+        !data.href || data.href.length > 65536 || data.href.includes("\0") ||
+        data.href.startsWith("#")) return false;
+    const href = data.href;
+    if (isTrustedNetworkPath(href)) throw new Error("Network file paths are blocked");
+    if (/^https?:\/\//i.test(href)) {
+      await shell.openExternal(href);
+      return true;
+    }
+    let logicalPath;
+    if (path.isAbsolute(href) && !/^file:/i.test(href)) {
+      logicalPath = path.normalize(href);
+    } else {
+      const url = new URL(href, admission.descriptor.documentUrl);
+      if (url.protocol !== "file:" || url.hostname) {
+        throw new Error("Network or unsupported file links are blocked");
+      }
+      logicalPath = fileURLToPath(url);
+    }
+    if (isTrustedNetworkPath(logicalPath)) throw new Error("Network file paths are blocked");
+    const readTarget = fs.realpathSync.native(logicalPath);
+    if (isTrustedNetworkPath(readTarget)) throw new Error("Network file paths are blocked");
+    const stats = fs.statSync(readTarget);
+    const ext = path.extname(readTarget).toLowerCase();
+    if (TRUSTED_LINK_EXECUTABLE_EXTS.has(ext) ||
+        (!stats.isDirectory() && !ext && process.platform !== "win32" &&
+          (stats.mode & 0o111) !== 0)) {
+      throw new Error(`Executable links are blocked: ${path.basename(readTarget)}`);
+    }
+    if (TRUSTED_LINK_MARKDOWN_EXTS.has(ext)) {
+      return deliverNativeDocumentIntent(event.sender, logicalPath);
+    }
+    if (!stats.isDirectory() && !TRUSTED_LINK_SAFE_EXTS.has(ext)) {
+      const decision = await dialog.showMessageBox(mainWindow, {
+        type: "question", title: "Open external file",
+        message: `Open "${path.basename(readTarget)}" with its system application?`,
+        buttons: ["Cancel", "Open"], defaultId: 0, cancelId: 0,
+      });
+      if (decision.response !== 1 || !isApprovalSender(event) ||
+          !admittedDocumentReference(data.documentRef, watchedOwner, watchedFilePath)) {
+        return false;
+      }
+    }
+    const error = await shell.openPath(readTarget);
+    if (error) throw new Error(error);
+    return true;
+  } catch (error) {
+    event.sender.send("show-error", error.message);
+    return false;
+  }
+});
+
+function documentSessionFiles() {
+  const profile = app.getPath("userData");
+  return {
+    manifest: path.join(profile, "document-session.json"),
+    marker: path.join(profile, "document-session-import.json"),
+  };
+}
+
+function writeDocumentSessionImportMarker(status, error = null, exclusive = false) {
+  const fd = fs.openSync(documentSessionFiles().marker, exclusive ? "wx" : "w", 0o600);
+  try {
+    fs.writeFileSync(fd, JSON.stringify({
+      version: 1, status, ...(error === null ? {} : { error }),
+    }), "utf8");
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function writeDocumentSession() {
+  if (!documentSessionManifest || documentSessionFailure) {
+    throw new Error(documentSessionFailure || "Document session is unavailable");
+  }
+  const file = documentSessionFiles().manifest;
+  const next = `${file}.${crypto.randomBytes(16).toString("hex")}.next`;
+  let fd;
+  try {
+    fd = fs.openSync(next, "wx", 0o600);
+    fs.writeFileSync(fd, JSON.stringify(documentSessionManifest), "utf8");
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = null;
+    fs.renameSync(next, file);
+  } finally {
+    if (fd !== null && fd !== undefined) fs.closeSync(fd);
+    if (fs.existsSync(next)) fs.unlinkSync(next);
+  }
+}
+
+function persistLiveDocumentSession() {
+  const text = JSON.stringify(documentSessionManifest);
+  const promise = new Promise((resolve, reject) => {
+    if (pendingLiveSessionWrite) {
+      pendingLiveSessionWrite.text = text;
+      pendingLiveSessionWrite.waiters.push({ resolve, reject });
+    } else {
+      pendingLiveSessionWrite = { text, waiters: [{ resolve, reject }] };
+    }
+  });
+  if (!liveSessionWriteRunning) {
+    liveSessionWriteRunning = true;
+    Promise.resolve().then(async () => {
+      while (pendingLiveSessionWrite) {
+        const write = pendingLiveSessionWrite;
+        pendingLiveSessionWrite = null;
+        const file = documentSessionFiles().manifest;
+        const next = `${file}.${crypto.randomBytes(16).toString("hex")}.next`;
+        let handle;
+        try {
+          handle = await fs.promises.open(next, "wx", 0o600);
+          await handle.writeFile(write.text, "utf8");
+          await handle.sync();
+          await handle.close();
+          handle = null;
+          await fs.promises.rename(next, file);
+          write.waiters.forEach(waiter => waiter.resolve(true));
+        } catch (error) {
+          write.waiters.forEach(waiter => waiter.reject(error));
+        } finally {
+          if (handle) await handle.close().catch(() => {});
+          await fs.promises.unlink(next).catch(error => {
+            if (error.code !== "ENOENT") console.error("Session write cleanup failed:", error);
+          });
+        }
+      }
+      liveSessionWriteRunning = false;
+    }).catch(error => {
+      liveSessionWriteRunning = false;
+      console.error("Session persistence worker failed:", error);
+    });
+  }
+  return promise;
+}
+
+function validSessionEntry(entry) {
+  return entry && /^[a-f0-9]{32}$/.test(entry.id) &&
+    typeof entry.filePath === "string" && !entry.filePath.includes("\0") &&
+    path.isAbsolute(entry.filePath) &&
+    typeof entry.provenance === "string" &&
+    ["native-open", "native-dialog", "legacy-profile"].includes(entry.provenance) &&
+    Number.isFinite(entry.scrollPosition) && entry.scrollPosition >= 0 &&
+    validSessionAnchor(entry.anchor);
+}
+
+function validSessionAnchor(anchor) {
+  return anchor === null || (anchor && typeof anchor === "object" &&
+    !Array.isArray(anchor) && Number.isFinite(anchor.scrollTop) &&
+    anchor.scrollTop >= 0 &&
+    (anchor.text === null || (typeof anchor.text === "string" &&
+      anchor.text.length <= 1024 * 1024)) &&
+    Number.isSafeInteger(anchor.ordinal) && anchor.ordinal >= 0 &&
+    Number.isFinite(anchor.delta));
+}
+
+function copySessionAnchor(anchor) {
+  return anchor === null ? null : {
+    scrollTop: anchor.scrollTop, text: anchor.text,
+    ordinal: anchor.ordinal, delta: anchor.delta,
+  };
+}
+
+function bootstrapDocumentSession(legacy) {
+  if (documentSessionManifest || documentSessionFailure) return;
+  const files = documentSessionFiles();
+  let importAttemptStarted = false;
+  try {
+    if (fs.existsSync(files.manifest)) {
+      if (!fs.existsSync(files.marker)) {
+        writeDocumentSessionImportMarker("attempted", null, true);
+        importAttemptStarted = true;
+      }
+      const saved = JSON.parse(fs.readFileSync(files.manifest, "utf8"));
+      if (saved?.version !== 1 || saved.importStatus !== "completed" ||
+          !Array.isArray(saved.entries) || saved.entries.length > MAX_SESSION_DOCUMENTS ||
+          !saved.entries.every(validSessionEntry) ||
+          new Set(saved.entries.map(entry => entry.id)).size !== saved.entries.length ||
+          !Array.isArray(saved.approvedEntries) ||
+          saved.approvedEntries.length > MAX_SESSION_DOCUMENTS ||
+          !saved.approvedEntries.every(validSessionEntry) ||
+          new Set(saved.approvedEntries.map(entry => entry.id)).size !== saved.approvedEntries.length ||
+          !saved.entries.every(entry => saved.approvedEntries.some(approved =>
+            approved.id === entry.id && approved.filePath === entry.filePath &&
+            approved.provenance === entry.provenance)) ||
+          (saved.activeEntryId !== null &&
+            !saved.entries.some(entry => entry.id === saved.activeEntryId))) {
+        throw new Error("Invalid main-owned document session");
+      }
+      if (importAttemptStarted) writeDocumentSessionImportMarker("completed");
+      documentSessionManifest = saved;
+      for (const entry of saved.entries) protectedSessionEntries.add(entry.id);
+      return;
+    }
+    if (fs.existsSync(files.marker)) {
+      throw new Error("Document session import was already attempted; its state is missing");
+    }
+    // Durable before parsing: a corrupt or interrupted import must never
+    // reinterpret later page-written localStorage as historical permission.
+    writeDocumentSessionImportMarker("attempted", null, true);
+    importAttemptStarted = true;
+    if (legacy.captureError) throw new Error(`Legacy session capture failed: ${legacy.captureError}`);
+    const source = legacy.openTabs === null ? [] : JSON.parse(legacy.openTabs);
+    if (!Array.isArray(source) || source.length > MAX_SESSION_DOCUMENTS ||
+        !source.every(entry => entry && typeof entry.filePath === "string" &&
+          !entry.filePath.includes("\0") && path.isAbsolute(entry.filePath) &&
+          (entry.scrollPosition === undefined ||
+            (Number.isFinite(entry.scrollPosition) && entry.scrollPosition >= 0)) &&
+          validSessionAnchor(entry.anchor == null ? null : entry.anchor))) {
+      throw new Error("Legacy document session is corrupt");
+    }
+    const entries = source.map(entry => ({
+      id: crypto.randomBytes(16).toString("hex"),
+      filePath: path.normalize(entry.filePath),
+      provenance: "legacy-profile",
+      scrollPosition: entry.scrollPosition || 0,
+      anchor: copySessionAnchor(entry.anchor || null),
+    }));
+    documentSessionManifest = {
+      version: 1, importStatus: "completed", entries, approvedEntries: entries.slice(),
+      activeEntryId: entries.find(entry =>
+        filePathSpellingKey(entry.filePath) ===
+          filePathSpellingKey(legacy.activeTabPath))?.id || null,
+    };
+    writeDocumentSession();
+    writeDocumentSessionImportMarker("completed");
+    for (const entry of entries) protectedSessionEntries.add(entry.id);
+  } catch (error) {
+    documentSessionManifest = null;
+    documentSessionFailure = error.message;
+    try {
+      if (importAttemptStarted) {
+        writeDocumentSessionImportMarker("failed-corrupt", error.message);
+      }
+    } catch (markerError) {
+      console.error("Could not persist the failed session import marker:", markerError);
+    }
+    console.error("Could not restore the main-owned document session:", error);
+  }
+}
+
+ipcMain.on("bootstrap-legacy-document-session", (event, data) => {
+  // sendSync replies immediately, so an initial default would mask the verdict.
+  const bootstrap = privateSessionBootstraps.get(event.sender);
+  if (!bootstrap || bootstrap.used || data?.nonce !== bootstrap.nonce ||
+      event.senderFrame !== event.sender.mainFrame ||
+      event.senderFrame.url !== pathToFileURL(path.join(__dirname, "index.html")).href) {
+    event.returnValue = false;
+    return;
+  }
+  bootstrap.used = true;
+  if (![data.openTabs, data.activeTabPath].every(value =>
+        value === null || (typeof value === "string" && value.length <= 1024 * 1024)) ||
+      (data.captureError !== undefined &&
+        (typeof data.captureError !== "string" || data.captureError.length > 1024))) {
+    bootstrapDocumentSession({
+      openTabs: null, activeTabPath: null,
+      captureError: "Legacy document session is corrupt or exceeds capture limits",
+    });
+    event.returnValue = false;
+    return;
+  }
+  bootstrapDocumentSession(data);
+  event.returnValue = true;
+});
+
+function admissionScopeIsCurrent(record) {
+  if (!record || record.sender.isDestroyed() ||
+      !mainWindow || mainWindow.webContents !== record.sender ||
+      record.rendererGeneration !== approvalRendererGeneration) return false;
+  const frame = record.sender.mainFrame;
+  return frame && !frame.isDestroyed() &&
+    frame.frameTreeNodeId === record.frameTreeNodeId &&
+    (record.pageSession === null ||
+      record.pageSession === approvalRendererPageSession);
+}
+
+function admissionIsCurrent(record) {
+  return !record?.retired && admissionScopeIsCurrent(record);
+}
+
+function pruneAdmissionScopeFences() {
+  const scope = `${approvalRendererPageSession}\0${approvalRendererGeneration}`;
+  if (retiredAdmissionScope !== scope) {
+    retiredAdmissionScope = scope;
+    retiredAdmissionTabFloor = 0;
+  }
+  // Retirement must not let the same page remove its ref and regain the
+  // provisional path route. Only a dead frame/session can release this fence.
+  for (const [key, record] of admittedOwnerTabs) {
+    if (!admissionScopeIsCurrent(record)) admittedOwnerTabs.delete(key);
+    else if (record.retired) {
+      retiredAdmissionTabFloor = Math.max(retiredAdmissionTabFloor, record.tabId);
+      admittedOwnerTabs.delete(key);
+    }
+  }
+}
+
+function admittedDocumentReference(ref, owner = null, filePath = null, forAdoption = false) {
+  const record = typeof ref === "string" ? documentAdmissions.get(ref) : null;
+  if (!admissionIsCurrent(record) || approvalRendererState !== "ready") return null;
+  if (record.pageSession === null) record.pageSession = approvalRendererPageSession;
+  const committedReplacement = owner && !forAdoption &&
+    (record.tabId === null || record.tabId === owner.tabId) &&
+    record.documentGeneration !== owner.documentGeneration &&
+    Array.from(committedDiskAdoptions.values()).some(
+    grant => grant.proposedOwner.documentRef === ref &&
+      grant.proposedOwner.tabId === owner.tabId &&
+      grant.proposedOwner.documentGeneration === owner.documentGeneration &&
+      grant.proposedOwner.pathKey === owner.pathKey &&
+      grant.pageSession === record.pageSession &&
+      grant.rendererGeneration === record.rendererGeneration &&
+      Date.now() - grant.acceptedAt <= DISK_ADOPTION_CAPABILITY_MS,
+  );
+  const fence = owner && admittedOwnerTabs.get([
+    owner.pageSession, owner.rendererGeneration, owner.tabId,
+  ].join("\0"));
+  if (fence && fence !== record &&
+      !(record.tabId === null && (forAdoption || committedReplacement))) return null;
+  if (owner && (owner.pageSession !== record.pageSession ||
+      owner.rendererGeneration !== record.rendererGeneration ||
+      (record.tabId !== null && (record.tabId !== owner.tabId ||
+        (!forAdoption && !committedReplacement &&
+          record.documentGeneration !== owner.documentGeneration))))) {
+    return null;
+  }
+  if (filePath && normaliseFilePath(filePath)?.resolved !== record.descriptor.logicalPath) {
+    return null;
+  }
+  return record;
+}
+
+function sweepRevokedAdmissionOwners() {
+  for (const [key, owner] of knownDocumentOwners) {
+    if (owner.documentRef &&
+        !admissionIsCurrent(documentAdmissions.get(owner.documentRef)) &&
+        documentOwnerCanBeForgotten(key)) forgetDocumentOwnerAliases(key);
+  }
+}
+
+function pinnedAdoptionAdmissionReferences() {
+  const pinnedReferences = new Set();
+  for (const grants of [pendingDiskAdoptions, committedDiskAdoptions]) {
+    for (const grant of grants.values()) {
+      if (grant.proposedOwner?.documentRef) pinnedReferences.add(grant.proposedOwner.documentRef);
+      if (grant.currentOwner?.documentRef) pinnedReferences.add(grant.currentOwner.documentRef);
+    }
+  }
+  return pinnedReferences;
+}
+
+function issueDocumentAdmission(target, filePath, diskVersion, physical, provenance, entryId = null) {
+  pruneAdmissionScopeFences();
+  sweepRevokedAdmissionOwners();
+  const pinnedReferences = pinnedAdoptionAdmissionReferences();
+  for (const [ref, record] of documentAdmissions) {
+    if (!admissionIsCurrent(record) ||
+        (!pinnedReferences.has(ref) && !record.deliveredRestore && record.tabId === null &&
+          (record.openEpoch !== fileOpenDeliveryEpoch ||
+          record.descriptor.logicalPath === path.normalize(path.resolve(filePath))))) {
+      record.retired = true;
+      documentAdmissions.delete(ref);
+    }
+  }
+  const replacingLiveAdmission = documentAdmissions.size === MAX_SESSION_DOCUMENTS &&
+    Array.from(documentAdmissions.values()).some(record => record.tabId !== null &&
+      record.descriptor.logicalPath === path.normalize(path.resolve(filePath)));
+  // A full delivered batch still needs a transient ref to reopen one of its
+  // entries. It is not permission to admit another distinct document.
+  const replacingDeliveredAdmission = documentAdmissions.size < MAX_SESSION_DOCUMENTS * 2 &&
+    Array.from(documentAdmissions.values()).some(record =>
+      record.deliveredRestore && record.tabId === null &&
+      record.descriptor.logicalPath === path.normalize(path.resolve(filePath)));
+  if (documentAdmissions.size >= MAX_SESSION_DOCUMENTS &&
+      !replacingLiveAdmission && !replacingDeliveredAdmission) {
+    throw new Error("Document admission capacity exhausted");
+  }
+  const frame = target.mainFrame;
+  if (!frame || frame.isDestroyed()) throw new Error("Document frame unavailable");
+  let entry = documentSessionManifest?.approvedEntries.find(candidate =>
+    entryId ? candidate.id === entryId :
+      candidate.filePath === path.normalize(path.resolve(filePath)));
+  if (entry && entryId === null && !documentSessionFailure) {
+    documentSessionManifest = { ...documentSessionManifest,
+      approvedEntries: documentSessionManifest.approvedEntries
+        .filter(candidate => candidate.id !== entry.id).concat(entry) };
+  }
+  if (!entry) {
+    entry = {
+      id: crypto.randomBytes(16).toString("hex"),
+      filePath: path.normalize(path.resolve(filePath)), provenance,
+      scrollPosition: 0, anchor: null,
+    };
+    if (documentSessionManifest && !documentSessionFailure) {
+      if (documentSessionManifest.approvedEntries.length >= MAX_SESSION_DOCUMENTS) {
+        const retained = new Set([
+          ...documentSessionManifest.entries.map(item => item.id),
+          ...unavailableSessionEntries, ...protectedSessionEntries,
+          ...Array.from(documentAdmissions.values())
+            .filter(admissionIsCurrent).map(record => record.descriptor.entryId),
+        ]);
+        const oldest = documentSessionManifest.approvedEntries.find(item =>
+          !retained.has(item.id) && !Array.from(knownDocumentOwners).some(([key, owner]) =>
+            owner.spelling === filePathSpellingKey(item.filePath) &&
+              !documentOwnerCanBeForgotten(key)));
+        if (!oldest) throw new Error("Document session capacity exhausted");
+        documentSessionManifest = { ...documentSessionManifest,
+          approvedEntries: documentSessionManifest.approvedEntries.filter(item =>
+            item.id !== oldest.id) };
+      }
+      const previous = documentSessionManifest;
+      documentSessionManifest = {
+        ...previous, entries: previous.entries.concat(entry),
+        approvedEntries: previous.approvedEntries.concat(entry),
+      };
+      persistLiveDocumentSession().catch(error => {
+        console.error("Could not persist native document admission:", error);
+        if (!target.isDestroyed()) target.send("show-error", "The document session could not be saved.");
+      });
+    }
+  }
+  unavailableSessionEntries.delete(entry.id);
+  const ref = crypto.randomBytes(32).toString("hex");
+  const descriptor = Object.freeze({
+    ref, entryId: entry.id, logicalPath: entry.filePath,
+    spellingKey: filePathSpellingKey(entry.filePath),
+    readTarget: physical.readTarget, pathKey: physical.pathKey,
+    documentUrl: pathToFileURL(entry.filePath).href,
+  });
+  documentAdmissions.set(ref, {
+    sender: target, frameTreeNodeId: frame.frameTreeNodeId,
+    rendererGeneration: approvalRendererGeneration,
+    pageSession: approvalRendererPageSession, descriptor,
+    snapshotVersion: diskVersion, tabId: null, documentGeneration: null,
+    openEpoch: fileOpenDeliveryEpoch,
+    openTicket: crypto.randomBytes(32).toString("hex"),
+    ticketUsed: false,
+  });
+  return Object.freeze({
+    ...descriptor, openTicket: documentAdmissions.get(ref).openTicket,
+  });
+}
+
+ipcMain.handle("restore-document-session", async (event) => {
+  if (!isApprovalSender(event) || approvalRendererState !== "ready") return null;
+  if (documentSessionFailure || !documentSessionManifest) {
+    return { entries: [], activeEntryId: null,
+      error: documentSessionFailure || "Private session bootstrap did not complete" };
+  }
+  // A delivered batch may still be queued in the renderer when another native
+  // open advances the epoch. Only a new restore supersedes its unused refs.
+  const pinnedReferences = pinnedAdoptionAdmissionReferences();
+  for (const [ref, record] of documentAdmissions) {
+    if (record.deliveredRestore && record.tabId === null &&
+        record.sender === event.sender && !pinnedReferences.has(ref)) {
+      record.retired = true;
+      documentAdmissions.delete(ref);
+    }
+  }
+  const generation = approvalRendererGeneration;
+  const pageSession = approvalRendererPageSession;
+  const openEpoch = fileOpenDeliveryEpoch;
+  const current = () => isApprovalSender(event) &&
+    generation === approvalRendererGeneration &&
+    pageSession === approvalRendererPageSession &&
+    openEpoch === fileOpenDeliveryEpoch;
+  const entries = [];
+  const saved = documentSessionManifest.entries.slice();
+  for (const entry of saved) protectedSessionEntries.add(entry.id);
+  for (const entry of saved) {
+    if (!current()) return { entries: [], activeEntryId: null, superseded: true };
+    try {
+      const snapshot = await markdownSnapshotPromise(entry.filePath);
+      if (!current()) return { entries: [], activeEntryId: null, superseded: true };
+      const document = issueDocumentAdmission(event.sender, entry.filePath,
+        snapshot.diskVersion, snapshot.physical, entry.provenance, entry.id);
+      entries.push({ ...entry, ...snapshot, physical: undefined, document });
+    } catch (error) {
+      if (!current()) return { entries: [], activeEntryId: null, superseded: true };
+      unavailableSessionEntries.add(entry.id);
+      entries.push({ ...entry, error: error.message });
+    }
+  }
+  for (const entry of entries) {
+    const record = documentAdmissions.get(entry.document?.ref);
+    if (record) record.deliveredRestore = true;
+  }
+  return { entries, activeEntryId: documentSessionManifest.activeEntryId };
+});
+
+ipcMain.handle("save-document-session-layout", async (event, data) => {
+  if (!isApprovalSender(event) || approvalRendererState !== "ready" ||
+      documentSessionFailure || !documentSessionManifest ||
+      !Array.isArray(data?.entries) || data.entries.length > MAX_SESSION_DOCUMENTS) {
+    throw new Error("Document layout refused");
+  }
+  const known = new Map(documentSessionManifest.approvedEntries.map(entry => [entry.id, entry]));
+  const seen = new Set();
+  const entries = data.entries.map(layout => {
+    const entry = known.get(layout?.id);
+    const admission = admittedDocumentReference(layout?.documentRef);
+    if (!entry || !admission || admission.sender !== event.sender ||
+        admission.descriptor.entryId !== entry.id ||
+        seen.has(entry.id) || !Number.isFinite(layout.scrollPosition) ||
+        layout.scrollPosition < 0 || !validSessionAnchor(layout.anchor)) {
+      throw new Error("Document layout contains an unknown or invalid entry");
+    }
+    seen.add(entry.id);
+    return { ...entry, scrollPosition: layout.scrollPosition,
+      anchor: copySessionAnchor(layout.anchor) };
+  });
+  if (data.activeEntryId !== null && !seen.has(data.activeEntryId)) {
+    throw new Error("Document layout has an unknown active entry");
+  }
+  // An unavailable or overtaken restore must not disappear on the next
+  // ordinary save of the visible tab layout.
+  documentSessionManifest.entries.forEach((entry, index) => {
+    if (!seen.has(entry.id) && (unavailableSessionEntries.has(entry.id) ||
+        protectedSessionEntries.has(entry.id))) {
+      entries.splice(Math.min(index, entries.length), 0, entry);
+    }
+  });
+  const previous = documentSessionManifest;
+  documentSessionManifest = { ...previous, entries, activeEntryId: data.activeEntryId };
+  // A live submitted reference proves this restore entry was consumed. Waiting
+  // for disk before releasing protection resurrects a tab closed during I/O.
+  for (const id of seen) {
+    protectedSessionEntries.delete(id);
+    unavailableSessionEntries.delete(id);
+  }
+  await persistLiveDocumentSession();
+  if (!isApprovalSender(event)) {
+    throw new Error("Document layout sender changed during persistence");
+  }
+  return true;
+});
+
 function sameDiskVersion(before, after) {
   return !diskVersionChanged(before, after);
 }
@@ -2358,39 +3073,47 @@ function sameDiskVersion(before, after) {
 // Pair renderer bytes with the mtime that describes those exact bytes. A
 // separate stat after an unconstrained read can observe a later external write
 // and make stale content look current, suppressing the watcher notification.
-function readMarkdownSnapshot(filePath, callback, attempt = 1) {
-  fs.stat(filePath, (beforeError, before) => {
-    if (beforeError) {
-      callback(beforeError, null, null, null);
-      return;
+function readMarkdownSnapshot(filePath, callback) {
+  markdownSnapshotPromise(filePath).then(snapshot =>
+    callback(null, snapshot.content, snapshot.modifiedTime,
+      snapshot.diskVersion, snapshot.physical),
+  error => callback(error, null, null, null, null));
+}
+
+async function markdownSnapshotPromise(filePath, expectedTarget = null) {
+  for (let attempt = 0; attempt < MAX_STABLE_FILE_READ_ATTEMPTS; attempt += 1) {
+    const readTarget = resolveCanonicalFilePath(filePath);
+    if (!readTarget || (expectedTarget && readTarget !== expectedTarget)) {
+      throw new Error("Document target moved before reading");
     }
-    readMarkdownFile(filePath, (readError, data) => {
-      if (readError) {
-        callback(readError, null, null, null);
-        return;
+    let handle;
+    try {
+      handle = await fs.promises.open(filePath, "r");
+      const before = await handle.stat();
+      if (!before.isFile()) throw new Error("Document target is not a regular file");
+      const raw = await handle.readFile({ encoding: "utf8" });
+      const after = await handle.stat();
+      const pathStats = await fs.promises.stat(filePath);
+      const targetStats = filePath === readTarget
+        ? pathStats : await fs.promises.stat(readTarget);
+      if (resolveCanonicalFilePath(filePath) === readTarget &&
+          after.isFile() && pathStats.isFile() && targetStats.isFile() &&
+          sameDiskVersion(before, after) && sameDiskVersion(before, pathStats) &&
+          sameDiskVersion(before, targetStats)) {
+        return Object.freeze({
+          content: wrapMermaidContent(removeBOM(raw), filePath),
+          modifiedTime: after.mtimeMs,
+          diskVersion: diskVersionFromStats(after),
+          physical: Object.freeze({
+            readTarget, pathKey: canonicalKeyFromPath(readTarget),
+          }),
+        });
       }
-      fs.stat(filePath, (afterError, after) => {
-        if (afterError) {
-          callback(afterError, null, null, null);
-          return;
-        }
-        if (sameDiskVersion(before, after)) {
-          callback(null, data, after.mtimeMs, diskVersionFromStats(after));
-          return;
-        }
-        if (attempt < MAX_STABLE_FILE_READ_ATTEMPTS) {
-          readMarkdownSnapshot(filePath, callback, attempt + 1);
-          return;
-        }
-        callback(
-          new Error(`File changed repeatedly while being read: ${filePath}`),
-          null,
-          null,
-          null,
-        );
-      });
-    });
-  });
+    } finally {
+      if (handle) await handle.close();
+    }
+  }
+  throw new Error(`File changed repeatedly while being read: ${filePath}`);
 }
 
 // ============================================
@@ -2400,6 +3123,7 @@ function readMarkdownSnapshot(filePath, callback, attempt = 1) {
 let testPreloadRegistered = false;
 
 function createWindow() {
+  const privateBootstrapNonce = crypto.randomBytes(32).toString("hex");
   const savedState = loadWindowState();
   const testPreloadPreferences =
     !app.isPackaged && process.argv.includes("--folia-test-preload")
@@ -2433,13 +3157,17 @@ function createWindow() {
       nodeIntegration: true,
       contextIsolation: false,
       preload: path.join(__dirname, "main-preload.js"),
-      additionalArguments: testPreloadPreferences.preload
-        ? ["--folia-test-pdf-restore"]
-        : [],
+      additionalArguments: [
+        `--folia-session-bootstrap=${privateBootstrapNonce}`,
+        ...(testPreloadPreferences.preload ? ["--folia-test-pdf-restore"] : []),
+      ],
       enableRemoteModule: true,
       backgroundThrottling: true, // Throttle background renderers to save CPU
     },
     icon: path.join(__dirname, "..", "assets", "app-icon.png"),
+  });
+  privateSessionBootstraps.set(mainWindow.webContents, {
+    nonce: privateBootstrapNonce, used: false,
   });
 
   // The main window runs with nodeIntegration: true, so a navigation away from
@@ -2606,6 +3334,7 @@ function createWindow() {
       openFile(fileToOpen, {
         sender: mainWindow.webContents,
         rendererGeneration: approvalRendererGeneration,
+        provenance: "native-open",
       });
       fileToOpen = null;
     }
@@ -3674,14 +4403,20 @@ ipcMain.handle("read-dialog-extra", (event, data) => {
   // Consume before the asynchronous read so a concurrent replay cannot start.
   batch.grants.delete(data.grant);
   return new Promise((resolve, reject) => {
-    readMarkdownSnapshot(filePath, (error, content, modifiedTime, diskVersion) => {
+    readMarkdownSnapshot(filePath, (error, content, modifiedTime, diskVersion, physical) => {
       if (!dialogExtraBatchIsCurrent(batch, event)) {
         reject(new Error("Dialog extra read refused: batch no longer active"));
       } else if (error) {
         console.error("Error reading dialog extra:", error);
         reject(error);
       } else {
-        resolve({ path: filePath, content, modifiedTime, diskVersion });
+        try {
+          const document = issueDocumentAdmission(event.sender, filePath,
+            diskVersion, physical, "native-dialog");
+          resolve({ path: filePath, content, modifiedTime, diskVersion, document });
+        } catch (admissionError) {
+          reject(admissionError);
+        }
       }
     });
   });
@@ -3742,7 +4477,7 @@ function openFile(filePath, options = {}) {
   const target = requestedSender || mainWindow.webContents;
 
   // Use helper function for reading markdown files
-  readMarkdownSnapshot(filePath, (err, data, modifiedTime, diskVersion) => {
+  readMarkdownSnapshot(filePath, (err, data, modifiedTime, diskVersion, physical) => {
     if (deliveryEpoch !== fileOpenDeliveryEpoch) {
       sendFileOpenFailure(
         target,
@@ -3780,6 +4515,17 @@ function openFile(filePath, options = {}) {
       return;
     }
     rememberDocumentModifiedTime(filePath, modifiedTime, { replace: false });
+    let document;
+    if (options.provenance) {
+      try {
+        document = issueDocumentAdmission(target, filePath, diskVersion,
+          physical, options.provenance);
+      } catch (error) {
+        sendFileOpenFailure(target, filePath, openRequest, "admission-refused",
+          error.message, rendererGeneration);
+        return;
+      }
+    }
     const sent = safeSendFileOpen(
       target,
       "file-opened",
@@ -3790,6 +4536,7 @@ function openFile(filePath, options = {}) {
         openRequest,
         modifiedTime,
         diskVersion,
+        ...(document ? { document } : {}),
       },
       rendererGeneration,
     );
@@ -3823,7 +4570,7 @@ function openFileDialog() {
         // Use helper function for reading markdown files
         readMarkdownSnapshot(
           firstFilePath,
-          (err, data, modifiedTime, diskVersion) => {
+          (err, data, modifiedTime, diskVersion, physical) => {
             if (deliveryEpoch !== fileOpenDeliveryEpoch) return;
             if (err) {
               console.error("Error reading file:", err);
@@ -3857,6 +4604,14 @@ function openFileDialog() {
               pageSession: approvalRendererPageSession,
               grants,
             };
+            let document;
+            try {
+              document = issueDocumentAdmission(target, firstFilePath,
+                diskVersion, physical, "native-dialog");
+            } catch (error) {
+              console.error("Could not admit the selected document:", error);
+              return;
+            }
             const sent = safeSendFileOpen(
               target,
               "file-opened",
@@ -3867,6 +4622,7 @@ function openFileDialog() {
                 extraReadGrants,
                 modifiedTime,
                 diskVersion,
+                document,
               },
               rendererGeneration,
             );
@@ -3941,10 +4697,14 @@ ipcMain.on("open-file-path", (event, payload) => {
     payload && typeof payload === "object" && !Array.isArray(payload);
   const filePath = structured ? payload.filePath : payload;
   const openRequest = structured ? payload.openRequest || null : null;
+  const approvedHistory = typeof filePath === "string" &&
+    documentSessionManifest?.approvedEntries.find(entry =>
+      entry.filePath === path.normalize(path.resolve(filePath)));
   openFile(filePath, {
     sender: event.sender,
     openRequest,
     rendererGeneration: approvalRendererGeneration,
+    ...(approvedHistory ? { provenance: approvedHistory.provenance } : {}),
   });
 });
 
@@ -4088,6 +4848,21 @@ ipcMain.on("export-pdf", async (event, data) => {
 // last write issued the last write applied, which is the only ordering a user
 // can reason about.
 const saveQueues = new Map();
+const saveTargetRevisions = new Map();
+
+function saveTargetRevision(key) {
+  let state = saveTargetRevisions.get(key);
+  if (!state) {
+    state = { revision: 0, readers: 0 };
+    saveTargetRevisions.set(key, state);
+  }
+  return state;
+}
+
+function releaseSaveTargetRevision(key, state) {
+  if (!state.readers && !saveQueues.has(key) &&
+      saveTargetRevisions.get(key) === state) saveTargetRevisions.delete(key);
+}
 // WHICH LIFECYCLE A QUEUED SAVE BELONGS TO. `__shutdown.reset` tears the
 // machine down and, last of all, re-opens the deletion-evidence latch - but
 // `saveQueues` can still hold a Save that was accepted BEFORE the latch tripped
@@ -4785,6 +5560,8 @@ async function openedHandleMatchesPath(filePath, handle) {
 
 function queueSave(filePath, run) {
   const saveKey = canonicalFileKey(filePath) || filePath;
+  const targetRevision = saveTargetRevision(saveKey);
+  targetRevision.revision += 1;
   const prior = saveQueues.get(saveKey) || Promise.resolve();
   saveQueueEnqueuedCount += 1;
   saveQueuePendingCount += 1;
@@ -4800,6 +5577,7 @@ function queueSave(filePath, run) {
     try {
       return await run(saveKey);
     } finally {
+      targetRevision.revision += 1;
       const remaining = (activeSaveRunsByKey.get(saveKey) || 1) - 1;
       if (remaining > 0) activeSaveRunsByKey.set(saveKey, remaining);
       else activeSaveRunsByKey.delete(saveKey);
@@ -4814,9 +5592,50 @@ function queueSave(filePath, run) {
   saveQueues.set(saveKey, next);
   next.finally(() => {
     if (saveQueues.get(saveKey) === next) saveQueues.delete(saveKey);
+    releaseSaveTargetRevision(saveKey, targetRevision);
   });
   return next;
 }
+
+ipcMain.handle("read-open-ticket-snapshot", async (event, data) => {
+  if (!isApprovalSender(event) || approvalRendererState !== "ready" ||
+      typeof data?.openTicket !== "string") return null;
+  const record = Array.from(documentAdmissions.values()).find(candidate =>
+    candidate.openTicket === data.openTicket);
+  if (!record || record.ticketUsed || !admissionIsCurrent(record) ||
+      record.sender !== event.sender ||
+      record.frameTreeNodeId !== event.senderFrame.frameTreeNodeId) return null;
+  record.ticketUsed = true;
+  const current = () => admissionIsCurrent(record) &&
+    record.openEpoch === fileOpenDeliveryEpoch &&
+    approvalRendererState === "ready";
+  const key = record.descriptor.pathKey;
+  const targetRevision = saveTargetRevision(key);
+  targetRevision.readers += 1;
+  try {
+  for (let attempt = 0; attempt < MAX_STABLE_FILE_READ_ATTEMPTS; attempt += 1) {
+    if (!current()) return null;
+    const tail = saveQueues.get(key);
+    if (tail) await tail;
+    if (!current()) return null;
+    const nextTail = saveQueues.get(key);
+    if (nextTail && nextTail !== tail) continue;
+    const revision = targetRevision.revision;
+    const snapshot = await markdownSnapshotPromise(
+      record.descriptor.logicalPath, record.descriptor.readTarget,
+    );
+    if (!current()) return null;
+    if (saveQueues.get(key) || revision !== targetRevision.revision) continue;
+    record.snapshotVersion = snapshot.diskVersion;
+    return { content: snapshot.content, modifiedTime: snapshot.modifiedTime,
+      diskVersion: snapshot.diskVersion, document: record.descriptor };
+  }
+  return null;
+  } finally {
+    targetRevision.readers -= 1;
+    releaseSaveTargetRevision(key, targetRevision);
+  }
+});
 
 function reconsiderShutdownAfterSaveSettlement() {
   setImmediate(() => {
@@ -6456,7 +7275,22 @@ function closingDocumentOwnerFromEnvelope(event, data) {
   ) {
     return null;
   }
+  const admittedTabKey = [
+    data.pageSession, data.rendererGeneration, data.tabId,
+  ].join("\0");
   const spelling = filePathSpellingKey(data.filePath);
+  const admission = data.documentRef === undefined ? null :
+    admittedDocumentReference(data.documentRef, data, data.filePath);
+  if ((data.documentRef !== undefined && !admission) ||
+      (admittedOwnerTabs.has(admittedTabKey) && !admission)) return null;
+  if (!admission && retiredAdmissionScope ===
+      `${data.pageSession}\0${data.rendererGeneration}` &&
+      data.tabId <= retiredAdmissionTabFloor) {
+    const knownKey = documentOwnerKey({ ...data, spelling });
+    const known = knownDocumentOwners.get(knownKey);
+    if (!known || known.documentRef ||
+        supersededDocumentOwners.has(knownKey)) return null;
+  }
   if (!spelling) return null;
   return Object.freeze({
     pageSession: data.pageSession,
@@ -6465,6 +7299,7 @@ function closingDocumentOwnerFromEnvelope(event, data) {
     documentGeneration: data.documentGeneration,
     pathKey: data.pathKey,
     spelling,
+    ...(admission ? { documentRef: data.documentRef } : {}),
   });
 }
 
@@ -6767,7 +7602,7 @@ ipcMain.handle("prepare-document-disk-adoption", async (event, data) => {
   const proposed = normaliseDocumentIdentity(
     data.proposedOwner,
     data.ownerFilePath,
-    { useCurrentPathIdentity: true },
+    { useCurrentPathIdentity: true, forAdoption: true },
   );
   const version = normaliseDiskVersion(data.diskVersion);
   const pathKey = resolveCanonicalFileKey(data.filePath);
@@ -6794,6 +7629,7 @@ ipcMain.handle("prepare-document-disk-adoption", async (event, data) => {
     ))
   ) return refuse("invalid-adoption-identity");
   const revision = deletionEvidenceRevision;
+  const acceptedReadTarget = resolveCanonicalFilePath(data.filePath);
 
   let handle;
   try {
@@ -6802,6 +7638,8 @@ ipcMain.handle("prepare-document-disk-adoption", async (event, data) => {
     const raw = await handle.readFile({ encoding: "utf8" });
     const after = await handle.stat();
     const pathStats = await fs.promises.stat(data.filePath);
+    const targetStats = acceptedReadTarget
+      ? await fs.promises.stat(acceptedReadTarget) : null;
     const content = wrapMermaidContent(
       removeBOM(raw), data.filePath,
     );
@@ -6810,6 +7648,9 @@ ipcMain.handle("prepare-document-disk-adoption", async (event, data) => {
     )).toString("hex");
     if (
       !before.isFile() ||
+      !targetStats || !targetStats.isFile() ||
+      resolveCanonicalFilePath(data.filePath) !== acceptedReadTarget ||
+      diskVersionChanged(version, diskVersionFromStats(targetStats)) ||
       resolveCanonicalFileKey(data.filePath) !== pathKey ||
       diskVersionChanged(version, diskVersionFromStats(before)) ||
       diskVersionChanged(version, diskVersionFromStats(after)) ||
@@ -6907,6 +7748,7 @@ ipcMain.handle("prepare-document-disk-adoption", async (event, data) => {
     oldOwner: owner,
     proposedOwner: proposed,
     versionPathKey: pathKey,
+    acceptedReadTarget,
     version,
     contentDigest: data.contentDigest,
     revision,
@@ -6983,7 +7825,7 @@ ipcMain.on("commit-document-disk-adoption", (event, data) => {
   const proposedOwner = normaliseDocumentIdentity(
     data.proposedOwner,
     data.ownerFilePath,
-    { useCurrentPathIdentity: true },
+    { useCurrentPathIdentity: true, forAdoption: true },
   );
   const oldOwner = data.oldOwner
     ? closingDocumentOwnerFromEnvelope(event, {
@@ -6999,6 +7841,7 @@ ipcMain.on("commit-document-disk-adoption", (event, data) => {
     currentKey !== grant.proposedOwner.pathKey ||
     resolveCanonicalFileKey(data.ownerFilePath) !== currentKey ||
     !proposedOwner ||
+    proposedOwner.documentRef !== grant.proposedOwner.documentRef ||
     documentOwnerKey(proposedOwner) !== grant.proposedOwnerKey ||
     documentOwnerKey(oldOwner) !== grant.oldOwnerKey ||
     (data.oldOwner && !oldOwner) ||
@@ -7282,7 +8125,7 @@ function completeDocumentDiskAdoption(data) {
   const owner = normaliseDocumentIdentity(
     data.actualOwner,
     grant.ownerPath,
-    { useCurrentPathIdentity: true },
+    { useCurrentPathIdentity: true, forAdoption: true },
   );
   const stats = readDocumentStats(
     grant.sourcePath,
@@ -7290,6 +8133,7 @@ function completeDocumentDiskAdoption(data) {
   );
   if (
     !owner ||
+    owner.documentRef !== grant.proposedOwner.documentRef ||
     documentOwnerKey(owner) !== grant.proposedOwnerKey ||
     data.filePath !== grant.sourcePath ||
     data.ownerFilePath !== grant.ownerPath ||
@@ -7471,6 +8315,7 @@ function completeDocumentDiskAdoption(data) {
     modifiedTime: grant.version.mtimeMs,
     adopted: true,
     readPath: grant.sourcePath,
+    acceptedReadTarget: grant.acceptedReadTarget,
   })) {
     committedDiskAdoptions.set(data.capability, grant);
     markDocumentChangedExternally(grant.sourcePath);
@@ -7623,6 +8468,7 @@ function retireDeletedDocumentOwner(event, data) {
   }
 
   forgetDocumentOwnerAliases(closingOwnerKey);
+  sweepRevokedAdmissionOwners();
   const retiredEvidence = record ? retireDeletionOwnerEvidence(record) : false;
   let retiredPathOnly = false;
   if (
@@ -7696,6 +8542,13 @@ function retireDeletedDocumentOwner(event, data) {
   if (sameDocumentOwner(closingOwner, watchedOwner)) {
     watchingPaused = false;
     stopFileWatching({ clearBaselines: false });
+  }
+  const admission = closingOwner.documentRef
+    ? documentAdmissions.get(closingOwner.documentRef) : null;
+  if (admission) {
+    admission.retired = true;
+    protectedSessionEntries.delete(admission.descriptor.entryId);
+    unavailableSessionEntries.delete(admission.descriptor.entryId);
   }
   return Object.freeze({
     retired: true,
@@ -9200,10 +10053,10 @@ app.on("open-file", (event, filePath) => {
     mainWindow.focus();
     if (mainWindow.webContents.isLoading()) {
       mainWindow.webContents.once("did-finish-load", () => {
-        mainWindow.webContents.send("external-file-open-request", { filePath });
+        deliverNativeDocumentIntent(mainWindow.webContents, filePath);
       });
     } else {
-      mainWindow.webContents.send("external-file-open-request", { filePath });
+      deliverNativeDocumentIntent(mainWindow.webContents, filePath);
     }
   } else {
     // App not ready yet — store for did-finish-load
@@ -9268,16 +10121,12 @@ if (!gotTheLock) {
           log("WebContents is loading, waiting for did-finish-load");
           mainWindow.webContents.once("did-finish-load", () => {
             log("Sending external-file-open-request after load");
-            mainWindow.webContents.send("external-file-open-request", {
-              filePath: fileToOpen,
-            });
+            deliverNativeDocumentIntent(mainWindow.webContents, fileToOpen);
             fileToOpen = null;
           });
         } else {
           log("Sending external-file-open-request immediately");
-          mainWindow.webContents.send("external-file-open-request", {
-            filePath: fileToOpen,
-          });
+          deliverNativeDocumentIntent(mainWindow.webContents, fileToOpen);
           fileToOpen = null;
         }
       } else {
@@ -11073,7 +11922,9 @@ ipcMain.on(QUIT_APPROVAL_COMMITTED, (event, data) => {
     }
   }
   if (data.committed !== true) {
-    finishShutdownCommit(attempt, false, data.why || "renderer");
+    finishShutdownCommit(attempt, false, data.why || "renderer",
+      data.why === "session-layout-persistence-failed"
+        ? { fallbackCause: "session-persistence" } : {});
     return;
   }
   attempt.awaitingVerification = true;
@@ -11426,6 +12277,18 @@ function askFallbackApproval(record, cause) {
     );
     return;
   }
+  if (cause === "session-persistence") {
+    askShutdownQuestion(record, {
+      confirmLabel: "Close anyway",
+      title: "Open tabs could not be saved",
+      message: "Folia could not save the open-tab layout.",
+      detail: "Your open tabs may not be restored next time. Closing now also " +
+        "discards any unsaved changes made since the previous confirmation. " +
+        "Cancel to keep working and retry.",
+      why: "fallback-session-persistence",
+    });
+    return;
+  }
   askShutdownQuestion(record, {
     confirmLabel: "Close anyway",
     title: "Unsaved changes cannot be checked",
@@ -11530,6 +12393,17 @@ ipcMain.on(QUIT_APPROVAL_READY, (event, data) => {
   }
   approvalRendererPageSession = data.pageSession;
   approvalRendererState = "ready";
+  for (const [ticket, record] of nativeDocumentOpenTickets) {
+    if (!record.delivered && record.sender === event.sender &&
+        record.generation === generation &&
+        record.frameTreeNodeId === event.senderFrame.frameTreeNodeId) {
+      record.delivered = true;
+      record.pageSession = data.pageSession;
+      event.sender.send("external-file-open-request", {
+        filePath: record.filePath, documentOpenTicket: ticket,
+      });
+    }
+  }
   if (activeDialogExtraBatch) {
     const batch = activeDialogExtraBatch;
     if (
@@ -12201,12 +13075,13 @@ ipcMain.handle("get-version", () => app.getVersion());
 ipcMain.handle("get-app-path", () => app.getAppPath());
 
 // Return README.md path — works in dev (next to main.js) and packaged (extraResources)
-ipcMain.handle("get-readme-path", () => {
+function getReadmePath() {
   if (app.isPackaged) {
     return path.join(process.resourcesPath, "README.md");
   }
   return path.join(__dirname, "..", "README.md");
-});
+}
+ipcMain.handle("get-readme-path", getReadmePath);
 
 // IPC handlers for update actions
 ipcMain.on("check-for-updates", () => {
@@ -13364,6 +14239,42 @@ module.exports = {
     ? {}
     : {
         __shutdown: {
+          documentAdmissionIsCurrent: ref => !!admittedDocumentReference(ref),
+          documentOwnerGuards: (owner, filePath) => ({
+            identity: !!normaliseDocumentIdentity(owner, filePath),
+            closing: !!closingDocumentOwnerFromEnvelope({
+              sender: mainWindow.webContents,
+              senderFrame: mainWindow.webContents.mainFrame,
+            }, { ...owner, filePath }),
+            retirementFloor: retiredAdmissionTabFloor,
+          }),
+          seedDocumentSessionLayout: async (layout) => {
+            const known = new Map(documentSessionManifest.approvedEntries.map(entry =>
+              [entry.id, entry]));
+            const entries = layout.entries.map(item => {
+              const entry = known.get(item.id);
+              if (!entry || !validSessionAnchor(item.anchor)) {
+                throw new Error("Invalid approved session fixture");
+              }
+              return { ...entry, scrollPosition: item.scrollPosition,
+                anchor: copySessionAnchor(item.anchor) };
+            });
+            documentSessionManifest = { ...documentSessionManifest,
+              entries, activeEntryId: layout.activeEntryId };
+            protectedSessionEntries.clear();
+            unavailableSessionEntries.clear();
+            entries.forEach(entry => protectedSessionEntries.add(entry.id));
+            return persistLiveDocumentSession();
+          },
+          documentSessionState: () => ({
+            admissions: documentAdmissions.size,
+            fences: admittedOwnerTabs.size,
+            protectedEntries: Array.from(protectedSessionEntries),
+            owners: Array.from(knownDocumentOwners.values()).map(owner => ({ ...owner })),
+            history: documentSessionManifest?.approvedEntries.map(entry => ({ ...entry })),
+            entries: documentSessionManifest?.entries.map(entry => ({ ...entry })),
+            activeEntryId: documentSessionManifest?.activeEntryId,
+          }),
           state: () =>
             Object.freeze({
               pendingId: pendingShutdown ? pendingShutdown.id : 0,

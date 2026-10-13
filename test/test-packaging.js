@@ -150,6 +150,13 @@ async function main() {
     typeof pkg.scripts?.test === "string" && !pkg.scripts.test.includes("bench:f22"),
     pkg.scripts && pkg.scripts.test,
   );
+  check(
+    "the private document session suite runs through its Node phase controller in ordinary tests",
+    pkg.scripts?.["test:document-session"] === "node test/test-document-session.js" &&
+      typeof pkg.scripts.test === "string" &&
+      pkg.scripts.test.split(" && ").includes("npm run test:document-session"),
+    pkg.scripts,
+  );
   const buildDoc = read("docs/BUILD.md");
   check(
     "BUILD documents the separate machine-exclusive F22 benchmark command",
@@ -616,7 +623,7 @@ async function main() {
       !mainJs.includes("...testPreloadPreferences") &&
       /if \(testPreloadPreferences\.preload && !testPreloadRegistered\)/.test(mainJs) &&
       /filePath: testPreloadPreferences\.preload/.test(mainJs) &&
-      /additionalArguments: testPreloadPreferences\.preload\s*\?\s*\["--folia-test-pdf-restore"\]\s*:\s*\[\]/.test(mainJs),
+      /additionalArguments:\s*\[\s*`--folia-session-bootstrap=\$\{privateBootstrapNonce\}`,\s*\.\.\.\(testPreloadPreferences\.preload \? \["--folia-test-pdf-restore"\] : \[\]\)/.test(mainJs),
   );
   check(
     "changed clean-tab reads use the fixed production bridge instead of renderer raw IPC",

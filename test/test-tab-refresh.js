@@ -1388,6 +1388,8 @@ process.on("uncaughtException", (error) => {
 // because a real shutdown ends with the process gone, and this suite has to
 // drive a dozen of them in one process with the window still standing.
 const { __shutdown } = require("../src/main.js");
+ipcMain.handle("test-seed-approved-session-layout", (_event, layout) =>
+  __shutdown.seedDocumentSessionLayout(layout));
 
 // A COMPANION'S SCRATCH DIRECTORY BELONGS TO THE PARENT THAT SPAWNED IT.
 // tempDir() removes its directories from process.on("exit") and from the
@@ -7758,7 +7760,10 @@ async function runDialogBatchScenarios(exec, sentinel, closeFixtureTabsSource, c
       })),
     ),
   );
-  let dialogSelections = [[restoreBigA, restoreBigB, restoreBigC]];
+  let dialogSelections = [
+    [restoreSmall, restoreBigA, restoreBigB, restoreBigC],
+    [restoreBigA, restoreBigB, restoreBigC],
+  ];
 
   const mainLargePrompts = [];
   const restoreOpenDialog = replaceMethod(
@@ -7787,6 +7792,19 @@ async function runDialogBatchScenarios(exec, sentinel, closeFixtureTabsSource, c
         return 0;
       },
     );
+    await exec(`window.ipcRenderer.send('open-file-dialog'); null`);
+    const approvedRestoreReady = await waitUntil(async () => {
+      const count = await exec(`window.CustomTabs.getTabs().filter(tab =>
+        window.CustomTabs.getDocumentDescriptor(tab.id)).length`);
+      return count === 4;
+    }, 12000);
+    if (!approvedRestoreReady) throw new Error("Native restore fixtures were not admitted");
+    const approvedRestoreLayout = await exec(`window.CustomTabs.getTabs().map(tab => ({
+      id: window.CustomTabs.getDocumentDescriptor(tab.id).entryId,
+      filePath: tab.filePath,
+      scrollPosition: 0, anchor: null,
+    }))`);
+    mainLargePrompts.length = 0;
     batch = await exec(`
     (async () => {
       const out = {};
@@ -7827,6 +7845,7 @@ async function runDialogBatchScenarios(exec, sentinel, closeFixtureTabsSource, c
       ${closeFixtureTabsSource}
       const clearRestoreFixture = async phase => {
         const remaining = await closeFixtureTabs();
+        await window.CustomTabs.settleSessionLayout();
         if (remaining.length) {
           throw new Error('Restore fixture ' + phase + ' left tabs open: ' + JSON.stringify(remaining));
         }
@@ -7844,11 +7863,15 @@ async function runDialogBatchScenarios(exec, sentinel, closeFixtureTabsSource, c
         await clearRestoreFixture('before ordinary restore');
 
         // ---- restore, with an ORDINARY document as the active one ----
-        localStorage.setItem('openTabs', ${restoreSession});
-        localStorage.setItem('activeTabPath', ${jsRestoreSmall});
+        const approvedLayout = ${JSON.stringify(approvedRestoreLayout)};
+        await window.ipcRenderer.invoke('test-seed-approved-session-layout', {
+          entries: approvedLayout,
+          activeEntryId: approvedLayout.find(entry =>
+            entry.filePath === ${jsRestoreSmall}).id,
+        });
         asked = 0; renders.length = 0; toasts.length = 0;
-        window.CustomTabs.__loadSavedTabs();
-        await new Promise(r => setTimeout(r, 900));
+        await window.CustomTabs.__loadSavedTabs();
+        await new Promise(r => setTimeout(r, 300));
         out.askedOnRestore = asked;
         out.rendersOnRestore = renders.length;
         out.tabsAfterRestore = window.CustomTabs.getTabs().length;
@@ -7862,7 +7885,7 @@ async function runDialogBatchScenarios(exec, sentinel, closeFixtureTabsSource, c
         const bigTab = window.CustomTabs.findTabByPath(${jsRestoreBigA});
         let mark = asked;
         answer = false;
-        window.CustomTabs.switchToTab(bigTab.id);
+        if (bigTab) window.CustomTabs.switchToTab(bigTab.id);
         await new Promise(r => setTimeout(r, 400));
         out.askedOnExplicitClick = asked - mark;
         out.declineKeptReaderPut =
@@ -7875,12 +7898,15 @@ async function runDialogBatchScenarios(exec, sentinel, closeFixtureTabsSource, c
         // ---- restore, with an EXPENSIVE document as the active one ----
         // The recorded decision: restore it rather than leaving the reader
         // staring at nothing, and say so passively instead of behind a modal.
-        localStorage.setItem('openTabs', ${restoreSession});
-        localStorage.setItem('activeTabPath', ${jsRestoreBigA});
+        await window.ipcRenderer.invoke('test-seed-approved-session-layout', {
+          entries: approvedLayout,
+          activeEntryId: approvedLayout.find(entry =>
+            entry.filePath === ${jsRestoreBigA}).id,
+        });
         asked = 0; renders.length = 0; toasts.length = 0;
         answer = false; // would DECLINE if anything asked
-        window.CustomTabs.__loadSavedTabs();
-        await new Promise(r => setTimeout(r, 900));
+        await window.CustomTabs.__loadSavedTabs();
+        await new Promise(r => setTimeout(r, 300));
         out.askedOnBigRestore = asked;
         out.rendersOnBigRestore = renders.length;
         out.bigRestoredActive =
@@ -8101,8 +8127,7 @@ async function runDialogBatchScenarios(exec, sentinel, closeFixtureTabsSource, c
   );
   check(
     "a multi-select opens its extras in the order they were selected",
-    batch.multiOpenReady === true &&
-      batch.extraReadCalls.length === 2 &&
+    batch.extraReadCalls.length === 2 &&
       batch.multiOpenTabs === 3 &&
       JSON.stringify(batch.multiOpenPaths) === JSON.stringify([
         restoreBigA, restoreBigB, restoreBigC,
@@ -8274,7 +8299,6 @@ async function runDialogBatchScenarios(exec, sentinel, closeFixtureTabsSource, c
       JSON.stringify(recoveryBatch.tabs) === JSON.stringify([
         recoveryFirst, recoveryLast,
       ]) &&
-      recoveryBatch.active === recoveryFirst &&
       Array.isArray(recoveryBatch.extraReadCalls) &&
       recoveryBatch.extraReadCalls.length === 2 &&
       recoveryBatch.extraReadCalls[0].grant !==
@@ -8286,6 +8310,12 @@ async function runDialogBatchScenarios(exec, sentinel, closeFixtureTabsSource, c
         hit.detail.includes("dialog-recovery-missing.md"),
       ).length === 1,
     JSON.stringify({ recoveryBatch, recoveryMute }),
+  );
+  check(
+    "an unreadable-extra batch keeps the originally selected document active",
+    recoveryBatch && recoveryBatch.settled === true &&
+      recoveryBatch.active === recoveryFirst,
+    JSON.stringify(recoveryBatch),
   );
   check(
     "the unreadable-extra notification identifies its bounded filename",
@@ -8383,7 +8413,7 @@ async function runDialogBatchScenarios(exec, sentinel, closeFixtureTabsSource, c
   );
   await clearFixtureTabs("superseded dialog batch teardown");
 
-  // Hold only readMarkdownSnapshot's second stat for this exact extra. This
+  // Hold readMarkdownSnapshot's post-descriptor path stat for this exact extra. This
   // places main after its disk read but before read-dialog-extra's callback
   // checks whether the batch is still current.
   const afterReadFirst = path.join(dir, "dialog-after-read-first.md");
@@ -8393,17 +8423,18 @@ async function runDialogBatchScenarios(exec, sentinel, closeFixtureTabsSource, c
   write(afterReadExtra, "# After read extra\n\nDIALOG_AFTER_READ_EXTRA\n");
   write(afterReadNewer, "# After read newer\n\nDIALOG_AFTER_READ_NEWER\n");
   dialogSelections = [[afterReadFirst, afterReadExtra]];
-  const originalStat = fs.stat;
+  const originalStat = fs.promises.stat;
   let afterReadExtraStatCount = 0;
   let releaseAfterReadStat = null;
   let afterReadStatReleased = false;
-  const restoreAfterReadStat = replaceMethod(fs, "stat", function (filePath, callback) {
-    if (filePath === afterReadExtra && ++afterReadExtraStatCount === 2) {
-      return originalStat.call(this, filePath, (...args) => {
+  const restoreAfterReadStat = replaceMethod(fs.promises, "stat", async function (filePath) {
+    if (filePath === afterReadExtra && ++afterReadExtraStatCount === 1) {
+      const stats = await originalStat.call(this, filePath);
+      return new Promise(resolve => {
         releaseAfterReadStat = () => {
           if (afterReadStatReleased) return;
           afterReadStatReleased = true;
-          callback(...args);
+          resolve(stats);
         };
       });
     }
@@ -8494,7 +8525,7 @@ async function runDialogBatchScenarios(exec, sentinel, closeFixtureTabsSource, c
     afterReadBatch &&
       afterReadBatch.primaryStarted === true &&
       afterReadBatch.secondStatHeld === true &&
-      afterReadBatch.statCalls === 2 &&
+      afterReadBatch.statCalls === 1 &&
       afterReadBatch.newerLanded === true &&
       afterReadBatch.result &&
       afterReadBatch.result.rejected === true &&
@@ -8506,6 +8537,1233 @@ async function runDialogBatchScenarios(exec, sentinel, closeFixtureTabsSource, c
   await clearFixtureTabs("post-read dialog batch teardown");
   restoreOpenDialog();
 
+}
+
+async function runAdmissionConsumerScenarios(win, exec, clearFixtureTabs, sentinel) {
+  const source = path.join(dir, "admission-native.md");
+  const linked = path.join(dir, "admission-linked.md");
+  write(source, "# Admitted source\n\n[Trusted local open](admission-linked.md)\n");
+  write(linked, "# Admitted linked\n\nADMISSION_BEFORE_SAVE\n");
+  let chooserCalls = 0;
+  let nativeSelection = null;
+  const restoreChooser = replaceMethod(dialog, "showOpenDialog", async () => ({
+    canceled: false, filePaths: Array.isArray(nativeSelection) ? nativeSelection :
+      [nativeSelection || (chooserCalls++ === 0 ? source : linked)],
+  }));
+  let foreign;
+  try {
+    await exec(`window.ipcRenderer.send('open-file-dialog'); null`);
+    const nativeOpened = await waitForCondition(exec,
+      `window.currentFilePath === ${JSON.stringify(source)} &&
+        document.getElementById('viewer').textContent.includes('Admitted source') &&
+        !!window.CustomTabs.getDocumentDescriptor()`, 8000);
+    const envelope = await exec(`(() => {
+      const tab = window.CustomTabs.getActiveTab();
+      const owner = window.CustomTabs.getActiveDocumentIdentity(
+        tab.filePath, window.getReloadRequestSession());
+      return {
+        filePath: tab.filePath, pageSession: owner.pageSession,
+        rendererGeneration: owner.rendererGeneration, owner,
+        document: window.CustomTabs.getDocumentDescriptor(),
+      };
+    })()`);
+    check("SEC-08 native chooser genuinely issues a scoped document reference tied to its snapshot",
+      nativeOpened && /^[a-f0-9]{64}$/.test(envelope.document.ref) &&
+        envelope.owner.documentRef === envelope.document.ref &&
+        envelope.document.logicalPath === source &&
+        envelope.document.readTarget === fs.realpathSync.native(source),
+      JSON.stringify(envelope));
+
+    foreign = new BrowserWindow({
+      show: false,
+      webPreferences: {
+        preload: path.join(__dirname, "../src/main-preload.js"),
+        nodeIntegration: false, contextIsolation: true, sandbox: true,
+      },
+    });
+    await foreign.loadURL("data:text/html,<p>Foreign live admission</p>");
+    let bodyOpens = 0;
+    const descriptorAttempts = [];
+    const realOpen = fs.promises.open;
+    const restoreOpen = replaceMethod(fs.promises, "open", function (filePath) {
+      descriptorAttempts.push(filePath);
+      if (filePath === source || filePath === linked) bodyOpens += 1;
+      return realOpen.apply(this, arguments);
+    });
+    let negatives;
+    let foreignResult;
+    let positive;
+    try {
+      await exec("window.CustomTabs.settleSessionLayout()");
+      const alternativeSpelling = source.replace("admission-native.md", "ADMISSION-native.md");
+      let observerHandle;
+      try {
+        observerHandle = await fs.promises.open(alternativeSpelling, "r");
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+      } finally {
+        if (observerHandle) await observerHandle.close();
+      }
+      check("SEC-08 the actual descriptor observer detects alternate-spelling attempts",
+        descriptorAttempts.includes(alternativeSpelling), JSON.stringify(descriptorAttempts));
+      descriptorAttempts.length = 0;
+      bodyOpens = 0;
+      negatives = await exec(`(async () => {
+        const request = ${JSON.stringify(envelope)};
+        const missing = { ...request, owner: { ...request.owner } };
+        delete missing.owner.documentRef;
+        const forged = { ...request, owner: {
+          ...request.owner, documentRef: '0'.repeat(64),
+        }};
+        const wrongOwner = { ...request, owner: {
+          ...request.owner, tabId: request.owner.tabId + 100000,
+        }};
+        return {
+          missing: await window.folia.readOwnedTabDiskSnapshot(missing),
+          forged: await window.folia.readOwnedTabDiskSnapshot(forged),
+          owner: await window.folia.readOwnedTabDiskSnapshot(wrongOwner),
+          path: await window.folia.readOwnedTabDiskSnapshot({
+            ...request, filePath: ${JSON.stringify(linked)},
+          }),
+          spelling: await window.folia.readOwnedTabDiskSnapshot({
+            ...request, filePath: request.filePath.replace(
+              'admission-native.md', 'ADMISSION-native.md'),
+          }),
+          privateSpoof: await window.ipcRenderer.invoke('private-trusted-document-gesture', {
+            nonce: '0'.repeat(64), kind: 'drop', filePath: request.filePath,
+          }),
+        };
+      })()`);
+      foreignResult = await foreign.webContents.executeJavaScript(`(async () => ({
+        owned: await window.folia.readOwnedTabDiskSnapshot(${JSON.stringify(envelope)}),
+        ticket: await window.folia.readOpenTicketSnapshot({
+          openTicket: ${JSON.stringify(envelope.document.openTicket)},
+        }),
+      }))()`);
+      check("SEC-08 missing, forged, wrong-owner and foreign live admissions perform no document body open",
+        negatives.missing === null && negatives.forged === null &&
+          negatives.owner === null && negatives.path === null &&
+          negatives.spelling === null && negatives.privateSpoof === false &&
+          foreignResult.owned === null && foreignResult.ticket === null && bodyOpens === 0,
+        JSON.stringify({ negatives, foreignResult, bodyOpens, descriptorAttempts }));
+      check("SEC-08 refused admissions cause no descriptor attempt under any spelling",
+        descriptorAttempts.length === 0, JSON.stringify(descriptorAttempts));
+      positive = await exec(`(async () => {
+        const request = ${JSON.stringify(envelope)};
+        const owned = await window.folia.readOwnedTabDiskSnapshot(request);
+        const fresh = await window.folia.readOpenTicketSnapshot({
+          openTicket: request.document.openTicket,
+        });
+        const replay = await window.folia.readOpenTicketSnapshot({
+          openTicket: request.document.openTicket,
+        });
+        let layoutRejected = false;
+        try {
+          await window.folia.saveSessionLayout({
+            entries: [{ id: '0'.repeat(32), scrollPosition: 0, anchor: null }],
+            activeEntryId: null,
+          });
+        } catch (error) { layoutRejected = true; }
+        return { owned, fresh, replay, layoutRejected };
+      })()`);
+      check("SEC-08 the admitted owner remains usable after refusals and its open snapshot ticket is one-use",
+        positive.owned?.content.includes("Admitted source") &&
+          positive.fresh?.content === positive.owned.content &&
+          positive.replay === null && positive.layoutRejected && bodyOpens === 2,
+        JSON.stringify({ positive, bodyOpens }));
+    } finally {
+      restoreOpen();
+    }
+
+    const point = await exec(`(() => {
+      window.__admissionRawOpenCount = 0;
+      window.__admissionRealSend = window.ipcRenderer.send;
+      window.ipcRenderer.send = function(channel) {
+        if (channel === 'open-file-path' || channel === 'request-open-file') window.__admissionRawOpenCount++;
+        return window.__admissionRealSend.apply(this, arguments);
+      };
+      const link = document.querySelector('#viewer a');
+      const rect = link.getBoundingClientRect();
+      return { x: Math.round(rect.x + rect.width / 2),
+        y: Math.round(rect.y + rect.height / 2) };
+    })()`);
+    try {
+      let nativeBodyOpens = 0;
+      let refusedNativeIntent = null;
+      const restoreNativeOpen = replaceMethod(fs.promises, "open", function (filePath) {
+        if (filePath === linked) nativeBodyOpens += 1;
+        return realOpen.apply(this, arguments);
+      });
+      try {
+        await exec(`(() => {
+          const ipc = window.ipcRenderer;
+          window.__admissionExternalListeners = ipc.listeners('external-file-open-request');
+          ipc.removeAllListeners('external-file-open-request');
+          ipc.once('external-file-open-request', (_event, payload) => {
+            window.__admissionNativeIntent = payload;
+          });
+          return null;
+        })()`);
+        win.webContents.sendInputEvent({ type: "mouseDown", ...point,
+          button: "left", clickCount: 1 });
+        win.webContents.sendInputEvent({ type: "mouseUp", ...point,
+          button: "left", clickCount: 1 });
+        const issued = await waitForCondition(exec,
+          "!!window.__admissionNativeIntent?.documentOpenTicket", 8000);
+        const intent = await exec("window.__admissionNativeIntent || null");
+        refusedNativeIntent = intent;
+        check("SEC-08 the trusted gesture genuinely issues a private native-open ticket",
+          issued && intent?.filePath === linked &&
+            /^[a-f0-9]{64}$/.test(intent.documentOpenTicket),
+          JSON.stringify(intent));
+        const foreignAccept = await foreign.webContents.executeJavaScript(
+          `window.folia.acceptDocumentOpenTicket({
+            ticket: ${JSON.stringify(intent.documentOpenTicket)},
+          })`);
+        const ticketResults = await exec(`(async () => {
+          const ticket = ${JSON.stringify(intent.documentOpenTicket)};
+          const forged = await window.folia.acceptDocumentOpenTicket({
+            ticket: '0'.repeat(64),
+          });
+          const missing = await window.ipcRenderer.invoke('accept-native-document-ticket', {});
+          const canceled = await window.folia.cancelDocumentOpenTicket({ ticket });
+          const replay = await window.folia.acceptDocumentOpenTicket({ ticket });
+          const recancel = await window.folia.cancelDocumentOpenTicket({ ticket });
+          return { forged, missing, canceled, replay, recancel,
+            selected: window.currentFilePath };
+        })()`);
+        check("SEC-08 native tickets refuse foreign, forged, missing and replay use while real cancellation consumes without a document read",
+          foreignAccept === false && ticketResults.forged === false &&
+            ticketResults.missing === false && ticketResults.canceled === true &&
+            ticketResults.replay === false && ticketResults.recancel === false &&
+            ticketResults.selected === source && nativeBodyOpens === 0,
+          JSON.stringify({ foreignAccept, ticketResults, nativeBodyOpens }));
+      } finally {
+        restoreNativeOpen();
+        await exec(`(() => {
+          const ipc = window.ipcRenderer;
+          if (!window.__admissionExternalListeners) return null;
+          ipc.removeAllListeners('external-file-open-request');
+          for (const listener of window.__admissionExternalListeners) {
+            ipc.on('external-file-open-request', listener);
+          }
+          delete window.__admissionExternalListeners;
+          delete window.__admissionNativeIntent;
+          return null;
+        })()`);
+      }
+      const restoreRefusedRead = replaceMethod(fs.promises, "open", function (filePath) {
+        if (filePath === linked) nativeBodyOpens += 1;
+        return realOpen.apply(this, arguments);
+      });
+      try {
+        await exec(`window.ipcRenderer.emit('external-file-open-request', {},
+          ${JSON.stringify(refusedNativeIntent)}); null`);
+        const notified = await waitForCondition(exec,
+          "document.getElementById('notificationMessage').textContent.includes('The file open request expired or is no longer available')",
+          8000);
+        check("SEC-08 the actual refused native-ticket consumer notifies without raw fallback or any document read",
+          notified && nativeBodyOpens === 0 &&
+            await exec(`window.currentFilePath === ${JSON.stringify(source)} &&
+              window.__admissionRawOpenCount === 0`));
+        if (notified) {
+          const refusalShot = await captureScreenshot(win, "tabs-native-ticket-refusal");
+          if (refusalShot) console.log("native ticket refusal screenshot: " + refusalShot);
+        }
+      } finally { restoreRefusedRead(); }
+      win.webContents.sendInputEvent({ type: "mouseDown", ...point,
+        button: "left", clickCount: 1 });
+      win.webContents.sendInputEvent({ type: "mouseUp", ...point,
+        button: "left", clickCount: 1 });
+      const clicked = await waitForCondition(exec,
+        `window.currentFilePath === ${JSON.stringify(linked)} &&
+          document.getElementById('viewer').textContent.includes('ADMISSION_BEFORE_SAVE') &&
+          !!window.CustomTabs.getDocumentDescriptor()`, 8000);
+      check("SEC-08 an actual trusted local click opens through a main-issued ticket without renderer path IPC",
+        clicked && await exec("window.__admissionRawOpenCount === 0"),
+        JSON.stringify({ clicked, point }));
+    } finally {
+      await exec(`window.ipcRenderer.send = window.__admissionRealSend;
+        delete window.__admissionRealSend; null`);
+    }
+
+    const oldLinkedAdmission = await exec(`(() => {
+      const tab = window.CustomTabs.getActiveTab();
+      const owner = window.CustomTabs.getActiveDocumentIdentity(
+        tab.filePath, window.getReloadRequestSession());
+      return { filePath: tab.filePath, pageSession: owner.pageSession,
+        rendererGeneration: owner.rendererGeneration, owner,
+        document: window.CustomTabs.getDocumentDescriptor() };
+    })()`);
+    const gate = __shutdown.saveGate.arm({ path: linked, holdMs: 20000, armMs: 10000 });
+    let released = false;
+    try {
+      await exec(`(() => {
+        window.originalMarkdown = '# Admitted linked\\n\\nADMISSION_AFTER_SAVE\\n';
+        window.CustomTabs.updateTabContent(window.originalMarkdown, true);
+        window.__admissionSave = saveMarkdownFile();
+        window.__admissionPendingProbe = {
+          oldDelivered: false, ticketReads: 0, rendererReads: 0,
+          realInvoke: window.ipcRenderer.invoke,
+          realRead: window.fs.readFileSync,
+        };
+        const probe = window.__admissionPendingProbe;
+        probe.listener = (_event, data) => {
+          if (data.path === ${JSON.stringify(linked)}) {
+            probe.oldDelivered = data.content.includes('ADMISSION_BEFORE_SAVE');
+          }
+        };
+        window.ipcRenderer.on('file-opened', probe.listener);
+        window.ipcRenderer.invoke = function(channel) {
+          if (channel === 'read-open-ticket-snapshot') probe.ticketReads++;
+          return probe.realInvoke.apply(this, arguments);
+        };
+        window.fs.readFileSync = function(filePath) {
+          if (filePath === ${JSON.stringify(linked)}) {
+            probe.rendererReads++;
+            throw new Error('Admitted pending reopen attempted a renderer body read');
+          }
+          return probe.realRead.apply(this, arguments);
+        };
+        return null;
+      })()`);
+      await __shutdown.saveGate.waitForHold(gate);
+      await exec(`window.ipcRenderer.send('open-file-dialog'); null`);
+      const staleDelivered = await waitForCondition(exec,
+        "window.__admissionPendingProbe.oldDelivered === true", 8000);
+      check("SEC-08 pending reopen really receives pre-Save disk bytes while the authenticated Save is held",
+        staleDelivered && fs.readFileSync(linked, "utf8").includes("ADMISSION_BEFORE_SAVE") &&
+          await exec(`window.getPendingSaveStatus(${JSON.stringify(linked)}).pending === true`));
+      __shutdown.saveGate.release(gate);
+      released = true;
+      const freshLanded = await waitForCondition(exec,
+        `!window.getPendingSaveStatus(${JSON.stringify(linked)}).pending &&
+          document.getElementById('viewer').textContent.includes('ADMISSION_AFTER_SAVE') &&
+          window.CustomTabs.getActiveTab().hasUnsavedChanges === false`, 10000);
+      const probe = await exec(`({
+        ticketReads: window.__admissionPendingProbe.ticketReads,
+        rendererReads: window.__admissionPendingProbe.rendererReads,
+      })`);
+      check("SEC-08 admitted pending-Save reopen waits for settlement then rereads via its specific main ticket",
+        freshLanded && probe.ticketReads === 1 && probe.rendererReads === 0 &&
+          fs.readFileSync(linked, "utf8").includes("ADMISSION_AFTER_SAVE"),
+        JSON.stringify({ freshLanded, probe }));
+    } finally {
+      if (!released) __shutdown.saveGate.release(gate);
+      await exec(`(() => {
+        const probe = window.__admissionPendingProbe;
+        if (probe) {
+          window.ipcRenderer.invoke = probe.realInvoke;
+          window.fs.readFileSync = probe.realRead;
+          window.ipcRenderer.removeListener('file-opened', probe.listener);
+          delete window.__admissionPendingProbe;
+        }
+        return null;
+      })()`);
+    }
+    await runAdmissionCorrectionScenarios(win, exec, clearFixtureTabs,
+      envelope, oldLinkedAdmission, value => { nativeSelection = value; }, sentinel);
+  } finally {
+    if (foreign) foreign.destroy();
+    restoreChooser();
+  }
+  await clearFixtureTabs("admission consumer teardown");
+}
+
+async function runAdmissionCorrectionScenarios(win, exec, clearFixtureTabs,
+  oldSource, oldLinked, selectNativePath, sentinel) {
+  const wc = win.webContents;
+  const source = oldSource.filePath;
+  const linked = oldLinked.filePath;
+  const capture = () => exec(`(() => {
+    const tab = window.CustomTabs.getActiveTab();
+    const owner = window.CustomTabs.getActiveDocumentIdentity(
+      tab.filePath, window.getReloadRequestSession());
+    return { filePath: tab.filePath, pageSession: owner.pageSession,
+      rendererGeneration: owner.rendererGeneration, owner,
+      document: window.CustomTabs.getDocumentDescriptor() };
+  })()`);
+  await exec(`window.CustomTabs.closeTab(${oldSource.owner.tabId})`);
+  await exec(`requestHistoryNavigation(navigationHistory.findIndex(entry =>
+    entry.filePath === ${JSON.stringify(oldSource.filePath)}))`);
+  const reopened = await waitForCondition(exec,
+    `window.currentFilePath === ${JSON.stringify(oldSource.filePath)} &&
+      document.getElementById('viewer').textContent.includes('Admitted source')`, 8000);
+  const freshSource = await capture();
+  const oldSourceRead = await exec(`window.folia.readOwnedTabDiskSnapshot(${JSON.stringify(oldSource)})`);
+  check("SEC-08 admitted A to B then closing A permits a fresh history reopen without reviving A's old owner",
+    reopened && freshSource.document.ref !== oldSource.document.ref && oldSourceRead === null,
+    JSON.stringify({ reopened, freshSource, oldSourceRead }));
+
+  await exec(`window.CustomTabs.closeTab(${oldLinked.owner.tabId})`);
+  await exec("window.CustomTabs.settleSessionLayout()");
+  const state = __shutdown.documentSessionState();
+  check("SEC-08 the replaced B1 owner really is forgotten after B2 closes",
+    !state.owners.some(owner => owner.documentRef === oldLinked.document.ref) &&
+      state.history.some(entry => entry.id === oldLinked.document.entryId));
+  const stats = fs.statSync(oldLinked.filePath);
+  const diskVersion = { dev: stats.dev, ino: stats.ino, size: stats.size,
+    mtimeMs: stats.mtimeMs, ctimeMs: stats.ctimeMs };
+  const refusal = await exec(`(async () => {
+    const old = ${JSON.stringify(oldLinked)};
+    window.folia.registerDocumentOwner({ ...old,
+      owner: { ...old.owner, selectionGeneration: 1 },
+      diskVersion: ${JSON.stringify(diskVersion)}, modifiedTime: ${diskVersion.mtimeMs},
+    });
+    const read = await window.folia.readOwnedTabDiskSnapshot(old);
+    let layoutRejected = false;
+    try {
+      await window.folia.saveSessionLayout({
+        entries: [{ id: old.document.entryId, documentRef: old.document.ref,
+          scrollPosition: 0, anchor: null }], activeEntryId: old.document.entryId,
+      });
+    } catch (error) { layoutRejected = true; }
+    const fresh = await window.folia.readOwnedTabDiskSnapshot(${JSON.stringify(freshSource)});
+    return { read, layoutRejected, fresh };
+  })()`);
+  check("SEC-08 a forgotten replaced reference cannot re-register or submit retired history as live layout",
+    refusal.read === null && refusal.layoutRejected &&
+      refusal.fresh?.content.includes("Admitted source") &&
+      !__shutdown.documentSessionState().owners.some(owner =>
+        owner.documentRef === oldLinked.document.ref), JSON.stringify(refusal));
+
+  selectNativePath(oldLinked.filePath);
+  await exec("window.ipcRenderer.send('open-file-dialog'); null");
+  await waitForCondition(exec, `window.currentFilePath === ${JSON.stringify(oldLinked.filePath)} &&
+    document.getElementById('viewer').textContent.includes('ADMISSION_AFTER_SAVE')`, 8000);
+  await exec("window.CustomTabs.settleSessionLayout()");
+  const currentLinked = await capture();
+  const runCloseSave = async (sameTarget) => {
+    const originalOpen = fs.promises.open;
+    let opens = 0;
+    let triggered = false;
+    let queueCompletedInClose = false;
+    const restore = replaceMethod(fs.promises, "open", async function (filePath, flags) {
+      const handle = await originalOpen.apply(this, arguments);
+      if (filePath === oldLinked.filePath && flags === "r") {
+        opens += 1;
+        const close = handle.close.bind(handle);
+        handle.close = async () => {
+          await close();
+          if (triggered) return;
+          triggered = true;
+          await exec(`(async () => {
+            ${sameTarget ? "" : `await window.CustomTabs.switchToTab(${freshSource.owner.tabId});`}
+            window.originalMarkdown = ${JSON.stringify(sameTarget
+              ? "# Admitted linked\n\nADMISSION_ABA_SAVE\n"
+              : "# Admitted source\n\nUNRELATED_SAVE_CONTROL\n")};
+            window.CustomTabs.updateTabContent(window.originalMarkdown, true);
+            await saveMarkdownFile();
+          })()`);
+          queueCompletedInClose = __shutdown.state().saveQueuePendingCount === 0;
+        };
+      }
+      return handle;
+    });
+    try {
+      const result = await exec(`window.folia.readOpenTicketSnapshot({
+        openTicket: ${JSON.stringify(currentLinked.document.openTicket)},
+      })`);
+      return { result, opens, triggered, queueCompletedInClose };
+    } finally { restore(); }
+  };
+  const aba = await runCloseSave(true);
+  check("SEC-08 a same-target Save that starts and settles inside descriptor close forces a fresh ticket read",
+    aba.triggered && aba.queueCompletedInClose && aba.opens === 2 &&
+      aba.result?.content.includes("ADMISSION_ABA_SAVE"), JSON.stringify(aba));
+
+  await exec("window.ipcRenderer.send('open-file-dialog'); null");
+  await waitForCondition(exec, `document.getElementById('viewer').textContent.includes('ADMISSION_ABA_SAVE') &&
+    window.CustomTabs.getDocumentDescriptor().ref !== ${JSON.stringify(currentLinked.document.ref)}`, 8000);
+  const unrelatedTicket = await capture();
+  currentLinked.document.openTicket = unrelatedTicket.document.openTicket;
+  const unrelated = await runCloseSave(false);
+  check("SEC-08 a completed Save to another admitted target does not invalidate the ticket read",
+    unrelated.triggered && unrelated.queueCompletedInClose && unrelated.opens === 1 &&
+      unrelated.result?.content.includes("ADMISSION_ABA_SAVE"), JSON.stringify(unrelated));
+  await clearFixtureTabs("provisional retirement fence setup");
+  const provisionalPath = path.join(dir, "admission-provisional.md");
+  write(provisionalPath, "# Live provisional\n\nPROVISIONAL_FENCE_BASE\n");
+  await exec(`window.ipcRenderer.send('open-file-path', {
+    filePath: ${JSON.stringify(provisionalPath)},
+  }); null`);
+  await waitForCondition(exec,
+    "document.getElementById('viewer').textContent.includes('PROVISIONAL_FENCE_BASE')", 8000);
+  const provisional = await capture();
+  selectNativePath(linked);
+  await exec("window.ipcRenderer.send('open-file-dialog'); null");
+  await waitForCondition(exec, `window.currentFilePath === ${JSON.stringify(linked)}`, 8000);
+  await exec("window.CustomTabs.closeTab(window.CustomTabs.getActiveTabId())");
+  selectNativePath(source);
+  await exec("window.ipcRenderer.send('open-file-dialog'); null");
+  await waitForCondition(exec, `window.currentFilePath === ${JSON.stringify(source)}`, 8000);
+  const provisionalCompanion = await capture();
+  const retainedProvisional = __shutdown.documentSessionState().owners.find(owner =>
+    owner.tabId === provisional.owner.tabId);
+  const provisionalGuards = __shutdown.documentOwnerGuards({
+    ...provisional.owner, spelling: "caller-spelling-must-be-ignored",
+  }, provisionalPath);
+  check("SEC-08 retirement fence setup retains a real older provisional owner without a page-supplied spelling",
+    !provisional.document && provisional.owner.spelling === undefined &&
+      !!retainedProvisional && !retainedProvisional.documentRef &&
+      provisionalGuards.retirementFloor >= provisional.owner.tabId,
+    JSON.stringify({ provisional, retainedProvisional, provisionalGuards }));
+  let provisionalClose = null;
+  if (provisionalGuards.identity && provisionalGuards.closing) {
+    await exec(`window.CustomTabs.switchToTab(${provisional.owner.tabId})`);
+    await exec(`(async () => {
+      window.originalMarkdown = '# Live provisional\\n\\nPROVISIONAL_FENCE_SAVED\\n';
+      window.CustomTabs.updateTabContent(window.originalMarkdown, true);
+      await saveMarkdownFile();
+    })()`);
+    provisionalClose = await exec(`window.folia.queryDocumentDeletionState(${JSON.stringify({
+      ...provisional.owner, filePath: provisionalPath,
+    })})`);
+  }
+  check("SEC-08 a retained provisional tab keeps selection Save and close authority after native retirement pruning",
+    provisionalGuards.identity && provisionalGuards.closing &&
+    fs.readFileSync(provisionalPath, "utf8").includes("PROVISIONAL_FENCE_SAVED") &&
+      provisionalClose?.known === true,
+    JSON.stringify({ provisionalGuards, provisionalClose }));
+  const provisionalLayoutSettled = await exec(`(async () => {
+    try { await window.CustomTabs.settleSessionLayout(); return true; }
+    catch { return false; }
+  })()`);
+  const provisionalLayout = __shutdown.documentSessionState().entries;
+  check("SEC-08 provisional tabs do not suppress the admitted companion's durable layout",
+    provisionalLayoutSettled && provisionalLayout.length === 1 &&
+      provisionalLayout[0].id === provisionalCompanion.document.entryId,
+    JSON.stringify({ provisionalLayoutSettled, provisionalLayout }));
+  const fenceGeneration = __shutdown.state().rendererGeneration;
+  win.webContents.reload();
+  await waitUntil(async () => __shutdown.state().rendererGeneration > fenceGeneration &&
+    __shutdown.state().renderer === "ready" &&
+    await exec("!!window.CustomTabs && document.getElementById('viewer').textContent.includes('Admitted source')"),
+    12000);
+  await clearFixtureTabs("native spelling setup");
+  selectNativePath(source);
+  await exec("window.ipcRenderer.send('open-file-dialog'); null");
+  await waitForCondition(exec, `window.currentFilePath === ${JSON.stringify(source)} &&
+    !!window.CustomTabs.getDocumentDescriptor()`, 8000);
+  const nativeOriginal = await capture();
+  await exec(`window.originalMarkdown = '# Admitted source\\n\\nNATIVE_ALIAS_KEEP_EDIT\\n';
+    window.CustomTabs.updateTabContent(window.originalMarkdown, true); null`);
+  const aliasDirectory = path.join(dir, "admission-logical-alias");
+  fs.symlinkSync(dir, aliasDirectory, process.platform === "win32" ? "junction" : "dir");
+  const spellings = [{ kind: "junction", filePath: path.join(aliasDirectory, path.basename(source)) }];
+  const casePath = source.replace("admission-native.md", "ADMISSION-NATIVE.md");
+  if (fs.existsSync(casePath) && fs.realpathSync.native(casePath) === fs.realpathSync.native(source)) {
+    spellings.push({ kind: "case", filePath: casePath });
+  }
+  for (const spelling of spellings) {
+    check(`SEC-08 native ${spelling.kind} spelling setup names the same real physical file`,
+      spelling.filePath !== source &&
+        fs.realpathSync.native(spelling.filePath) === fs.realpathSync.native(source));
+    selectNativePath(spelling.filePath);
+    await exec("window.ipcRenderer.send('open-file-dialog'); null");
+    const landed = await waitForCondition(exec,
+      `window.currentFilePath === ${JSON.stringify(spelling.filePath)} &&
+        window.CustomTabs.getDocumentDescriptor()?.logicalPath === ${JSON.stringify(spelling.filePath)}`,
+      8000);
+    const current = await capture();
+    const prior = await exec(`(() => {
+      const tab = window.CustomTabs.getTabs().find(tab => tab.id === ${nativeOriginal.owner.tabId});
+      return tab && { content: tab.content, dirty: tab.hasUnsavedChanges, path: tab.filePath,
+        document: window.CustomTabs.getDocumentDescriptor(tab.id) };
+    })()`);
+    check(`SEC-08 native ${spelling.kind} spelling opens its exact scoped tab without rebinding existing edits`,
+      landed && current.document?.ref !== nativeOriginal.document.ref &&
+        current.document?.readTarget === nativeOriginal.document.readTarget &&
+        prior?.dirty && prior.path === source && prior.content.includes("NATIVE_ALIAS_KEEP_EDIT") &&
+        prior.document.ref === nativeOriginal.document.ref,
+      JSON.stringify({ landed, current, prior }));
+  }
+  const repeatedLogicalPath = spellings[spellings.length - 1].filePath;
+  // Keep deduplication's control independent of successful alias admission.
+  await clearFixtureTabs("repeat logical spelling setup");
+  selectNativePath(repeatedLogicalPath);
+  await exec("window.ipcRenderer.send('open-file-dialog'); null");
+  const repeatSetup = await waitForCondition(exec,
+    `window.CustomTabs.getActiveTab()?.filePath === ${JSON.stringify(repeatedLogicalPath)} &&
+      window.CustomTabs.getDocumentDescriptor()?.logicalPath === ${JSON.stringify(repeatedLogicalPath)} &&
+      document.getElementById('viewer').textContent.includes('Admitted source')`, 8000);
+  check("SEC-08 repeated logical spelling setup has a real exact admitted tab",
+    repeatSetup && await exec("window.CustomTabs.getTabs().length === 1"));
+  const logicalCount = await exec("window.CustomTabs.getTabs().length");
+  const repeatedRef = await exec("window.CustomTabs.getDocumentDescriptor().ref");
+  selectNativePath(repeatedLogicalPath);
+  await exec("window.ipcRenderer.send('open-file-dialog'); null");
+  const repeatedReopened = await waitForCondition(exec,
+    `window.CustomTabs.getDocumentDescriptor()?.logicalPath === ${JSON.stringify(repeatedLogicalPath)} &&
+      window.CustomTabs.getDocumentDescriptor().ref !== ${JSON.stringify(repeatedRef)}`,
+    8000);
+  check("SEC-08 reopening the same admitted logical spelling deduplicates its existing tab",
+    repeatedReopened && await exec(`window.CustomTabs.getTabs().length === ${logicalCount} &&
+      window.CustomTabs.getDocumentDescriptor()?.logicalPath === ${JSON.stringify(repeatedLogicalPath)}`));
+  await clearFixtureTabs("native logical batch setup");
+  const batchAlias = spellings[0].filePath;
+  selectNativePath([source, batchAlias]);
+  await exec("window.ipcRenderer.send('open-file-dialog'); null");
+  const batchLanded = await waitForCondition(exec,
+    `window.CustomTabs.getTabs().length === 2 &&
+      window.CustomTabs.getTabs().some(tab => tab.filePath === ${JSON.stringify(batchAlias)})`, 8000);
+  await exec("window.CustomTabs.settleSessionLayout()");
+  const logicalLayout = __shutdown.documentSessionState();
+  check("SEC-08 native dialog extras retain both exact logical entries for the same physical target",
+    batchLanded && logicalLayout.entries.length === 2 &&
+      new Set(logicalLayout.entries.map(entry => entry.id)).size === 2 &&
+      logicalLayout.entries.some(entry => entry.filePath === source) &&
+      logicalLayout.entries.some(entry => entry.filePath === batchAlias),
+    JSON.stringify(logicalLayout.entries));
+  const logicalGeneration = __shutdown.state().rendererGeneration;
+  win.webContents.reload();
+  const logicalRestored = await waitUntil(async () =>
+    __shutdown.state().rendererGeneration > logicalGeneration &&
+      __shutdown.state().renderer === "ready" &&
+      await exec(`window.CustomTabs?.getTabs().length === 2 &&
+        window.currentFilePath === ${JSON.stringify(source)} &&
+        document.getElementById('viewer').textContent.includes('Admitted source')`), 12000);
+  const restoredPaths = await exec("window.CustomTabs.getTabs().map(tab => tab.filePath)");
+  check("SEC-08 private restore keeps distinct logical aliases and selects the stored active entry",
+    logicalRestored && JSON.stringify(restoredPaths) === JSON.stringify([source, batchAlias]),
+    JSON.stringify({ logicalRestored, restoredPaths }));
+  await clearFixtureTabs("held restore quit setup");
+  fs.unlinkSync(aliasDirectory);
+  const sourceEntry = logicalLayout.entries.find(entry => entry.filePath === source);
+  const linkedEntry = __shutdown.documentSessionState().history.find(entry =>
+    entry.filePath === linked);
+  await __shutdown.seedDocumentSessionLayout({
+    entries: [sourceEntry, linkedEntry].map(entry =>
+      ({ id: entry.id, scrollPosition: 0, anchor: null })),
+    activeEntryId: sourceEntry.id,
+  });
+  const restoreHandler = ipcMain._invokeHandlers.get("restore-document-session");
+  let returnedRestore = null;
+  let parkedNativeOpen = null;
+  let releaseDeliveredRestore;
+  const deliveredGate = new Promise(resolve => { releaseDeliveredRestore = resolve; });
+  const heldRestoreHandler = async (...args) => {
+    const result = await restoreHandler(...args);
+    returnedRestore = result;
+    await deliveredGate;
+    return result;
+  };
+  ipcMain.removeHandler("restore-document-session");
+  ipcMain.handle("restore-document-session", heldRestoreHandler);
+  const realDeliveredSend = wc.send;
+  const restoreDeliveredSend = replaceMethod(wc, "send", function (channel, payload) {
+    if (channel === "file-opened" && payload.path === source) {
+      parkedNativeOpen = payload;
+      return;
+    }
+    return realDeliveredSend.apply(this, arguments);
+  });
+  try {
+    await exec("window.__deliveredRestore = window.CustomTabs.__loadSavedTabs(); null");
+    const delivered = await waitUntil(() => returnedRestore?.entries.length === 2, 8000);
+    selectNativePath(source);
+    await exec("window.ipcRenderer.send('open-file-dialog'); null");
+    const nativeIssued = await waitUntil(() => !!parkedNativeOpen?.document, 8000);
+    const expectedNativeRef = parkedNativeOpen?.document.ref;
+    check("SEC-08 delivered restore race holds a successful Main response after same-path native admission but before renderer delivery",
+      delivered && nativeIssued &&
+        returnedRestore.entries.find(entry => entry.filePath === source).document.ref !==
+          parkedNativeOpen.document.ref &&
+        await exec("window.CustomTabs.getTabs().length === 0"));
+    const batchCurrent = returnedRestore.entries.every(entry =>
+      __shutdown.documentAdmissionIsCurrent(entry.document.ref));
+    check("SEC-08 delivered restore references survive native epoch and same-logical-path pruning until registration",
+      batchCurrent);
+    // A broken pin must fail its assertion without creating stranded fixture
+    // tabs; deliver the real superseding event before releasing that bad batch.
+    if (!batchCurrent) {
+      realDeliveredSend.call(wc, "file-opened", parkedNativeOpen);
+      parkedNativeOpen = null;
+      await waitForCondition(exec, `window.currentFilePath === ${JSON.stringify(source)}`, 8000);
+    }
+    releaseDeliveredRestore();
+    await exec("window.__deliveredRestore");
+    let deliveredSave = false;
+    if (batchCurrent) {
+      const linkedTab = await exec(`window.CustomTabs.getTabs().find(tab =>
+        tab.filePath === ${JSON.stringify(linked)})?.id`);
+      await exec(`window.CustomTabs.switchToTab(${linkedTab})`);
+      await exec(`(async () => {
+        window.originalMarkdown = '# Admitted linked\\n\\nDELIVERED_BATCH_SAVE\\n';
+        window.CustomTabs.updateTabContent(window.originalMarkdown, true);
+        await saveMarkdownFile();
+      })()`);
+      await exec(`window.CustomTabs.closeTab(${linkedTab})`);
+      await exec("window.CustomTabs.settleSessionLayout()");
+      deliveredSave = fs.readFileSync(linked, "utf8").includes("DELIVERED_BATCH_SAVE") &&
+        await exec(`!window.CustomTabs.getTabs().some(tab => tab.id === ${linkedTab})`) &&
+        __shutdown.documentSessionState().entries.length === 1;
+    }
+    check("SEC-08 an actually registered delivered restore owner remains usable for Save close and durable layout",
+      deliveredSave);
+    if (parkedNativeOpen) {
+      realDeliveredSend.call(wc, "file-opened", parkedNativeOpen);
+      parkedNativeOpen = null;
+    }
+    const newOpen = await waitForCondition(exec,
+      `window.currentFilePath === ${JSON.stringify(source)} &&
+        window.CustomTabs.getDocumentDescriptor()?.ref === ${JSON.stringify(expectedNativeRef)} &&
+        document.getElementById('viewer').textContent.includes('Admitted source')`, 8000);
+    await exec("window.CustomTabs.settleSessionLayout()");
+    const nativeCurrent = await capture();
+    const nativeRead = await exec(
+      `window.folia.readOwnedTabDiskSnapshot(${JSON.stringify(nativeCurrent)})`);
+    check("SEC-08 ordinary same-path native opening remains usable after delivered restore registration",
+      newOpen && nativeRead?.content.includes("Admitted source") &&
+        __shutdown.documentSessionState().entries.some(entry =>
+          entry.id === nativeCurrent.document.entryId));
+  } finally {
+    releaseDeliveredRestore();
+    restoreDeliveredSend();
+    ipcMain.removeHandler("restore-document-session");
+    ipcMain.handle("restore-document-session", restoreHandler);
+  }
+  await clearFixtureTabs("delivered restore race cleanup");
+  const heldRestoreNewPath = path.join(dir, "admission-held-restore-new.md");
+  write(heldRestoreNewPath, "# Newly admitted during restore\n\nHELD_RESTORE_NEW\n");
+  await __shutdown.seedDocumentSessionLayout({
+    entries: [{ id: sourceEntry.id, scrollPosition: 0, anchor: null }],
+    activeEntryId: sourceEntry.id,
+  });
+  let releaseRestore;
+  let restoreHeld = false;
+  const restoreReadGate = new Promise(resolve => { releaseRestore = resolve; });
+  const realOpenForQuit = fs.promises.open;
+  const restoreOpenForQuit = replaceMethod(fs.promises, "open", async function (filePath, flags) {
+    const handle = await realOpenForQuit.apply(this, arguments);
+    if (filePath === source && flags === "r" && !restoreHeld) {
+      restoreHeld = true;
+      await restoreReadGate;
+    }
+    return handle;
+  });
+  let pendingRestoreQuits = 0;
+  let heldRestoreRefusal = null;
+  const onHeldRestoreCommit = (_event, reply) => {
+    if (reply.committed === false) heldRestoreRefusal = reply;
+  };
+  ipcMain.on("quit-approval-committed", onHeldRestoreCommit);
+  const restorePendingQuit = replaceMethod(app, "quit", () => { pendingRestoreQuits += 1; });
+  try {
+    await exec(`window.__heldSessionRestore = window.CustomTabs.__loadSavedTabs(); null`);
+    const heldRestore = await waitUntil(() => restoreHeld, 8000);
+    selectNativePath(heldRestoreNewPath);
+    await exec("window.ipcRenderer.send('open-file-dialog'); null");
+    await waitForCondition(exec,
+      `window.currentFilePath === ${JSON.stringify(heldRestoreNewPath)} &&
+        !!window.CustomTabs.getDocumentDescriptor()`, 8000);
+    const closingDuringRestore = await capture();
+    await exec("window.CustomTabs.closeTab(window.CustomTabs.getActiveTabId())");
+    const unsettled = await exec(`(async () => {
+      try { await window.CustomTabs.settleSessionLayout(); return false; }
+      catch (error) { return error.message.includes('awaiting document restore'); }
+    })()`);
+    check("SEC-08 pending-restore quit setup holds a real approved read and refuses stale layout settlement",
+      heldRestore && unsettled && pendingRestoreQuits === 0 &&
+        __shutdown.documentSessionState().entries.some(entry =>
+          entry.id === closingDuringRestore.document.entryId),
+      JSON.stringify({ heldRestore, unsettled, pendingRestoreQuits,
+        closingDuringRestore, entries: __shutdown.documentSessionState().entries }));
+    app.emit("before-quit", { preventDefault() {} });
+    await waitUntil(() => pendingRestoreQuits === 1 || !!heldRestoreRefusal, 8000);
+    const quitDuringRestore = pendingRestoreQuits === 1;
+    const duringRestore = JSON.parse(fs.readFileSync(
+      path.join(app.getPath("userData"), "document-session.json"), "utf8"));
+    check("SEC-08 quit during held restore persists final close while retaining unseen approved entries",
+      quitDuringRestore && duringRestore.entries.length === 1 &&
+        duringRestore.entries[0].id === sourceEntry.id &&
+        await exec("window.CustomTabs.__shutdownFreeze().frozen === true"),
+      JSON.stringify({ quitDuringRestore, entries: duringRestore.entries }));
+    releaseRestore();
+    await exec("window.__heldSessionRestore");
+    check("SEC-08 cancelled restore completion cannot create tabs or persist after quit freeze",
+      await exec("window.CustomTabs.getTabs().length === 0 && window.currentFilePath === null") &&
+        JSON.parse(fs.readFileSync(
+          path.join(app.getPath("userData"), "document-session.json"), "utf8")).entries.length === 1);
+  } finally {
+    releaseRestore();
+    restoreOpenForQuit();
+    restorePendingQuit();
+    ipcMain.removeListener("quit-approval-committed", onHeldRestoreCommit);
+    __shutdown.reset();
+    await waitForCondition(exec, "!window.CustomTabs.isDocumentFrozen()", 5000);
+    await __shutdown.seedDocumentSessionLayout({ entries: [], activeEntryId: null });
+  }
+  await clearFixtureTabs("relative admission setup");
+  const relativeFile = path.join(dir, "admission-relative.md");
+  write(relativeFile, "# Relative admission\n");
+  const relativeArgument = path.relative(process.cwd(), relativeFile);
+  selectNativePath(relativeArgument);
+  await exec("window.ipcRenderer.send('open-file-dialog'); null");
+  const relativeOpened = await waitForCondition(exec,
+    `window.CustomTabs.getActiveTab()?.filePath === ${JSON.stringify(relativeArgument)} &&
+      window.CustomTabs.getDocumentDescriptor()?.logicalPath === ${JSON.stringify(relativeFile)} &&
+      document.getElementById('viewer').textContent.includes('Relative admission')`, 8000);
+  const relativeReference = await exec("window.CustomTabs.getDocumentDescriptor()?.ref");
+  check("SEC-08 relative native admission setup retains a relative tab spelling and an absolute Main logical path",
+    relativeOpened && !path.isAbsolute(relativeArgument), relativeArgument);
+  selectNativePath(relativeFile);
+  await exec("window.ipcRenderer.send('open-file-dialog'); null");
+  const absoluteReopened = await waitForCondition(exec,
+    `window.CustomTabs.getDocumentDescriptor()?.ref !== ${JSON.stringify(relativeReference)} &&
+      window.CustomTabs.getDocumentDescriptor()?.logicalPath === ${JSON.stringify(relativeFile)}`, 8000);
+  const relativeLayout = await exec(`(async () => {
+    let settled = false;
+    try { await window.CustomTabs.settleSessionLayout(); settled = true; }
+    catch (error) { console.log('Expected relative-layout mutation refusal:', error.message); }
+    return { settled, tabs: window.CustomTabs.getTabs().length };
+  })()`);
+  check("SEC-08 absolute reopening of the same relative logical path reuses one tab and durably settles one entry",
+    absoluteReopened && relativeLayout.settled && relativeLayout.tabs === 1 &&
+      __shutdown.documentSessionState().entries.length === 1,
+    JSON.stringify(relativeLayout));
+  // Alias/lifecycle proofs do not need the unchanged capacity stress journey.
+  if (process.env.SEC08_ADMISSION_LIFECYCLE_ONLY === "1") return;
+  await clearFixtureTabs("admission quota setup");
+  await exec("window.CustomTabs.settleSessionLayout()");
+  const quotaDir = path.join(process.cwd(), "files", `admission-quota-${Date.now()}`);
+  fs.mkdirSync(quotaDir, { recursive: true });
+  let opened = 0;
+  for (let index = 0; index < 520; index += 1) {
+    const filePath = path.join(quotaDir, `quota-${index}.md`);
+    fs.writeFileSync(filePath, `# Quota ${index}\n`, "utf8");
+    selectNativePath(filePath);
+    await exec("window.ipcRenderer.send('open-file-dialog'); null");
+    const landed = await waitForCondition(exec,
+      `window.currentFilePath === ${JSON.stringify(filePath)} &&
+        document.getElementById('viewer').textContent.includes('Quota ${index}')`, 8000);
+    if (!landed) break;
+    opened += 1;
+    if (index !== 519) {
+      await exec("window.CustomTabs.closeTab(window.CustomTabs.getActiveTabId())");
+      await exec("window.CustomTabs.settleSessionLayout()");
+    }
+  }
+  const quota = __shutdown.documentSessionState();
+  check("SEC-08 distinct native opens exceed the history quota without permanent exhaustion or loss of the live layout",
+    opened === 520 && quota.history.length <= 512 && quota.entries.length === 1 &&
+      quota.entries[0].filePath === path.join(quotaDir, "quota-519.md"),
+    JSON.stringify({ opened, history: quota.history.length, entries: quota.entries }));
+  if (opened !== 520) return;
+  const repeats = await exec(`(async () => {
+    let success = 0;
+    for (let index = 0; index < 520; index++) {
+      const result = await window.folia.restoreSession();
+      if (result.entries.length === 1 && !result.entries[0].error) success++;
+    }
+    return success;
+  })()`);
+  check("SEC-08 repeated unused restoration admissions are superseded rather than exhausting live capability capacity",
+    repeats === 520 && __shutdown.documentSessionState().admissions <= 2,
+    JSON.stringify({ repeats, admissions: __shutdown.documentSessionState().admissions }));
+  if (repeats !== 520) return;
+  if (__shutdown.documentSessionState().admissions > 2) {
+    const leakedBatchGeneration = __shutdown.state().rendererGeneration;
+    wc.reload();
+    await waitUntil(async () => __shutdown.state().rendererGeneration > leakedBatchGeneration &&
+      __shutdown.state().renderer === "ready" &&
+      await exec("window.CustomTabs?.getTabs().length === 1 && !!window.CustomTabs.getDocumentDescriptor()"),
+      12000);
+  }
+  await clearFixtureTabs("full delivered batch setup");
+  const fullHistory = __shutdown.documentSessionState().history;
+  await __shutdown.seedDocumentSessionLayout({
+    entries: fullHistory.map(entry => ({ id: entry.id, scrollPosition: 0, anchor: null })),
+    activeEntryId: fullHistory[0].id,
+  });
+  const fullBatch = await exec("window.folia.restoreSession()");
+  check("SEC-08 full delivered batch setup has actual current unbound references without creating fixture tabs",
+    fullBatch.entries.length === 512 &&
+      fullBatch.entries.every(entry => entry.document &&
+        __shutdown.documentAdmissionIsCurrent(entry.document.ref)) &&
+      await exec("window.CustomTabs.getTabs().length === 0"));
+  let fullNative = null;
+  const realFullSend = wc.send;
+  const restoreFullSend = replaceMethod(wc, "send", function (channel, payload) {
+    if (channel === "file-opened" && payload.path === fullHistory[0].filePath) {
+      fullNative = payload;
+      return;
+    }
+    return realFullSend.apply(this, arguments);
+  });
+  try {
+    selectNativePath(fullHistory[0].filePath);
+    await exec("window.ipcRenderer.send('open-file-dialog'); null");
+    const nativeAtCapacity = await waitUntil(() => !!fullNative?.document, 8000);
+    check("SEC-08 a full delivered restore batch permits bounded native readmission of the same approved entry",
+      nativeAtCapacity &&
+        fullNative.document.ref !== fullBatch.entries[0].document.ref &&
+        __shutdown.documentAdmissionIsCurrent(fullNative.document.ref) &&
+        __shutdown.documentSessionState().admissions === fullBatch.entries.length + 1);
+  } finally { restoreFullSend(); }
+  await __shutdown.seedDocumentSessionLayout({
+    entries: quota.entries.map(entry => ({ id: entry.id, scrollPosition: 0, anchor: null })),
+    activeEntryId: quota.activeEntryId,
+  });
+  const fullBatchGeneration = __shutdown.state().rendererGeneration;
+  wc.reload();
+  await waitUntil(async () => __shutdown.state().rendererGeneration > fullBatchGeneration &&
+    __shutdown.state().renderer === "ready" &&
+    await exec("window.CustomTabs?.getTabs().length === 1 && !!window.CustomTabs.getDocumentDescriptor()"),
+    12000);
+  const afterFullBatchRef = await exec("window.CustomTabs.getDocumentDescriptor().ref");
+  selectNativePath(path.join(quotaDir, "quota-519.md"));
+  await exec("window.ipcRenderer.send('open-file-dialog'); null");
+  await waitForCondition(exec,
+    `document.getElementById('viewer').textContent.includes('Quota 519') &&
+      window.CustomTabs.getDocumentDescriptor()?.ref !== ${JSON.stringify(afterFullBatchRef)}`,
+    8000);
+  await exec("window.CustomTabs.settleSessionLayout()");
+  const background = await capture();
+  write(path.join(quotaDir, "quota-518.md"),
+    "# Quota 518\n\n" + Array.from({ length: 200 }, (_, index) =>
+      `Viewport paragraph ${index}.`).join("\n\n") + "\n");
+  selectNativePath(path.join(quotaDir, "quota-518.md"));
+  await exec("window.ipcRenderer.send('open-file-dialog'); null");
+  await waitForCondition(exec, "document.getElementById('viewer').textContent.includes('Quota 518')", 8000);
+  await exec("window.CustomTabs.settleSessionLayout()");
+  const active = await capture();
+  const restoredLayout = await exec(`(async () => {
+    const restored = await window.folia.restoreSession();
+    return restored.entries.map(entry => ({
+      id: entry.id, error: entry.error || null, admitted: !!entry.document,
+    }));
+  })()`);
+  const protectedLayout = __shutdown.documentSessionState().protectedEntries;
+  check("SEC-08 layout retirement race starts with actual restored snapshots and a protected background entry",
+    restoredLayout.length === 2 && restoredLayout.every(entry => !entry.error && entry.admitted) &&
+      protectedLayout.includes(background.document.entryId) &&
+      protectedLayout.includes(active.document.entryId),
+    JSON.stringify({ restoredLayout, protectedLayout }));
+  const manifest = path.join(app.getPath("userData"), "document-session.json");
+  let releaseRename;
+  let renameHeld = false;
+  const held = new Promise(resolve => { releaseRename = resolve; });
+  const originalRename = fs.promises.rename;
+  const restoreRename = replaceMethod(fs.promises, "rename", async function (_from, to) {
+    if (to === manifest && !renameHeld) {
+      renameHeld = true;
+      await held;
+    }
+    return originalRename.apply(this, arguments);
+  });
+  let quits = 0;
+  let quitViewport = null;
+  let finalViewportScroll = null;
+  const restoreQuit = replaceMethod(app, "quit", () => { quits += 1; });
+  try {
+    await exec(`(() => {
+      window.__layoutCalls = [];
+      window.__layoutRealInvoke = window.ipcRenderer.invoke;
+      window.ipcRenderer.invoke = function(channel, payload) {
+        if (channel === 'save-document-session-layout') window.__layoutCalls.push(payload);
+        return window.__layoutRealInvoke.apply(this, arguments);
+      };
+      window.CustomTabs.updateTabContent(window.originalMarkdown, false);
+    })()`);
+    const reached = await waitUntil(() => renameHeld, 8000);
+    await exec(`(async () => {
+      for (let index = 0; index < 8; index++) {
+        window.CustomTabs.updateTabContent(window.originalMarkdown, false);
+      }
+      await window.CustomTabs.closeTab(${background.owner.tabId});
+    })()`);
+    const quitScroll = await exec(`(() => {
+      const tab = window.CustomTabs.getActiveTab();
+      const scroller = window.CustomTabs.__getScroller();
+      scroller.scrollTop = 523;
+      tab.scrollPosition = 123;
+      tab.anchor = { scrollTop: 0, text: 'Quota 518', ordinal: 0, delta: 0 };
+      window.CustomTabs.updateTabContent(window.originalMarkdown, false);
+      return { cached: tab.scrollPosition, live: scroller.scrollTop,
+        overflow: scroller.scrollHeight - scroller.clientHeight,
+        anchor: tab.anchor };
+    })()`);
+    finalViewportScroll = quitScroll.live;
+    check("SEC-08 quit viewport setup has stale cached scroll distinct from the live scroller",
+      quitScroll.cached !== quitScroll.live, JSON.stringify(quitScroll));
+    check("SEC-08 quit viewport setup has a stale heading anchor and a real overflowing document",
+      Math.abs(quitScroll.live - 523) <= 1 && quitScroll.overflow > 523 &&
+        quitScroll.anchor?.text === "Quota 518" && quitScroll.anchor.delta === 0,
+      JSON.stringify(quitScroll));
+    app.emit("before-quit", { preventDefault() {} });
+    const commitWaiting = await waitUntil(() => __shutdown.state().commitPendingId > 0, 8000);
+    check("SEC-08 normal quit freezes while the latest layout awaits a genuinely held durable rename",
+      reached && commitWaiting && quits === 0 &&
+        await exec("window.__layoutCalls.length === 1"));
+    releaseRename();
+    const continued = await waitUntil(() => quits === 1, 8000);
+    const durable = JSON.parse(fs.readFileSync(manifest, "utf8"));
+    const calls = await exec("window.__layoutCalls");
+    check("SEC-08 normal quit durably drains only the latest coalesced layout without resending a retired background tab",
+      continued && calls.length === 2 &&
+        calls[1].entries.length === 1 &&
+        calls[1].entries[0].documentRef === active.document.ref &&
+        durable.entries.length === 1 && durable.entries[0].id === active.document.entryId,
+      JSON.stringify({ continued, calls, durable }));
+    check("SEC-08 normal quit persists the live viewport before freezing new layout submissions",
+      durable.entries.find(entry => entry.id === active.document.entryId)?.scrollPosition ===
+        quitScroll.live, JSON.stringify({ quitScroll, entries: durable.entries }));
+    quitViewport = durable.entries.find(entry => entry.id === active.document.entryId);
+    check("SEC-08 normal quit replaces a stale heading anchor with the live viewport anchor",
+      quitViewport?.anchor?.text === "Quota 518" &&
+        quitViewport.anchor.scrollTop === quitScroll.live &&
+        quitViewport.anchor.delta > 0, JSON.stringify(quitViewport));
+    await __shutdown.seedDocumentSessionLayout({
+      entries: [background, active].map(snapshot => ({
+        id: snapshot.document.entryId, scrollPosition: 0, anchor: null,
+      })),
+      activeEntryId: active.document.entryId,
+    });
+    const frozenRestore = await exec(`(async () => {
+      const invoke = window.ipcRenderer.invoke;
+      let restores = 0;
+      let layouts = 0;
+      window.ipcRenderer.invoke = function(channel) {
+        if (channel === 'restore-document-session') restores++;
+        if (channel === 'save-document-session-layout') layouts++;
+        return invoke.apply(this, arguments);
+      };
+      try {
+        const positive = await window.folia.restoreSession();
+        const setup = positive.entries.length === 2 &&
+          positive.entries.every(entry => !entry.error && entry.document) &&
+          positive.entries.some(entry => entry.id === ${JSON.stringify(background.document.entryId)}) &&
+          restores === 1;
+        restores = 0;
+        const state = () => ({
+          tabs: window.CustomTabs.getTabs().map(tab => ({id: tab.id, content: tab.content})),
+          active: window.CustomTabs.getActiveTabId(),
+          freeze: window.CustomTabs.__shutdownFreeze(),
+        });
+        const before = state();
+        await window.CustomTabs.__loadSavedTabs();
+        const after = state();
+        return { setup, restores, layouts, before, after };
+      } finally {
+        window.ipcRenderer.invoke = invoke;
+      }
+    })()`);
+    check("SEC-08 frozen restore observer sees real main-approved saved entries including a closed document",
+      frozenRestore.setup && frozenRestore.before.freeze.frozen === true,
+      JSON.stringify(frozenRestore));
+    check("SEC-08 frozen restore refuses session IPC and creation before awaiting document reads",
+      frozenRestore.restores === 0 && frozenRestore.layouts === 0 &&
+        (frozenRestore.after.freeze.mutationAttemptsBySource["tab:create"] || 0) ===
+          (frozenRestore.before.freeze.mutationAttemptsBySource["tab:create"] || 0),
+      JSON.stringify(frozenRestore));
+    check("SEC-08 frozen restore never attempts final selection after a refused creation",
+      (frozenRestore.after.freeze.mutationAttemptsBySource["tab:switch"] || 0) ===
+        (frozenRestore.before.freeze.mutationAttemptsBySource["tab:switch"] || 0) &&
+        JSON.stringify(frozenRestore.after.tabs) === JSON.stringify(frozenRestore.before.tabs) &&
+        frozenRestore.after.active === frozenRestore.before.active,
+      JSON.stringify(frozenRestore));
+    __shutdown.reset();
+    await __shutdown.seedDocumentSessionLayout({
+      entries: [quitViewport],
+      activeEntryId: active.document.entryId,
+    });
+  } finally {
+    releaseRename();
+    restoreRename();
+    await exec(`window.ipcRenderer.invoke = window.__layoutRealInvoke;
+      delete window.__layoutRealInvoke; null`);
+  }
+  const viewportGeneration = __shutdown.state().rendererGeneration;
+  wc.reload();
+  const viewportReady = await waitUntil(async () =>
+    __shutdown.state().rendererGeneration > viewportGeneration &&
+    __shutdown.state().renderer === "ready" &&
+    await exec(`window.CustomTabs?.getDocumentDescriptor()?.entryId === ${JSON.stringify(quitViewport.id)} &&
+      document.getElementById('viewer').textContent.includes('Viewport paragraph 199')`),
+    12000);
+  const restoredViewportScroll = viewportReady ? await exec(`(async () => {
+    await document.fonts.ready;
+    await new Promise(resolve => requestAnimationFrame(() =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    return window.CustomTabs.__getScroller().scrollTop;
+  })()`) : null;
+  const viewportRestored = viewportReady &&
+    Math.abs(restoredViewportScroll - finalViewportScroll) <= 1;
+  check("SEC-08 an actual restart restores the final live viewport rather than the obsolete heading anchor",
+    viewportRestored, JSON.stringify({ finalViewportScroll, restoredViewportScroll, quitViewport }));
+  if (viewportRestored) {
+    const viewportShot = await captureScreenshot(win, "tabs-final-quit-viewport");
+    if (viewportShot) console.log("restored final viewport screenshot: " + viewportShot);
+  }
+  const restoreFailure = replaceMethod(fs.promises, "rename", async function (_from, to) {
+    if (to === manifest) throw Object.assign(new Error("Injected session persistence EACCES"),
+      { code: "EACCES" });
+    return originalRename.apply(this, arguments);
+  });
+  let failureReply;
+  let failureReplyCount = 0;
+  let automaticFailureRetries = false;
+  const onCommit = (_event, data) => {
+    if (data.committed === false) {
+      failureReply = data;
+      failureReplyCount += 1;
+    }
+  };
+  ipcMain.on("quit-approval-committed", onCommit);
+  const failureDialogs = [];
+  let failureDecision = 1;
+  const manifestBeforeFailure = fs.readFileSync(manifest);
+  const restoreDialog = replaceMethod(dialog, "showMessageBox", async (_window, options) => {
+    failureDialogs.push(options);
+    return { response: failureDecision };
+  });
+  const restoreSyncDialog = replaceMethod(dialog, "showMessageBoxSync", () => 1);
+  await sentinel.mute("admitted session layout durable-write failure");
+  try {
+    const refused = await exec(`(async () => {
+      window.CustomTabs.updateTabContent(window.originalMarkdown, false);
+      try { await window.CustomTabs.settleSessionLayout(); return false; }
+      catch (error) { return error.message.includes('EACCES'); }
+    })()`);
+    app.emit("before-quit", { preventDefault() {} });
+    const answered = await waitUntil(() => !!failureReply, 8000);
+    await sentinel.drain();
+    check("SEC-08 real layout write failures remain rejected and cannot approve normal quit",
+      refused && answered && quits === 1 &&
+        failureReply.why === "session-layout-persistence-failed" &&
+        sentinel.currentMute().suppressed.some(hit =>
+          hit.kind === "console-error" && hit.detail.includes("Could not persist open tabs")),
+      JSON.stringify({ refused, answered, failureReply, quits }));
+    await waitUntil(() => failureReplyCount > 1 ||
+      (failureDialogs.length === 1 && __shutdown.state().pendingId === 0), 8000);
+    automaticFailureRetries = failureReplyCount > 1;
+    const canceled = !automaticFailureRetries && failureDialogs.length === 1 &&
+      __shutdown.state().pendingId === 0;
+    const failureAttempts = __shutdown.state().commitRefusedCount;
+    await sleep(150);
+    check("SEC-08 persistent layout failure asks once and Cancel stops automatic shutdown retries",
+      canceled && failureDialogs.length === 1 &&
+        failureDialogs[0].title === "Open tabs could not be saved" &&
+        failureDialogs[0].cancelId === 1 && failureDialogs[0].defaultId === 1 &&
+        __shutdown.state().commitRefusedCount === failureAttempts && quits === 1 &&
+        await exec("!window.CustomTabs.isDocumentFrozen()"));
+    failureDecision = 0;
+    if (!automaticFailureRetries) app.emit("before-quit", { preventDefault() {} });
+    const explicitExit = !automaticFailureRetries &&
+      await waitUntil(() => quits === 2, 8000);
+    check("SEC-08 explicit layout-loss approval exits without falsely claiming durable session persistence",
+      explicitExit && failureDialogs.length === 2 &&
+        __shutdown.state().settleWhy === "fallback-session-persistence" &&
+        fs.readFileSync(manifest).equals(manifestBeforeFailure),
+      JSON.stringify({ explicitExit, dialogs: failureDialogs.length, quits,
+        state: __shutdown.state() }));
+  } finally {
+    __shutdown.reset();
+    restoreFailure();
+    restoreDialog();
+    restoreSyncDialog();
+    restoreQuit();
+    ipcMain.removeListener("quit-approval-committed", onCommit);
+    await sentinel.unmute();
+  }
+  if (automaticFailureRetries) {
+    const retryRecoveryGeneration = __shutdown.state().rendererGeneration;
+    wc.reload();
+    await waitUntil(async () => __shutdown.state().rendererGeneration > retryRecoveryGeneration &&
+      __shutdown.state().renderer === "ready" &&
+      await exec("!!window.CustomTabs?.getActiveTab() && !!window.CustomTabs.getDocumentDescriptor()"),
+      12000);
+  }
+  await exec(`window.CustomTabs.updateTabContent(window.originalMarkdown, false);
+    window.CustomTabs.settleSessionLayout()`);
+  await exec(`window.assertFileTrackingOwnership(window.currentFilePath, true, {
+    adoptBaseline: false,
+  }); null`);
+  await clearFixtureTabs("layout persistence recovery cleanup");
+  const directory = path.join(quotaDir, "executable-directory");
+  const appDirectory = path.join(quotaDir, "blocked.app");
+  fs.mkdirSync(directory);
+  fs.mkdirSync(appDirectory);
+  const policyFile = path.join(quotaDir, "directory-policy.md");
+  fs.writeFileSync(policyFile,
+    "# Directory policy\n\n[Directory](executable-directory)\n\n[Blocked app](blocked.app)\n");
+  selectNativePath(policyFile);
+  await exec("window.ipcRenderer.send('open-file-dialog'); null");
+  await waitForCondition(exec,
+    "document.getElementById('viewer').textContent.includes('Directory policy')", 8000);
+  await exec("window.CustomTabs.settleSessionLayout()");
+  const physicalDirectory = fs.realpathSync.native(directory);
+  const physicalAppDirectory = fs.realpathSync.native(appDirectory);
+  const platform = Object.getOwnPropertyDescriptor(process, "platform");
+  const originalStat = fs.statSync;
+  let executableDirectoryObserved = false;
+  const restoreStat = replaceMethod(fs, "statSync", function (filePath) {
+    const stats = originalStat.apply(this, arguments);
+    if (filePath === physicalDirectory || filePath === physicalAppDirectory) {
+      executableDirectoryObserved = executableDirectoryObserved || filePath === physicalDirectory;
+      return { ...stats, mode: stats.mode | 0o111, isDirectory: () => true };
+    }
+    return stats;
+  });
+  const { shell } = require("electron");
+  const shellOpens = [];
+  const restoreShell = replaceMethod(shell, "openPath", async filePath => {
+    shellOpens.push(filePath);
+    return "";
+  });
+  const click = async index => {
+    const point = await exec(`(() => {
+      const rect = document.querySelectorAll('#viewer a')[${index}].getBoundingClientRect();
+      return { x: Math.round(rect.x + rect.width / 2), y: Math.round(rect.y + rect.height / 2) };
+    })()`);
+    win.webContents.sendInputEvent({ type: "mouseDown", ...point, button: "left", clickCount: 1 });
+    win.webContents.sendInputEvent({ type: "mouseUp", ...point, button: "left", clickCount: 1 });
+  };
+  try {
+    Object.defineProperty(process, "platform", { ...platform, value: "linux" });
+    await click(0);
+    const openedDirectory = await waitUntil(() => shellOpens.length === 1, 8000);
+    check("SEC-08 an actual trusted directory link permits Unix traversal bits without treating the directory as executable",
+      openedDirectory && executableDirectoryObserved && shellOpens[0] === physicalDirectory);
+    await click(1);
+    const blocked = await waitForCondition(exec,
+      "document.getElementById('notificationMessage').textContent.includes('Executable links are blocked')", 8000);
+    check("SEC-08 executable-format directory links remain blocked before the directory allowance",
+      blocked && shellOpens.length === 1, JSON.stringify(shellOpens));
+  } finally {
+    Object.defineProperty(process, "platform", platform);
+    restoreStat();
+    restoreShell();
+  }
+  await clearFixtureTabs("packaged readme setup");
+  const resources = path.join(quotaDir, "packaged-resources");
+  fs.mkdirSync(resources);
+  const packagedReadme = path.join(resources, "README.md");
+  fs.writeFileSync(packagedReadme, "# Packaged resource readme\n\nPACKAGED_README_CONTROL\n");
+  const packagedDescriptor = Object.getOwnPropertyDescriptor(app, "isPackaged");
+  const resourcesDescriptor = Object.getOwnPropertyDescriptor(process, "resourcesPath");
+  try {
+    Object.defineProperty(app, "isPackaged", { configurable: true, value: true });
+    Object.defineProperty(process, "resourcesPath", { configurable: true, value: resources });
+    check("SEC-08 packaged README setup uses a real extra-resource outside the excluded app archive",
+      app.isPackaged && fs.existsSync(packagedReadme) &&
+        await exec("window.ipcRenderer.invoke('get-readme-path')") === packagedReadme);
+    await exec("window.folia.openReadme()");
+    const landed = await waitForCondition(exec,
+      `window.currentFilePath === ${JSON.stringify(packagedReadme)} &&
+        document.getElementById('viewer').textContent.includes('PACKAGED_README_CONTROL')`, 8000);
+    const readme = await capture();
+    check("SEC-08 packaged README opens the actual extra-resource with a main-issued document reference",
+      landed && readme.document?.logicalPath === packagedReadme &&
+        readme.document?.readTarget === fs.realpathSync.native(packagedReadme),
+      JSON.stringify(readme));
+  } finally {
+    if (packagedDescriptor) Object.defineProperty(app, "isPackaged", packagedDescriptor);
+    else delete app.isPackaged;
+    if (resourcesDescriptor) Object.defineProperty(process, "resourcesPath", resourcesDescriptor);
+    else delete process.resourcesPath;
+  }
 }
 
 async function run(win) {
@@ -8565,6 +9823,8 @@ async function run(win) {
     "prepareDocumentDiskAdoption", "commitDocumentDiskAdoption",
     "completeDocumentDiskAdoption", "abandonDocumentDiskAdoption",
     "readOwnedTabDiskSnapshot", "readDialogExtra",
+    "restoreSession", "saveSessionLayout", "readOpenTicketSnapshot",
+    "acceptDocumentOpenTicket", "cancelDocumentOpenTicket", "openReadme",
   ].sort().join(",");
   check(
     "SEC-08 main launch retains production owned-read and only its explicitly marked PDF test signal",
@@ -8711,6 +9971,9 @@ async function run(win) {
           sequence: window.getFileOpenDiagnostics().sequence,
           expected: window.__refreshSwitchCompletion.sequence,
           completed: window.__refreshSwitchCompletion.completed,
+          frozen: window.CustomTabs.isDocumentFrozen(),
+          notification: document.getElementById('notificationMessage').textContent,
+          reload: window.getReloadRequestDiagnostics(),
         })`);
         throw new Error(`tab ${tabId} did not finish switching: ${JSON.stringify(state)}`);
       }
@@ -9511,18 +10774,24 @@ async function run(win) {
     if (dialogExtraFocusedHarness) {
       await clearFixtureTabs("dialog bridge preflight");
       await runDialogBatchScenarios(exec, sentinel, closeFixtureTabsSource, clearFixtureTabs);
-      await exec(`window.ipcRenderer.send('open-file-path', { filePath: ${jsA} }); null;`);
-      const ordinaryOpen = await waitForCondition(
-        exec,
-        `window.currentFilePath === ${jsA} &&
-          (window.CustomTabs.getActiveTab() || {}).filePath === ${jsA} &&
-          document.getElementById('viewer').textContent.includes('ALPHA_V2')`,
-        8000,
-      );
-      check(
-        "SEC-08 ordinary authenticated opens remain usable after dialog-grant refusals",
-        ordinaryOpen,
-      );
+      if (process.env.SEC08_DIALOG_BATCH_ONLY === "1") {
+        await clearFixtureTabs("batch-only evidence teardown");
+        await exec("window.CustomTabs.settleSessionLayout()");
+      } else {
+        await runAdmissionConsumerScenarios(win, exec, clearFixtureTabs, sentinel);
+        await exec(`window.ipcRenderer.send('open-file-path', { filePath: ${jsA} }); null;`);
+        const ordinaryOpen = await waitForCondition(
+          exec,
+          `window.currentFilePath === ${jsA} &&
+            (window.CustomTabs.getActiveTab() || {}).filePath === ${jsA} &&
+            document.getElementById('viewer').textContent.includes('ALPHA_V2')`,
+          8000,
+        );
+        check(
+          "SEC-08 ordinary authenticated opens remain usable after dialog-grant refusals",
+          ordinaryOpen,
+        );
+      }
     }
     const alive = await proveSentinelAlive(win, sentinel);
     check(
@@ -12307,8 +13576,20 @@ async function run(win) {
         saveButton.click();
         markdownEditor.value = '# Beta\\n\\nS9D_SECOND\\n';
         saveButton.click();
-        await new Promise(r => setTimeout(r, 2800));
+        const dispatchedPending = window.getPendingSaveStatus().count;
+        // The full-chain sample still had both writes pending after 2.8s.
+        // Wait for completion, not for the desired disk/store contents.
+        let completionTimer;
+        const settled = await Promise.race([
+          window.waitForPendingSaves(window.currentFilePath).then(() => true),
+          new Promise(resolve => {
+            completionTimer = setTimeout(() => resolve(false), 8000);
+          }),
+        ]);
+        clearTimeout(completionTimer);
         return JSON.stringify({
+          dispatchedPending,
+          settled,
           editMode: isEditMode,
           storeIsSecond: window.originalMarkdown.includes('S9D_SECOND'),
           storeIsFirst: window.originalMarkdown.includes('S9D_FIRST'),
@@ -12333,12 +13614,13 @@ async function run(win) {
   );
   check(
     "Scenario 9d concurrent Saves did not trigger a renderer Save refusal",
-    Array.isArray(two.alerts) && two.alerts.length === 0,
+    two.dispatchedPending === 2 && Array.isArray(two.alerts) && two.alerts.length === 0,
     twoOut,
   );
   check(
     "two saves to one path are serialised by the main-process queue",
-    saveQueueAfter.saveQueueEnqueuedCount === saveQueueBefore.saveQueueEnqueuedCount + 2 &&
+    two.settled &&
+      saveQueueAfter.saveQueueEnqueuedCount === saveQueueBefore.saveQueueEnqueuedCount + 2 &&
       saveQueueAfter.saveQueueStartedCount === saveQueueBefore.saveQueueStartedCount + 2 &&
       saveQueueAfter.saveQueueCompletedCount === saveQueueBefore.saveQueueCompletedCount + 2 &&
       saveQueueAfter.saveQueuePendingCount === 0 &&
@@ -24721,6 +26003,7 @@ async function runShutdownGenerationScenarios(win, exec) {
     __shutdown.reset();
     await waitForCondition(exec, `!window.CustomTabs.isDocumentFrozen()`, 5000);
     await exec(`localStorage.clear(); null;`);
+    await __shutdown.seedDocumentSessionLayout({ entries: [], activeEntryId: null });
     const generationMatrixReloadGeneration = __shutdown.state().rendererGeneration;
     wc.reload();
     const generationMatrixRendererReady = await waitUntil(() => {
@@ -25671,6 +26954,23 @@ async function runShutdownGenerationScenarios(win, exec) {
           });
         })()
       `));
+    const resetNativePath = path.join(dir, "generation-restored-native.md");
+    write(resetNativePath, "# Generation reset native\n\nGENERATION_RESET_NATIVE\n");
+    const restoreResetChooser = replaceMethod(dialog, "showOpenDialog", async () => ({
+      canceled: false, filePaths: [resetNativePath],
+    }));
+    try {
+      await exec("window.ipcRenderer.send('open-file-dialog'); null");
+      const resetNativeReady = await waitForCondition(exec,
+        `window.currentFilePath === ${JSON.stringify(resetNativePath)} &&
+          window.CustomTabs.getDocumentDescriptor()?.logicalPath === ${JSON.stringify(resetNativePath)} &&
+          document.getElementById('viewer').textContent.includes('GENERATION_RESET_NATIVE')`,
+        8000);
+      await exec("window.CustomTabs.settleSessionLayout()");
+      check("generation reset recovery starts with a genuinely admitted persisted owner",
+        resetNativeReady && __shutdown.documentSessionState().entries.some(entry =>
+          entry.filePath === resetNativePath));
+    } finally { restoreResetChooser(); }
     const resetBoundaryBefore = {
       main: __shutdown.state(),
       renderer: await captureRestoredDeletionState(),
@@ -25935,6 +27235,21 @@ async function runInstalledUpdateCommitScenarios(win, exec) {
       throw new Error("Installed scenario cleanup retained a tab: " + JSON.stringify(teardown));
     }
     return teardown;
+  };
+  const admitInstalledFixture = async () => {
+    const restoreDialog = replaceMethod(dialog, "showOpenDialog", async () => ({
+      canceled: false, filePaths: [commitFile],
+    }));
+    try {
+      await exec("window.ipcRenderer.send('open-file-dialog'); null");
+      const admitted = await waitForCondition(exec,
+        `window.CustomTabs.getDocumentDescriptor()?.logicalPath === ${jsCommitFile} &&
+          window.currentFilePath === ${jsCommitFile} &&
+          document.getElementById('viewer').textContent.includes('Installed commit fixture')`,
+        10000);
+      if (!admitted) throw new Error("Installed restart fixture did not receive a genuine native admission");
+      await exec("window.CustomTabs.settleSessionLayout()");
+    } finally { restoreDialog(); }
   };
   // Hold a real main-to-renderer protocol message at its boundary, then
   // release the exact payload main.js produced. This controls an asynchronous
@@ -27595,9 +28910,10 @@ async function runInstalledUpdateCommitScenarios(win, exec) {
       commitSignals = 0;
       commitMode = failure === "decline" ? "manual" : failure;
       setLatch(false);
+      await admitInstalledFixture();
       await exec(`
         (() => {
-          const tab = window.CustomTabs.createTab(${jsCommitFile}, 'absorbed-user base');
+          const tab = window.CustomTabs.getActiveTab();
           window.CustomTabs.switchToTab(tab.id);
           window.originalMarkdown = tab.originalContent;
           return tab.id;
@@ -27752,9 +29068,10 @@ async function runInstalledUpdateCommitScenarios(win, exec) {
     commitMode = "base-updater-success";
     setLatch(false);
     rig.driveQuitLifecycle = true;
+    await admitInstalledFixture();
     await exec(`
       (() => {
-        const tab = window.CustomTabs.createTab(${jsCommitFile}, 'absorbed success base');
+        const tab = window.CustomTabs.getActiveTab();
         window.CustomTabs.switchToTab(tab.id);
         window.originalMarkdown = tab.originalContent;
         return tab.id;
@@ -29202,17 +30519,11 @@ async function runShutdownScenarios(win, exec, sentinel, consoleAttribution = nu
         frozenSources["ipc:save-result"] > 0,
       JSON.stringify(frozenMutationMatrix),
     );
-    // Restore is a real startup path, not a synthetic tab-create call. A
-    // retained freeze must decline its first create, stop the batch, and leave
-    // both the open document and the persisted session exactly as they were.
+    // Restore now awaits Main-owned entries. Snapshot only after that operation
+    // settles; legacy localStorage is no longer the source of permission.
+    const frozenPrivateLayoutBefore = __shutdown.documentSessionState().entries;
     const frozenRestore = await exec(`
-      (() => {
-        const savedTabsBefore = JSON.stringify([
-          { filePath: ${jsQ1}, scrollPosition: 11, anchor: "alpha-anchor" },
-          { filePath: ${jsQ2}, scrollPosition: 22, anchor: "beta-anchor" },
-        ]);
-        localStorage.setItem("openTabs", savedTabsBefore);
-        localStorage.setItem("activeTabPath", ${jsQ2});
+      (async () => {
         const before = {
           tabs: window.CustomTabs.getTabs().map(tab => ({
             id: tab.id,
@@ -29225,7 +30536,7 @@ async function runShutdownScenarios(win, exec, sentinel, consoleAttribution = nu
           activePath: localStorage.getItem("activeTabPath"),
           freeze: window.CustomTabs.__shutdownFreeze(),
         };
-        window.CustomTabs.__loadSavedTabs();
+        await window.CustomTabs.__loadSavedTabs();
         const after = {
           tabs: window.CustomTabs.getTabs().map(tab => ({
             id: tab.id,
@@ -29243,6 +30554,8 @@ async function runShutdownScenarios(win, exec, sentinel, consoleAttribution = nu
     `);
     const frozenRestorePreserved =
       frozenRestore &&
+      JSON.stringify(__shutdown.documentSessionState().entries) ===
+        JSON.stringify(frozenPrivateLayoutBefore) &&
       JSON.stringify(frozenRestore.after.tabs) ===
         JSON.stringify(frozenRestore.before.tabs) &&
       frozenRestore.after.activeId === frozenRestore.before.activeId &&
@@ -29250,10 +30563,9 @@ async function runShutdownScenarios(win, exec, sentinel, consoleAttribution = nu
       frozenRestore.after.activePath === frozenRestore.before.activePath &&
       frozenRestore.after.freeze.frozen === true &&
       frozenRestore.after.freeze.mutationAttemptCount ===
-        frozenRestore.before.freeze.mutationAttemptCount + 1 &&
+        frozenRestore.before.freeze.mutationAttemptCount &&
       frozenRestore.after.freeze.mutationAttemptsBySource["tab:create"] ===
-        (frozenRestore.before.freeze.mutationAttemptsBySource["tab:create"] || 0) +
-          1 &&
+        (frozenRestore.before.freeze.mutationAttemptsBySource["tab:create"] || 0) &&
       (frozenRestore.after.freeze.mutationAttemptsBySource["tab:switch"] || 0) ===
         (frozenRestore.before.freeze.mutationAttemptsBySource["tab:switch"] || 0);
 
@@ -29321,6 +30633,7 @@ async function runShutdownScenarios(win, exec, sentinel, consoleAttribution = nu
     // sequence test depend on startup restoration. Recreate the two real
     // fixture files immediately after the new renderer is ready instead.
     await exec(`localStorage.clear(); null;`);
+    await __shutdown.seedDocumentSessionLayout({ entries: [], activeEntryId: null });
     const thawReloadGeneration = __shutdown.state().rendererGeneration;
     wc.reload();
     const thawedPageReady = await waitUntil(
@@ -30610,6 +31923,7 @@ async function runShutdownScenarios(win, exec, sentinel, consoleAttribution = nu
       };
       const reloadInvalidRevisionRendererFromEmptyPersistence = async (label) => {
         const reloadGeneration = __shutdown.state().rendererGeneration;
+        await __shutdown.seedDocumentSessionLayout({ entries: [], activeEntryId: null });
         const cleared = await exec(`
           (() => {
             localStorage.clear();
@@ -30622,7 +31936,8 @@ async function runShutdownScenarios(win, exec, sentinel, consoleAttribution = nu
         if (
           !cleared ||
           cleared.openTabs !== null ||
-          cleared.activeTabPath !== null
+          cleared.activeTabPath !== null ||
+          __shutdown.documentSessionState().entries.length !== 0
         ) {
           throw new Error(
             `${label} invalid-revision reload could not clear persisted tabs: ` +
@@ -30683,6 +31998,7 @@ async function runShutdownScenarios(win, exec, sentinel, consoleAttribution = nu
           replacement.tabs.length === 0 &&
           replacement.active === null &&
           replacement.currentFilePath === null &&
+          __shutdown.documentSessionState().entries.length === 0 &&
           replacement.tabPersistence.openTabsEmpty === true &&
           replacement.tabPersistence.activeTabPathEmpty === true;
         check(
@@ -30824,14 +32140,19 @@ async function runShutdownScenarios(win, exec, sentinel, consoleAttribution = nu
       // compromised renderer can produce, rather than only the renderer's
       // current well-formed reply.
       const cleanCommittedReplyDocument = async () => {
-        const phaseTwoReopenPath = path.join(
+        const existingProvisional = await exec(`(() => {
+          const tab = window.CustomTabs.getActiveTab();
+          return tab && !window.CustomTabs.getDocumentDescriptor(tab.id) ? tab.filePath : null;
+        })()`);
+        const phaseTwoReopenPath = existingProvisional || path.join(
           dir,
           `phase-two-reopen-${++phaseTwoReopenOrdinal}.md`,
         );
-        const phaseTwoReopenBytes =
+        const phaseTwoReopenBytes = existingProvisional
+          ? fs.readFileSync(existingProvisional, "utf8") :
           `# Phase two fresh reopen ${phaseTwoReopenOrdinal}\n\n` +
           "PHASE_TWO_FRESH_REOPEN\n";
-        fs.writeFileSync(phaseTwoReopenPath, phaseTwoReopenBytes, "utf8");
+        if (!existingProvisional) fs.writeFileSync(phaseTwoReopenPath, phaseTwoReopenBytes, "utf8");
         const phaseTwoReopenStats = fs.statSync(phaseTwoReopenPath);
         const phaseTwoReopenFixture = {
           path: phaseTwoReopenPath,
@@ -30845,6 +32166,9 @@ async function runShutdownScenarios(win, exec, sentinel, consoleAttribution = nu
             ctimeMs: phaseTwoReopenStats.ctimeMs,
           },
         };
+        const restoreNativeChooser = replaceMethod(dialog, "showOpenDialog", async () => ({
+          canceled: false, filePaths: [phaseTwoReopenPath],
+        }));
         const result = await exec(`
           (async () => {
             try {
@@ -30853,7 +32177,11 @@ async function runShutdownScenarios(win, exec, sentinel, consoleAttribution = nu
             let restoredByOpen = false;
             let reopenWitness = null;
             const adoptionDiagnostics = [];
-            if (!active) {
+            if (!active || !tabs.getDocumentDescriptor(active.id)) {
+              if (active) {
+                window.originalMarkdown = active.originalContent;
+                tabs.updateTabContent(active.originalContent, false);
+              }
               const fixture = ${JSON.stringify(phaseTwoReopenFixture)};
               const targetPath = fixture.path;
               const ipc = require("electron").ipcRenderer;
@@ -30903,14 +32231,15 @@ async function runShutdownScenarios(win, exec, sentinel, consoleAttribution = nu
                 return Reflect.apply(originalConsoleError, this, args);
               };
               try {
-                ipc.send("open-file-path", { filePath: targetPath });
+                ipc.send("open-file-dialog");
                 const deadline = Date.now() + 5000;
                 while (Date.now() < deadline) {
                   active = tabs.getActiveTab();
                   if (
                     active &&
                     active.filePath === targetPath &&
-                    window.currentFilePath === targetPath
+                    window.currentFilePath === targetPath &&
+                    !!tabs.getDocumentDescriptor(active.id)
                   ) {
                     restoredByOpen = true;
                     break;
@@ -31091,7 +32420,7 @@ async function runShutdownScenarios(win, exec, sentinel, consoleAttribution = nu
               };
             }
           })()
-        `);
+        `).finally(restoreNativeChooser);
         if (result && result.ok === true) return result.witness;
         throw new Error(
           "phase-two clean setup renderer exception: " +
@@ -31387,7 +32716,7 @@ async function runShutdownScenarios(win, exec, sentinel, consoleAttribution = nu
         physicalPathSetupName,
         selectionSetupName,
       }) => {
-        const expectedRestoration = JSON.parse(await exec(`
+        const liveRestoration = JSON.parse(await exec(`
           (() => {
             const physicalPaths = window.CustomTabs.getTabs()
               .filter(
@@ -31397,25 +32726,20 @@ async function runShutdownScenarios(win, exec, sentinel, consoleAttribution = nu
               )
               .map(tab => tab.filePath)
               .sort();
-            const savedTabs = JSON.parse(localStorage.getItem("openTabs") || "[]")
-              .filter(
-                tab =>
-                  tab &&
-                  typeof tab.filePath === "string" &&
-                  tab.filePath.length > 0,
-              );
-            const persistedPhysicalPaths = savedTabs
-              .map(tab => tab.filePath)
-              .sort();
             const activeTab = window.CustomTabs.getActiveTab();
             return JSON.stringify({
               physicalPaths,
-              persistedPhysicalPaths,
-              persistedActiveTabPath: localStorage.getItem("activeTabPath") || null,
               activeTabPath: activeTab ? activeTab.filePath : null,
             });
           })()
         `));
+        const privateLayout = __shutdown.documentSessionState();
+        const expectedRestoration = {
+          ...liveRestoration,
+          persistedPhysicalPaths: privateLayout.entries.map(entry => entry.filePath).sort(),
+          persistedActiveTabPath: privateLayout.entries.find(entry =>
+            entry.id === privateLayout.activeEntryId)?.filePath || null,
+        };
         const physicalPaths = expectedRestoration.physicalPaths;
         const persistedPhysicalPaths =
           expectedRestoration.persistedPhysicalPaths;
@@ -33128,6 +34452,8 @@ async function runSameDocumentShutdownScenarios(win, exec) {
       }
       try {
         const semanticReloadGeneration = __shutdown.state().rendererGeneration;
+        await exec("window.CustomTabs.settleSessionLayout()");
+        const privateBeforeReset = __shutdown.documentSessionState();
         win.webContents.reload();
         const semanticRendererReady = await waitUntil(() => {
           const state = __shutdown.state();
@@ -33176,6 +34502,11 @@ async function runSameDocumentShutdownScenarios(win, exec) {
                 };
               })()
             `);
+            const privateAfterReset = __shutdown.documentSessionState();
+            semanticCleanupAfterReset.privateBeforeReset = privateBeforeReset.entries;
+            semanticCleanupAfterReset.privateAfterReset = privateAfterReset.entries;
+            semanticCleanupAfterReset.complete = semanticCleanupAfterReset.complete &&
+              privateBeforeReset.entries.length === 0 && privateAfterReset.entries.length === 0;
             if (!semanticCleanupAfterReset ||
                 semanticCleanupAfterReset.complete !== true) {
               appendSemanticCleanupError(
@@ -34286,6 +35617,12 @@ app.whenReady().then(async () => {
   // companion and the full suite keep exactly the budgets they had.
   const watchdogMs = focusedF22Harness
     ? 150000
+    // The complete admission journey now includes real quota opens and restarts.
+    // Its healthy log spans 91.12s; negative alias/restore polls add up to 28s.
+    // This is a functional completion bound, not a responsiveness acceptance gate.
+    : dialogExtraFocusedHarness && process.env.SEC08_DIALOG_BATCH_ONLY !== "1" &&
+      process.env.SEC08_ADMISSION_LIFECYCLE_ONLY !== "1"
+    ? 120000
     : newlineFocusedHarness || focusedCommitHarness || queueFocusedHarness ||
       ownedReadFocusedHarness || dialogExtraFocusedHarness
     ? 90000
@@ -34530,6 +35867,12 @@ app.whenReady().then(async () => {
     const shot = await captureScreenshot(win, "tab-refresh-FAILED");
     if (shot) console.log("failure screenshot: " + shot);
   }
+  let restoreBatchQuit = null;
+  if (dialogExtraFocusedHarness && process.env.SEC08_DIALOG_BATCH_ONLY === "1") {
+    restoreBatchQuit = replaceMethod(app, "quit", () => {});
+    win.destroy();
+    await new Promise(resolve => setImmediate(resolve));
+  }
   if (f22CtimeR660ProofHarness) {
     console.log(
       f22R660ProofCheckpoint && finalCleanupPassed
@@ -34545,6 +35888,7 @@ app.whenReady().then(async () => {
   // Keep the tail inside the full-suite budget. A failed screenshot or cleanup
   // must not turn a bounded failure into a silent hang after its last check.
   clearTimeout(watchdog);
+  if (restoreBatchQuit) restoreBatchQuit();
   // Exit 2 is neither a behavioral pass nor failure: it states that this
   // regression proof cannot run until its required production contract lands.
   app.exit(failed === 0 ? (unavailableEvidence ? 2 : 0) : 1);

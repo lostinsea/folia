@@ -1617,6 +1617,7 @@
       deletionTombstone: state.deletionTombstone,
       generation: state.generation,
       pathKey: state.pathKey,
+      admission: state.admission,
       diskVersion: tab.diskVersion,
       mtimeMs: tab.mtimeMs,
       hasUnsavedChanges: tab.hasUnsavedChanges,
@@ -1631,7 +1632,7 @@
     for (const key of [
       "content", "originalContent", "dirty", "foldedLive",
       "reloadConflict", "saveFailure", "deletionTombstone",
-      "generation", "pathKey",
+      "generation", "pathKey", "admission",
     ]) {
       state[key] = prior[key];
     }
@@ -1715,6 +1716,7 @@
       stillCurrent = null,
       reservedIdentity = null,
       allowUnsavedMutation = null,
+      documentAdmission = null,
     } = {},
   ) {
     const supplied = normaliseDiskVersion(diskVersion);
@@ -1794,12 +1796,16 @@
         tabId: identity.tabId,
         documentGeneration: identity.documentGeneration,
         pathKey: identity.pathKey,
+        ...(identity.documentRef ? { documentRef: identity.documentRef } : {}),
         proposedOwner: {
           pageSession: session,
           rendererGeneration: approvalRendererGeneration,
           tabId: proposedTabId,
           documentGeneration: proposedGeneration,
           pathKey: freshKey,
+          ...((documentAdmission || tabState?.admission)?.ref ? {
+            documentRef: (documentAdmission || tabState.admission).ref,
+          } : {}),
         },
         modifiedTime,
         diskVersion: supplied,
@@ -2217,7 +2223,10 @@
       tab, content,
       reservation ? reservation.documentGeneration : null,
     );
-    state.pathKey = opts.verifiedDiskAdoption
+    state.admission = opts.documentAdmission || null;
+    state.pathKey = opts.documentAdmission
+      ? opts.documentAdmission.pathKey
+      : opts.verifiedDiskAdoption
       ? opts.verifiedDiskAdoption.pathKey
       : canonicalTabPath(filePath);
 
@@ -3227,105 +3236,143 @@
     }
   }
 
+  let sessionRestoreStarted = false;
+  let sessionRestoreInProgress = false;
+  let sessionRestoreToken = 0;
+  let sessionLayoutRequested = false;
+  let sessionLayoutTail = Promise.resolve();
+  let pendingSessionLayout = null;
+  let sessionLayoutRunning = false;
+  let sessionLayoutRevision = 0;
+  let durableSessionLayoutRevision = 0;
+  let sessionLayoutFailure = null;
+  let resolveSessionOwnerReady;
+  const sessionOwnerReady = new Promise(resolve => {
+    resolveSessionOwnerReady = resolve;
+  });
+
   function saveTabs() {
     const activeTab = getActiveTab();
-    const tabsData = tabs.map((tab) => ({
-      filePath: tab.filePath,
+    if (isDocumentFrozen() || approvalRendererGeneration === null) return null;
+    sessionLayoutRequested = true;
+    if (sessionRestoreInProgress) return null;
+    sessionLayoutRequested = false;
+    // Only Main-issued IDs can enter the private layout. Unseen restore
+    // entries stay protected by Main; provisional tabs cannot suppress a
+    // legitimate close of an admitted tab.
+    const entries = tabs.filter(tab => documentState.get(tab)?.admission).map((tab) => ({
+      id: documentState.get(tab).admission.entryId,
+      documentRef: documentState.get(tab).admission.ref,
       scrollPosition: tab.scrollPosition,
-      anchor: tab.anchor,
+      anchor: tab.anchor ? { ...tab.anchor } : null,
     }));
-    try {
-      localStorage.setItem("openTabs", JSON.stringify(tabsData));
-      // Tab ids are handed out fresh on every startup, so the id alone cannot
-      // identify which tab to re-activate after a restart.
-      localStorage.setItem("activeTabPath", activeTab ? activeTab.filePath : "");
-      console.log("[CustomTabs] Saved tabs to localStorage");
-    } catch (error) {
-      console.error("[CustomTabs] Could not persist open tabs:", error);
-      notify("The open tabs could not be saved for the next session. Free storage and retry.", 6000);
-    }
+    const layout = {
+      entries,
+      activeEntryId: activeTab ? documentState.get(activeTab)?.admission?.entryId || null : null,
+    };
+    pendingSessionLayout = { layout, revision: ++sessionLayoutRevision };
+    startSessionLayoutWriter();
+    return sessionLayoutRevision;
   }
 
-  function loadSavedTabs() {
-    try {
-      const savedTabs = localStorage.getItem("openTabs");
-      const savedActiveTabPath = localStorage.getItem("activeTabPath");
-
-      if (savedTabs) {
-        const tabsData = JSON.parse(savedTabs);
-        console.log("[CustomTabs] Restoring", tabsData.length, "tabs");
-
-        // Load files directly using fs (available since nodeIntegration: true)
-        if (tabsData.length > 0 && window.fs) {
-          let restorationRefused = false;
-          for (const tabData of tabsData) {
-            try {
-              if (window.fs.existsSync(tabData.filePath)) {
-                const snapshot = readStableDiskSnapshot(tabData.filePath);
-                // activate:false - a restore must not switch to every tab it
-                // creates. It used to, so restoring N tabs rendered N
-                // documents and raised the large-document dialog once per
-                // expensive file, all before the window was usable.
-                const tab = createTab(tabData.filePath, snapshot.content, {
-                  activate: false,
-                  modifiedTime: snapshot.modifiedTime,
-                  diskVersion: snapshot.diskVersion,
-                });
-                // A retained shutdown freeze intentionally refuses creation.
-                // Stop the batch at the first refusal: every later create
-                // would be refused for the same reason, and no restored-tab,
-                // active-tab or persisted-session state may move on behalf of
-                // a restoration that did not happen.
-                if (!tab) {
-                  restorationRefused = true;
-                  break;
-                }
-                tab.scrollPosition = tabData.scrollPosition || 0;
-                tab.anchor = tabData.anchor || null;
-                console.log("[CustomTabs] Restored tab:", tabData.filePath);
-              } else {
-                console.log(
-                  "[CustomTabs] File no longer exists:",
-                  tabData.filePath,
-                );
-              }
-            } catch (error) {
-              console.error(
-                "[CustomTabs] Error restoring tab:",
-                tabData.filePath,
-                error,
-              );
-            }
+  function startSessionLayoutWriter() {
+    if (sessionLayoutRunning) return;
+    sessionLayoutRunning = true;
+    sessionLayoutTail = (async () => {
+      while (pendingSessionLayout) {
+        const request = pendingSessionLayout;
+        pendingSessionLayout = null;
+        try {
+          await window.folia.saveSessionLayout(request.layout);
+          durableSessionLayoutRevision = request.revision;
+          sessionLayoutFailure = null;
+        } catch (error) {
+          sessionLayoutFailure = error;
+          if (!pendingSessionLayout) {
+            console.error("[CustomTabs] Could not persist open tabs:", error);
+            notify("The open tabs could not be saved for the next session. Free storage and retry.", 6000);
           }
-
-          // Re-activate the tab that was active when the app was closed.
-          if (!restorationRefused && tabs.length > 0) {
-            const restored =
-              (savedActiveTabPath && findTabByPath(savedActiveTabPath)) ||
-              tabs[0];
-          // The one switch a restore performs. silent:true because the reader
-          // did not ask for it: this is the document they left open, so it is
-          // restored and its cost reported passively rather than behind a
-          // modal that blocks the app before it is even visible.
-          if (approvalRendererGeneration === null) {
-            pendingRestoredTabId = restored.id;
-          } else {
-            switchToTab(restored.id, {
-              silent: true,
-              fileOpenOptions: { adoptPathIdentity: true },
-            }).catch((error) => {
-              console.error("[CustomTabs] Could not restore active tab:", error);
-            });
-          }
-          }
-        } else {
-          console.log("[CustomTabs] No fs module or no tabs to restore");
         }
-      } else {
-        console.log("[CustomTabs] No saved tabs in localStorage");
+      }
+      if (sessionLayoutFailure) throw sessionLayoutFailure;
+    })().finally(() => {
+      sessionLayoutRunning = false;
+      if (pendingSessionLayout) startSessionLayoutWriter();
+    });
+    // The error remains observable to shutdown/explicit settlement even if
+    // nobody is awaiting this background persistence operation yet.
+    sessionLayoutTail.catch(() => {});
+  }
+
+  async function settleSessionLayout() {
+    let tail;
+    do {
+      tail = sessionLayoutTail;
+      await tail;
+    } while (tail !== sessionLayoutTail || pendingSessionLayout);
+    if (sessionLayoutFailure) throw sessionLayoutFailure;
+    if (sessionLayoutRequested || sessionRestoreInProgress) {
+      throw new Error("The open tabs are still awaiting document restore");
+    }
+    return durableSessionLayoutRevision;
+  }
+
+  async function loadSavedTabs({ repeat = false } = {}) {
+    if (sessionRestoreInProgress || (sessionRestoreStarted && !repeat)) return;
+    sessionRestoreStarted = true;
+    const restoreToken = ++sessionRestoreToken;
+    const openIntent = latestFileOpenIntent;
+    const switchIntent = latestTabSwitchIntent;
+    const selected = activeTabId;
+    const stillCurrent = () => restoreToken === sessionRestoreToken &&
+      openIntent === latestFileOpenIntent &&
+      switchIntent === latestTabSwitchIntent && selected === activeTabId &&
+      !isDocumentFrozen();
+    sessionRestoreInProgress = true;
+    try {
+      const ready = await sessionOwnerReady;
+      if (!ready || !stillCurrent()) return;
+      const saved = await window.folia.restoreSession();
+      if (!saved || saved.superseded || !stillCurrent()) return;
+      if (saved.error) {
+        notify(`The previous document session could not be restored: ${saved.error}`, 8000);
+        return;
+      }
+      const restored = [];
+      for (const entry of saved.entries) {
+        if (!stillCurrent()) return;
+        if (entry.error) {
+          console.error("[CustomTabs] Could not restore document:", entry.filePath, entry.error);
+          notify(`Could not restore ${safeDocumentLabel(entry.filePath)}. Its session entry was kept.`, 6000);
+          continue;
+        }
+        if (findTabForAdmission(entry.filePath, entry.document)) continue;
+        const tab = createTab(entry.filePath, entry.content, {
+          activate: false,
+          modifiedTime: entry.modifiedTime,
+          diskVersion: entry.diskVersion,
+          documentAdmission: entry.document,
+        });
+        if (!tab) return;
+        tab.scrollPosition = entry.scrollPosition;
+        tab.anchor = entry.anchor;
+        restored.push(tab);
+      }
+      if (!stillCurrent()) return;
+      const active = restored.find(tab =>
+        documentState.get(tab).admission.entryId === saved.activeEntryId) || restored[0];
+      if (active) {
+        await switchToTab(active.id, {
+          silent: true, fileOpenOptions: { adoptPathIdentity: true },
+        });
       }
     } catch (error) {
       console.error("[CustomTabs] Error loading saved tabs:", error);
+    } finally {
+      if (restoreToken === sessionRestoreToken) {
+        sessionRestoreInProgress = false;
+        saveTabs();
+      }
     }
   }
 
@@ -3493,6 +3540,15 @@
     );
   }
 
+  function findTabForAdmission(filePath, admission) {
+    // A native reference owns this exact logical path. Do not transfer it to
+    // a differently spelled tab merely because both resolve to one file.
+    if (admission) return tabs.find(
+      tab => normaliseTabPath(tab.filePath)?.resolved === admission.logicalPath,
+    );
+    return findTabByPath(filePath);
+  }
+
   function getActiveTab() {
     return tabs.find((t) => t.id === activeTabId);
   }
@@ -3526,6 +3582,7 @@
       tabId: tab.id,
       documentGeneration: state.generation,
       pathKey,
+      ...(state.admission ? { documentRef: state.admission.ref } : {}),
     });
   }
 
@@ -3953,7 +4010,8 @@
         }
         for (const [index, extraPath] of allPaths.slice(1).entries()) {
           if (!stillCurrent()) return;
-          if (findTabByPath(extraPath)) continue;
+          const logicalExtraPath = normaliseTabPath(extraPath)?.resolved;
+          if (tabs.some(tab => normaliseTabPath(tab.filePath)?.resolved === logicalExtraPath)) continue;
           let extraApproval = null;
           let extraTab = null;
           let extraCompleted = false;
@@ -3973,7 +4031,8 @@
             extraApproval = await verifyDiskAdoption(
               null, extraPath, snapshot.content,
               snapshot.modifiedTime, snapshot.diskVersion,
-              { reservedIdentity: extraReservation, stillCurrent },
+              { reservedIdentity: extraReservation, stillCurrent,
+                documentAdmission: snapshot.document },
             );
             if (!stillCurrent()) return;
             const extraVersion = diskVersionForAdoption(
@@ -3998,6 +4057,7 @@
               verifiedDiskAdoption: extraApproval,
               deferOwnerRegistration: true,
               reservedIdentity: extraReservation,
+              documentAdmission: snapshot.document,
             });
             if (!extraTab) continue;
             if (!completeDiskAdoption(
@@ -4066,12 +4126,20 @@
           await window.waitForPendingSaves(data.path);
           if (!mayMutateDocument("ipc:file-opened-after-save")) return;
           try {
-            const settledSnapshot = readStableDiskSnapshot(data.path);
+            const settledSnapshot = data.document
+              ? await window.folia.readOpenTicketSnapshot({
+                  openTicket: data.document.openTicket,
+                })
+              : readStableDiskSnapshot(data.path);
+            if (!settledSnapshot) {
+              throw new Error("The admitted open was superseded or its ticket was spent");
+            }
             openData = {
               ...data,
               content: settledSnapshot.content,
               modifiedTime: settledSnapshot.modifiedTime,
               diskVersion: settledSnapshot.diskVersion,
+              ...(settledSnapshot.document ? { document: settledSnapshot.document } : {}),
             };
           } catch (error) {
             console.error(
@@ -4119,7 +4187,7 @@
             (!!findTabByPath(filePath) &&
               findTabByPath(filePath) ===
                 findTabByPath(latestFileOpenPath)));
-        let targetTab = findTabByPath(filePath);
+        let targetTab = findTabForAdmission(filePath, openData.document);
         let adoptionApproval = null;
         let grantCompleted = false;
         let approvedNavigationPrior = null;
@@ -4219,6 +4287,7 @@
                   normaliseTabPath(filePath).spelling,
                 stillCurrent: () => !overtakenForSameDocument(),
                 reservedIdentity: targetReservation,
+                documentAdmission: openData.document,
               },
             );
             if (isDocumentFrozen()) {
@@ -4303,6 +4372,7 @@
             targetTab.hasUnsavedChanges = false;
             targetTab.diskVersion = verifiedVersion;
             targetTab.mtimeMs = verifiedVersion.mtimeMs;
+            if (openData.document) targetState.admission = openData.document;
             pendingActivationTabs.add(targetTab);
             rememberTabPathAlias(
               normaliseTabPath(filePath).spelling,
@@ -4321,6 +4391,7 @@
             {
               stillCurrent: () => !overtakenForSameDocument(),
               reservedIdentity: targetReservation,
+              documentAdmission: openData.document,
             },
           );
           if (isDocumentFrozen()) {
@@ -4355,6 +4426,7 @@
             verifiedDiskAdoption: adoptionApproval,
             deferOwnerRegistration: true,
             reservedIdentity: targetReservation,
+            documentAdmission: openData.document,
           });
           if (!targetTab) {
             appliedDiskAdoptionApprovals.delete(adoptionApproval);
@@ -5974,7 +6046,7 @@
     return true;
   }
 
-  tabIpc.on("quit-approval-commit", (event, data) => {
+  tabIpc.on("quit-approval-commit", async (event, data) => {
     const id = data && data.id;
     const generation = data && data.gen;
     const revision = data && data.revision;
@@ -6023,7 +6095,36 @@
       reply(false, "revision-moved");
       return;
     }
+    if (sessionRestoreInProgress) {
+      sessionRestoreToken += 1;
+      sessionRestoreInProgress = false;
+    }
+    const active = getActiveTab();
+    if (active) {
+      active.scrollPosition = getScroller()?.scrollTop || 0;
+      active.anchor = captureAnchor();
+    }
+    const layoutRevision = saveTabs();
+    if (!Number.isSafeInteger(layoutRevision)) {
+      reply(false, "session-layout-unavailable");
+      return;
+    }
     freezeDocument(id, generation);
+    const frozen = shutdownFreeze;
+    try {
+      await settleSessionLayout();
+    } catch (error) {
+      if (shutdownFreeze === frozen) thawDocument("session-layout-persistence-failed");
+      reply(false, "session-layout-persistence-failed");
+      return;
+    }
+    if (shutdownFreeze !== frozen || approvalRendererGeneration !== generation ||
+        documentRevision !== revision || sessionLayoutRevision !== layoutRevision ||
+        durableSessionLayoutRevision !== layoutRevision) {
+      if (shutdownFreeze === frozen) thawDocument("session-layout-revision-moved");
+      reply(false, "revision-moved");
+      return;
+    }
     reply(true, "committed");
   });
 
@@ -6039,6 +6140,8 @@
       shutdownFreeze.gen === data.gen &&
       data.gen === approvalRendererGeneration &&
       data.revision === documentRevision &&
+      !sessionLayoutRunning && !pendingSessionLayout && !sessionLayoutFailure &&
+      durableSessionLayoutRevision === sessionLayoutRevision &&
       !shutdownFreeze.deferredOperationsOverflowed
     );
     tabIpc.send("quit-approval-verified", {
@@ -6169,7 +6272,7 @@
     // suite's error sentinel and its state - is to call it. Same test-seam
     // convention as __getScroller: assert on the real function, never on a
     // re-implementation of it.
-    __loadSavedTabs: loadSavedTabs,
+    __loadSavedTabs: () => loadSavedTabs({ repeat: true }),
     // Exposed because "the replay cache is bounded" is an assertion of ABSENCE
     // and there is no other way to observe it. Counting dialogs or responses
     // cannot tell a cache of one from a cache of fifty: every one of those
@@ -6288,6 +6391,9 @@
     renderTabs,
     findTabByPath,
     getActiveTab,
+    getDocumentDescriptor: (tabId = activeTabId) =>
+      documentState.get(tabs.find(tab => tab.id === tabId))?.admission || null,
+    settleSessionLayout,
     getActiveDocumentIdentity,
     getDocumentIdentityForTab,
     ownsDocumentIdentity,
@@ -6362,8 +6468,10 @@
           notify("Could not open a file after document ownership became ready.", 6000);
         }
       }
+      resolveSessionOwnerReady(true);
     })
     .catch((error) => {
+      resolveSessionOwnerReady(false);
       pendingHandshakeTrackingAssertion = null;
       if (pendingHandshakeFileOpens.length > 0) {
         pendingHandshakeFileOpens.length = 0;

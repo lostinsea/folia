@@ -314,7 +314,10 @@ function resolveDocumentRelativeImageSrc(src, docPath) {
 
   let resolved;
   try {
-    resolved = new URL(value, pathToFileURL(docPath));
+    const tab = window.CustomTabs?.getTabs().find(candidate =>
+      candidate.filePath === docPath);
+    const descriptor = tab && window.CustomTabs.getDocumentDescriptor(tab.id);
+    resolved = new URL(value, descriptor?.documentUrl || pathToFileURL(docPath));
   } catch {
     return null;
   }
@@ -3483,8 +3486,10 @@ const DROPPABLE_EXTENSIONS = ['md', 'markdown', 'mdown', 'mkd', 'mkdn', 'mmd', '
 
   window.addEventListener('drop', (e) => {
     if (!isFileDrag(e)) return;
+    const privatelyCaptured = e.isTrusted && e.defaultPrevented;
     e.preventDefault();
     clearDropState();
+    if (privatelyCaptured) return;
     if (!mayMutateRendererDocument('drop-open')) return;
 
     const files = e.dataTransfer && e.dataTransfer.files;
@@ -3550,9 +3555,7 @@ if (welcomeReadmeBtn) {
     if (!mayMutateRendererDocument('welcome-open-readme')) return;
     cancelPendingNavigation('superseded-by-welcome-readme');
     try {
-      const readmePath = await ipcRenderer.invoke('get-readme-path');
-      if (!mayMutateRendererDocument('welcome-open-readme-after-await')) return;
-      ipcRenderer.send('open-file-path', readmePath);
+      await window.folia.openReadme();
     } catch (e) {
       showNotification('README.md not found', 2000);
     }
@@ -7570,6 +7573,7 @@ function documentOwnerFor(
     tabId: selectedIdentity.tabId,
     documentGeneration: selectedIdentity.documentGeneration,
     pathKey: selectedIdentity.pathKey,
+    ...(selectedIdentity.documentRef ? { documentRef: selectedIdentity.documentRef } : {}),
     selectionGeneration,
   });
 }
@@ -8544,6 +8548,7 @@ function queryDocumentDiskAdoptionState(
       tabId: identity.tabId,
       documentGeneration: identity.documentGeneration,
       pathKey: identity.pathKey,
+      ...(identity.documentRef ? { documentRef: identity.documentRef } : {}),
       modifiedTime,
       diskVersion,
     });
@@ -9019,19 +9024,40 @@ ipcRenderer.on('file-reload-result', async (event, data) => {
 
 // Handle external file open request (from double-clicking a file when app is already open)
 ipcRenderer.on('external-file-open-request', (event, data) => {
-  if (!mayMutateRendererDocument('ipc-external-file-open')) return;
+  if (!mayMutateRendererDocument('ipc-external-file-open')) {
+    if (data.documentOpenTicket) {
+      window.folia.cancelDocumentOpenTicket({ ticket: data.documentOpenTicket });
+    }
+    return;
+  }
   const { filePath } = data;
   cancelPendingNavigation('superseded-by-external-open');
 
   // Check for unsaved changes
   if (hasUnsavedWork()) {
     if (!confirm(i18n('confirm.unsavedOpenFile', {name: filePath.split(/[\\/]/).pop()}))) {
+      if (data.documentOpenTicket) {
+        window.folia.cancelDocumentOpenTicket({ ticket: data.documentOpenTicket });
+      }
       return; // User canceled, don't open the new file
     }
   }
 
   // Proceed with opening the file
-  ipcRenderer.send('request-open-file', { filePath });
+  if (data.documentOpenTicket) {
+    window.folia.acceptDocumentOpenTicket({ ticket: data.documentOpenTicket })
+      .then(accepted => {
+        if (!accepted) {
+          showNotification(
+            'The file open request expired or is no longer available. Retry opening the file.',
+            6000,
+          );
+        }
+      })
+      .catch(error => showNotification(error.message, 5000));
+  } else {
+    ipcRenderer.send('request-open-file', { filePath });
+  }
 });
 
 // Handle error messages from main process
