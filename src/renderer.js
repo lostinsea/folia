@@ -3539,7 +3539,7 @@ openFileBtn.addEventListener('click', () => {
 
   fileMenu.classList.remove('visible');
   cancelPendingNavigation('superseded-by-open-dialog');
-  ipcRenderer.send('open-file-dialog');
+  window.folia.openFileDialog();
 });
 
 // Welcome screen "Open File" button
@@ -3548,7 +3548,7 @@ if (welcomeOpenBtn) {
   welcomeOpenBtn.addEventListener('click', () => {
     if (!mayMutateRendererDocument('welcome-open-file')) return;
     cancelPendingNavigation('superseded-by-welcome-open');
-    ipcRenderer.send('open-file-dialog');
+    window.folia.openFileDialog();
   });
 }
 
@@ -3599,8 +3599,7 @@ exportPdfBtn.addEventListener('click', () => {
   const pathParts = currentFilePath.split(/[\\/]/);
   const currentFileName = pathParts.pop();
 
-  const channel = 'export-pdf';
-  ipcRenderer.send(channel, { currentFileName });
+  window.folia.exportPdf({ currentFileName });
 });
 
 // Put the document into light theme for an export, and report what it was.
@@ -3856,7 +3855,7 @@ function reloadCurrentFile() {
 // not enough on its own: a document exported from dark mode used to produce a
 // light page carrying dark diagrams. Re-theme the diagrams and only report
 // ready once that has finished, or printToPDF races the re-render.
-ipcRenderer.on('prepare-for-pdf-export', async () => {
+window.folia.onPrepareForPdfExport(async () => {
   // Held across printToPDF, which runs in the main process between this
   // handler and the result one. A theme change from the menu inside that
   // window would re-theme the diagrams the printer is about to capture; the
@@ -3865,10 +3864,10 @@ ipcRenderer.on('prepare-for-pdf-export', async () => {
   parkExportScheme();
   await setExportTheme(false);
   // Double rAF ensures the style change is painted before main calls printToPDF
-  requestAnimationFrame(() => requestAnimationFrame(() => ipcRenderer.send('pdf-export-ready')));
+  requestAnimationFrame(() => requestAnimationFrame(() => window.folia.pdfExportReady()));
 });
 
-ipcRenderer.on('pdf-export-result', async (event, data) => {
+window.folia.onPdfExportResult(async (data) => {
   // Restore to the reader's CURRENT preference, which may have been changed
   // (and held) while the PDF was being written. Every path in main.js replies
   // on this channel, including its failure branches, so the hold cannot leak.
@@ -6675,7 +6674,7 @@ async function renderMarkdownFull(content, generation) {
           maxBtn.addEventListener('click', () => {
             const svgContent = svg.outerHTML;
             const isDarkMode = document.body.classList.contains('dark-mode');
-            ipcRenderer.send('open-mermaid-popup', { svgContent, isDarkMode });
+            window.folia.openMermaidPopup({ svgContent, isDarkMode });
           });
 
           container.appendChild(maxBtn);
@@ -7041,7 +7040,7 @@ function addTableMaximizeButtons() {
       // Extract table data
       const tableData = extractTableData(table);
       const isDarkMode = document.body.classList.contains('dark-mode');
-      ipcRenderer.send('open-table-popup', { tableData, isDarkMode });
+      window.folia.openTablePopup({ tableData, isDarkMode });
     });
 
     // Store for batch insertion
@@ -7393,7 +7392,7 @@ function initImageZoom() {
 
     btn.addEventListener('click', e => {
       e.stopPropagation();
-      ipcRenderer.send('open-image-popup', {
+      window.folia.openImagePopup({
         src: img.src,
         alt: img.alt || '',
         isDarkMode: document.body.classList.contains('dark-mode')
@@ -9179,11 +9178,11 @@ ipcRenderer.on('update-status', (event, data) => {
 
 // Update button handlers
 downloadUpdateBtn.addEventListener('click', () => {
-  ipcRenderer.send('download-update');
+  window.folia.downloadUpdate();
 });
 
 installUpdateBtn.addEventListener('click', () => {
-  ipcRenderer.send('install-update');
+  window.folia.installUpdate();
 });
 
 laterUpdateBtn.addEventListener('click', () => {
@@ -10966,7 +10965,7 @@ ctxInsertImage.addEventListener('click', () => {
     showNotification(i18n('notif.openFileFirst'), 2000);
     return;
   }
-  ipcRenderer.send('open-image-dialog');
+  window.folia.openImageDialog();
 });
 
 // Find insertion position for label based on exact right-click caret position
@@ -11156,7 +11155,7 @@ function insertImageMarkdown(imageMarkdown, originalSize, compressedSize) {
 }
 
 // Handle image selected from main process
-ipcRenderer.on('image-selected', (event, data) => {
+window.folia.onImageSelected((data) => {
   if (data.error) {
     showNotification(i18n('notif.imageFailed') + data.error, 3000);
     return;
@@ -11633,7 +11632,7 @@ async function renderMermaidInDOM(code, mode, replaceTarget) {
   maxBtn.addEventListener('click', () => {
     const svg = mermaidEl.querySelector('svg');
     if (svg) {
-      ipcRenderer.send('open-mermaid-popup', { svgContent: svg.outerHTML, isDarkMode: document.body.classList.contains('dark-mode') });
+      window.folia.openMermaidPopup({ svgContent: svg.outerHTML, isDarkMode: document.body.classList.contains('dark-mode') });
     }
   });
   container.appendChild(maxBtn);
@@ -11721,7 +11720,7 @@ function renderTableInDOM(mdTable, mode, replaceTarget) {
     <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7"></path>
   </svg>`;
   maxBtn.addEventListener('click', () => {
-    ipcRenderer.send('open-table-popup', { tableData: extractTableData(tableEl), isDarkMode: document.body.classList.contains('dark-mode') });
+    window.folia.openTablePopup({ tableData: extractTableData(tableEl), isDarkMode: document.body.classList.contains('dark-mode') });
   });
   container.appendChild(maxBtn);
 
@@ -12547,11 +12546,19 @@ try {
     if (!event.data) return;
     if (event.data.type === 'request-pdf-export') {
       const currentFileName = currentFilePath ? path.basename(currentFilePath) : null;
-      const channel = 'export-pdf';
-      ipcRenderer.send(channel, { currentFileName });
-      ipcRenderer.once('pdf-export-result', (_ev, result) => {
+      const unsubscribe = window.folia.oncePdfExportResult((result) => {
         exportChannel.postMessage({ type: 'export-result', ...result });
       });
+      try {
+        window.folia.exportPdf({ currentFileName });
+      } catch (error) {
+        unsubscribe();
+        // A local dispatch failure did not acquire a theme hold. Reporting it
+        // through the shared PDF result stream would release another export.
+        console.error('PDF request delivery failed:', error);
+        exportChannel.postMessage({ type: 'export-result', success: false, error: error.message });
+        showNotification(i18n('alert.pdfFailed') + error.message, 4000);
+      }
     }
   };
 } catch (e) {
@@ -12762,7 +12769,7 @@ ctxNotesPanelDelete.addEventListener('click', () => {
 // Set welcome version from app
 (async function setWelcomeVersion() {
   try {
-    const version = await ipcRenderer.invoke('get-version');
+    const version = await window.folia.getVersion();
     const el = document.getElementById('welcomeVersion');
     if (el && version) el.textContent = 'v' + version;
   } catch (e) {}

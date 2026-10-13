@@ -563,6 +563,22 @@ remaining scope are recorded in `docs/PLANNED-WORK.md`.
 Other commands/browser privileged consumers and production flags remain open;
 this transition is neither complete isolation nor measured responsiveness.
 
+**Fixed app UI request/result ports (2026-10-13).** Native file/image choosers,
+existing PDF request/ready/results, Mermaid/table/image popups, update actions
+and app-version lookup now cross fixed preload methods. Request metadata is
+copied/validated, document and popup strings stay verbatim, and Main retains
+its existing normalization and authority. Subscriptions expose payloads only;
+native one-shot removal and own-wrapper cleanup preserve receiver failure
+semantics. Popup PDF dispatch failure reports directly rather than injecting a
+shared result that could release another export's theme hold. Existing PDF
+cancellation/correlation and unpaired-refusal limitations are not repaired or
+certified by this transport unit. Fresh independent Sol/Luna reviews converge;
+focused integration and exact proof evidence is in `docs/PLANNED-WORK.md`.
+The theme fixture observes its owned teardown before its terminal report,
+preserving all diagnostics and strict transcript rules; the deferred product
+shutdown campaign remains deferred. Main authority, remaining privileged
+consumers, production flags and actual responsiveness still need closure.
+
 The **production main window still has Node enabled and isolation disabled**.
 Preparation, commit, completion and abandonment of disk-adoption capabilities
 now use fixed copied/validated preload methods; main's actual authority,

@@ -7676,6 +7676,265 @@ async function runDocumentTransportValidation(exec) {
     JSON.stringify(probe));
 }
 
+async function runUiTransportValidation(exec) {
+  const probe = await exec(`(async () => {
+    const ipc = window.ipcRenderer, api = window.folia;
+    const originalSend = ipc.send, originalInvoke = ipc.invoke;
+    const calls = [], channels = new Set(['open-file-dialog', 'open-image-dialog',
+      'export-pdf', 'pdf-export-ready', 'open-mermaid-popup', 'open-table-popup',
+      'open-image-popup', 'download-update', 'install-update']);
+    const text = ('UI_CR\\r\\nUnicode:\\u03bb\\ud83d\\ude00\\u0000').repeat(4096);
+    const tableData = { columns: [{ title: '<raw>&', field: 'original',
+      headerFilter: 'input', headerFilterPlaceholder: 'Filter...' }],
+      data: [{ original: text }], ignored: 'drop' };
+    let sendFailure = false, invokeFailure = false, versionReply = 'verbatim-version';
+    ipc.send = function(channel, payload) {
+      if (!channels.has(channel)) return originalSend.apply(this, arguments);
+      if (sendFailure) throw new Error('controlled UI send failure');
+      calls.push({ channel, payload, argc: arguments.length });
+    };
+    ipc.invoke = async function(channel) {
+      if (channel !== 'get-version') return originalInvoke.apply(this, arguments);
+      if (invokeFailure) throw new Error('controlled UI invoke failure');
+      return versionReply;
+    };
+    try {
+      const requests = [
+        ['openFileDialog'], ['openImageDialog'], ['pdfExportReady'],
+        ['downloadUpdate'], ['installUpdate'],
+        ['exportPdf', { currentFileName: null, ignored: 'drop' }],
+        ['exportPdf', { currentFileName: '' }],
+        ['exportPdf', { currentFileName: 'document.md' }],
+        ['openMermaidPopup', { svgContent: text, isDarkMode: false, ignored: 'drop' }],
+        ['openImagePopup', { src: text, alt: '', isDarkMode: true, ignored: 'drop' }],
+        ['openTablePopup', { tableData, isDarkMode: false, ignored: 'drop' }],
+      ];
+      const synchronous = requests.map(([method, request], index) => {
+        const result = api[method](request);
+        if (result instanceof Promise) result.catch(() => {});
+        return calls.length === index + 1 && result === undefined;
+      });
+      const validCalls = calls.slice();
+      const malformed = [
+        ['exportPdf', null], ['exportPdf', []], ['exportPdf', {}],
+        ['exportPdf', { currentFileName: 1 }],
+        ['openMermaidPopup', { svgContent: text, isDarkMode: 'false' }],
+        ['openMermaidPopup', { svgContent: 1, isDarkMode: false }],
+        ['openImagePopup', { src: text, alt: null, isDarkMode: true }],
+        ['openImagePopup', { src: {}, alt: '', isDarkMode: true }],
+        ['openTablePopup', { tableData: [], isDarkMode: false }],
+        ['openTablePopup', { tableData: { columns: {}, data: [] }, isDarkMode: false }],
+        ['openTablePopup', { tableData: { columns: [], data: null }, isDarkMode: false }],
+      ].map(([method, request]) => {
+        try {
+          const result = api[method](request);
+          if (result instanceof Promise) result.catch(() => {});
+          return false;
+        } catch (error) { return error instanceof TypeError; }
+      });
+      const rejectedBeforeIpc = calls.length === validCalls.length;
+      const sendErrors = [];
+      sendFailure = true;
+      for (const [method, request] of requests) {
+        try {
+          const result = api[method](request);
+          if (result instanceof Promise) result.catch(() => {});
+          sendErrors.push(false);
+        }
+        catch (error) { sendErrors.push(error.message === 'controlled UI send failure'); }
+      }
+      sendFailure = false;
+      const version = await api.getVersion();
+      const badReplies = [];
+      for (const reply of [null, true, 1, {}]) {
+        versionReply = reply;
+        try { await api.getVersion(); badReplies.push(false); }
+        catch (error) { badReplies.push(error.message.includes('Invalid app version response')); }
+      }
+      versionReply = '';
+      const emptyVersion = await api.getVersion();
+      invokeFailure = true;
+      let invokeError = false;
+      try { await api.getVersion(); }
+      catch (error) { invokeError = error.message === 'controlled UI invoke failure'; }
+      return { synchronous, malformed, rejectedBeforeIpc, sendErrors,
+        version, emptyVersion, badReplies, invokeError,
+        channels: validCalls.map(call => call.channel),
+        noArgs: validCalls.slice(0, 5).every(call => call.argc === 1),
+        names: validCalls.slice(5, 8).map(call => call.payload.currentFileName),
+        knownTop: validCalls.every(call => !call.payload || !('ignored' in call.payload)),
+        svg: validCalls[8]?.payload?.svgContent === text && validCalls[8].payload.isDarkMode === false,
+        image: validCalls[9]?.payload?.src === text && validCalls[9].payload.alt === '' &&
+          validCalls[9].payload.isDarkMode === true,
+        table: validCalls[10]?.payload?.tableData?.columns === tableData.columns &&
+          validCalls[10].payload.tableData.data === tableData.data &&
+          !('ignored' in validCalls[10].payload.tableData) &&
+          validCalls[10].payload.tableData.columns[0].title === '<raw>&' &&
+          validCalls[10].payload.tableData.data[0].original === text,
+      };
+    } finally { ipc.send = originalSend; ipc.invoke = originalInvoke; }
+  })()`);
+  check("SEC-08 fixed UI requests dispatch synchronously on exact channels with verbatim content and nullable filenames",
+    probe.synchronous.length === 11 && probe.synchronous.every(Boolean) &&
+      probe.channels.join(",") === "open-file-dialog,open-image-dialog,pdf-export-ready,download-update,install-update,export-pdf,export-pdf,export-pdf,open-mermaid-popup,open-image-popup,open-table-popup" &&
+      probe.noArgs && probe.names[0] === null && probe.names[1] === "" &&
+      probe.names[2] === "document.md" && probe.knownTop &&
+      probe.svg && probe.image && probe.table, JSON.stringify(probe));
+  check("SEC-08 fixed UI requests reject malformed metadata before transport and surface send failures",
+    probe.malformed.length === 11 && probe.malformed.every(Boolean) &&
+      probe.rejectedBeforeIpc && probe.sendErrors.length === 11 && probe.sendErrors.every(Boolean),
+    JSON.stringify(probe));
+  check("SEC-08 version port preserves exact string replies and rejects malformed replies and invoke failures",
+    probe.version === "verbatim-version" && probe.emptyVersion === "" &&
+      probe.badReplies.length === 4 && probe.badReplies.every(Boolean) && probe.invokeError,
+    JSON.stringify(probe));
+}
+
+async function runUiEventBoundary(win) {
+  const exec = code => win.webContents.executeJavaScript(code, true);
+  const setup = await exec(`(() => {
+    window.__uiEvents = []; window.__pdfOnce = 0;
+    window.__uiOff = [
+      window.folia.onPrepareForPdfExport(function(...args) {
+        window.__uiEvents.push({ kind: 'prepare', argc: args.length, data: args[0] });
+      }),
+      window.folia.onPdfExportResult(function(...args) {
+        window.__uiEvents.push({ kind: 'pdf', argc: args.length, data: args[0] });
+      }),
+      window.folia.onImageSelected(function(...args) {
+        window.__uiEvents.push({ kind: 'image', argc: args.length, data: args[0] });
+      }),
+      window.folia.oncePdfExportResult(function(...args) {
+        window.__pdfOnce += 1;
+        window.__uiEvents.push({ kind: 'once', argc: args.length, data: args[0] });
+      }),
+    ];
+    const rejected = ['onPrepareForPdfExport', 'onPdfExportResult',
+      'onImageSelected', 'oncePdfExportResult'].map(method => {
+      try { window.folia[method](null); return false; }
+      catch (error) { return error.message.includes('Invalid document event callback'); }
+    });
+    return rejected;
+  })()`);
+  win.webContents.send("prepare-for-pdf-export");
+  win.webContents.send("pdf-export-result", { success: false, error: "latched",
+    saveBlocked: "capacity", saveBlockedStage: "ingress", saveBlockedWhy: "pinned", ignored: 1 });
+  win.webContents.send("image-selected", { base64: "", mimeType: "image/svg+xml",
+    fileName: "empty.svg", ignored: 1 });
+  const delivered = await waitForCondition(exec, "window.__uiEvents.length === 4");
+  const initial = await exec(`window.__uiEvents`);
+  check("SEC-08 isolated UI subscriptions deliver payloads and retain pathless PDF refusals and empty image data",
+    setup.length === 4 && setup.every(Boolean) && delivered &&
+      initial.map(item => item.kind).join(",") === "prepare,pdf,once,image" &&
+      initial.every(item => item.argc === 1 && (!item.data || !("ignored" in item.data))) &&
+      initial[0].data === undefined && initial[1].data.success === false &&
+      !("path" in initial[1].data) && initial[1].data.error === "latched" &&
+      initial[1].data.saveBlocked === "capacity" && initial[1].data.saveBlockedStage === "ingress" &&
+      initial[1].data.saveBlockedWhy === "pinned" && initial[3].data.base64 === "" &&
+      initial[3].data.mimeType === "image/svg+xml" && initial[3].data.fileName === "empty.svg",
+    JSON.stringify({ setup, delivered, initial }));
+  await exec("window.__uiOff[3](); window.__uiOff[3](); null;");
+  win.webContents.send("pdf-export-result", { success: false, error: "latched",
+    path: "before-write.pdf", saveBlocked: "capacity", saveBlockedStage: "before-write",
+    saveBlockedWhy: "pinned" });
+  win.webContents.send("image-selected", { error: "controlled read refusal" });
+  const subsequent = await waitForCondition(exec, "window.__uiEvents.length === 6");
+  const next = await exec(`({ once: window.__pdfOnce, events: window.__uiEvents.slice(4) })`);
+  check("SEC-08 PDF one-shot removal leaves permanent result and image refusal subscribers alive",
+    subsequent && next.once === 1 && next.events[0].kind === "pdf" &&
+      next.events[0].data.path === "before-write.pdf" &&
+      next.events[0].data.saveBlockedStage === "before-write" &&
+      next.events[1].kind === "image" &&
+      next.events[1].data.error === "controlled read refusal",
+    JSON.stringify(next));
+  await exec("window.__uiOff.forEach(off => off()); null;");
+}
+
+async function runPdfOnceValidation(exec) {
+  const probe = await exec(`(() => {
+    const ipc = window.ipcRenderer, api = window.folia, channel = 'pdf-export-result';
+    const initial = new Set(ipc.listeners(channel));
+    const controlledError = new Error('controlled PDF receiver failure');
+    let onceCalls = 0, permanentCalls = 0, removedBeforeReceiver = false;
+    const errors = [];
+    let offPermanent, offOnce;
+    try {
+      offPermanent = api.onPdfExportResult(() => { permanentCalls += 1; });
+      offOnce = api.oncePdfExportResult(() => {
+        onceCalls += 1;
+        removedBeforeReceiver = ipc.listeners(channel).length === initial.size + 1;
+        throw controlledError;
+      });
+      for (let i = 0; i < 2; i++) {
+        try { ipc.emit(channel, {}, { success: true, path: 'controlled-once.pdf' }); }
+        catch (error) { errors.push(error === controlledError); }
+      }
+      offOnce(); offOnce();
+      return { onceCalls, permanentCalls, removedBeforeReceiver, errors };
+    } finally {
+      offOnce?.(); offPermanent?.();
+      for (const listener of ipc.listeners(channel)) {
+        if (!initial.has(listener)) ipc.removeListener(channel, listener);
+      }
+    }
+  })()`);
+  check("SEC-08 PDF once subscription removes itself before a throwing receiver without removing permanent subscribers",
+    probe.onceCalls === 1 && probe.permanentCalls === 2 && probe.removedBeforeReceiver &&
+      probe.errors.length === 1 && probe.errors[0], JSON.stringify(probe));
+}
+
+async function runPopupPdfDispatchFailure(exec, sentinel) {
+  await sentinel.mute("controlled UI dispatch failure");
+  let probe;
+  try {
+    probe = await exec(`(async () => {
+      const original = window.folia, originalAlert = window.alert;
+      let pending = 0, cleanup = 0, dispatches = 0, subscribedBeforeDispatch = false;
+      let response = null, alerts = 0;
+      const sender = new BroadcastChannel('folia-export');
+      sender.onmessage = event => {
+        if (event.data?.type === 'export-result') response = event.data;
+      };
+      const initialHold = exportThemeHold;
+      beginExportThemeHold();
+      const held = exportThemeHold;
+      window.alert = () => { alerts += 1; };
+      window.folia = { ...original,
+        oncePdfExportResult() {
+          pending += 1;
+          let live = true;
+          return () => { if (live) { live = false; pending -= 1; cleanup += 1; } };
+        },
+        exportPdf() {
+          dispatches += 1; subscribedBeforeDispatch = pending === 1;
+          throw new Error('controlled UI dispatch failure');
+        },
+      };
+      try {
+        sender.postMessage({ type: 'request-pdf-export' });
+        const deadline = Date.now() + 4000;
+        while (!response && Date.now() < deadline) {
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        return { initialHold, held, after: exportThemeHold, pending, cleanup, dispatches,
+          subscribedBeforeDispatch, response, alerts,
+          notification: document.getElementById('notificationMessage').textContent };
+      } finally {
+        sender.close(); window.folia = original; window.alert = originalAlert;
+        endExportThemeHold();
+      }
+    })()`);
+  } finally { await sentinel.unmute("controlled UI dispatch failure"); }
+  check("SEC-08 actual popup PDF failure setup reaches a subscribed request and an independent theme hold",
+    probe.initialHold === 0 && probe.held === 1 && probe.dispatches === 1 &&
+      probe.subscribedBeforeDispatch, JSON.stringify(probe));
+  check("SEC-08 popup PDF dispatch failure cleans only its waiter and reports directly without releasing another hold",
+    probe.pending === 0 && probe.cleanup === 1 && probe.after === probe.held &&
+      probe.alerts === 0 && probe.response?.success === false &&
+      probe.response?.error === "controlled UI dispatch failure" &&
+      probe.notification.includes("controlled UI dispatch failure"), JSON.stringify(probe));
+}
+
 async function runDocumentEventBoundary(win) {
   const exec = code => win.webContents.executeJavaScript(code, true);
   const channels = [
@@ -10255,6 +10514,10 @@ async function run(win) {
     "saveMarkdown", "requestReload", "acknowledgeSaveResult",
     "onFileOpened", "onFileOpenResult", "onFileReloadResult",
     "onSaveMarkdownResult", "onFileChangedExternally",
+    "openFileDialog", "openImageDialog", "exportPdf", "pdfExportReady",
+    "onPrepareForPdfExport", "onPdfExportResult", "oncePdfExportResult", "onImageSelected",
+    "openMermaidPopup", "openImagePopup", "openTablePopup",
+    "downloadUpdate", "installUpdate", "getVersion",
   ].sort().join(",");
   check(
     "SEC-08 main launch retains production owned-read and only its explicitly marked PDF test signal",
@@ -10330,6 +10593,7 @@ async function run(win) {
       JSON.stringify(isolatedBoundary),
     );
     await runDocumentEventBoundary(isolatedBridgeWindow);
+    await runUiEventBoundary(isolatedBridgeWindow);
     check(
       "SEC-08 session test preload does not expose the PDF signal to an unmarked window or subframe",
       isolatedBoundary.pdfRestore === "undefined" &&
@@ -10657,6 +10921,9 @@ async function run(win) {
   await runAdoptionBridgeValidation(exec);
   await runDocumentControlBridgeValidation(exec);
   await runDocumentTransportValidation(exec);
+  await runUiTransportValidation(exec);
+  await runPdfOnceValidation(exec);
+  await runPopupPdfDispatchFailure(exec, sentinel);
   const bridgeValidation = await exec(`
     (async () => {
       const request = ${JSON.stringify(mainOwnedRefresh.validPayload)};

@@ -730,6 +730,40 @@ async function main() {
     }),
   );
   const rendererSource = stripJsComments(read("src/renderer.js"));
+  const themeHarness = stripJsComments(read("test/test-theme.js"));
+  const themeFinish = themeHarness.slice(themeHarness.indexOf("async function finish()"),
+    themeHarness.indexOf("const watchdog ="));
+  const themeTeardownOrder = [
+    "await Promise.all(", 'win.webContents.once("destroyed", resolve);',
+    "win.destroy();", "await new Promise(resolve => setImmediate(resolve));",
+    "results.push(`=== ", "console.log(text);", "app.exit(failed === 0 ? 0 : 1);",
+  ].map(marker => themeFinish.indexOf(marker));
+  check(
+    "theme harness awaits owned renderer destruction before its terminal transcript",
+    themeTeardownOrder.every((position, index) => position >= 0 &&
+      (index === 0 || position > themeTeardownOrder[index - 1])) &&
+      /if \(finishing\) return;\s+finishing = true;/.test(themeFinish) &&
+      themeFinish.includes("nodeIntegration: false, contextIsolation: true, sandbox: true") &&
+      !themeFinish.includes("preload:") &&
+      themeFinish.includes('console.error("FATAL: theme harness teardown failed:", error);'),
+    JSON.stringify(themeTeardownOrder),
+  );
+  const uiPortCounts = {
+    openFileDialog: 2, openImageDialog: 1, exportPdf: 2, pdfExportReady: 1,
+    openMermaidPopup: 2, openImagePopup: 1, openTablePopup: 2,
+    downloadUpdate: 1, installUpdate: 1, getVersion: 1,
+    onPrepareForPdfExport: 1, onPdfExportResult: 1, oncePdfExportResult: 1,
+    onImageSelected: 1,
+  };
+  const uiPortObserved = Object.fromEntries(Object.keys(uiPortCounts).map(method => [
+    method, (rendererSource.match(new RegExp(`window\\.folia\\.${method}\\(`, "g")) || []).length,
+  ]));
+  check(
+    "SEC-08 renderer uses all fixed UI request and response ports without raw channel access",
+    Object.entries(uiPortCounts).every(([method, count]) => uiPortObserved[method] === count) &&
+      !/ipcRenderer\.(?:on|once|send|invoke)\(\s*["'](?:open-file-dialog|open-image-dialog|export-pdf|pdf-export-ready|open-mermaid-popup|open-image-popup|open-table-popup|download-update|install-update|get-version|prepare-for-pdf-export|pdf-export-result|image-selected)["']/.test(rendererSource),
+    JSON.stringify(uiPortObserved),
+  );
   check(
     "SEC-08 document-events.js loads exactly once before both consumers",
     documentEventsScriptAt >= 0 &&

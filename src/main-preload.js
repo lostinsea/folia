@@ -217,6 +217,10 @@ const DOCUMENT_EVENT_FIELDS = {
     "error", "conflict", "deleted", "settlementOnly", "pathReplaced", "originalPathKey",
     "saveBlocked", "saveBlockedStage", "saveBlockedWhy"],
   "file-changed-externally": ["path", "modifiedTime", "watcher"],
+  "prepare-for-pdf-export": [],
+  "pdf-export-result": ["success", "path", "error", "saveBlocked",
+    "saveBlockedStage", "saveBlockedWhy"],
+  "image-selected": ["base64", "mimeType", "fileName", "error"],
 };
 const DOCUMENT_EVENT_RECORD_FIELDS = {
   diskVersion: ["dev", "ino", "size", "mtimeMs", "ctimeMs"],
@@ -246,19 +250,32 @@ function projectDocumentEventRecord(value, fields) {
   return projected;
 }
 
-function subscribeDocumentEvent(channel, callback) {
+function subscribeDocumentEvent(channel, callback, once = false) {
   if (typeof callback !== "function") {
     throw new TypeError("Invalid document event callback");
   }
-  const listener = (_event, data) =>
-    callback(projectDocumentEventRecord(data, DOCUMENT_EVENT_FIELDS[channel]));
-  ipcRenderer.on(channel, listener);
   let subscribed = true;
+  const listener = (_event, data) => {
+    if (once) subscribed = false;
+    callback(projectDocumentEventRecord(data, DOCUMENT_EVENT_FIELDS[channel]));
+  };
+  if (once) ipcRenderer.once(channel, listener);
+  else ipcRenderer.on(channel, listener);
   return () => {
     if (!subscribed) return;
     subscribed = false;
     ipcRenderer.removeListener(channel, listener);
   };
+}
+
+function copyPopupRequest(request, textFields) {
+  if (!request || typeof request !== "object" || Array.isArray(request) ||
+      typeof request.isDarkMode !== "boolean" ||
+      !textFields.every(field => typeof request[field] === "string")) {
+    throw new TypeError("Invalid popup request");
+  }
+  return Object.fromEntries([...textFields, "isDarkMode"]
+    .map(field => [field, request[field]]));
 }
 
 function copyReloadTransport(request) {
@@ -444,6 +461,62 @@ function copyDocumentQueryReply(result, fields) {
 }
 
 const api = Object.freeze({
+  openFileDialog() {
+    ipcRenderer.send("open-file-dialog");
+  },
+  openImageDialog() {
+    ipcRenderer.send("open-image-dialog");
+  },
+  exportPdf(request) {
+    if (!request || typeof request !== "object" || Array.isArray(request) ||
+        (request.currentFileName !== null && typeof request.currentFileName !== "string")) {
+      throw new TypeError("Invalid PDF export request");
+    }
+    ipcRenderer.send("export-pdf", { currentFileName: request.currentFileName });
+  },
+  pdfExportReady() {
+    ipcRenderer.send("pdf-export-ready");
+  },
+  onPrepareForPdfExport(callback) {
+    return subscribeDocumentEvent("prepare-for-pdf-export", callback);
+  },
+  onPdfExportResult(callback) {
+    return subscribeDocumentEvent("pdf-export-result", callback);
+  },
+  oncePdfExportResult(callback) {
+    return subscribeDocumentEvent("pdf-export-result", callback, true);
+  },
+  onImageSelected(callback) {
+    return subscribeDocumentEvent("image-selected", callback);
+  },
+  openMermaidPopup(request) {
+    ipcRenderer.send("open-mermaid-popup", copyPopupRequest(request, ["svgContent"]));
+  },
+  openImagePopup(request) {
+    ipcRenderer.send("open-image-popup", copyPopupRequest(request, ["src", "alt"]));
+  },
+  openTablePopup(request) {
+    const payload = copyPopupRequest(request, []);
+    const tableData = request.tableData;
+    if (!tableData || typeof tableData !== "object" || Array.isArray(tableData) ||
+        !Array.isArray(tableData.columns) || !Array.isArray(tableData.data)) {
+      throw new TypeError("Invalid table popup request");
+    }
+    // Main owns escaping, re-keying and column policy; do not scan rows twice.
+    payload.tableData = { columns: tableData.columns, data: tableData.data };
+    ipcRenderer.send("open-table-popup", payload);
+  },
+  downloadUpdate() {
+    ipcRenderer.send("download-update");
+  },
+  installUpdate() {
+    ipcRenderer.send("install-update");
+  },
+  async getVersion() {
+    const version = await ipcRenderer.invoke("get-version");
+    if (typeof version !== "string") throw new TypeError("Invalid app version response");
+    return version;
+  },
   onFileOpened(callback) {
     return subscribeDocumentEvent("file-opened", callback);
   },

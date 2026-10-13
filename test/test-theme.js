@@ -49,6 +49,7 @@ const {
 
 const results = [];
 let failed = 0;
+let finishing = false;
 
 function check(name, condition, detail) {
   const ok = !!condition;
@@ -58,12 +59,33 @@ function check(name, condition, detail) {
   );
 }
 
-function finish() {
-  results.push(`=== ${results.length - failed}/${results.length} passed ===`);
-  const text = results.join("\n") + "\n";
-  fs.writeFileSync(path.join(__dirname, "test-theme-results.txt"), text);
-  console.log(text);
-  app.exit(failed === 0 ? 0 : 1);
+async function finish() {
+  if (finishing) return;
+  finishing = true;
+  try {
+    // Keep owned teardown diagnostics before the terminal transcript, without
+    // muting them or racing automatic quit when the last test window disappears.
+    const windows = BrowserWindow.getAllWindows();
+    const keepalive = new BrowserWindow({
+      show: false,
+      webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
+    });
+    await Promise.all(windows.map(win => new Promise(resolve => {
+      if (win.webContents.isDestroyed()) return resolve();
+      win.webContents.once("destroyed", resolve);
+      win.destroy();
+    })));
+    await new Promise(resolve => setImmediate(resolve));
+    if (keepalive.isDestroyed()) throw new Error("Theme teardown keepalive was lost");
+    results.push(`=== ${results.length - failed}/${results.length} passed ===`);
+    const text = results.join("\n") + "\n";
+    fs.writeFileSync(path.join(__dirname, "test-theme-results.txt"), text);
+    console.log(text);
+    app.exit(failed === 0 ? 0 : 1);
+  } catch (error) {
+    console.error("FATAL: theme harness teardown failed:", error);
+    app.exit(2);
+  }
 }
 
 /* A HANG DETECTOR, NOT A PERFORMANCE BUDGET - and the difference is what the
@@ -6503,9 +6525,7 @@ app.whenReady().then(async () => {
         });
         const timer = setTimeout(() => settleReady("TIMEOUT"), 15000);
         const t0 = Date.now();
-        await exec(
-          `(() => { require('electron').ipcRenderer.emit('prepare-for-pdf-export'); return 1; })()`,
-        );
+        win.webContents.send("prepare-for-pdf-export");
         const readyOutcome = await ready;
         if (readyOutcome === "TIMEOUT") prepFailures.push(`${label}: no pdf-export-ready`);
         clearTimeout(timer);
@@ -6557,19 +6577,36 @@ app.whenReady().then(async () => {
 
         // Release through the real result handler so the hold cannot leak into
         // the next state, and so restoreExportScheme() is exercised each pass.
-        await exec(
-          `(() => { require('electron').ipcRenderer.emit('pdf-export-result', {}, ` +
-            `{ success: true, path: 'C:/tmp/10i-probe.pdf' }); return 1; })()`,
-        );
-        await new Promise((r) => setTimeout(r, 60));
+        await exec(`(() => {
+          window.__pdfReleaseSeen = false;
+          window.__pdfReleaseOff = window.folia.onPdfExportResult(() => {
+            window.__pdfReleaseSeen = true;
+            window.__pdfReleaseOff();
+          });
+          return null;
+        })()`);
+        let releaseDelivered = false;
+        try {
+          win.webContents.send("pdf-export-result", {
+            success: true, path: "C:/tmp/10i-probe.pdf",
+          });
+          const releaseDeadline = Date.now() + 15000;
+          while (Date.now() < releaseDeadline) {
+            releaseDelivered = await exec("window.__pdfReleaseSeen === true");
+            if (releaseDelivered) break;
+            await new Promise(resolve => setTimeout(resolve, 25));
+          }
+        } finally {
+          await exec("window.__pdfReleaseOff(); null;");
+        }
         /* WAITED ON THE PRODUCT'S OWN MERMAID SETTLE RATHER THAN ONLY ON A
            SLEEP, because the result handler is async and its tail is
            unbounded: setExportTheme() awaits updateMermaidTheme() and then
            whenMermaidSettled(), which PERF-07 defers in idle chunks. Left as a
            fixed sleep, a document with enough diagrams would still be
            re-theming state N while state N+1 was being measured.
-           MEASURED, so the sleep above is not load-bearing for the assertion
-           below and is kept only to let the handler reach its first await:
+           The independent result-delivery flag above lets the real
+           handler reach its first await before settlement is observed:
            both observables this section reads - data-theme and the dark class -
            land SYNCHRONOUSLY. restoreExportScheme() sets the attribute
            directly, and setExportTheme() toggles the class before its first
@@ -6592,6 +6629,7 @@ app.whenReady().then(async () => {
               ` dark: document.body.classList.contains('dark-mode') })`,
           ),
         );
+        printRestored[label].delivered = releaseDelivered;
         /* DETACHED ONLY HERE, at the end of the state's whole export cycle, so
            a signal that arrives LATE - after the reading, during the settle, or
            on the way through the result handler - is still counted against this
@@ -6659,7 +6697,7 @@ app.whenReady().then(async () => {
        genuinely absent, not merely "some value". */
     const restoreMisses = PRINT_STATES.filter(([mode, scheme, label]) => {
       const got = printRestored[label];
-      if (!got) return true;
+      if (!got || !got.delivered) return true;
       return got.attr !== (scheme || null) || got.dark !== (mode === "dark");
     }).map(
       ([mode, scheme, label]) =>
@@ -6984,6 +7022,11 @@ app.whenReady().then(async () => {
       "utf8",
     );
     const POPUP_CHANNELS = ["open-mermaid-popup", "open-image-popup", "open-table-popup"];
+    const POPUP_METHODS = {
+      "open-mermaid-popup": "openMermaidPopup",
+      "open-image-popup": "openImagePopup",
+      "open-table-popup": "openTablePopup",
+    };
     /* THE ONLY KEYS A POPUP PAYLOAD MAY CARRY. `isDarkMode` is the whole theme
        surface - a boolean - and everything else is document content. Frozen
        deliberately per channel rather than as one union, so a key legitimate on
@@ -7000,12 +7043,11 @@ app.whenReady().then(async () => {
        literal early. */
     const popupSites = [];
     for (const channel of POPUP_CHANNELS) {
-      const needle = "'" + channel + "'";
+      const needle = "window.folia." + POPUP_METHODS[channel] + "(";
       let at = rendererSrc.indexOf(needle);
       while (at !== -1) {
         const open = rendererSrc.indexOf("{", at);
-        const comma = rendererSrc.indexOf(",", at + needle.length);
-        if (open === -1 || comma === -1 || open < comma) {
+        if (open === -1 || rendererSrc.slice(at + needle.length, open).trim() !== "") {
           popupSites.push({ channel, keys: null, why: "no object literal argument" });
         } else {
           let depth = 0;
@@ -7087,7 +7129,7 @@ app.whenReady().then(async () => {
               darkExpr = last === null ? null : last.trim();
             }
           }
-          /* EXACTLY ONE ARGUMENT AFTER THE CHANNEL. The key sweep reads the
+          /* EXACTLY ONE PAYLOAD ARGUMENT. The key sweep reads the
              first object literal and stops, so a second argument carrying the
              scheme would be neither parsed nor sent through any assertion -
              and the runtime probe records args[0] alone, so it could not see

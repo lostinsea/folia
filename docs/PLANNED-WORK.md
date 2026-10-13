@@ -426,6 +426,51 @@ clipboard/path consumers, production flags and final measured responsiveness
 remain subsequent gates; these results do not qualify responsiveness or full
 isolation.
 
+**Fixed app UI requests — IMPLEMENTED / PROVEN, unintegrated.** The bounded browser-privilege
+transition covers native file/image choosers, existing PDF request/ready/results,
+Mermaid/table/image popups, update download/install and app-version lookup.
+Use fixed request/subscription methods, preserving same-stack delivery and
+the existing Main normalizers; do not add arbitrary path opens, generic IPC,
+extra reads or payload scans. The permanent PDF theme hold and one-shot popup
+result forwarding must retain ordering, independent unsubscription and
+observable failure. Independent Sol/Luna design feedback agrees on this scope;
+the owned boundary/actual BroadcastChannel controls are 66/66
+(`ui-ports-owned-r3.log`), actual PDF theme/popup integration is 398/398
+(`ui-ports-theme-r2.log`), and source packaging is 373/0
+(`ui-ports-packaging-r2.log`), all in `.context-viewport-evidence`.
+R803-R811 are individually exact PROVEN; affected R336/R346/R347/R360/
+R377/R378/R381 are PROVEN under their existing declarations
+(`ui-ports-exact-proofs-r2.log`), with source hashes restored exactly.
+The earlier theme mutation transcripts remain UNUSABLE in the retained r1
+log: their terminal footer preceded actual renderer destruction. The fixture
+now observes owned destruction before reporting, using an unloaded sandboxed
+keepalive to prevent automatic quit racing the observation. Its single-flight
+finish reports teardown errors explicitly. No diagnostic is muted and no
+transcript rule is weakened; this is not a product shutdown fix.
+Fresh independent Sol/Luna implementation reviews converge without blockers.
+Both accepted the teardown correction; Sol additionally required the
+single-flight/fail-closed completion guard, which was implemented and reviewed.
+There is no outstanding disagreement.
+The existing PDF protocol has no result on dialog cancellation or request
+correlation. Registering the popup waiter before dispatch does not fix canceled
+or concurrent exports; the existing unpaired-refusal theme-hold limitation is
+also retained, not falsely certified. Local dispatch failure now cleans only
+its waiter and reports directly without synthesizing a shared PDF result.
+Clipboard/path/physical-metadata/quit consumers, final Main admission gates and
+production flags remain subsequent work; no responsiveness conclusion follows.
+
+**Remaining shutdown/notice ports — design accepted, implementation NEXT.**
+Independent Sol/Luna feedback agrees on fixed payload-only subscriptions and
+synchronous copied responses, retaining Main's validators and the existing
+single generation invoke. Malformed commit/verify and deletion-refusal
+correlations must survive projection rather than become throwing callbacks.
+Keep all subscribers before readiness, including the actual
+`external-file-open-request` ticket channel; preserve freeze/replay, durable
+layout settlement, diagnostics coalescing and scalar error messages.
+No new filesystem work, document-string scan or authorization handshake is
+planned. Clipboard/folder/history/path authority and final production flags
+remain subsequent, with actual responsiveness still unqualified.
+
 **Browser primitive transition — IMPLEMENTED / PROVEN, unintegrated.** Removed
 renderer Node crypto and Buffer dependencies using native Web Crypto/TextEncoder for the existing
 attestation and an allocation-free shared UTF-8 byte counter for explicitly

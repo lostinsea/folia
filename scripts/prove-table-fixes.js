@@ -9348,12 +9348,12 @@ const REVERTS = [
     file: RENDERER,
     from:
       "      const isDarkMode = document.body.classList.contains('dark-mode');\n" +
-      "      ipcRenderer.send('open-table-popup', { tableData, isDarkMode });\n",
+      "      window.folia.openTablePopup({ tableData, isDarkMode });\n",
     to:
       "      const isDarkMode =\n" +
       "        document.body.classList.contains('dark-mode') ||\n" +
       "        document.body.getAttribute('data-theme') === 'parchment';\n" +
-      "      ipcRenderer.send('open-table-popup', { tableData, isDarkMode });\n",
+      "      window.folia.openTablePopup({ tableData, isDarkMode });\n",
     suite: "test:theme",
     expect: [
       /10i: the payload a popup really receives is the same in every scheme but for the mode boolean/,
@@ -9365,14 +9365,13 @@ const REVERTS = [
     // above are absence claims over a set built by walking renderer.js text, so
     // every one of them is satisfied for free by an EMPTY set - and this
     // project's recurring disease is exactly that: an assertion of absence
-    // fails open. Renaming a channel at its send site is the realistic way the
-    // subject set silently shrinks, and it costs the parse one whole surface
-    // while leaving main.js still listening on the old name, so the marker
-    // sweep and the leak assertions all stay green.
-    what: "rename the image popup channel at its send site, so one surface leaves the parsed subject set",
+    // fails open. With fixed ports, a computed call still works but is outside
+    // this parser's audited syntax. It costs the parse one live surface while
+    // leaving runtime delivery intact; the absence checks cannot notice it.
+    what: "use an unreviewed computed image-popup call shape, so one live surface leaves the parsed subject set",
     file: RENDERER,
-    from: "      ipcRenderer.send('open-image-popup', {\n",
-    to: "      ipcRenderer.send('open-image-window', {\n",
+    from: "      window.folia.openImagePopup({\n",
+    to: '      window.folia["openImagePopup"]({\n',
     suite: "test:theme",
     expect: [
       /10i: every popup-open payload in the renderer was really parsed \(positive control\)/,
@@ -9864,12 +9863,12 @@ const REVERTS = [
     what: "add an unreviewed sixth popup send site",
     file: RENDERER,
     from:
-      "      ipcRenderer.send('open-table-popup', { tableData, isDarkMode });\n" +
+      "      window.folia.openTablePopup({ tableData, isDarkMode });\n" +
       "    });",
     to:
-      "      ipcRenderer.send('open-table-popup', { tableData, isDarkMode });\n" +
+      "      window.folia.openTablePopup({ tableData, isDarkMode });\n" +
       "      if (window.__foliaR360NeverTrue) {\n" +
-      "        ipcRenderer.send('open-table-popup', { tableData, isDarkMode });\n" +
+      "        window.folia.openTablePopup({ tableData, isDarkMode });\n" +
       "      }\n" +
       "    });",
     suite: "test:theme",
@@ -10559,7 +10558,7 @@ const REVERTS = [
     // the fix.
     what: "stop the renderer telling main.js the page is ready to print",
     file: RENDERER,
-    from: "ipcRenderer.send('pdf-export-ready')",
+    from: "window.folia.pdfExportReady()",
     to: "void 0",
     suite: "test:theme",
     expect: [
@@ -10587,8 +10586,8 @@ const REVERTS = [
     // still charged to the state that produced it.
     what: "send the print-ready signal twice",
     file: RENDERER,
-    from: "ipcRenderer.send('pdf-export-ready')",
-    to: "(ipcRenderer.send('pdf-export-ready'), ipcRenderer.send('pdf-export-ready'))",
+    from: "window.folia.pdfExportReady()",
+    to: "(window.folia.pdfExportReady(), window.folia.pdfExportReady())",
     suite: "test:theme",
     expect: [/the page is already settled the instant the export reports ready/],
   },
@@ -10661,17 +10660,13 @@ const REVERTS = [
     // vacuous, and indistinguishable from a real pass. A review round called
     // this out as an unmeasured dependency hidden by R375's transition delay.
     //
-    // THE REVERT MOVES THE CLOCK, NOT THE PROBE. Starting the stopwatch after
-    // the round trip instead of before it reports a latency of roughly zero
-    // while measuring exactly the same page - so it proves the number is
-    // anchored to the SIGNAL rather than being a self-satisfied reading of the
-    // probe's own duration. Measured on this machine: 63ms against a 400ms
-    // ceiling, and R375's 500ms delay sits above the ceiling by design so that
-    // revert stays valid for any latency this assertion permits.
-    what: "start the ready-moment stopwatch after the round trip instead of before it",
+    // The mutation leaves the clock unstarted, without changing the page or
+    // probe. The latency control must reject that unrelated reading rather
+    // than accepting colour correctness alone.
+    what: "leave the ready-moment stopwatch unstarted",
     file: THEME_TEST,
-    from: "        const t0 = Date.now();\n        await exec(",
-    to: "        let t0 = 0;\n        await exec(",
+    from: "        const t0 = Date.now();\n        win.webContents.send(",
+    to: "        let t0 = 0;\n        win.webContents.send(",
     suite: "test:theme",
     expect: [
       /the ready-moment reading is taken close enough to the signal to still be a reading of that moment/,
@@ -19706,6 +19701,153 @@ const REVERTS = [
           mustPass: [
             /^SEC-08 actual isolated document ports deliver only payloads on their exact five channels$/,
             /^SEC-08 actual isolated document ports preserve text empty values and complete Save correlation$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R803",
+          what: "scan and normalize popup text instead of passing its exact content",
+          file: path.join(SRC, "main-preload.js"),
+          from: "    .map(field => [field, request[field]]));",
+          to: '    .map(field => [field, typeof request[field] === "string"\n      ? request[field].replace(/\\r\\n/g, "\\n") : request[field]]));',
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 fixed UI requests dispatch synchronously on exact channels with verbatim content and nullable filenames$/,
+          ],
+          mustPass: [
+            /^SEC-08 fixed UI requests reject malformed metadata before transport and surface send failures$/,
+            /^SEC-08 isolated UI subscriptions deliver payloads and retain pathless PDF refusals and empty image data$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R804",
+          what: "accept nonboolean popup theme metadata",
+          file: path.join(SRC, "main-preload.js"),
+          from: '      typeof request.isDarkMode !== "boolean" ||\n',
+          to: "",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 fixed UI requests reject malformed metadata before transport and surface send failures$/,
+          ],
+          mustPass: [
+            /^SEC-08 fixed UI requests dispatch synchronously on exact channels with verbatim content and nullable filenames$/,
+            /^SEC-08 version port preserves exact string replies and rejects malformed replies and invoke failures$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R805",
+          what: "turn same-stack PDF request refusal into an unobserved promise",
+          file: path.join(SRC, "main-preload.js"),
+          from: "  exportPdf(request) {",
+          to: "  async exportPdf(request) {",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 fixed UI requests dispatch synchronously on exact channels with verbatim content and nullable filenames$/,
+            /^SEC-08 fixed UI requests reject malformed metadata before transport and surface send failures$/,
+          ],
+          mustPass: [
+            /^SEC-08 actual popup PDF failure setup reaches a subscribed request and an independent theme hold$/,
+            /^SEC-08 popup PDF dispatch failure cleans only its waiter and reports directly without releasing another hold$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R806",
+          what: "leave a one-shot PDF receiver attached after its first result",
+          file: path.join(SRC, "main-preload.js"),
+          from: "  if (once) ipcRenderer.once(channel, listener);",
+          to: "  if (once) ipcRenderer.on(channel, listener);",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 PDF one-shot removal leaves permanent result and image refusal subscribers alive$/,
+            /^SEC-08 PDF once subscription removes itself before a throwing receiver without removing permanent subscribers$/,
+          ],
+          mustPass: [
+            /^SEC-08 isolated UI subscriptions deliver payloads and retain pathless PDF refusals and empty image data$/,
+            /^SEC-08 popup PDF dispatch failure cleans only its waiter and reports directly without releasing another hold$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R807",
+          what: "strand the popup PDF waiter when request dispatch fails",
+          file: RENDERER,
+          from: "      } catch (error) {\n        unsubscribe();",
+          to: "      } catch (error) {\n        void unsubscribe;",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 popup PDF dispatch failure cleans only its waiter and reports directly without releasing another hold$/,
+          ],
+          mustPass: [
+            /^SEC-08 actual popup PDF failure setup reaches a subscribed request and an independent theme hold$/,
+            /^SEC-08 PDF once subscription removes itself before a throwing receiver without removing permanent subscribers$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R808",
+          what: "discard PDF capacity-refusal stage and reason metadata",
+          file: path.join(SRC, "main-preload.js"),
+          from: '  "pdf-export-result": ["success", "path", "error", "saveBlocked",\n    "saveBlockedStage", "saveBlockedWhy"],',
+          to: '  "pdf-export-result": ["success", "path", "error"],',
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 isolated UI subscriptions deliver payloads and retain pathless PDF refusals and empty image data$/,
+            /^SEC-08 PDF one-shot removal leaves permanent result and image refusal subscribers alive$/,
+          ],
+          mustPass: [
+            /^SEC-08 PDF once subscription removes itself before a throwing receiver without removing permanent subscribers$/,
+            /^SEC-08 version port preserves exact string replies and rejects malformed replies and invoke failures$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R809",
+          what: "accept malformed app-version replies",
+          file: path.join(SRC, "main-preload.js"),
+          from: '    if (typeof version !== "string") throw new TypeError("Invalid app version response");',
+          to: "",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 version port preserves exact string replies and rejects malformed replies and invoke failures$/,
+          ],
+          mustPass: [
+            /^SEC-08 fixed UI requests dispatch synchronously on exact channels with verbatim content and nullable filenames$/,
+            /^SEC-08 PDF once subscription removes itself before a throwing receiver without removing permanent subscribers$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R810",
+          what: "restore a native file-chooser caller's raw renderer IPC dependency",
+          file: RENDERER,
+          from: "  cancelPendingNavigation('superseded-by-open-dialog');\n  window.folia.openFileDialog();",
+          to: "  cancelPendingNavigation('superseded-by-open-dialog');\n  ipcRenderer.send('open-file-dialog');",
+          suite: "test:packaging",
+          expect: [
+            /^SEC-08 renderer uses all fixed UI request and response ports without raw channel access$/,
+          ],
+          mustPass: [
+            /^SEC-08 renderer consumes the browser document registry without raw document IPC$/,
+            /^SEC-08 document-events\.js is packaged for its classic-script consumers$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R811",
+          what: "stop awaiting owned renderer destruction before the theme terminal transcript",
+          file: THEME_TEST,
+          from: "    await Promise.all(windows.map(win => new Promise(resolve => {",
+          to: "    void Promise.all(windows.map(win => new Promise(resolve => {",
+          suite: "test:packaging",
+          expect: [
+            /^theme harness awaits owned renderer destruction before its terminal transcript$/,
+          ],
+          mustPass: [
+            /^SEC-08 renderer uses all fixed UI request and response ports without raw channel access$/,
+            /^every Electron test suite establishes an isolated userData profile$/,
           ],
           requireMustPassAssertions: true, requireExactFailures: true,
         },
