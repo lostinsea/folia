@@ -482,6 +482,18 @@ function copyDocumentQueryReply(result, fields) {
 }
 
 const api = Object.freeze({
+  confirmLargeRender(request) {
+    if (!request || typeof request !== "object" || Array.isArray(request) ||
+        typeof request.name !== "string" || !Number.isFinite(request.seconds) ||
+        request.seconds < 0) {
+      throw new TypeError("Invalid large render confirmation request");
+    }
+    const result = ipcRenderer.sendSync("confirm-large-render", {
+      name: request.name, seconds: request.seconds,
+    });
+    if (typeof result !== "boolean") throw new TypeError("Invalid large render confirmation response");
+    return result;
+  },
   async getQuitApprovalGeneration() {
     const generation = await ipcRenderer.invoke("quit-approval-generation");
     if (!positiveInteger(generation)) throw new TypeError("Invalid renderer generation response");

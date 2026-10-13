@@ -4306,9 +4306,20 @@ function confirmLargeDocument(content, filePath) {
 // dialog on the main process, where dialogs belong. Sending the estimate
 // rather than the document keeps megabytes off the sync IPC channel.
 ipcMain.on("confirm-large-render", (event, data) => {
-  const name = data && typeof data.name === "string" ? data.name : "This document";
-  const seconds = data && Number.isFinite(data.seconds) ? data.seconds : 0;
-  event.returnValue = askAboutLargeDocument(name, seconds);
+  if (!isApprovalSender(event) ||
+      !data || typeof data !== "object" || Array.isArray(data) ||
+      typeof data.name !== "string" || !Number.isFinite(data.seconds) ||
+      data.seconds < 0) {
+    log("Large render confirmation refused: invalid sender or payload.");
+    event.returnValue = null;
+    return;
+  }
+  try {
+    event.returnValue = askAboutLargeDocument(data.name, data.seconds);
+  } catch (error) {
+    log("Large render confirmation failed:", error);
+    event.returnValue = null;
+  }
 });
 
 function safeSendFileOpen(target, channel, data, rendererGeneration = null) {

@@ -7677,6 +7677,309 @@ async function runDocumentTransportValidation(exec) {
     JSON.stringify(probe));
 }
 
+async function runTabPathCopyScenario(exec, expectedPath) {
+  const ctx = await exec(`(async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    const calls = [];
+    Object.defineProperty(navigator, 'clipboard', { configurable: true,
+      value: { writeText(text) { calls.push(text); return Promise.resolve(); } } });
+    try {
+      const tab = document.querySelector('.tab.active');
+      const rect = tab.getBoundingClientRect();
+      tab.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true,
+        clientX: Math.round(rect.x + rect.width / 2), clientY: Math.round(rect.y + rect.height / 2) }));
+      const menu = document.getElementById('tabContextMenu');
+      const bounds = menu.getBoundingClientRect();
+      document.getElementById('ctxTabCopyPath').click();
+      await Promise.resolve(); await Promise.resolve();
+      return { painted: bounds.width > 0 && bounds.height > 0,
+        onScreen: bounds.left >= 0 && bounds.top >= 0 &&
+          bounds.right <= innerWidth && bounds.bottom <= innerHeight,
+        copied: calls[0], calls: calls.length, dismissed: !menu.classList.contains('visible') };
+    } finally {
+      if (descriptor) Object.defineProperty(navigator, 'clipboard', descriptor);
+      else delete navigator.clipboard;
+    }
+  })()`);
+  check("right-clicking a tab opens its menu on screen",
+    ctx.painted && ctx.onScreen, JSON.stringify(ctx));
+  check("the tab menu copies that tab's full path and closes itself",
+    ctx.copied === expectedPath && ctx.calls === 1 && ctx.dismissed, JSON.stringify(ctx));
+}
+
+async function runLargeRenderBoundary(win, isolatedWindow) {
+  const modalCalls = [];
+  let answer = 0, fail = false;
+  const restore = replaceMethod(dialog, "showMessageBoxSync", (_owner, options) => {
+    modalCalls.push(options.message);
+    if (fail) throw new Error("controlled large render modal failure");
+    return answer;
+  });
+  try {
+    const request = { name: "Exact guard name", seconds: 12 };
+    const call = code => win.webContents.executeJavaScript(code, true);
+    const approved = await call(`window.folia.confirmLargeRender(${JSON.stringify(request)})`);
+    answer = 1;
+    const canceled = await call(`window.folia.confirmLargeRender(${JSON.stringify(request)})`);
+    check("SEC-08 real large-render bridge preserves native approval cancellation and exact modal metadata",
+      approved === true && canceled === false && modalCalls.length === 2 &&
+        modalCalls.every(message => message === '"Exact guard name" may take about 12 seconds to display.'),
+      JSON.stringify({ approved, canceled, modalCalls }));
+    const before = modalCalls.length;
+    const foreign = await isolatedWindow.webContents.executeJavaScript(`(() => {
+      try { window.folia.confirmLargeRender(${JSON.stringify(request)}); return false; }
+      catch (error) { return error.message.includes('Invalid large render confirmation response'); }
+    })()`, true);
+    check("SEC-08 an actual isolated foreign window cannot open the main large-render modal",
+      foreign && modalCalls.length === before, JSON.stringify({ foreign, modalCalls }));
+    const beforeMalformed = modalCalls.length;
+    const handler = ipcMain.listeners("confirm-large-render")[0];
+    const replies = [];
+    for (const payload of [null, [], { name: 1, seconds: 1 },
+      { name: "invalid", seconds: -1 }, { name: "invalid", seconds: Infinity }]) {
+      const event = { sender: win.webContents, senderFrame: win.webContents.mainFrame };
+      Object.defineProperty(event, "returnValue", { set(value) { replies.push(value); } });
+      handler(event, payload);
+    }
+    check("SEC-08 Main refuses malformed large-render envelopes before modal work and replies exactly once",
+      replies.length === 5 && replies.every(value => value === null) &&
+        modalCalls.length === beforeMalformed, JSON.stringify({ replies, modalCalls }));
+    const beforeFailure = modalCalls.length;
+    fail = true;
+    const refused = await call(`(() => {
+      try { window.folia.confirmLargeRender(${JSON.stringify(request)}); return false; }
+      catch (error) { return error.message.includes('Invalid large render confirmation response'); }
+    })()`);
+    check("SEC-08 native modal failure remains protocol refusal rather than cached acceptance or cancellation",
+      refused && modalCalls.length === beforeFailure + 1, JSON.stringify({ refused, modalCalls }));
+  } finally { restore(); }
+}
+
+async function runLargeRenderTransportValidation(exec) {
+  const probe = await exec(`(() => {
+    const ipc = window.ipcRenderer, original = ipc.sendSync;
+    const calls = []; let reply = true, fail = false;
+    ipc.sendSync = function(channel, payload) {
+      if (channel !== 'confirm-large-render') return original.apply(this, arguments);
+      if (fail) throw new Error('controlled large render send failure');
+      calls.push({ channel, payload }); return reply;
+    };
+    try {
+      const approved = window.folia.confirmLargeRender({ name: '', seconds: 0, ignored: 1 });
+      reply = false;
+      const canceled = window.folia.confirmLargeRender({ name: 'guard', seconds: 12 });
+      const count = calls.length;
+      const malformed = [null, [], 1, {}, { name: 1, seconds: 0 },
+        { name: 'guard', seconds: -1 }, { name: 'guard', seconds: Infinity },
+        { name: 'guard', seconds: '12' }].map(request => {
+          try { window.folia.confirmLargeRender(request); return false; }
+          catch (error) { return error instanceof TypeError; }
+        });
+      const rejectedBeforeIpc = calls.length === count;
+      const badReplies = [null, undefined, 0, 'false'].map(value => {
+        reply = value;
+        try { window.folia.confirmLargeRender({ name: 'guard', seconds: 1 }); return false; }
+        catch (error) { return error.message.includes('Invalid large render confirmation response'); }
+      });
+      fail = true;
+      let sendFailure = false;
+      try { window.folia.confirmLargeRender({ name: 'guard', seconds: 1 }); }
+      catch (error) { sendFailure = error.message === 'controlled large render send failure'; }
+      return { approved, canceled, calls: calls.slice(0, count), malformed,
+        rejectedBeforeIpc, badReplies, sendFailure };
+    } finally { ipc.sendSync = original; }
+  })()`);
+  check("SEC-08 fixed large-render confirmation validates and copies only scalar metadata synchronously",
+    probe.approved === true && probe.canceled === false && probe.calls.length === 2 &&
+      probe.calls.every(call => call.channel === "confirm-large-render" &&
+        Object.keys(call.payload).sort().join(",") === "name,seconds") &&
+      probe.calls[0].payload.name === "" && probe.calls[0].payload.seconds === 0 &&
+      probe.malformed.length === 8 && probe.malformed.every(Boolean) && probe.rejectedBeforeIpc,
+    JSON.stringify(probe));
+  check("SEC-08 large-render confirmation rejects nonboolean replies and surfaces same-stack send failure",
+    probe.badReplies.length === 4 && probe.badReplies.every(Boolean) && probe.sendFailure,
+    JSON.stringify(probe));
+}
+
+async function runBrowserClipboardConsumers(exec, sentinel) {
+  await sentinel.mute("controlled browser clipboard refusal");
+  let probe;
+  try {
+    probe = await exec(`(async () => {
+      const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+      const originalNotify = window.showNotification;
+      const calls = [], notices = [];
+      let release = null, fail = false;
+      Object.defineProperty(navigator, 'clipboard', { configurable: true,
+        value: { writeText(text) {
+          calls.push(text);
+          if (fail) return Promise.reject(new Error('controlled browser clipboard refusal'));
+          return new Promise(resolve => { release = resolve; });
+        } } });
+      window.showNotification = (...args) => { notices.push(args); };
+      const host = document.createElement('div');
+      const pre = document.createElement('pre'), code = document.createElement('code');
+      const text = 'Exact CR\\r\\nUnicode:\\u03bb\\ud83d\\ude00\\u0000';
+      code.textContent = text; pre.append(code); host.append(pre);
+      const image = document.createElement('img');
+      image.src = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5e0AAAAASUVORK5CYII=';
+      host.append(image); document.getElementById('viewer').append(host);
+      const settle = async () => {
+        release(); release = null;
+        await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+      };
+      try {
+        const context = target => target.dispatchEvent(new MouseEvent('contextmenu',
+          { bubbles: true, cancelable: true, clientX: 20, clientY: 20 }));
+        context(code); document.getElementById('ctxCopyCode').click();
+        const sameStack = calls.length === 1 && calls[0] === text;
+        const noEarlySuccess = notices.length === 0;
+        code.textContent = 'changed after dispatch';
+        await settle();
+        const codeSuccess = notices.length === 1 && notices[0][0] === i18n('notif.copied');
+        context(image); document.getElementById('ctxCopyImageSrc').click();
+        const imageText = image.src;
+        await settle();
+        const path = 'C:\\\\Clipboard Space\\\\MixedCase.md';
+        showRecentContextMenu(20, 20, path);
+        document.getElementById('ctxCopyPath').click();
+        const recentCleared = recentContextFilePath === null;
+        await settle();
+        code.textContent = '';
+        context(code); document.getElementById('ctxCopyCode').click();
+        await settle();
+        addCodeBlockCopyButtons();
+        const button = pre.parentNode.querySelector('.code-copy-btn');
+        code.textContent = text;
+        button.click();
+        const noEarlyIcon = !button.classList.contains('copied');
+        await settle();
+        const successIcon = button.classList.contains('copied');
+        button.classList.remove('copied');
+        fail = true;
+        const beforeFailure = notices.length;
+        button.click();
+        await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+        const failedButton = !button.classList.contains('copied') &&
+          notices.length === beforeFailure + 1 &&
+          notices.at(-1)[0] === i18n('notif.copyFailed');
+        context(code);
+        document.getElementById('ctxCopyCode').click();
+        await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+        const failedMenu = notices.at(-1)[0] === i18n('notif.copyFailed') &&
+          notices.length === beforeFailure + 2;
+        return { calls, sameStack, noEarlySuccess, codeSuccess, imageText, path,
+          recentCleared, noEarlyIcon, successIcon, failedButton, failedMenu };
+      } finally {
+        host.remove(); hideContextMenu(); hideRecentContextMenu();
+        window.showNotification = originalNotify;
+        if (descriptor) Object.defineProperty(navigator, 'clipboard', descriptor);
+        else delete navigator.clipboard;
+      }
+    })()`);
+    await sentinel.drain();
+    check("SEC-08 actual browser clipboard menus preserve verbatim code image and path snapshots before clearing state",
+      probe.sameStack && probe.calls[0] === "Exact CR\r\nUnicode:\u03bb\ud83d\ude00\u0000" &&
+        probe.calls[1] === probe.imageText && probe.calls[2] === probe.path &&
+        probe.calls[3] === "" && probe.recentCleared, JSON.stringify(probe));
+    check("SEC-08 clipboard menu and code-button success waits for the write to resolve",
+      probe.noEarlySuccess && probe.codeSuccess && probe.noEarlyIcon && probe.successIcon,
+      JSON.stringify(probe));
+    check("SEC-08 clipboard failure is observable without false success feedback",
+      probe.failedButton && probe.failedMenu &&
+        sentinel.currentMute().suppressed.some(hit =>
+          hit.kind === "console-error" && hit.detail.includes("controlled browser clipboard refusal")),
+      JSON.stringify(probe));
+  } finally { await sentinel.unmute(); }
+}
+
+async function runFixedLargeTabGuard(exec, dir, sentinel) {
+  const smallPath = path.join(dir, "bridge-guard-small.md");
+  const bigPath = path.join(dir, "bridge-guard-big.md");
+  const silentPath = path.join(dir, "bridge-guard-silent.md");
+  const smallText = "# Bridge small\n\nBRIDGE_SMALL_GUARD\n";
+  const bigText = "|".repeat(260000) + "\n";
+  write(smallPath, smallText); write(bigPath, bigText); write(silentPath, bigText);
+  await sentinel.mute("controlled large-render transport refusal");
+  try {
+    const probe = await exec(`(async () => {
+      const tabs = window.CustomTabs, ipc = window.ipcRenderer;
+      const originalSend = ipc.sendSync, originalId = tabs.getActiveTabId();
+      let asked = 0, reply = false;
+      ipc.sendSync = function(channel) {
+        if (channel === 'confirm-large-render') { asked++; return reply; }
+        return originalSend.apply(this, arguments);
+      };
+      const smallText = ${JSON.stringify(smallText)}, bigText = '|'.repeat(260000) + '\\n';
+      const out = { smallIsLarge: window.FoliaFileHelpers.isLargeDocument(smallText).large,
+        bigIsLarge: window.FoliaFileHelpers.isLargeDocument(bigText).large };
+      const created = [];
+      try {
+        const small = tabs.createTab(${JSON.stringify(smallPath)}, smallText);
+        created.push(small);
+        for (let i = 0; i < 100 &&
+          !document.getElementById('viewer').textContent.includes('BRIDGE_SMALL_GUARD'); i++)
+          await new Promise(resolve => setTimeout(resolve, 50));
+        out.smallPainted = document.getElementById('viewer').textContent.includes('BRIDGE_SMALL_GUARD');
+        out.smallAsked = asked;
+        const big = tabs.createTab(${JSON.stringify(bigPath)}, bigText); created.push(big);
+        out.createAsked = asked - out.smallAsked;
+        out.createCanceled = tabs.getActiveTabId() === small.id;
+        let mark = asked;
+        reply = null;
+        await tabs.switchToTab(big.id);
+        out.refusalAsked = asked - mark; out.refusalProceeded = tabs.getActiveTabId() === big.id;
+        await tabs.switchToTab(small.id);
+        mark = asked; reply = false;
+        await tabs.switchToTab(big.id);
+        out.retryAsked = asked - mark;
+        out.retryCanceled = tabs.getActiveTabId() === small.id &&
+          document.getElementById('viewer').textContent.includes('BRIDGE_SMALL_GUARD');
+        mark = asked; reply = true;
+        await tabs.switchToTab(big.id);
+        out.acceptAsked = asked - mark; out.accepted = tabs.getActiveTabId() === big.id;
+        mark = asked;
+        await tabs.switchToTab(small.id); await tabs.switchToTab(big.id);
+        out.revisitAsked = asked - mark;
+        reply = false;
+        const silent = tabs.createTab(${JSON.stringify(silentPath)}, bigText); created.push(silent);
+        mark = asked;
+        await tabs.switchToTab(silent.id, { silent: true });
+        out.silentAsked = asked - mark; out.silentActive = tabs.getActiveTabId() === silent.id;
+        await tabs.switchToTab(small.id); await tabs.switchToTab(silent.id);
+        out.silentRevisitAsked = asked - mark;
+        return out;
+      } finally {
+        try {
+          for (const tab of created.reverse()) {
+            tab.hasUnsavedChanges = false;
+            await tabs.closeTab(tab.id);
+          }
+          if (tabs.getTabs().some(tab => tab.id === originalId)) await tabs.switchToTab(originalId);
+        } finally { ipc.sendSync = originalSend; }
+      }
+    })()`);
+    await sentinel.drain();
+    check("SEC-08 fixed confirmation scenario proves an expensive sample painted ordinary control and zero small-path IPC",
+      probe.bigIsLarge === true && probe.smallIsLarge === false &&
+        probe.smallPainted && probe.smallAsked === 0, JSON.stringify(probe));
+    check("SEC-08 actual tab guard preserves cancellation approval and accepted-revisit fast paths",
+      probe.createAsked === 1 && probe.createCanceled && probe.retryAsked === 1 &&
+        probe.retryCanceled && probe.acceptAsked === 1 && probe.accepted &&
+        probe.revisitAsked === 0, JSON.stringify(probe));
+    check("SEC-08 protocol refusal proceeds observably but never caches large-tab acceptance",
+      probe.refusalAsked === 1 && probe.refusalProceeded &&
+        probe.retryAsked === 1 && probe.retryCanceled &&
+        sentinel.currentMute().suppressed.some(hit =>
+          hit.kind === "console-error" &&
+          hit.detail.includes("Invalid large render confirmation response")),
+      JSON.stringify(probe));
+    check("SEC-08 silent large-tab restore avoids confirmation IPC and retains accepted-revisit behavior",
+      probe.silentAsked === 0 && probe.silentActive && probe.silentRevisitAsked === 0,
+      JSON.stringify(probe));
+  } finally { await sentinel.unmute(); }
+}
+
 async function runShutdownResponseCacheScenario(win, exec) {
   const setup = await exec(`(() => {
     const tab = window.CustomTabs.getActiveTab() || null;
@@ -10790,6 +11093,7 @@ async function run(win) {
     "onQuitApprovalVerification", "onQuitApprovalThaw", "acknowledgeFileDeletion",
     "onFileDeleted", "onFileNotFound", "onExternalFileOpenRequest", "onError", "onUpdateStatus",
     "getNewlineAlignmentDiagnosticsEnabled", "reportNewlineAlignmentWitness",
+    "confirmLargeRender",
   ].sort().join(",");
   check(
     "SEC-08 main launch retains production owned-read and only its explicitly marked PDF test signal",
@@ -10867,6 +11171,7 @@ async function run(win) {
     await runDocumentEventBoundary(isolatedBridgeWindow);
     await runUiEventBoundary(isolatedBridgeWindow);
     await runControlEventBoundary(isolatedBridgeWindow);
+    await runLargeRenderBoundary(win, isolatedBridgeWindow);
     check(
       "SEC-08 session test preload does not expose the PDF signal to an unmarked window or subframe",
       isolatedBoundary.pdfRestore === "undefined" &&
@@ -11209,6 +11514,7 @@ async function run(win) {
   await runDocumentTransportValidation(exec);
   await runUiTransportValidation(exec);
   await runControlTransportValidation(exec);
+  await runLargeRenderTransportValidation(exec);
   await runPdfOnceValidation(exec);
   await runPopupPdfDispatchFailure(exec, sentinel);
   const bridgeValidation = await exec(`
@@ -11758,7 +12064,12 @@ async function run(win) {
   await runDocumentControlCloseJourney(exec);
   await runReloadTransportFailure(exec, sentinel);
   if (ownedReadFocusedHarness || dialogExtraFocusedHarness) {
-    if (ownedReadFocusedHarness) await runShutdownResponseCacheScenario(win, exec);
+    if (ownedReadFocusedHarness) {
+      await runShutdownResponseCacheScenario(win, exec);
+      await runTabPathCopyScenario(exec, await exec("window.currentFilePath"));
+      await runBrowserClipboardConsumers(exec, sentinel);
+      await runFixedLargeTabGuard(exec, dir, sentinel);
+    }
     if (dialogExtraFocusedHarness) {
       await clearFixtureTabs("dialog bridge preflight");
       await runDialogBatchScenarios(exec, sentinel, closeFixtureTabsSource, clearFixtureTabs);
@@ -15176,34 +15487,7 @@ async function run(win) {
     // --- the tab right-click menu ---
     // This replaces the deleted click-to-copy file-path element, so the path is
     // still obtainable now that the location bar is gone.
-    const ctxPath = layoutFiles[layoutFiles.length - 1];
-    const ctx = await exec(`(() => {
-      const t = document.querySelector('.tab.active');
-      const r = t.getBoundingClientRect();
-      t.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true,
-        clientX: Math.round(r.x + r.width / 2), clientY: Math.round(r.y + r.height / 2) }));
-      const m = document.getElementById('tabContextMenu');
-      const mr = m.getBoundingClientRect();
-      require('electron').clipboard.writeText('CLIPBOARD_NOT_WRITTEN');
-      document.getElementById('ctxTabCopyPath').click();
-      return {
-        painted: mr.width > 0 && mr.height > 0,
-        onScreen: mr.left >= 0 && mr.top >= 0 &&
-                  mr.right <= window.innerWidth && mr.bottom <= window.innerHeight,
-        copied: require('electron').clipboard.readText(),
-        dismissed: !m.classList.contains('visible'),
-      };
-    })()`);
-    check(
-      "right-clicking a tab opens its menu on screen",
-      ctx.painted === true && ctx.onScreen === true,
-      JSON.stringify(ctx),
-    );
-    check(
-      "the tab menu copies that tab's full path and closes itself",
-      ctx.copied === ctxPath && ctx.dismissed === true,
-      JSON.stringify(ctx),
-    );
+    await runTabPathCopyScenario(exec, layoutFiles[layoutFiles.length - 1]);
 
     await clearFixtureTabs("layout teardown");
   }

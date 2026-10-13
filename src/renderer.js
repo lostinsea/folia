@@ -1,7 +1,7 @@
 // ============================================
 // IMPORTS
 // ============================================
-const { ipcRenderer, shell, clipboard } = require('electron');
+const { ipcRenderer, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
@@ -7408,6 +7408,18 @@ function initImageZoom() {
   });
 }
 
+async function copyTextToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (error) {
+    console.error('Failed to copy:', error);
+    showNotification(i18n('notif.copyFailed'), 2000);
+    return false;
+  }
+}
+window.copyTextToClipboard = copyTextToClipboard;
+
 // Add copy buttons to code blocks
 function addCodeBlockCopyButtons() {
   const codeBlocks = viewer.querySelectorAll('.markdown-body pre, #viewer pre');
@@ -7444,9 +7456,7 @@ function addCodeBlockCopyButtons() {
       // Get the raw text content (without formatting)
       const textContent = codeElement.textContent;
 
-      try {
-        await navigator.clipboard.writeText(textContent);
-
+      if (await copyTextToClipboard(textContent)) {
         // Show success feedback
         const copyIcon = copyBtn.querySelector('.copy-icon');
         const checkIcon = copyBtn.querySelector('.check-icon');
@@ -7460,9 +7470,6 @@ function addCodeBlockCopyButtons() {
           checkIcon.style.display = 'none';
           copyBtn.classList.remove('copied');
         }, 2000);
-      } catch (err) {
-        console.error('Failed to copy:', err);
-        showNotification(i18n('notif.copyFailed'), 2000);
       }
     });
 
@@ -11286,25 +11293,25 @@ const ctxCopyCode = document.getElementById('ctxCopyCode');
 const ctxCopyImageSrc = document.getElementById('ctxCopyImageSrc');
 
 // Copy Image Source (base64 data URL)
-ctxCopyImageSrc && ctxCopyImageSrc.addEventListener('click', () => {
+ctxCopyImageSrc && ctxCopyImageSrc.addEventListener('click', async () => {
+  const target = rightClickTarget;
+  const imgEl = target && (target.tagName === 'IMG' ? target : target.closest?.('img'));
+  const text = imgEl?.src;
   hideContextMenu();
-  if (!rightClickTarget) return;
-  const imgEl = rightClickTarget.tagName === 'IMG' ? rightClickTarget : rightClickTarget.closest?.('img');
-  if (imgEl && imgEl.src) {
-    clipboard.writeText(imgEl.src);
+  if (text && await copyTextToClipboard(text)) {
     showNotification(i18n('notif.copied'), 1500);
   }
 });
 
 // Copy Code block content
-ctxCopyCode && ctxCopyCode.addEventListener('click', () => {
+ctxCopyCode && ctxCopyCode.addEventListener('click', async () => {
+  const target = rightClickTarget;
+  const codeEl = target && (target.closest('pre')?.querySelector('code') ||
+                 target.closest('code') ||
+                 (target.tagName === 'CODE' ? target : null));
+  const text = codeEl?.textContent;
   hideContextMenu();
-  if (!rightClickTarget) return;
-  const codeEl = rightClickTarget.closest('pre')?.querySelector('code') ||
-                 rightClickTarget.closest('code') ||
-                 (rightClickTarget.tagName === 'CODE' ? rightClickTarget : null);
-  if (codeEl) {
-    clipboard.writeText(codeEl.textContent);
+  if (codeEl && await copyTextToClipboard(text)) {
     showNotification(i18n('notif.copied'), 1500);
   }
 });
@@ -12626,12 +12633,12 @@ ctxRemoveRecent.addEventListener('click', () => {
 });
 
 // Copy file path
-ctxCopyPath.addEventListener('click', () => {
-  if (recentContextFilePath) {
-    clipboard.writeText(recentContextFilePath);
+ctxCopyPath.addEventListener('click', async () => {
+  const text = recentContextFilePath;
+  hideRecentContextMenu();
+  if (text && await copyTextToClipboard(text)) {
     showNotification(i18n('notif.pathCopied'), 1500);
   }
-  hideRecentContextMenu();
 });
 
 // ============================================

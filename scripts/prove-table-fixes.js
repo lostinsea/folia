@@ -6880,16 +6880,17 @@ const REVERTS = [
   // implies a proof it does not have; the assertion stays as a contract.
   {
     id: "R247",
-    suite: "test:tabs",
+    suite: "test:sec08-owned-read-evidence",
     // The tab right-click menu is the REPLACEMENT for the deleted
     // click-to-copy file-path element, so without it the document's location
     // is not obtainable from the UI at all.
     what: "stop the tab menu putting the document's path on the clipboard",
     file: TABS,
-    from: "      clipboard.writeText(p);",
-    to: "      /* path not copied */",
-    expect: [/the tab menu copies that tab's full path and closes itself/],
-    mustPass: [/right-clicking a tab opens its menu on screen/],
+    from: "      if (await window.copyTextToClipboard(p) &&",
+    to: "      if (false &&",
+    expect: [/^the tab menu copies that tab's full path and closes itself$/],
+    mustPass: [/^right-clicking a tab opens its menu on screen$/],
+    requireMustPassAssertions: true, requireExactFailures: true,
   },
 
   // --- Scenario 12: batch paths must not interrogate the reader ------------
@@ -19968,6 +19969,119 @@ const REVERTS = [
           mustPass: [
             /^SEC-08 control projection retains malformed correlations and complete nested deletion ownership$/,
             /^SEC-08 control unsubscribe removes only its own listener without suppressing another subscriber$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R819",
+          what: "accept nonboolean large-render replies as cancellation instead of protocol refusal",
+          file: path.join(SRC, "main-preload.js"),
+          from: '    if (typeof result !== "boolean") throw new TypeError("Invalid large render confirmation response");',
+          to: "",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 an actual isolated foreign window cannot open the main large-render modal$/,
+            /^SEC-08 native modal failure remains protocol refusal rather than cached acceptance or cancellation$/,
+            /^SEC-08 large-render confirmation rejects nonboolean replies and surfaces same-stack send failure$/,
+            /^SEC-08 protocol refusal proceeds observably but never caches large-tab acceptance$/,
+          ],
+          mustPass: [
+            /^SEC-08 actual tab guard preserves cancellation approval and accepted-revisit fast paths$/,
+            /^SEC-08 fixed confirmation scenario proves an expensive sample painted ordinary control and zero small-path IPC$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R820",
+          what: "allow an isolated foreign sender to open the main large-render modal",
+          file: MAIN,
+          from: '  if (!isApprovalSender(event) ||\n' +
+            '      !data || typeof data !== "object" || Array.isArray(data) ||\n' +
+            '      typeof data.name !== "string" || !Number.isFinite(data.seconds) ||\n' +
+            '      data.seconds < 0) {',
+          to: '  if (!data || typeof data !== "object" || Array.isArray(data) ||\n' +
+            '      typeof data.name !== "string" || !Number.isFinite(data.seconds) ||\n' +
+            '      data.seconds < 0) {',
+          suite: "test:sec08-owned-read-evidence",
+          expect: [/^SEC-08 an actual isolated foreign window cannot open the main large-render modal$/],
+          mustPass: [
+            /^SEC-08 real large-render bridge preserves native approval cancellation and exact modal metadata$/,
+            /^SEC-08 Main refuses malformed large-render envelopes before modal work and replies exactly once$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R821",
+          what: "let malformed main-window large-render metadata reach the native modal",
+          file: MAIN,
+          from: '  if (!isApprovalSender(event) ||\n' +
+            '      !data || typeof data !== "object" || Array.isArray(data) ||\n' +
+            '      typeof data.name !== "string" || !Number.isFinite(data.seconds) ||\n' +
+            '      data.seconds < 0) {',
+          to: '  if (!isApprovalSender(event)) {',
+          suite: "test:sec08-owned-read-evidence",
+          expect: [/^SEC-08 Main refuses malformed large-render envelopes before modal work and replies exactly once$/],
+          mustPass: [
+            /^SEC-08 real large-render bridge preserves native approval cancellation and exact modal metadata$/,
+            /^SEC-08 an actual isolated foreign window cannot open the main large-render modal$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R822",
+          what: "report clipboard success after an observable browser write refusal",
+          file: RENDERER,
+          from: "    showNotification(i18n('notif.copyFailed'), 2000);\n    return false;",
+          to: "    showNotification(i18n('notif.copyFailed'), 2000);\n    return true;",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [/^SEC-08 clipboard failure is observable without false success feedback$/],
+          mustPass: [
+            /^SEC-08 clipboard menu and code-button success waits for the write to resolve$/,
+            /^SEC-08 actual browser clipboard menus preserve verbatim code image and path snapshots before clearing state$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R823",
+          what: "read the recent-file clipboard target after the menu clears it",
+          file: RENDERER,
+          from: "  const text = recentContextFilePath;\n  hideRecentContextMenu();\n" +
+            "  if (text && await copyTextToClipboard(text)) {",
+          to: "  const text = recentContextFilePath;\n  hideRecentContextMenu();\n" +
+            "  if (text && await copyTextToClipboard(recentContextFilePath)) {",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [/^SEC-08 actual browser clipboard menus preserve verbatim code image and path snapshots before clearing state$/],
+          mustPass: [
+            /^SEC-08 clipboard menu and code-button success waits for the write to resolve$/,
+            /^SEC-08 clipboard failure is observable without false success feedback$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R824",
+          what: "restore raw Electron IPC in the actual tab size-confirmation caller",
+          file: TABS,
+          from: "      proceed = window.folia.confirmLargeRender({",
+          to: '      proceed = tabIpc.sendSync("confirm-large-render", {',
+          suite: "test:packaging",
+          expect: [/^SEC-08 tab size confirmation uses only the fixed production port$/],
+          mustPass: [
+            /^SEC-08 clipboard commands share browser-native writes instead of renderer Electron clipboard$/,
+            /^SEC-08 custom-tabs uses every fixed control and notice port without raw channels$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R825",
+          what: "forward unrelated caller fields through the large-render confirmation port",
+          file: path.join(SRC, "main-preload.js"),
+          from: "      name: request.name, seconds: request.seconds,",
+          to: "      ...request,",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [/^SEC-08 fixed large-render confirmation validates and copies only scalar metadata synchronously$/],
+          mustPass: [
+            /^SEC-08 large-render confirmation rejects nonboolean replies and surfaces same-stack send failure$/,
+            /^SEC-08 real large-render bridge preserves native approval cancellation and exact modal metadata$/,
           ],
           requireMustPassAssertions: true, requireExactFailures: true,
         },

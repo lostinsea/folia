@@ -774,6 +774,20 @@ async function main() {
       onQuitApprovalThaw: 1, getNewlineAlignmentDiagnosticsEnabled: 1,
       reportNewlineAlignmentWitness: 1 },
   };
+  const tabSource = stripJsComments(read("src/custom-tabs.js"));
+  check(
+    "SEC-08 clipboard commands share browser-native writes instead of renderer Electron clipboard",
+    rendererSource.includes("window.copyTextToClipboard = copyTextToClipboard;") &&
+      (rendererSource.match(/await copyTextToClipboard\(/g) || []).length === 4 &&
+      tabSource.includes("await window.copyTextToClipboard(p)") &&
+      !/(?:^|[^\w.])clipboard\.writeText\(/.test(rendererSource + tabSource) &&
+      !/const\s*\{[^}]*\bclipboard\b[^}]*\}\s*=\s*require\(["']electron["']\)/.test(rendererSource + tabSource),
+  );
+  check(
+    "SEC-08 tab size confirmation uses only the fixed production port",
+    (tabSource.match(/window\.folia\.confirmLargeRender\(/g) || []).length === 1 &&
+      !/ipcRenderer\.sendSync\(\s*["']confirm-large-render["']/.test(tabSource),
+  );
   for (const [consumer, counts] of Object.entries(controlPortCounts)) {
     const source = stripJsComments(read(`src/${consumer}.js`));
     const observed = Object.fromEntries(Object.keys(counts).map(method => [

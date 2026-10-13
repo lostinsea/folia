@@ -595,6 +595,20 @@ Precise passing and retained failed evidence is in `docs/PLANNED-WORK.md`.
 Clipboard/folder/path consumers, provisional authority and production flags
 remain open; these results do not establish measured responsiveness.
 
+**Browser clipboard and fixed size confirmation (2026-10-13).** The actual
+tab/code/image/recent-path copy commands share browser-native clipboard writes,
+capture exact strings before dismissing menus, and report success only after
+resolution. Browser rejection is logged and reported without false success.
+The tab render-cost guard now sends only copied scalar name/seconds through a
+fixed synchronous preload port. Main rejects a foreign sender or malformed
+envelope before opening its modal; cancellation remains false, while protocol
+refusal throws into the existing observable, uncached tab fallback. Ordinary
+nonlarge switching adds no IPC and silent restore retains its acceptance cache.
+Focused controls, individually exact proofs and converged fresh independent
+Sol/Luna implementation feedback are recorded in the roadmap, together with
+the retained later pre-consumer tab-switch/cleanup failure.
+Clipboard stubs do not establish final sandbox feasibility or responsiveness.
+
 The **production main window still has Node enabled and isolation disabled**.
 Preparation, commit, completion and abandonment of disk-adoption capabilities
 now use fixed copied/validated preload methods; main's actual authority,

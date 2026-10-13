@@ -495,6 +495,37 @@ Clipboard and large-render confirmation are the next bounded browser
 transition; folder/history/physical metadata, final authority gates and
 production flags remain subsequent, with responsiveness still unqualified.
 
+**Clipboard and large-render browser transition — IMPLEMENTED / PROVEN,
+review converged; unintegrated.**
+Independent Sol/Luna design feedback agrees on a shared browser-native
+clipboard helper and a fixed synchronous confirmation method, without new
+clipboard IPC or work on the ordinary nonlarge path. Capture exact strings
+before menu state clears, preserve existing success feedback only after the
+write resolves, and report failures. Main must validate sender/envelope before
+the modal and reply once: cancellation stays `false`, transport refusal is
+nonboolean and reaches the existing uncached tab fallback. Sol specifically
+identified the immediate synchronous reply setter; no provisional reply is
+assigned before the modal. Actual code-button/image/code/recent/tab commands
+now use browser clipboard writes; exact snapshots, empty code, deferred
+success and observable refusal run without changing the system clipboard.
+The real owner/isolated-foreign confirmation boundary, scalar validation and
+actual tab cancellation/refusal/retry/acceptance/silent paths pass 91/91
+(`browser-ui-owned-r2.log`); source packaging is 378/0
+(`browser-ui-packaging-r1.log`). R247 now shares its original scenario with
+the focused route; R247 and R819-R825 are individually exact PROVEN in
+`browser-ui-exact-proofs-r1.log`, with source hashes restored exactly.
+Both fresh independent Sol/Luna implementation reviews found no significant
+issues; no review disagreement remains. The later restored-source r3 run is
+red (28/30): the existing Alpha tab switch timed out before the new consumer
+scenarios, and cleanup reported EPERM. Its pending-Promise/readiness diagnostics
+are retained in `browser-ui-owned-r3.log`; no cause, environment attribution
+or product fix is asserted. Earlier passing and exact proof evidence is not
+rewritten as a final green run. Retain the
+earlier R247/R823 anchor failures as failures, not passing sweeps. Mocked
+clipboard evidence is not actual final sandbox clipboard feasibility.
+Folder/history/physical metadata, production flags and actual isolated
+responsiveness remain subsequent gates.
+
 **Browser primitive transition — IMPLEMENTED / PROVEN, unintegrated.** Removed
 renderer Node crypto and Buffer dependencies using native Web Crypto/TextEncoder for the existing
 attestation and an allocation-free shared UTF-8 byte counter for explicitly

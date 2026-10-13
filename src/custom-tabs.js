@@ -15,7 +15,7 @@
 
   // Keep the per-tab clipboard local instead of borrowing renderer.js's scope.
   // The menu helpers come from the preceding classic script, not a Node require.
-  const { clipboard, ipcRenderer: tabIpc } = require("electron");
+  const { ipcRenderer: tabIpc } = require("electron");
   if (!window.FoliaDocumentEvents) {
     throw new Error("FoliaDocumentEvents must load before custom-tabs.js");
   }
@@ -142,12 +142,12 @@
   }
 
   ctxTabCopyPath &&
-    ctxTabCopyPath.addEventListener("click", () => {
+    ctxTabCopyPath.addEventListener("click", async () => {
       const p = tabContextPath;
       hideTabContextMenu();
       if (!p) return;
-      clipboard.writeText(p);
-      if (typeof window.showNotification === "function") {
+      if (await window.copyTextToClipboard(p) &&
+          typeof window.showNotification === "function") {
         window.showNotification(
           typeof window.i18n === "function"
             ? window.i18n("notif.pathCopied")
@@ -2490,7 +2490,7 @@
 
     let proceed = true;
     try {
-      proceed = window.ipcRenderer.sendSync("confirm-large-render", {
+      proceed = window.folia.confirmLargeRender({
         name: tab.filename,
         seconds: seconds,
       });
