@@ -549,6 +549,62 @@ remaining browser privileged consumers and provisional path authority with
 fixed main-owned operations, preserving restore/basic Save and unchanged-tab
 fast paths. Node-off/context-isolation/sandbox and live-grant foreign-sender
 controls follow the production ports, not a test-only Node facade.
+Approved history/recent/native-fallback opens and tab/recent folder reveal are
+**IMPLEMENTED / PROVEN, unintegrated**. They reuse Main's approved-entry/live-native
+permission and its existing failure correlation; browser paths are selectors,
+never new filesystem authority. Preserve same-stack transport, precise
+case-preserving logical targets, existing unsaved guards and relative native
+spellings. Actual first-time trusted link/drop capture already exists and is
+not duplicated. Unapproved stale recents must be refused visibly and can be
+opened through the native chooser, not imported as blanket new permission.
+Independent Sol/Luna design feedback agrees on lexical exact-path lookup,
+same-stack ports, existing channels and dispatch/correlation cleanup. Both
+identified missing private provenance on admission-only reopens; Sol additionally
+identified the asynchronous reissuance scope fence, and Luna the invalid
+correlation/visible-error distinction. Those corrections are implementation
+requirements, not expanded scope. Actual consumer implementation is frozen for
+fresh independent implementation review and exact proofs. Focused consumers
+pass 105/105 (`approved-request-owned-r3.log`); the actual reload scope fence
+holds a successful old-page body read, obtains a genuinely bound new-page
+admission, then proves the old read issues nothing into the replacement scope.
+Private startup/migration passes 57/57 (`approved-request-private-r1.log`),
+including native admission-only reopen and retirement with a corrupt manifest.
+Both logs are in `.context-viewport-evidence`. The initial 71/72 failure came
+from a legacy close fixture opening a never-approved path; it now uses the real
+native chooser and refuses to proceed without a painted admitted document.
+First-round Sol found an undelivered result admission retaining permission
+after the native tab closed with corrupt history; Luna found no implementation
+issue. Sol's finding was accepted. Both browser and native-chooser failed sends
+now discard only their newly issued reference, retaining durable history and
+the existing live tab. Private corrected evidence is 61/61
+(`approved-request-private-r3.log`), including both real refused deliveries.
+R827-R831 proved exactly on the first frozen bytes; R826 was UNUSABLE after
+the retained earlier Alpha-switch timeout, before its scenario. All source
+hashes restored. The same request actors now have a narrow existing-suite
+selector, 21/21 (`approved-request-narrow-r2.log`); their full-route 105/105
+evidence remains separate, not waived or replaced with a passing label.
+R826-R832 are individually exact PROVEN on the final controls in
+`approved-request-final-exact-proofs-r5.log`, with source restoration drift zero.
+The post-cleanup scope oracle observes issuance as well as retained admissions,
+without reading secret values; otherwise cleanup could hide temporary reissuance.
+The earlier r2 campaign's R828 WRONG-GUARD is retained: a version-query reply
+was not an event-delivery fence. The bounded wait now awaits the exact invalid
+correlation error, not an unrelated notification count. Sol identified that
+predicate distinction; Luna initially accepted the count-based wait.
+Both fresh correction reviews accepted product bytes and the final exact-error
+test predicate with no new blockers or remaining disagreement. Nonblocking dedicated post-modal
+replacement and in-flight admission-revocation controls remain outside this
+bounded actor set; no claim that those scenarios were individually proven.
+The first anchor audit found R831's wrong line shape; packaging caught an
+undefined source variable then a CRLF-specific census. Corrected source
+packaging is 380/0 (`approved-request-packaging-r4.log`). The first narrow
+launcher omitted the focused dispatch branch and reached the deferred updater
+campaign (55/56); the corrected route preserves the original focused dispatch
+and 90-second bound. Final narrow positive is 21/21
+(`approved-request-narrow-final-r4.log`), private is 61/61, and source packaging
+380/0 (`approved-request-packaging-final-r5.log`). All failed logs remain retained.
+This does not close the
+subsequent provisional document-owner or renderer physical-metadata routes.
 The capability-protocol unit is IMPLEMENTED / PROVEN, unintegrated: preparation, commit, completion and abandonment
 of existing disk-adoption capabilities to four fixed preload methods. It
 preserves async/sync ordering, nonce/digest/version/owner provenance and

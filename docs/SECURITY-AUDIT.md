@@ -609,6 +609,29 @@ Sol/Luna implementation feedback are recorded in the roadmap, together with
 the retained later pre-consumer tab-switch/cleanup failure.
 Clipboard stubs do not establish final sandbox feasibility or responsiveness.
 
+**Approved browser document selectors (2026-10-13, implemented/proven;
+review converged, unintegrated).**
+History/recent/native-fallback opens and tab/recent folder reveal use fixed
+same-stack preload ports. Both legacy open sinks share Main's lexical,
+case-preserving permission lookup against independent approved history or a
+current native admission; browser recents never grant permission. Unknown
+paths are refused before filesystem or shell access. Private admission
+provenance keeps native reopen available when durable history is corrupt.
+Captured sender/frame/generation/page and permission are rechecked after the
+body read and native confirmation before issuing a result/admission. Actual
+new-page replacement, admission-only reopen/retirement, foreign approved-path
+refusal and navigation failure controls are green in the focused/private logs.
+Sol's first review found undelivered admission lifetime retaining permission
+after close; Luna did not identify it. Failed native/browser result delivery
+now discards its new reference without revoking approved history or the live
+tab, with real refused-delivery controls. R826-R832 are individually exact
+PROVEN (`approved-request-final-exact-proofs-r5.log`) with exact restoration.
+Fresh correction reviews accept product bytes and the exact-error wait, with
+no remaining disagreement. Narrow/private controls are 21/21 and 61/61,
+source packaging 380/0.
+Production security flags and other provisional authority/metadata consumers
+are unchanged; this is not complete renderer isolation or performance evidence.
+
 The **production main window still has Node enabled and isolation disabled**.
 Preparation, commit, completion and abandonment of disk-adoption capabilities
 now use fixed copied/validated preload methods; main's actual authority,

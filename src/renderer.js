@@ -865,6 +865,8 @@ const UI_STRINGS = {
   'notif.fileNotFound': 'File not found: ',
   'notif.pdfExported': 'PDF exported: ',
   'notif.copyFailed': 'Failed to copy to clipboard',
+  'notif.documentOpenFailed': 'The document could not be opened. Retry or use Open to select it.',
+  'notif.folderRevealFailed': 'The containing folder could not be opened. Retry the command.',
   'notif.fileDeleted': 'Warning: The opened file has been deleted from disk',
   'notif.fileReloaded': 'File reloaded successfully',
   'notif.largeDocumentRestored': '"${name}" is large - it may take about ${seconds}s to display',
@@ -1769,14 +1771,26 @@ function requestHistoryNavigation(targetIndex) {
   pendingNavigationRequest = request;
   lastNavigationRequestResult = 'pending';
   updateNavButtons();
-  ipcRenderer.send('open-file-path', {
-    filePath: entry.filePath,
-    openRequest: {
-      token: request.token,
-      path: request.path,
-      targetIndex: request.targetIndex,
-    },
-  });
+  try {
+    window.folia.openApprovedDocument({
+      filePath: entry.filePath,
+      openRequest: {
+        token: request.token,
+        path: request.path,
+        targetIndex: request.targetIndex,
+      },
+    });
+  } catch (error) {
+    console.error('History navigation dispatch failed:', error);
+    if (pendingNavigationRequest === request) {
+      pendingNavigationRequest = null;
+      failedNavigationRequestCount += 1;
+      lastNavigationRequestResult = 'navigation-dispatch-failed';
+      updateNavButtons();
+    }
+    showNotification(i18n('notif.documentOpenFailed'), 5000);
+    return false;
+  }
   return true;
 }
 
@@ -3404,7 +3418,7 @@ viewer.addEventListener('click', (e) => {
         } else if (MARKDOWN_EXTS.has(ext)) {
           // Open the markdown file in this app
           cancelPendingNavigation('superseded-by-document-link');
-          ipcRenderer.send('open-file-path', openPath);
+          requestApprovedDocumentOpen(openPath);
         } else if (resolved.isDirectory) {
           // Opening a folder shows it in the file manager; nothing is executed.
           shell.openPath(openPath);
@@ -3517,7 +3531,7 @@ const DROPPABLE_EXTENSIONS = ['md', 'markdown', 'mdown', 'mkd', 'mkdn', 'mmd', '
 
     if (hasUnsavedWork() && !confirm(i18n('confirm.unsavedOpen'))) return;
     cancelPendingNavigation('superseded-by-drop-open');
-    ipcRenderer.send('open-file-path', filePath);
+    requestApprovedDocumentOpen(filePath);
   });
 
   // A drag that ends outside the window fires no drop, and on some window
@@ -5115,7 +5129,7 @@ function updateFileMenuRecent() {
         }
       }
       cancelPendingNavigation('superseded-by-recent-open');
-      ipcRenderer.send('open-file-path', file.path);
+      requestApprovedDocumentOpen(file.path);
       fileMenu.classList.remove('visible');
     });
 
@@ -7420,6 +7434,25 @@ async function copyTextToClipboard(text) {
 }
 window.copyTextToClipboard = copyTextToClipboard;
 
+function requestApprovedDocumentOpen(filePath) {
+  try {
+    window.folia.openApprovedDocument({ filePath });
+  } catch (error) {
+    console.error('Document open dispatch failed:', error);
+    showNotification(i18n('notif.documentOpenFailed'), 5000);
+  }
+}
+
+function revealApprovedDocumentFolder(filePath) {
+  try {
+    window.folia.revealApprovedDocument({ filePath });
+  } catch (error) {
+    console.error('Folder reveal dispatch failed:', error);
+    showNotification(i18n('notif.folderRevealFailed'), 5000);
+  }
+}
+window.revealApprovedDocumentFolder = revealApprovedDocumentFolder;
+
 // Add copy buttons to code blocks
 function addCodeBlockCopyButtons() {
   const codeBlocks = viewer.querySelectorAll('.markdown-body pre, #viewer pre');
@@ -9078,7 +9111,7 @@ window.folia.onExternalFileOpenRequest(data => {
       })
       .catch(error => showNotification(error.message, 5000));
   } else {
-    ipcRenderer.send('request-open-file', { filePath });
+    requestApprovedDocumentOpen(filePath);
   }
 });
 
@@ -12615,10 +12648,9 @@ document.addEventListener('keydown', (e) => {
 
 // Open containing folder
 ctxOpenFolder.addEventListener('click', () => {
-  if (recentContextFilePath) {
-    ipcRenderer.send('open-folder-in-explorer', recentContextFilePath);
-  }
+  const filePath = recentContextFilePath;
   hideRecentContextMenu();
+  if (filePath) revealApprovedDocumentFolder(filePath);
 });
 
 // Remove from recent files

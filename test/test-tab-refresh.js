@@ -4,7 +4,7 @@
 // Boots the real main.js so every real IPC handler exists, then drives the
 // renderer through the multi-tab refresh scenarios via executeJavaScript.
 // Uses only the Electron already required to run the app - no test framework.
-const { app, BrowserWindow, dialog, ipcMain, autoUpdater: electronAutoUpdater } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, shell, autoUpdater: electronAutoUpdater } = require("electron");
 const { spawnSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
@@ -143,8 +143,9 @@ const newlineFocusedHarness = process.env.F22_NEWLINE_FOCUSED_HARNESS === "1";
 const focusedCommitHarness = process.env.F22_COMMIT_FOCUSED_HARNESS === "1";
 const queueFocusedHarness = process.env.F22_QUEUE_FOCUSED_HARNESS === "1";
 const ownedReadFocusedHarness = process.env.SEC08_OWNED_READ_FOCUSED_HARNESS === "1";
+const approvedRequestFocusedHarness = process.env.SEC08_APPROVED_REQUEST_FOCUSED_HARNESS === "1";
 const dialogExtraFocusedHarness = process.env.SEC08_DIALOG_EXTRA_FOCUSED_HARNESS === "1";
-if ((ownedReadFocusedHarness || dialogExtraFocusedHarness) &&
+if ((ownedReadFocusedHarness || dialogExtraFocusedHarness || approvedRequestFocusedHarness) &&
     !process.argv.includes("--folia-test-preload")) {
   process.argv.push("--folia-test-preload");
 }
@@ -7801,6 +7802,334 @@ async function runLargeRenderTransportValidation(exec) {
     JSON.stringify(probe));
 }
 
+async function runApprovedDocumentTransport(exec) {
+  const probe = await exec(`(() => {
+    const ipc = window.ipcRenderer, original = ipc.send;
+    const calls = []; let fail = false;
+    ipc.send = function(channel, payload) {
+      if (!['open-file-path', 'open-folder-in-explorer'].includes(channel))
+        return original.apply(this, arguments);
+      if (fail) throw new Error('controlled approved document dispatch refusal');
+      calls.push({ channel, payload });
+    };
+    try {
+      const path = '.\\\\relative-native.md';
+      const navigation = { token: 7, path, targetIndex: 0, ignored: true };
+      window.folia.openApprovedDocument({ filePath: path, openRequest: navigation, ignored: true });
+      window.folia.openApprovedDocument({ filePath: path });
+      window.folia.revealApprovedDocument({ filePath: path, ignored: true, openRequest: navigation });
+      const synchronous = calls.length === 3;
+      const invalid = [null, [], 1, {}, { filePath: '' }, { filePath: 'bad\\u0000path' },
+        { filePath: path, openRequest: [] }, { filePath: path, openRequest: { ...navigation, token: 0 } },
+        { filePath: path, openRequest: { ...navigation, path: 1 } },
+        { filePath: path, openRequest: { ...navigation, targetIndex: -1 } }].map(request => {
+          try { window.folia.openApprovedDocument(request); return false; }
+          catch (error) { return error instanceof TypeError; }
+        });
+      const revealInvalid = [null, [], { filePath: 1 }].map(request => {
+        try { window.folia.revealApprovedDocument(request); return false; }
+        catch (error) { return error instanceof TypeError; }
+      });
+      const noInvalidIpc = calls.length === 3;
+      fail = true;
+      const failures = ['openApprovedDocument', 'revealApprovedDocument'].map(method => {
+        try { window.folia[method]({ filePath: path }); return false; }
+        catch (error) { return error.message === 'controlled approved document dispatch refusal'; }
+      });
+      return { calls, synchronous, invalid, revealInvalid, noInvalidIpc, failures };
+    } finally { ipc.send = original; }
+  })()`);
+  check("SEC-08 approved open and reveal ports dispatch synchronously with exact scalar fields and relative native spellings",
+    probe.synchronous && probe.calls.map(call => call.channel).join(",") ===
+      "open-file-path,open-file-path,open-folder-in-explorer" &&
+      Object.keys(probe.calls[0].payload).sort().join(",") === "filePath,openRequest" &&
+      Object.keys(probe.calls[0].payload.openRequest).sort().join(",") === "path,targetIndex,token" &&
+      probe.calls.slice(1).every(call => Object.keys(call.payload).join(",") === "filePath") &&
+      probe.calls.every(call => call.payload.filePath === ".\\relative-native.md"),
+    JSON.stringify(probe));
+  check("SEC-08 approved document ports reject malformed metadata before IPC and preserve same-stack delivery refusal",
+    probe.invalid.length === 10 && probe.invalid.every(Boolean) &&
+      probe.revealInvalid.length === 3 && probe.revealInvalid.every(Boolean) &&
+      probe.noInvalidIpc && probe.failures.length === 2 && probe.failures.every(Boolean),
+    JSON.stringify(probe));
+}
+
+async function runApprovedDocumentBoundary(win, exec) {
+  const source = path.join(dir, "Approved-Request-Cased.md");
+  const unapproved = path.join(dir, "unapproved-request.md");
+  const wrongCase = source.replace("Approved-Request-Cased", "approved-request-cased");
+  const network = "\\\\unapproved-host\\share\\unapproved.md";
+  write(source, "# Approved source\n\nAPPROVED_REQUEST_V1\n");
+  write(unapproved, "# Not admitted\n\nUNAPPROVED_REQUEST\n");
+  const restoreChooser = replaceMethod(dialog, "showOpenDialog", async () => ({
+    canceled: false, filePaths: [source],
+  }));
+  let foreign;
+  const restores = [];
+  try {
+    await exec("window.folia.openFileDialog(); null;");
+    const admitted = await waitForCondition(exec,
+      `window.currentFilePath === ${JSON.stringify(source)} &&
+       document.getElementById('viewer').textContent.includes('APPROVED_REQUEST_V1') &&
+       !!window.CustomTabs.getDocumentDescriptor()?.ref`, 8000);
+    check("SEC-08 approved request boundary starts with a real native reference and independent Main history",
+      admitted && __shutdown.documentSessionState().history.some(entry => entry.filePath === source),
+      JSON.stringify({ admitted, history: __shutdown.documentSessionState().history }));
+    if (!admitted) throw new Error("Approved request boundary was not native-admitted");
+    const denied = new Set([unapproved, wrongCase, network]);
+    const probes = [];
+    for (const method of ["existsSync", "statSync", "open"]) {
+      const original = fs[method];
+      restores.push(replaceMethod(fs, method, function (target) {
+        if (target === source || denied.has(target)) probes.push({ method, target });
+        if (denied.has(target)) {
+          if (method === "existsSync") return false;
+          const error = new Error("Controlled unapproved target probe");
+          if (method === "open") {
+            const callback = arguments[arguments.length - 1];
+            process.nextTick(() => callback(error));
+            return;
+          }
+          throw error;
+        }
+        return original.apply(this, arguments);
+      }));
+    }
+    const originalOpen = fs.promises.open;
+    restores.push(replaceMethod(fs.promises, "open", function (target) {
+      if (target === source || denied.has(target)) probes.push({ method: "descriptor", target });
+      if (denied.has(target)) return Promise.reject(new Error("Controlled unapproved descriptor probe"));
+      return originalOpen.apply(this, arguments);
+    }));
+    const reveals = [];
+    restores.push(replaceMethod(shell, "showItemInFolder", target => { reveals.push(target); }));
+    const relative = path.relative(process.cwd(), source);
+    write(source, "# Approved source changed\n\nAPPROVED_REQUEST_V2\n");
+    await exec(`window.folia.openApprovedDocument({ filePath: ${JSON.stringify(relative)} }); null;`);
+    const reopened = await waitForCondition(exec,
+      `window.currentFilePath === ${JSON.stringify(source)} &&
+       document.getElementById('viewer').textContent.includes('APPROVED_REQUEST_V2') &&
+       !!window.CustomTabs.getDocumentDescriptor()?.ref`, 8000);
+    check("SEC-08 approved relative reopen uses Main's original spelling and the filesystem witness is alive",
+      reopened && probes.some(probe => probe.method === "existsSync" && probe.target === source) &&
+        probes.some(probe => probe.method === "descriptor" && probe.target === source),
+      JSON.stringify({ reopened, probes }));
+    const recentBefore = await exec("localStorage.getItem('recentFiles')");
+    const operationCount = () => probes.filter(probe => probe.method !== "statSync").length;
+    await exec(`(() => {
+      const files = getRecentFiles();
+      files.unshift({ path: ${JSON.stringify(unapproved)}, name: 'unapproved-request.md', timestamp: 1 });
+      localStorage.setItem('recentFiles', JSON.stringify(files));
+      return true;
+    })()`);
+    try {
+      const beforeDenials = operationCount();
+      await exec(`(() => {
+        for (const filePath of ${JSON.stringify([unapproved, wrongCase, network])}) {
+          window.folia.openApprovedDocument({ filePath });
+          window.folia.revealApprovedDocument({ filePath });
+          window.ipcRenderer.send('request-open-file', { filePath });
+        }
+        return true;
+      })()`);
+      await exec("window.folia.getVersion()");
+      const retained = await exec(`getRecentFiles().some(file => file.path === ${JSON.stringify(unapproved)})`);
+      check("SEC-08 unapproved case-distinct and network paths reach neither filesystem nor shell through either open sink",
+        probes.every(probe => !denied.has(probe.target)) &&
+          operationCount() === beforeDenials && reveals.length === 0,
+        JSON.stringify({ beforeDenials, probes, reveals }));
+      check("SEC-08 denied historical recent paths are not removed or promoted to Main approval",
+        retained && !__shutdown.documentSessionState().history.some(entry => entry.filePath === unapproved),
+        JSON.stringify({ retained, history: __shutdown.documentSessionState().history }));
+      const correlation = await exec(`(async () => {
+        const results = [], errors = [];
+        const stop = window.folia.onFileOpenResult(data => results.push(data));
+        const stopErrors = window.folia.onError(message => errors.push(message));
+        const path = ${JSON.stringify(unapproved)};
+        try {
+          window.folia.openApprovedDocument({ filePath: path,
+            openRequest: { token: 440, path, targetIndex: 0 } });
+          window.folia.openApprovedDocument({ filePath: ${JSON.stringify(source)},
+            openRequest: { token: 441, path, targetIndex: 0 } });
+          window.ipcRenderer.send('request-open-file', { filePath: path,
+            openRequest: { token: 0, path, targetIndex: 0 } });
+          await window.folia.getVersion();
+          for (let i = 0; i < 80 && (results.length < 2 ||
+            !errors.some(message => message.includes('invalid navigation correlation'))); i++)
+            await new Promise(resolve => setTimeout(resolve, 25));
+          return { results, errors };
+        } finally { stop(); stopErrors(); }
+      })()`);
+      check("SEC-08 valid denied or mismatched navigation retains exact failure correlation and malformed correlation is visible",
+        correlation.results.length === 2 &&
+          correlation.results.every((result, index) =>
+            result.path === unapproved && result.openRequest.path === unapproved &&
+            result.openRequest.token === 440 + index && result.openRequest.targetIndex === 0 &&
+            result.reason === "approved-open-refused") &&
+          correlation.errors.some(message => message.includes("invalid navigation correlation")),
+        JSON.stringify(correlation));
+    } finally {
+      await exec(recentBefore === null ? "localStorage.removeItem('recentFiles'); null;" :
+        `localStorage.setItem('recentFiles', ${JSON.stringify(recentBefore)}); null;`);
+    }
+    foreign = new BrowserWindow({
+      show: false, webPreferences: {
+        preload: path.join(__dirname, "../src/main-preload.js"),
+        nodeIntegration: false, contextIsolation: true, sandbox: true,
+      },
+    });
+    await foreign.loadURL("data:text/html,<p>Foreign approved path</p>");
+    const beforeForeign = operationCount(), revealBeforeForeign = reveals.length;
+    await foreign.webContents.executeJavaScript(`(async () => {
+      window.folia.openApprovedDocument({ filePath: ${JSON.stringify(source)} });
+      window.folia.revealApprovedDocument({ filePath: ${JSON.stringify(source)} });
+      await window.folia.getVersion();
+    })()`, true);
+    check("SEC-08 actual isolated foreign requests cannot use an owner's genuinely approved path",
+      operationCount() === beforeForeign && reveals.length === revealBeforeForeign,
+      JSON.stringify({ beforeForeign, probes, reveals }));
+    const revealBeforeMenus = reveals.length;
+    await exec(`(() => {
+      const tab = document.querySelector('.tab.active'), rect = tab.getBoundingClientRect();
+      tab.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true,
+        clientX: rect.x + rect.width / 2, clientY: rect.y + rect.height / 2 }));
+      document.getElementById('ctxTabOpenFolder').click();
+      showRecentContextMenu(20, 20, ${JSON.stringify(source)});
+      document.getElementById('ctxOpenFolder').click();
+      return true;
+    })()`);
+    await exec("window.folia.getVersion()");
+    check("SEC-08 actual tab and recent folder commands capture approved targets before clearing their menus",
+      reveals.length === revealBeforeMenus + 2 &&
+        reveals.slice(revealBeforeMenus).every(target => target === source),
+      JSON.stringify({ reveals }));
+  } finally {
+    for (const restore of restores.reverse()) restore();
+    if (foreign && !foreign.isDestroyed()) foreign.destroy();
+    restoreChooser();
+  }
+}
+
+async function runApprovedNavigationDispatch(exec, sentinel) {
+  await sentinel.mute("controlled approved navigation dispatch refusal");
+  try {
+    const probe = await exec(`(() => {
+      const ipc = window.ipcRenderer, originalSend = ipc.send;
+      const saved = { navigationHistory, navigationIndex, pendingNavigationRequest,
+        failedNavigationRequestCount, lastNavigationRequestResult, navigationRequestSequence };
+      let reentrant = false;
+      const newer = Object.freeze({ token: 999999, path: window.currentFilePath,
+        targetIndex: 1, scrollTop: 0 });
+      ipc.send = function(channel) {
+        if (channel !== 'open-file-path') return originalSend.apply(this, arguments);
+        if (reentrant) pendingNavigationRequest = newer;
+        throw new Error('controlled approved navigation dispatch refusal');
+      };
+      try {
+        navigationHistory = [{ filePath: window.currentFilePath, scrollPosition: 0 }];
+        navigationIndex = 0;
+        pendingNavigationRequest = null;
+        const first = requestHistoryNavigation(0);
+        const cleared = first === false && pendingNavigationRequest === null &&
+          failedNavigationRequestCount === saved.failedNavigationRequestCount + 1 &&
+          lastNavigationRequestResult === 'navigation-dispatch-failed';
+        reentrant = true;
+        const second = requestHistoryNavigation(0);
+        return { cleared, newerPreserved: second === false && pendingNavigationRequest === newer &&
+          failedNavigationRequestCount === saved.failedNavigationRequestCount + 1 };
+      } finally {
+        ipc.send = originalSend;
+        ({ navigationHistory, navigationIndex, pendingNavigationRequest,
+          failedNavigationRequestCount, lastNavigationRequestResult, navigationRequestSequence } = saved);
+        updateNavButtons();
+      }
+    })()`);
+    await sentinel.drain();
+    check("SEC-08 actual history send refusal retires its own pending navigation and remains observable",
+      probe.cleared && sentinel.currentMute().suppressed.some(hit =>
+        hit.kind === "console-error" && hit.detail.includes("controlled approved navigation dispatch refusal")),
+      JSON.stringify(probe));
+    check("SEC-08 history delivery failure cannot erase a newer reentrant navigation",
+      probe.newerPreserved, JSON.stringify(probe));
+  } finally { await sentinel.unmute(); }
+}
+
+async function runApprovedOpenScopeFence(win, exec) {
+  const source = await exec("window.currentFilePath");
+  const previousPage = await exec("window.getReloadRequestSession()");
+  const originalOpen = fs.promises.open;
+  // Failed delivery discards a mis-scoped admission; observe issuance too,
+  // without recording its secret values.
+  const crypto = require("crypto"), originalRandom = crypto.randomBytes;
+  let admissionSecrets = 0;
+  const restoreRandom = replaceMethod(crypto, "randomBytes", function (size) {
+    if (size === 32) admissionSecrets++;
+    return originalRandom.apply(this, arguments);
+  });
+  let release = null, claimed = false, closed = false;
+  const restore = replaceMethod(fs.promises, "open", async function (filePath) {
+    const handle = await originalOpen.apply(this, arguments);
+    if (filePath !== source || claimed) return handle;
+    claimed = true;
+    const originalRead = handle.readFile.bind(handle), originalClose = handle.close.bind(handle);
+    handle.readFile = async function () {
+      const content = await originalRead(...arguments);
+      await new Promise(resolve => { release = resolve; });
+      return content;
+    };
+    handle.close = async function () {
+      try { return await originalClose(); }
+      finally { closed = true; }
+    };
+    return handle;
+  });
+  try {
+    await exec(`window.folia.openApprovedDocument({ filePath: ${JSON.stringify(source)} }); null;`);
+    const held = await waitUntil(() => release !== null, 8000);
+    check("SEC-08 approved asynchronous open actually holds a successful old-page body read",
+      held && claimed && !closed, JSON.stringify({ held, claimed, closed, source }));
+    if (!held) throw new Error("Approved open scope fixture did not hold the real body read");
+    let loaded = false;
+    const onLoaded = () => { loaded = true; };
+    win.webContents.once("did-finish-load", onLoaded);
+    win.webContents.reload();
+    const reloadFinished = await waitUntil(() => loaded, 10000);
+    if (!reloadFinished) {
+      win.webContents.removeListener("did-finish-load", onLoaded);
+      throw new Error("Approved open scope fixture did not reload");
+    }
+    const ready = await waitForCondition(exec, `
+      typeof window.getReloadRequestSession === 'function' &&
+      window.getReloadRequestSession() !== ${JSON.stringify(previousPage)} &&
+      window.currentFilePath === ${JSON.stringify(source)} &&
+      document.getElementById('viewer').textContent.includes('APPROVED_REQUEST_V2') &&
+      !!window.CustomTabs.getDocumentDescriptor()?.ref
+    `, 10000);
+    const newPage = await exec("window.getReloadRequestSession()");
+    const before = __shutdown.documentSessionState();
+    const scope = __shutdown.state();
+    const actualOwner = before.owners.find(owner =>
+      owner.pageSession === newPage && owner.documentRef);
+    check("SEC-08 scope replacement reaches a ready new page and a genuinely bound restored admission",
+      ready && newPage !== previousPage && scope.renderer === "ready" &&
+        scope.rendererPageSession === newPage && !!actualOwner && admissionSecrets >= 2,
+      JSON.stringify({ ready, newPage, previousPage, before, scopeGeneration: scope.rendererGeneration }));
+    const secretsBefore = admissionSecrets;
+    release(); release = null;
+    const settled = await waitUntil(() => closed, 8000);
+    await new Promise(resolve => setImmediate(resolve));
+    const after = __shutdown.documentSessionState();
+    check("SEC-08 old-page approved read cannot issue an admission into its replacement scope",
+      settled && ready && after.admissions === before.admissions &&
+        admissionSecrets === secretsBefore,
+      JSON.stringify({ settled, before, after, secretsBefore, admissionSecrets }));
+  } finally {
+    if (release) release();
+    restore();
+    restoreRandom();
+  }
+}
+
 async function runBrowserClipboardConsumers(exec, sentinel) {
   await sentinel.mute("controlled browser clipboard refusal");
   let probe;
@@ -8796,11 +9125,23 @@ async function runDocumentControlCloseJourney(exec) {
     id: window.CustomTabs.getActiveTabId(),
     heading: document.getElementById('viewer').querySelector('h1')?.textContent,
   })`);
-  await exec(`window.ipcRenderer.send('open-file-path', { filePath: ${jsFile} }); null;`);
-  const opened = await waitForCondition(exec, `
-    window.currentFilePath === ${jsFile} &&
-    document.getElementById('viewer').textContent.includes('CONTROL_CLOSE_FIXTURE')
-  `);
+  const restoreChooser = replaceMethod(dialog, "showOpenDialog", async () => ({
+    canceled: false, filePaths: [file],
+  }));
+  let opened;
+  try {
+    await exec(`window.folia.openFileDialog(); null;`);
+    opened = await waitForCondition(exec, `
+      window.currentFilePath === ${jsFile} &&
+      document.getElementById('viewer').textContent.includes('CONTROL_CLOSE_FIXTURE') &&
+      window.CustomTabs.getDocumentDescriptor()?.logicalPath === ${jsFile}
+    `);
+  } finally { restoreChooser(); }
+  if (!opened) {
+    check("SEC-08 document close journey starts with an actual registered clean disk owner",
+      false, "The native-admitted document did not reach the viewer");
+    throw new Error("Document close fixture did not open");
+  }
   const request = await exec(`({
     filePath: ${jsFile},
     ...window.CustomTabs.getActiveDocumentIdentity(${jsFile}, window.getReloadRequestSession()),
@@ -8808,7 +9149,7 @@ async function runDocumentControlCloseJourney(exec) {
   const initial = await exec(`window.folia.queryDocumentDeletionState(${JSON.stringify(request)})`);
   check(
     "SEC-08 document close journey starts with an actual registered clean disk owner",
-    opened && Number.isSafeInteger(request.tabId) &&
+    opened && Number.isSafeInteger(request.tabId) && /^[a-f0-9]{64}$/.test(request.documentRef) &&
       initial.known === true && initial.unresolved === false,
     JSON.stringify({ opened, request, initial }),
   );
@@ -11093,7 +11434,7 @@ async function run(win) {
     "onQuitApprovalVerification", "onQuitApprovalThaw", "acknowledgeFileDeletion",
     "onFileDeleted", "onFileNotFound", "onExternalFileOpenRequest", "onError", "onUpdateStatus",
     "getNewlineAlignmentDiagnosticsEnabled", "reportNewlineAlignmentWitness",
-    "confirmLargeRender",
+    "confirmLargeRender", "openApprovedDocument", "revealApprovedDocument",
   ].sort().join(",");
   check(
     "SEC-08 main launch retains production owned-read and only its explicitly marked PDF test signal",
@@ -11102,6 +11443,20 @@ async function run(win) {
       bridgeExposure.subframePdfRestore === "undefined",
     JSON.stringify(bridgeExposure),
   );
+  if (approvedRequestFocusedHarness) {
+    await runApprovedDocumentTransport(exec);
+    await runApprovedDocumentBoundary(win, exec);
+    await runApprovedNavigationDispatch(exec, sentinel);
+    await runApprovedOpenScopeFence(win, exec);
+    const alive = await proveSentinelAlive(win, sentinel);
+    check("the error sentinel was demonstrably watching both channels",
+      alive.console === true && alive.dom === true, JSON.stringify(alive));
+    const report = await sentinel.stop();
+    consoleAttribution.stop(report);
+    check("nothing rendered a visible error at any point during the suite",
+      report.hits.length === 0, JSON.stringify(report.hits));
+    return;
+  }
   const isolatedBridgeWindow = new BrowserWindow({
     show: false,
     webPreferences: {
@@ -11515,6 +11870,7 @@ async function run(win) {
   await runUiTransportValidation(exec);
   await runControlTransportValidation(exec);
   await runLargeRenderTransportValidation(exec);
+  await runApprovedDocumentTransport(exec);
   await runPdfOnceValidation(exec);
   await runPopupPdfDispatchFailure(exec, sentinel);
   const bridgeValidation = await exec(`
@@ -12069,6 +12425,9 @@ async function run(win) {
       await runTabPathCopyScenario(exec, await exec("window.currentFilePath"));
       await runBrowserClipboardConsumers(exec, sentinel);
       await runFixedLargeTabGuard(exec, dir, sentinel);
+      await runApprovedDocumentBoundary(win, exec);
+      await runApprovedNavigationDispatch(exec, sentinel);
+      await runApprovedOpenScopeFence(win, exec);
     }
     if (dialogExtraFocusedHarness) {
       await clearFixtureTabs("dialog bridge preflight");
@@ -36866,7 +37225,7 @@ app.whenReady().then(async () => {
       process.env.SEC08_ADMISSION_LIFECYCLE_ONLY !== "1"
     ? 120000
     : newlineFocusedHarness || focusedCommitHarness || queueFocusedHarness ||
-      ownedReadFocusedHarness || dialogExtraFocusedHarness
+      ownedReadFocusedHarness || dialogExtraFocusedHarness || approvedRequestFocusedHarness
     ? 90000
     : portableHarness
       ? COMPANION_WATCHDOG_MS.portable
@@ -36981,7 +37340,7 @@ app.whenReady().then(async () => {
     } else if (queueFocusedHarness) {
       await runF22QueueFocusedScenario((code) =>
         win.webContents.executeJavaScript(code, true));
-    } else if (ownedReadFocusedHarness || dialogExtraFocusedHarness) {
+    } else if (ownedReadFocusedHarness || dialogExtraFocusedHarness || approvedRequestFocusedHarness) {
       await run(win);
     } else if (companionSelfcheck) {
       await runCompanionSettlementScenarios();

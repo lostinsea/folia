@@ -788,6 +788,20 @@ async function main() {
     (tabSource.match(/window\.folia\.confirmLargeRender\(/g) || []).length === 1 &&
       !/ipcRenderer\.sendSync\(\s*["']confirm-large-render["']/.test(tabSource),
   );
+  check(
+    "SEC-08 browser open and reveal callers use fixed ports without raw path IPC",
+    (rendererSource.match(/window\.folia\.openApprovedDocument\(/g) || []).length === 2 &&
+      (rendererSource.match(/window\.folia\.revealApprovedDocument\(/g) || []).length === 1 &&
+      !/ipcRenderer\.(?:send|invoke)\(\s*["'](?:open-file-path|request-open-file|open-folder-in-explorer)["']/.test(rendererSource) &&
+      tabSource.includes("window.revealApprovedDocumentFolder(p)") &&
+      !/require\(["']electron["']\)/.test(tabSource),
+  );
+  check(
+    "SEC-08 both compatibility open sinks and folder reveal retain Main's approved-path gate",
+    mainJs.includes('ipcMain.on("open-file-path", requestApprovedBrowserDocument);') &&
+      mainJs.includes('ipcMain.on("request-open-file", requestApprovedBrowserDocument);') &&
+      /const permission = approvedBrowserDocumentPermission\(event, filePath\);\s*shell\.showItemInFolder\(permission\.filePath\);/.test(mainJs),
+  );
   for (const [consumer, counts] of Object.entries(controlPortCounts)) {
     const source = stripJsComments(read(`src/${consumer}.js`));
     const observed = Object.fromEntries(Object.keys(counts).map(method => [

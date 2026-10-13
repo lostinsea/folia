@@ -299,6 +299,27 @@ function copyControlMessage(request, fields) {
   return projectDocumentEventRecord(request, fields);
 }
 
+function copyApprovedDocumentRequest(request, withNavigation = false) {
+  if (!request || typeof request !== "object" || Array.isArray(request) ||
+      !isPath(request.filePath)) {
+    throw new TypeError("Invalid approved document request");
+  }
+  const payload = { filePath: request.filePath };
+  if (withNavigation && request.openRequest != null) {
+    const navigation = request.openRequest;
+    if (typeof navigation !== "object" || Array.isArray(navigation) ||
+        !positiveInteger(navigation.token) || !isPath(navigation.path) ||
+        !Number.isSafeInteger(navigation.targetIndex) || navigation.targetIndex < 0) {
+      throw new TypeError("Invalid approved navigation request");
+    }
+    payload.openRequest = {
+      token: navigation.token, path: navigation.path,
+      targetIndex: navigation.targetIndex,
+    };
+  }
+  return payload;
+}
+
 function copyReloadTransport(request) {
   if (!request || typeof request !== "object" || Array.isArray(request) ||
       !isPath(request.filePath) || !isPath(request.reloadRequestPath) ||
@@ -482,6 +503,12 @@ function copyDocumentQueryReply(result, fields) {
 }
 
 const api = Object.freeze({
+  openApprovedDocument(request) {
+    ipcRenderer.send("open-file-path", copyApprovedDocumentRequest(request, true));
+  },
+  revealApprovedDocument(request) {
+    ipcRenderer.send("open-folder-in-explorer", copyApprovedDocumentRequest(request));
+  },
   confirmLargeRender(request) {
     if (!request || typeof request !== "object" || Array.isArray(request) ||
         typeof request.name !== "string" || !Number.isFinite(request.seconds) ||

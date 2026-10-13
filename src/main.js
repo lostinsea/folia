@@ -2961,7 +2961,7 @@ function issueDocumentAdmission(target, filePath, diskVersion, physical, provena
   documentAdmissions.set(ref, {
     sender: target, frameTreeNodeId: frame.frameTreeNodeId,
     rendererGeneration: approvalRendererGeneration,
-    pageSession: approvalRendererPageSession, descriptor,
+    pageSession: approvalRendererPageSession, descriptor, provenance: entry.provenance,
     snapshotVersion: diskVersion, tabId: null, documentGeneration: null,
     openEpoch: fileOpenDeliveryEpoch,
     openTicket: crypto.randomBytes(32).toString("hex"),
@@ -4489,6 +4489,13 @@ function openFile(filePath, options = {}) {
 
   // Use helper function for reading markdown files
   readMarkdownSnapshot(filePath, (err, data, modifiedTime, diskVersion, physical) => {
+    if (options.approvedBrowserPermission &&
+        !approvedBrowserPermissionIsCurrent(options.approvedBrowserPermission)) {
+      log("Approved document open lost its owner or permission before read completion.");
+      sendFileOpenFailure(target, filePath, openRequest, "approved-open-superseded",
+        null, rendererGeneration);
+      return;
+    }
     if (deliveryEpoch !== fileOpenDeliveryEpoch) {
       sendFileOpenFailure(
         target,
@@ -4525,6 +4532,13 @@ function openFile(filePath, options = {}) {
       );
       return;
     }
+    if (options.approvedBrowserPermission &&
+        !approvedBrowserPermissionIsCurrent(options.approvedBrowserPermission)) {
+      log("Approved document open lost its owner or permission during confirmation.");
+      sendFileOpenFailure(target, filePath, openRequest, "approved-open-superseded",
+        null, rendererGeneration);
+      return;
+    }
     rememberDocumentModifiedTime(filePath, modifiedTime, { replace: false });
     let document;
     if (options.provenance) {
@@ -4551,7 +4565,10 @@ function openFile(filePath, options = {}) {
       },
       rendererGeneration,
     );
-    if (!sent) return;
+    if (!sent) {
+      if (document) documentAdmissions.delete(document.ref);
+      return;
+    }
     activeDialogExtraBatch = null;
   });
 }
@@ -4638,6 +4655,7 @@ function openFileDialog() {
               rendererGeneration,
             );
             if (sent) activeDialogExtraBatch = batch;
+            else documentAdmissions.delete(document.ref);
           },
         );
       }
@@ -4699,31 +4717,101 @@ ipcMain.on("open-image-dialog", async () => {
   }
 });
 
-// Handle direct file path open request from renderer (for markdown links and
-// tokenized back/forward navigation). Metadata is echoed but never supplies
-// filesystem authority: only the top-level filePath is opened.
-ipcMain.on("open-file-path", (event, payload) => {
-  if (!isApprovalSender(event)) return;
-  const structured =
-    payload && typeof payload === "object" && !Array.isArray(payload);
-  const filePath = structured ? payload.filePath : payload;
-  const openRequest = structured ? payload.openRequest || null : null;
-  const approvedHistory = typeof filePath === "string" &&
-    documentSessionManifest?.approvedEntries.find(entry =>
-      entry.filePath === path.normalize(path.resolve(filePath)));
-  openFile(filePath, {
-    sender: event.sender,
-    openRequest,
-    rendererGeneration: approvalRendererGeneration,
-    ...(approvedHistory ? { provenance: approvedHistory.provenance } : {}),
+function approvedBrowserDocumentPermission(event, filePath) {
+  if (!isApprovalSender(event) || approvalRendererState !== "ready") {
+    throw new Error("Document command refused: invalid renderer owner");
+  }
+  if (typeof filePath !== "string" || !filePath || filePath.includes("\0") ||
+      filePath.length > 32768) {
+    throw new Error("Document command refused: invalid path");
+  }
+  // Lexical lookup only: probing an unapproved path could itself touch a
+  // network share. Permission owns the exact case-preserving logical target.
+  const resolved = normaliseFilePath(filePath).resolved;
+  const entry = documentSessionManifest?.approvedEntries.find(candidate =>
+    candidate.filePath === resolved);
+  const admission = entry ? null : Array.from(documentAdmissions.values()).find(record =>
+    admissionIsCurrent(record) && record.descriptor.logicalPath === resolved);
+  if (!entry && !admission) {
+    throw new Error("This document is not approved. Use Open to select it.");
+  }
+  const provenance = entry ? entry.provenance : admission.provenance;
+  if (!["native-open", "native-dialog", "legacy-profile"].includes(provenance)) {
+    throw new Error("Document command refused: invalid native provenance");
+  }
+  return Object.freeze({
+    sender: event.sender, frameTreeNodeId: event.senderFrame.frameTreeNodeId,
+    generation: approvalRendererGeneration, pageSession: approvalRendererPageSession,
+    filePath: entry ? entry.filePath : admission.descriptor.logicalPath,
+    provenance,
+    entryId: entry ? entry.id : null, admission,
   });
-});
+}
+
+function approvedBrowserPermissionIsCurrent(permission) {
+  if (!permission || !mainWindow || permission.sender.isDestroyed() ||
+      mainWindow.webContents !== permission.sender ||
+      approvalRendererState !== "ready" ||
+      permission.generation !== approvalRendererGeneration ||
+      permission.pageSession !== approvalRendererPageSession ||
+      permission.sender.mainFrame.frameTreeNodeId !== permission.frameTreeNodeId) return false;
+  return permission.entryId !== null
+    ? !!documentSessionManifest?.approvedEntries.some(entry =>
+        entry.id === permission.entryId && entry.filePath === permission.filePath &&
+        entry.provenance === permission.provenance)
+    : documentAdmissions.get(permission.admission.descriptor.ref) === permission.admission &&
+        admissionIsCurrent(permission.admission) &&
+        permission.admission.descriptor.logicalPath === permission.filePath &&
+        permission.admission.provenance === permission.provenance;
+}
+
+function copyApprovedNavigation(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      !Number.isSafeInteger(value.token) || value.token <= 0 ||
+      !Number.isSafeInteger(value.targetIndex) || value.targetIndex < 0 ||
+      typeof value.path !== "string" || !value.path || value.path.includes("\0") ||
+      value.path.length > 32768) return null;
+  return Object.freeze({
+    token: value.token, path: value.path, targetIndex: value.targetIndex,
+  });
+}
+
+function requestApprovedBrowserDocument(event, payload) {
+  const structured = payload && typeof payload === "object" && !Array.isArray(payload);
+  const filePath = structured ? payload.filePath : payload;
+  const navigation = structured ? copyApprovedNavigation(payload.openRequest) : null;
+  try {
+    if (structured && payload.openRequest != null && !navigation) {
+      throw new Error("Document open refused: invalid navigation correlation");
+    }
+    const permission = approvedBrowserDocumentPermission(event, filePath);
+    if (navigation && normaliseFilePath(navigation.path).resolved !== permission.filePath) {
+      throw new Error("Document open refused: navigation target mismatch");
+    }
+    openFile(permission.filePath, {
+      sender: event.sender, openRequest: navigation,
+      rendererGeneration: permission.generation, provenance: permission.provenance,
+      approvedBrowserPermission: permission,
+    });
+  } catch (error) {
+    log("Approved document open refused:", error);
+    sendFileOpenFailure(event.sender, navigation ? navigation.path : filePath,
+      navigation, "approved-open-refused", error.message, approvalRendererGeneration);
+  }
+}
+
+ipcMain.on("open-file-path", requestApprovedBrowserDocument);
 
 // Handle open folder in file explorer request
-ipcMain.on("open-folder-in-explorer", (event, filePath) => {
-  if (filePath) {
-    // shell.showItemInFolder will open the folder and select the file
-    shell.showItemInFolder(filePath);
+ipcMain.on("open-folder-in-explorer", (event, payload) => {
+  try {
+    const filePath = payload && typeof payload === "object" && !Array.isArray(payload)
+      ? payload.filePath : payload;
+    const permission = approvedBrowserDocumentPermission(event, filePath);
+    shell.showItemInFolder(permission.filePath);
+  } catch (error) {
+    log("Approved folder reveal refused:", error);
+    safeSendFileOpen(event.sender, "show-error", error.message, approvalRendererGeneration);
   }
 });
 
@@ -10075,15 +10163,7 @@ app.on("open-file", (event, filePath) => {
   }
 });
 
-ipcMain.on("request-open-file", (event, data) => {
-  const { filePath } = data;
-  if (filePath && fs.existsSync(filePath)) {
-    openFile(filePath, {
-      sender: event.sender,
-      rendererGeneration: approvalRendererGeneration,
-    });
-  }
-});
+ipcMain.on("request-open-file", requestApprovedBrowserDocument);
 
 // ============================================
 // SINGLE INSTANCE LOCK & APP LIFECYCLE

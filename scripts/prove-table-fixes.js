@@ -137,6 +137,10 @@ const TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL = Object.freeze([
   "Shutdown approval renderer unusable: webContents destroyed",
 ]);
 const VIRTUAL_SUITES = Object.freeze({
+  "test:sec08-approved-request-evidence": Object.freeze({
+    npmScript: "test:tabs",
+    environment: { SEC08_APPROVED_REQUEST_FOCUSED_HARNESS: "1" },
+  }),
   "test:sec08-batch-evidence": Object.freeze({
     npmScript: "test:tabs",
     environment: Object.freeze({
@@ -20082,6 +20086,129 @@ const REVERTS = [
           mustPass: [
             /^SEC-08 large-render confirmation rejects nonboolean replies and surfaces same-stack send failure$/,
             /^SEC-08 real large-render bridge preserves native approval cancellation and exact modal metadata$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R826",
+          what: "fold lexical case while authorizing an approved browser document",
+          file: MAIN,
+          from: "  const entry = documentSessionManifest?.approvedEntries.find(candidate =>\n" +
+            "    candidate.filePath === resolved);",
+          to: "  const entry = documentSessionManifest?.approvedEntries.find(candidate =>\n" +
+            "    candidate.filePath.toLowerCase() === resolved.toLowerCase());",
+          suite: "test:sec08-approved-request-evidence",
+          expect: [/^SEC-08 unapproved case-distinct and network paths reach neither filesystem nor shell through either open sink$/],
+          mustPass: [
+            /^SEC-08 approved relative reopen uses Main's original spelling and the filesystem witness is alive$/,
+            /^SEC-08 actual isolated foreign requests cannot use an owner's genuinely approved path$/,
+            /^SEC-08 denied historical recent paths are not removed or promoted to Main approval$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R827",
+          what: "allow a foreign browser sender to select the owner's genuine approved path",
+          file: MAIN,
+          from: "function approvedBrowserDocumentPermission(event, filePath) {\n" +
+            '  if (!isApprovalSender(event) || approvalRendererState !== "ready") {',
+          to: "function approvedBrowserDocumentPermission(event, filePath) {\n" +
+            '  if (approvalRendererState !== "ready") {',
+          suite: "test:sec08-approved-request-evidence",
+          expect: [/^SEC-08 actual isolated foreign requests cannot use an owner's genuinely approved path$/],
+          mustPass: [
+            /^SEC-08 unapproved case-distinct and network paths reach neither filesystem nor shell through either open sink$/,
+            /^SEC-08 actual tab and recent folder commands capture approved targets before clearing their menus$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R828",
+          what: "permit an old-page approved read to cross into the replacement page scope",
+          file: MAIN,
+          from: "      permission.generation !== approvalRendererGeneration ||\n" +
+            "      permission.pageSession !== approvalRendererPageSession ||\n",
+          to: "",
+          suite: "test:sec08-approved-request-evidence",
+          expect: [/^SEC-08 old-page approved read cannot issue an admission into its replacement scope$/],
+          mustPass: [
+            /^SEC-08 approved asynchronous open actually holds a successful old-page body read$/,
+            /^SEC-08 scope replacement reaches a ready new page and a genuinely bound restored admission$/,
+            /^SEC-08 approved relative reopen uses Main's original spelling and the filesystem witness is alive$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R829",
+          what: "forward unrelated browser fields through approved document request ports",
+          file: path.join(SRC, "main-preload.js"),
+          from: "  const payload = { filePath: request.filePath };",
+          to: "  const payload = { ...request };",
+          suite: "test:sec08-approved-request-evidence",
+          expect: [/^SEC-08 approved open and reveal ports dispatch synchronously with exact scalar fields and relative native spellings$/],
+          mustPass: [
+            /^SEC-08 approved document ports reject malformed metadata before IPC and preserve same-stack delivery refusal$/,
+            /^SEC-08 approved request boundary starts with a real native reference and independent Main history$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R830",
+          what: "erase a newer navigation when an older same-stack dispatch fails",
+          file: RENDERER,
+          from: "    if (pendingNavigationRequest === request) {\n" +
+            "      pendingNavigationRequest = null;\n" +
+            "      failedNavigationRequestCount += 1;",
+          to: "    {\n" +
+            "      pendingNavigationRequest = null;\n" +
+            "      failedNavigationRequestCount += 1;",
+          suite: "test:sec08-approved-request-evidence",
+          expect: [/^SEC-08 history delivery failure cannot erase a newer reentrant navigation$/],
+          mustPass: [
+            /^SEC-08 actual history send refusal retires its own pending navigation and remains observable$/,
+            /^SEC-08 valid denied or mismatched navigation retains exact failure correlation and malformed correlation is visible$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R831",
+          what: "omit private native provenance when durable document history is unavailable",
+          file: MAIN,
+          from: "    pageSession: approvalRendererPageSession, descriptor, provenance: entry.provenance,",
+          to: "    pageSession: approvalRendererPageSession, descriptor,",
+          suite: "test:document-session",
+          expect: [/^corrupt-unmarked: admission-only approved reopen retains native provenance without importing a corrupt manifest$/],
+          mustPass: [
+            /^corrupt-unmarked: a native chooser still issues a real current reference while durable history is unavailable$/,
+            /^corrupt-unmarked: retiring the only native admission removes its browser reopen permission$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R832",
+          what: "retain undelivered open-result admissions after their only native tab closes",
+          file: MAIN,
+          from: "    if (!sent) {\n" +
+            "      if (document) documentAdmissions.delete(document.ref);\n" +
+            "      return;\n" +
+            "    }\n    activeDialogExtraBatch = null;",
+          to: "    if (!sent) return;\n    activeDialogExtraBatch = null;",
+          also: [{
+            file: MAIN,
+            from: "            if (sent) activeDialogExtraBatch = batch;\n" +
+              "            else documentAdmissions.delete(document.ref);",
+            to: "            if (sent) activeDialogExtraBatch = batch;",
+          }],
+          suite: "test:document-session",
+          expect: [
+            /^corrupt-unmarked: undelivered browser result admission is discarded while the existing live reference remains usable$/,
+            /^corrupt-unmarked: undelivered native result admission is discarded while the existing live reference remains usable$/,
+            /^corrupt-unmarked: retiring the only native admission removes its browser reopen permission$/,
+          ],
+          mustPass: [
+            /^corrupt-unmarked: admission-only approved reopen retains native provenance without importing a corrupt manifest$/,
+            /^corrupt-unmarked: the admission-only browser refusal fixture reaches a newly issued real result without replacing the live tab$/,
+            /^corrupt-unmarked: the admission-only native refusal fixture reaches a newly issued real result without replacing the live tab$/,
           ],
           requireMustPassAssertions: true, requireExactFailures: true,
         },

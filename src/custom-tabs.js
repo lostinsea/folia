@@ -15,7 +15,6 @@
 
   // Keep the per-tab clipboard local instead of borrowing renderer.js's scope.
   // The menu helpers come from the preceding classic script, not a Node require.
-  const { ipcRenderer: tabIpc } = require("electron");
   if (!window.FoliaDocumentEvents) {
     throw new Error("FoliaDocumentEvents must load before custom-tabs.js");
   }
@@ -161,7 +160,7 @@
     ctxTabOpenFolder.addEventListener("click", () => {
       const p = tabContextPath;
       hideTabContextMenu();
-      if (p) tabIpc.send("open-folder-in-explorer", p);
+      if (p) window.revealApprovedDocumentFolder(p);
     });
 
   // Tab management state

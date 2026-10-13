@@ -48,7 +48,7 @@ if (typeof electron === "string") {
   console.log(`=== ${passed}/${assertions} passed ===`);
   process.exit(passed === assertions ? 0 : 1);
 } else {
-  const { app, BrowserWindow, ipcMain, session } = electron;
+  const { app, BrowserWindow, dialog, ipcMain, session, shell } = electron;
   const { pathToFileURL } = require("url");
   const phase = process.argv[2];
   const profile = path.join(batchRoot, phase);
@@ -245,6 +245,76 @@ if (typeof electron === "string") {
     const afterForgery = await exec("window.folia.restoreSession()");
     check("post-page localStorage changes never admit the forged fixture",
       !afterForgery.entries.some(entry => entry.filePath === forged));
+    if (phase === "corrupt-unmarked") {
+      const originalChooser = dialog.showOpenDialog;
+      const originalOpen = fs.promises.open;
+      const originalReveal = shell.showItemInFolder;
+      const reveals = [];
+      let bodyOpens = 0;
+      shell.showItemInFolder = target => { reveals.push(target); };
+      dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [first] });
+      fs.promises.open = function (target) {
+        if (target === first) bodyOpens++;
+        return originalOpen.apply(this, arguments);
+      };
+      try {
+        await exec("window.folia.openFileDialog(); null;");
+        const native = await until(() => exec(`window.currentFilePath === ${JSON.stringify(first)} &&
+          document.getElementById('viewer').textContent.includes('FIRST_RESTORED') &&
+          !!window.CustomTabs.getDocumentDescriptor()?.ref`));
+        const oldRef = await exec("window.CustomTabs.getDocumentDescriptor()?.ref");
+        check("a native chooser still issues a real current reference while durable history is unavailable",
+          native && oldRef && __shutdown.documentSessionState().history === undefined);
+        if (!native) throw new Error("Admission-only approved-open fixture did not become ready");
+        await exec(`window.folia.openApprovedDocument({ filePath: ${JSON.stringify(first)} }); null;`);
+        const reopened = await until(() => exec(`window.currentFilePath === ${JSON.stringify(first)} &&
+          window.CustomTabs.getDocumentDescriptor()?.ref !== ${JSON.stringify(oldRef)} &&
+          !!window.CustomTabs.getDocumentDescriptor()?.ref`));
+        check("admission-only approved reopen retains native provenance without importing a corrupt manifest",
+          reopened && bodyOpens >= 2 && __shutdown.documentSessionState().history === undefined);
+        if (reopened) {
+          const originalSend = win.webContents.send;
+          let refused = null;
+          const deliveredRef = await exec("window.CustomTabs.getDocumentDescriptor().ref");
+          win.webContents.send = function (channel, data) {
+            if (channel === "file-opened") {
+              refused = data;
+              throw new Error("Controlled approved reopen result delivery refusal");
+            }
+            return originalSend.apply(this, arguments);
+          };
+          try {
+            for (const [kind, request] of [
+              ["browser", `window.folia.openApprovedDocument({ filePath: ${JSON.stringify(first)} }); null;`],
+              ["native", "window.folia.openFileDialog(); null;"],
+            ]) {
+              refused = null;
+              await exec(request);
+              const refusedDelivery = await until(() => refused !== null);
+              check(`the admission-only ${kind} refusal fixture reaches a newly issued real result without replacing the live tab`,
+                refusedDelivery && refused.document.ref !== deliveredRef &&
+                  await exec("window.CustomTabs.getDocumentDescriptor().ref") === deliveredRef);
+              check(`undelivered ${kind} result admission is discarded while the existing live reference remains usable`,
+                refusedDelivery && __shutdown.documentSessionState().admissions === 1 &&
+                  await exec("window.CustomTabs.getDocumentDescriptor().ref") === deliveredRef);
+            }
+          } finally { win.webContents.send = originalSend; }
+        }
+        await exec("(async () => { await window.CustomTabs.closeTab(window.CustomTabs.getActiveTabId()); })()");
+        await exec("window.folia.getVersion()");
+        const beforeRetired = bodyOpens;
+        await exec(`window.folia.openApprovedDocument({ filePath: ${JSON.stringify(first)} }); null;`);
+        await exec(`window.folia.revealApprovedDocument({ filePath: ${JSON.stringify(first)} }); null;`);
+        await exec("window.folia.getVersion()");
+        check("retiring the only native admission removes its browser reopen permission",
+          bodyOpens === beforeRetired && reveals.length === 0 &&
+            __shutdown.documentSessionState().history === undefined);
+      } finally {
+        dialog.showOpenDialog = originalChooser;
+        fs.promises.open = originalOpen;
+        shell.showItemInFolder = originalReveal;
+      }
+    }
     finish();
   }).catch(error => {
     console.error(error.stack);
