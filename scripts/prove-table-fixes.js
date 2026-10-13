@@ -20579,6 +20579,107 @@ const REVERTS = [
           ],
           requireMustPassAssertions: true, requireExactFailures: true,
         },
+        {
+          id: "R852",
+          what: "probe disk before authenticating a committed adoption capability",
+          file: MAIN,
+          from: 'ipcMain.on("check-committed-disk-adoption", function checkCommittedDiskAdoption(event, data) {',
+          to: 'ipcMain.on("check-committed-disk-adoption", function checkCommittedDiskAdoption(event, data) {\n' +
+            '  fs.statSync(__filename);',
+          suite: "test:sec08-owned-read-core-evidence",
+          expect: [/^SEC-08 committed authority rejects unknown foreign and still-pending grants before filesystem probes$/],
+          mustPass: [
+            /^SEC-08 committed-check setup uses an actual admitted owner and freshly attested pending grant$/,
+            /^SEC-08 committed check copies fixed fields and freshly validates a grant twice without consuming it$/,
+            /^SEC-08 committed check refuses real disk changes after approval$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R853",
+          what: "return a committed metadata success without freshly checking the approved bytes and bindings",
+          file: MAIN,
+          from: '  if (!diskAdoptionSnapshotIsCurrent(grant)) {\n' +
+            '    refuse("disk-version-or-target-moved");\n    return;\n  }\n' +
+            '  event.returnValue = Object.freeze({\n    valid: true,',
+          to: '  event.returnValue = Object.freeze({\n    valid: true,',
+          suite: "test:sec08-owned-read-core-evidence",
+          expect: [
+            /^SEC-08 committed check refuses real disk changes after approval$/,
+            /^SEC-08 committed check copies fixed fields and freshly validates a grant twice without consuming it$/,
+          ],
+          mustPass: [
+            /^SEC-08 committed authority rejects unknown foreign and still-pending grants before filesystem probes$/,
+            /^SEC-08 committed-check positive setup commits the genuine pending grant$/,
+            /^SEC-08 Main refuses a stale prepared snapshot before asking replacement consent$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 2,
+        },
+        {
+          id: "R854",
+          what: "ask about a stale disk snapshot before checking it in Main",
+          file: MAIN,
+          from: '  // The renderer no longer probes disk before committing. Refuse a stale\n' +
+            '  // snapshot before either kind of confirmation, as well as after the dialog.\n' +
+            '  if (!diskAdoptionSnapshotIsCurrent(grant)) {\n' +
+            '    refuse("disk-version-or-target-moved");\n    return;\n  }\n',
+          to: "",
+          suite: "test:sec08-owned-read-core-evidence",
+          expect: [/^SEC-08 Main refuses a stale prepared snapshot before asking replacement consent$/],
+          mustPass: [
+            /^SEC-08 pre-dialog check setup retains actual deletion evidence and attests the restored file$/,
+            /^SEC-08 pre-dialog positive control reaches the actual replacement confirmation$/,
+            /^SEC-08 committed check refuses real disk changes after approval$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R855",
+          what: "derive an adoption proposal by probing renderer filesystem instead of the admitted descriptor",
+          file: TABS,
+          from: "    const freshKey = admission?.pathKey;",
+          to: "    const freshKey = resolveTabPath(filePath);",
+          suite: "test:packaging",
+          expect: [/^disk adoption verification uses admitted proposals and a fixed Main post-approval fence without renderer disk probes$/],
+          mustPass: [
+            /^disk adoption consumers use fixed production bridge methods instead of raw protocol IPC$/,
+            /^changed clean-tab reads use the fixed production bridge instead of renderer raw IPC$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R856",
+          what: "forward arbitrary request fields through the capability-only committed check",
+          file: path.join(SRC, "main-preload.js"),
+          from: '  checkCommittedDiskAdoption(request) {\n    const payload = copyAdoptionCapability(request);',
+          to: '  checkCommittedDiskAdoption(request) {\n    const payload = { ...request, ...copyAdoptionCapability(request) };',
+          suite: "test:sec08-owned-read-core-evidence",
+          expect: [/^SEC-08 committed check copies fixed fields and freshly validates a grant twice without consuming it$/],
+          mustPass: [
+            /^SEC-08 committed bridge rejects malformed capability envelopes before IPC$/,
+            /^SEC-08 committed authority rejects unknown foreign and still-pending grants before filesystem probes$/,
+            /^SEC-08 committed check refuses real disk changes after approval$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R857",
+          what: "accept a body-bearing committed metadata receipt before fixed-field copying",
+          file: path.join(SRC, "main-preload.js"),
+          from: '    if (!isPath(result.pathKey) || Object.keys(result).some(\n' +
+            '      key => !["valid", "pathKey", "version"].includes(key),\n' +
+            '    )) throw new TypeError("Invalid committed disk adoption response");',
+          to: '    if (!isPath(result.pathKey)) throw new TypeError("Invalid committed disk adoption response");',
+          suite: "test:sec08-owned-read-core-evidence",
+          expect: [/^SEC-08 committed bridge rejects malformed receipts and metadata body leakage$/],
+          mustPass: [
+            /^SEC-08 committed bridge rejects malformed capability envelopes before IPC$/,
+            /^SEC-08 committed check copies fixed fields and freshly validates a grant twice without consuming it$/,
+            /^SEC-08 committed check refuses real disk changes after approval$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
       ];
 
 // These are release exceptions, not passing or withdrawn proofs. An explicit
@@ -21658,7 +21759,7 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760,R840,R841,R845,R849";
+      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760,R840,R841,R845,R849,R853";
   const toolbarAllowanceIsRecordScoped =
     REVERTS.filter((r) =>
       exactShutdownTailForMutation(r) === TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL,

@@ -1075,6 +1075,28 @@ const api = Object.freeze({
       version: copyDiskVersion(result.version, "disk adoption"),
     });
   },
+  checkCommittedDiskAdoption(request) {
+    const payload = copyAdoptionCapability(request);
+    const result = ipcRenderer.sendSync("check-committed-disk-adoption", payload);
+    if (!result || typeof result !== "object" || Array.isArray(result) ||
+        typeof result.valid !== "boolean") {
+      throw new TypeError("Invalid committed disk adoption response");
+    }
+    if (!result.valid) {
+      if (typeof result.why !== "string" || !result.why ||
+          result.why.length > 256 || Object.keys(result).some(
+            key => key !== "valid" && key !== "why",
+          )) throw new TypeError("Invalid committed disk adoption response");
+      return Object.freeze({ valid: false, why: result.why });
+    }
+    if (!isPath(result.pathKey) || Object.keys(result).some(
+      key => !["valid", "pathKey", "version"].includes(key),
+    )) throw new TypeError("Invalid committed disk adoption response");
+    return Object.freeze({
+      valid: true, pathKey: result.pathKey,
+      version: copyDiskVersion(result.version, "committed disk adoption"),
+    });
+  },
   completeDocumentDiskAdoption(request) {
     const payload = {
       ...copyAdoptionCapability(request),

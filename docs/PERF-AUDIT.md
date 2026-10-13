@@ -1138,6 +1138,20 @@ The later user direction authorized continuing release work while retaining
 isolation responsiveness as mandatory; it does not waive thresholds or erase
 the historical failed/open observations above.
 
+### SEC-08 adoption metadata fence — responsiveness still unqualified
+
+The bounded adoption migration removes renderer physical/version probes only
+inside `verifyDiskAdoption`. It retains Main's body/digest preparation and
+transactional commit/completion, adds a pre-dialog metadata fence in Main and
+uses one small synchronous committed-capability check after approval. No body
+is serialized by that new check, and the unchanged conditional-refresh branch
+does not enter adoption. Remaining selection/post-completion helpers still
+use raw renderer metadata; this staged change does not certify isolation.
+The IPC and relocated/additional metadata work have not been measured against
+the final-source responsiveness contracts. Native-backed core 109/109 and exact
+R852-R857 controls (`adoption-fence-exact-proofs-r2.log`) pin actual grant/
+refusal behavior, not latency. No literal zero-overhead claim is made.
+
 ## Measured and found already fast
 - **Custom tab sync I/O is not the current bottleneck.**
   - `custom-tabs.js:69-111,640`

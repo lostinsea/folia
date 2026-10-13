@@ -7247,6 +7247,206 @@ async function runConditionalRefreshValidation(win, exec, dir, filePath) {
     JSON.stringify(authority));
 }
 
+async function runCommittedAdoptionChecks(win, exec, dir) {
+  const filePath = path.join(dir, "committed-adoption-check.md");
+  const original = "# Committed adoption check\n\nADOPTION_CHECK_BASE\n";
+  write(filePath, original);
+  const restoreChooser = replaceMethod(dialog, "showOpenDialog", async () => ({
+    canceled: false, filePaths: [filePath],
+  }));
+  let tabId;
+  try {
+    await exec("window.folia.openFileDialog(); null;");
+    if (!await waitForCondition(exec,
+      `window.currentFilePath === ${JSON.stringify(filePath)} &&
+       document.getElementById('viewer').textContent.includes('ADOPTION_CHECK_BASE')`, 8000)) {
+      throw new Error("Committed adoption fixture did not reach the real viewer");
+    }
+    tabId = await exec("window.CustomTabs.getActiveTabId()");
+    const prepare = async () => exec(`(async () => {
+      const tab = window.CustomTabs.getTabs().find(tab => tab.id === ${tabId});
+      const owner = window.CustomTabs.getDocumentIdentityForTab(
+        tab.id, tab.filePath, window.getReloadRequestSession());
+      const snapshot = await window.folia.readOwnedTabDiskSnapshot({
+        filePath: tab.filePath, pageSession: owner.pageSession,
+        rendererGeneration: owner.rendererGeneration, owner,
+      });
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(snapshot.content));
+      const request = {
+        ...owner, filePath: tab.filePath, ownerFilePath: tab.filePath,
+        proposedOwner: owner, oldOwner: owner, replaceDocument: false,
+        contentDigest: Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join(''),
+        modifiedTime: snapshot.modifiedTime, diskVersion: snapshot.diskVersion,
+      };
+      const state = await window.folia.prepareDocumentDiskAdoption(request);
+      return { request: { ...request, capability: state.capability, revision: state.revision }, state };
+    })()`);
+    const prepared = await prepare();
+    check("SEC-08 committed-check setup uses an actual admitted owner and freshly attested pending grant",
+      prepared.state?.known === true && prepared.state.versionMatches === true &&
+        /^[a-f0-9]{32}$/.test(prepared.state.capability) &&
+        /^[a-f0-9]{64}$/.test(prepared.request.documentRef),
+      JSON.stringify(prepared));
+    const request = {
+      capability: prepared.state.capability,
+      pageSession: prepared.request.pageSession,
+      rendererGeneration: prepared.request.rendererGeneration,
+    };
+    const malformed = await exec(`(() => {
+      const request = ${JSON.stringify(request)};
+      const sync = window.ipcRenderer.sendSync;
+      let calls = 0;
+      const rejected = [];
+      window.ipcRenderer.sendSync = function () { calls += 1; return sync.apply(this, arguments); };
+      try {
+        for (const input of [
+          null, [], { ...request, capability: 'bad' },
+          { ...request, pageSession: '' }, { ...request, rendererGeneration: Infinity },
+        ]) {
+          try { window.folia.checkCommittedDiskAdoption(input); rejected.push(false); }
+          catch (error) { rejected.push(error.message.includes('Invalid')); }
+        }
+        return { rejected, calls };
+      } finally { window.ipcRenderer.sendSync = sync; }
+    })()`);
+    check("SEC-08 committed bridge rejects malformed capability envelopes before IPC",
+      malformed.rejected.length === 5 && malformed.rejected.every(Boolean) && malformed.calls === 0,
+      JSON.stringify(malformed));
+    let probes = 0;
+    const stat = fs.statSync;
+    const realpath = fs.realpathSync.native;
+    const observer = () => {
+      if (/\bcheckCommittedDiskAdoption\b/.test(String(new Error().stack))) probes += 1;
+    };
+    const restoreStat = replaceMethod(fs, "statSync", function () {
+      observer();
+      return stat.apply(this, arguments);
+    });
+    const restoreRealpath = replaceMethod(fs.realpathSync, "native", function () {
+      observer();
+      return realpath.apply(this, arguments);
+    });
+    let authority;
+    try {
+      authority = await exec(`(() => {
+        const request = ${JSON.stringify(request)};
+        return [
+          { ...request, capability: 'f'.repeat(32) },
+          { ...request, pageSession: request.pageSession + '-foreign' },
+          { ...request, rendererGeneration: request.rendererGeneration + 1 },
+          request,
+        ].map(input => window.ipcRenderer.sendSync('check-committed-disk-adoption', input));
+      })()`);
+      authority = { refused: authority, refusedProbes: probes };
+      const committed = await exec(`window.folia.commitDocumentDiskAdoption(${JSON.stringify(prepared.request)})`);
+      check("SEC-08 committed-check positive setup commits the genuine pending grant",
+        committed?.accepted === true && committed.capability === request.capability,
+        JSON.stringify(committed));
+      probes = 0;
+      authority.positive = await exec(`(() => {
+        const request = ${JSON.stringify(request)};
+        const sync = window.ipcRenderer.sendSync;
+        let forwarded;
+        window.ipcRenderer.sendSync = function (channel, data) {
+          if (channel === 'check-committed-disk-adoption') forwarded = data;
+          return sync.apply(this, arguments);
+        };
+        try {
+          const first = window.folia.checkCommittedDiskAdoption({ ...request, filePath: 'not-authority', ignored: true });
+          const firstFields = Object.keys(forwarded).sort();
+          const second = window.folia.checkCommittedDiskAdoption(request);
+          return { first, second, firstFields, fields: Object.keys(forwarded).sort() };
+        } finally { window.ipcRenderer.sendSync = sync; }
+      })()`);
+      authority.positiveProbes = probes;
+    } finally { restoreRealpath(); restoreStat(); }
+    check("SEC-08 committed authority rejects unknown foreign and still-pending grants before filesystem probes",
+      authority.refused.length === 4 && authority.refused.every(reply => reply.valid === false) &&
+        authority.refusedProbes === 0, JSON.stringify(authority));
+    check("SEC-08 committed check copies fixed fields and freshly validates a grant twice without consuming it",
+      authority.positive.first.valid === true && authority.positive.second.valid === true &&
+        authority.positive.first.pathKey === prepared.state.pathKey &&
+        authority.positive.firstFields.join(",") === "capability,pageSession,rendererGeneration" &&
+        authority.positive.fields.join(",") === "capability,pageSession,rendererGeneration" &&
+        authority.positiveProbes > 0, JSON.stringify(authority));
+    const badResponses = await exec(`(() => {
+      const request = ${JSON.stringify(request)};
+      const positive = ${JSON.stringify(authority.positive.first)};
+      const sync = window.ipcRenderer.sendSync;
+      const rejected = [];
+      try {
+        for (const response of [
+          undefined, [], { ...positive, valid: 'true' },
+          { ...positive, pathKey: 'bad\\0path' },
+          { ...positive, version: { ...positive.version, size: Infinity } },
+          { ...positive, content: 'body-must-not-cross' },
+          { valid: false }, { valid: false, why: 'refused', version: positive.version },
+        ]) {
+          window.ipcRenderer.sendSync = () => response;
+          try { window.folia.checkCommittedDiskAdoption(request); rejected.push(false); }
+          catch (error) { rejected.push(error.message.includes('Invalid committed disk adoption response')); }
+        }
+        return rejected;
+      } finally { window.ipcRenderer.sendSync = sync; }
+    })()`);
+    check("SEC-08 committed bridge rejects malformed receipts and metadata body leakage",
+      badResponses.length === 8 && badResponses.every(Boolean), JSON.stringify(badResponses));
+    write(filePath, "# Committed adoption check\n\nLATE_CHANGED_AFTER_COMMIT\n");
+    const late = await exec(`window.folia.checkCommittedDiskAdoption(${JSON.stringify(request)})`);
+    check("SEC-08 committed check refuses real disk changes after approval",
+      late.valid === false && late.why === "disk-version-or-target-moved" &&
+        fs.readFileSync(filePath, "utf8").includes("LATE_CHANGED_AFTER_COMMIT"),
+      JSON.stringify(late));
+    await exec(`window.folia.abandonDocumentDiskAdoption(${JSON.stringify(request)}); null;`);
+
+    // A real missing-target query establishes consent, not an injected flag.
+    fs.unlinkSync(filePath);
+    const deletion = await exec(`(() => {
+      const tab = window.CustomTabs.getTabs().find(tab => tab.id === ${tabId});
+      const owner = window.CustomTabs.getDocumentIdentityForTab(tab.id, tab.filePath, window.getReloadRequestSession());
+      return window.folia.queryDocumentDeletionState({ ...owner, filePath: tab.filePath });
+    })()`);
+    write(filePath, original);
+    const deletionGrant = await prepare();
+    check("SEC-08 pre-dialog check setup retains actual deletion evidence and attests the restored file",
+      deletion.known === true && deletion.ownDeletion === true &&
+        deletionGrant.state.known === true && deletionGrant.state.ownDeletion === true,
+      JSON.stringify({ deletion, state: deletionGrant.state }));
+    let dialogs = 0;
+    const restoreDialog = replaceMethod(dialog, "showMessageBoxSync", (_window, options) => {
+      if (options.title !== "Confirm document replacement") {
+        throw new Error(`Unexpected adoption check dialog: ${options.title}`);
+      }
+      dialogs += 1;
+      return 0;
+    });
+    try {
+      const positive = await exec(`window.folia.commitDocumentDiskAdoption(${JSON.stringify(deletionGrant.request)})`);
+      check("SEC-08 pre-dialog positive control reaches the actual replacement confirmation",
+        positive.accepted === true && positive.confirmed === true && dialogs === 1,
+        JSON.stringify({ positive, dialogs }));
+      await exec(`window.folia.abandonDocumentDiskAdoption(${JSON.stringify({
+        ...request, capability: deletionGrant.state.capability,
+      })}); null;`);
+      const staleGrant = await prepare();
+      dialogs = 0;
+      write(filePath, "# Committed adoption check\n\nSTALE_BEFORE_DIALOG\n");
+      const stale = await exec(`window.folia.commitDocumentDiskAdoption(${JSON.stringify(staleGrant.request)})`);
+      check("SEC-08 Main refuses a stale prepared snapshot before asking replacement consent",
+        stale.accepted === false && stale.why === "disk-version-or-target-moved" && dialogs === 0,
+        JSON.stringify({ stale, dialogs }));
+    } finally { restoreDialog(); }
+  } finally {
+    restoreChooser();
+    if (tabId) await exec(`(async () => {
+      const confirm = window.confirm;
+      window.confirm = () => true;
+      try { return await window.CustomTabs.closeTab(${tabId}); }
+      finally { window.confirm = confirm; }
+    })()`);
+  }
+}
+
 async function runConditionalMetadataJourneys(win, exec, dir, otherTabId, sentinel) {
   for (const mode of ["missing", "retargeted", "background-undo", "active-undo", "superseded", "closed", "frozen"]) {
     const filePath = path.join(dir, `conditional-${mode}.md`);
@@ -12293,6 +12493,7 @@ async function run(win) {
     "queryDocumentDiskAdoptionState", "reportAdoptionTrackingConflict",
     "retireDeletedDocumentOwner",
     "prepareDocumentDiskAdoption", "commitDocumentDiskAdoption",
+    "checkCommittedDiskAdoption",
     "completeDocumentDiskAdoption", "abandonDocumentDiskAdoption",
     "readOwnedTabDiskSnapshot", "refreshOwnedTabDiskSnapshot", "readDialogExtra",
     "restoreSession", "saveSessionLayout", "readOpenTicketSnapshot",
@@ -13381,6 +13582,7 @@ async function run(win) {
   await runReloadTransportFailure(exec, sentinel);
   if (ownedReadFocusedHarness || dialogExtraFocusedHarness) {
     if (ownedReadFocusedHarness) {
+      await runCommittedAdoptionChecks(win, exec, dir);
       await runConditionalMetadataJourneys(win, exec, dir, ids.a, sentinel);
       if (!await waitForCondition(exec,
         `window.CustomTabs.getActiveTabId() === ${ids.a} &&
@@ -13388,7 +13590,7 @@ async function run(win) {
         throw new Error("Conditional metadata teardown did not restore the real rendered control");
       }
       const capture = await win.webContents.capturePage();
-      const destination = path.join(__dirname, "..", ".context-viewport-evidence", "screenshots", "conditional-refresh-final.png");
+      const destination = path.join(__dirname, "..", ".context-viewport-evidence", "screenshots", "adoption-fence-final.png");
       fs.mkdirSync(path.dirname(destination), { recursive: true });
       fs.writeFileSync(destination, capture.toPNG());
     }

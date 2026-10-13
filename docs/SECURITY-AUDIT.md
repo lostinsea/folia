@@ -700,6 +700,26 @@ The unchanged raw receipt's exact keys are checked before preload filtering,
 and changed receipts reject even valid native descriptors. These are
 functional/source results, not responsiveness qualification or final isolation.
 
+**Adoption's post-approval metadata fence — IMPLEMENTED / PROVEN, unintegrated.**
+`verifyDiskAdoption` now proposes the admitted native descriptor's key, with
+no renderer physical/version probe or hidden path-helper fallback. Preparation
+still attests bytes/digest/version in Main. Commit freshly checks the retained
+physical target and source/owner bindings before either confirmation dialog,
+and checks again after it. The one non-consuming post-commit check accepts only
+an opaque committed capability and session/generation, authenticates it before
+filesystem access, and returns fixed metadata or an explicit refusal. Local
+generation/mutation/live-selection/freeze/unsaved witnesses and abandonment
+remain; completion and subsequent raw renderer checks are not removed.
+The final native-backed core/private-session/native-authority/source-package
+controls are 109/109, 61/61, 43/43 and 381/0 (`adoption-fence-*-final-*` logs),
+with genuine late-change and deletion-consent controls. R714-R718 and R852-R857
+are individually exact PROVEN in `adoption-fence-exact-proofs-r2.log`, with
+source restoration and immutable-review byte identity. Fresh independent
+Sol/Luna implementation and oracle-correction reviews converge without blockers.
+The roadmap retains the distinct pre-dialog design finding and failed initial
+oracle/proof outcomes. The restored rendered control capture was viewed.
+This is not full browser migration, Node-off closure or measured responsiveness.
+
 The **production main window still has Node enabled and isolation disabled**.
 Preparation, commit, completion and abandonment of disk-adoption capabilities
 now use fixed copied/validated preload methods; main's actual authority,

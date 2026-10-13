@@ -1012,6 +1012,19 @@ async function main() {
       ).test(rendererSource)),
   );
   check(
+    "disk adoption verification uses admitted proposals and a fixed Main post-approval fence without renderer disk probes",
+    (() => {
+      const start = customTabsSource.indexOf("  async function verifyDiskAdoption(");
+      const end = customTabsSource.indexOf("  function refreshTabFromDisk(", start);
+      const verification = customTabsSource.slice(start, end);
+      return start >= 0 && end > start &&
+        verification.includes("const freshKey = admission?.pathKey;") &&
+        verification.includes("window.folia.checkCommittedDiskAdoption({") &&
+        !/\b(?:getDiskVersion|resolveTabPath|tabPathKey)\s*\(/.test(verification) &&
+        read("src/main-preload.js").includes('"check-committed-disk-adoption"');
+    })(),
+  );
+  check(
     "document control consumers use fixed production bridge methods instead of raw control IPC",
     [
       ["registerDocumentOwner", "register-document-owner"],

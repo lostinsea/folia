@@ -735,6 +735,40 @@ legs also failed) and R844 UNUSABLE (the unsafe probe mutant aborted a legitimat
 missing-file case). Their corrected exact contracts, not a success-shaped rerun,
 are what the final campaign proves. Broader provisional fixtures remain nongreen.
 
+**Adoption post-approval metadata fence — IMPLEMENTED / PROVEN, unintegrated.**
+This bounded browser migration removes only `verifyDiskAdoption`'s raw
+physical/version probes. Its proposal uses an admitted descriptor; Main retains
+fresh preparation/commit/completion checks, now including a version/physical
+fence before either confirmation dialog. A fixed non-consuming committed-grant
+check replaces the renderer's post-commit probe, while all local mutation,
+selection, generation and freeze witnesses remain. Sol/Luna design feedback
+agrees on capability-only transport and fail-closed metadata; Sol identified
+the missing pre-dialog version fence, which is included rather than accepting
+a stale prompt. Other raw selection/post-completion/path helpers, production
+flags and final responsiveness remain open. The real native-backed core is
+109/109 (`adoption-fence-core-final-r3.log`), including fresh/non-consuming grant
+checks, authority refusal before probes, actual late disk changes and actual
+deletion-consent positive/stale-before-dialog controls. The first 108/109 run
+retains a probe observer that missed the event-emitter-qualified callback name;
+the positive probe control exposed that vacuous observation. The first source
+oracle also searched for a stripped comment; it now uses function boundaries.
+Fresh independent Sol/Luna implementation reviews find no blockers or
+disagreement. The first exact campaign retains R853 UNUSABLE (removing the
+fresh probe also intentionally fails its observed-positive control) and R856
+VACUOUS (the second call overwrote the first forwarding observation). R853 now
+declares both exact failures; R856 preserves and checks both calls' actual
+field sets. Their corrected exact-count inventory is maintained by the existing
+harness self-check; its interim inventory mismatch correctly failed before any
+mutations. R714-R718 and R852-R857 are individually exact PROVEN in
+`adoption-fence-exact-proofs-r2.log`, with all product/test/proof bytes restored
+and matching the immutable r2 review snapshot. Independent Sol/Luna oracle
+correction feedback converges without blockers or disagreement.
+Final private-session/native-authority/source-packaging controls are 61/61,
+43/43 and 381/0 (`adoption-fence-*-final-*` logs). Final anchors resolve, which
+is not proof. The restored Alpha/ALPHA_V2 capture was opened and viewed
+(`screenshots/adoption-fence-final.png`). These are functional/source controls;
+broader provisional fixtures, production flags and responsiveness remain open.
+
 The capability-protocol unit is IMPLEMENTED / PROVEN, unintegrated: preparation, commit, completion and abandonment
 of existing disk-adoption capabilities to four fixed preload methods. It
 preserves async/sync ordering, nonce/digest/version/owner provenance and

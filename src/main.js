@@ -7966,6 +7966,51 @@ function diskAdoptionAuthorityIsCurrent(permission, proposed, oldOwner, ownerPat
     !!admittedDocumentReference(oldOwner.documentRef, oldOwner, ownerPath);
 }
 
+function diskAdoptionSnapshotIsCurrent(grant) {
+  const bindingsMatch = () =>
+    resolveCanonicalFilePath(grant.sourcePath) === grant.acceptedReadTarget &&
+    resolveCanonicalFilePath(grant.ownerPath) === grant.acceptedReadTarget;
+  if (!bindingsMatch()) return false;
+  const stats = readDocumentStats(
+    grant.acceptedReadTarget, "while checking disk adoption",
+  );
+  return !!stats && stats.isFile() &&
+    !diskVersionChanged(grant.version, diskVersionFromStats(stats)) &&
+    bindingsMatch();
+}
+
+ipcMain.on("check-committed-disk-adoption", function checkCommittedDiskAdoption(event, data) {
+  const refuse = why => {
+    event.returnValue = Object.freeze({ valid: false, why });
+  };
+  if (!isApprovalSender(event) || approvalRendererState !== "ready" ||
+      !data || typeof data.capability !== "string" ||
+      !/^[a-f0-9]{32}$/.test(data.capability) ||
+      data.pageSession !== approvalRendererPageSession ||
+      data.rendererGeneration !== approvalRendererGeneration) {
+    refuse("invalid-adoption-check");
+    return;
+  }
+  const grant = committedDiskAdoptions.get(data.capability);
+  if (!grant || grant.pageSession !== data.pageSession ||
+      grant.rendererGeneration !== data.rendererGeneration ||
+      grant.revision !== deletionEvidenceRevision ||
+      Date.now() - grant.acceptedAt > DISK_ADOPTION_CAPABILITY_MS ||
+      !diskAdoptionAuthorityIsCurrent(
+        grant.sourcePermission, grant.proposedOwner, grant.oldOwner, grant.ownerPath,
+      )) {
+    refuse("stale-adoption-capability");
+    return;
+  }
+  if (!diskAdoptionSnapshotIsCurrent(grant)) {
+    refuse("disk-version-or-target-moved");
+    return;
+  }
+  event.returnValue = Object.freeze({
+    valid: true, pathKey: grant.versionPathKey, version: grant.version,
+  });
+});
+
 ipcMain.on("commit-document-disk-adoption", (event, data) => {
   const refuse = (why) => {
     event.returnValue = Object.freeze({ accepted: false, why });
@@ -8051,6 +8096,12 @@ ipcMain.on("commit-document-disk-adoption", (event, data) => {
     filePathSpellingKey(data.ownerFilePath) !== grant.ownerSpelling
   ) {
     refuse("capability-target-mismatch");
+    return;
+  }
+  // The renderer no longer probes disk before committing. Refuse a stale
+  // snapshot before either kind of confirmation, as well as after the dialog.
+  if (!diskAdoptionSnapshotIsCurrent(grant)) {
+    refuse("disk-version-or-target-moved");
     return;
   }
   if (
@@ -8153,6 +8204,7 @@ ipcMain.on("commit-document-disk-adoption", (event, data) => {
     );
     if (
       grant.revision !== deletionEvidenceRevision ||
+      !diskAdoptionSnapshotIsCurrent(grant) ||
       !currentStats ||
       resolveCanonicalFileKey(sourcePath) !== currentKey ||
       diskVersionChanged(
@@ -8284,6 +8336,7 @@ ipcMain.on("commit-document-disk-adoption", (event, data) => {
   if (
     !before ||
     !after ||
+    !diskAdoptionSnapshotIsCurrent(grant) ||
     resolveCanonicalFileKey(sourcePath) !== currentKey ||
     diskVersionChanged(version, diskVersionFromStats(before)) ||
     diskVersionChanged(version, diskVersionFromStats(after))

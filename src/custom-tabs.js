@@ -1723,10 +1723,12 @@
     } = {},
   ) {
     const supplied = normaliseDiskVersion(diskVersion);
-    const freshKey = resolveTabPath(filePath);
-    const boundKey = tab && tabPathKey(tab);
-    const retargeted = !!boundKey && boundKey !== freshKey;
     const tabState = tab && documentState.get(tab);
+    const admission = documentAdmission || tabState?.admission;
+    // This proposes an admitted identity; only Main attests its current binding.
+    const freshKey = admission?.pathKey;
+    const boundKey = tabState?.pathKey;
+    const retargeted = !!boundKey && boundKey !== freshKey;
     const previousGeneration = tabState && tabState.generation;
     const previousMutationRevision =
       tabState && tabState.mutationRevision;
@@ -1739,11 +1741,13 @@
       !supplied ||
       !Number.isFinite(modifiedTime) ||
       supplied.mtimeMs !== modifiedTime ||
-      !freshKey ||
-      (tab && !tabs.includes(tab)) ||
+      typeof freshKey !== "string" || !freshKey || freshKey.includes("\0") ||
+      !admission || !/^[a-f0-9]{64}$/.test(admission.ref) ||
+      (tab && (!tabs.includes(tab) || !boundKey)) ||
       (retargeted && !allowPathReplacement) ||
       typeof window.prepareDocumentDiskAdoption !== "function" ||
-      typeof window.commitDocumentDiskAdoption !== "function"
+      typeof window.commitDocumentDiskAdoption !== "function" ||
+      typeof window.folia?.checkCommittedDiskAdoption !== "function"
     ) {
       notify("The file target changed. The in-memory copy was kept.", 6000);
       return null;
@@ -1806,9 +1810,7 @@
           tabId: proposedTabId,
           documentGeneration: proposedGeneration,
           pathKey: freshKey,
-          ...((documentAdmission || tabState?.admission)?.ref ? {
-            documentRef: (documentAdmission || tabState.admission).ref,
-          } : {}),
+          documentRef: admission.ref,
         },
         modifiedTime,
         diskVersion: supplied,
@@ -1823,8 +1825,6 @@
           typeof state.capability !== "string"
         ) break;
         if (
-          !sameDiskVersion(getDiskVersion(filePath), supplied) ||
-          resolveTabPath(filePath) !== freshKey ||
           (tab && (
             !tabs.includes(tab) ||
             tabState.generation !== previousGeneration ||
@@ -1890,8 +1890,6 @@
       return null;
     }
     if (
-      !sameDiskVersion(getDiskVersion(filePath), supplied) ||
-      resolveTabPath(filePath) !== freshKey ||
       (tab && (
         !tabs.includes(tab) ||
         tabState.generation !== previousGeneration ||
@@ -1932,9 +1930,22 @@
       notify("The file changed before adoption. The in-memory copy was kept.", 6000);
       return null;
     }
+    let checked;
+    try {
+      checked = window.folia.checkCommittedDiskAdoption({
+        capability: committed.capability,
+        pageSession: session,
+        rendererGeneration: approvalRendererGeneration,
+      });
+    } catch (error) {
+      abandonDiskAdoption(committed.capability);
+      console.error("[CustomTabs] Could not check committed disk adoption:", error);
+      notify("The file could not be verified after approval. Nothing was replaced.", 6000);
+      return null;
+    }
     if (
-      !sameDiskVersion(getDiskVersion(filePath), supplied) ||
-      resolveTabPath(filePath) !== freshKey ||
+      !checked || checked.valid !== true || checked.pathKey !== freshKey ||
+      !sameDiskVersion(checked.version, supplied) ||
       (tab && (
         !tabs.includes(tab) ||
         tabState.generation !== previousGeneration ||
