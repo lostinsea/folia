@@ -137,6 +137,22 @@ const TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL = Object.freeze([
   "Shutdown approval renderer unusable: webContents destroyed",
 ]);
 const VIRTUAL_SUITES = Object.freeze({
+  "test:sec08-renderer-open-evidence": Object.freeze({
+    npmScript: "test:tabs",
+    environment: Object.freeze({
+      SEC08_OWNED_METADATA_FOCUSED_HARNESS: "1",
+      SEC08_RENDERER_BOUNDARIES_HARNESS: "1",
+      SEC08_RENDERER_BOUNDARIES_UNIT: "open",
+    }),
+  }),
+  "test:sec08-renderer-reload-evidence": Object.freeze({
+    npmScript: "test:tabs",
+    environment: Object.freeze({
+      SEC08_OWNED_METADATA_FOCUSED_HARNESS: "1",
+      SEC08_RENDERER_BOUNDARIES_HARNESS: "1",
+      SEC08_RENDERER_BOUNDARIES_UNIT: "reload",
+    }),
+  }),
   "test:sec08-owned-metadata-evidence": Object.freeze({
     npmScript: "test:tabs",
     environment: Object.freeze({ SEC08_OWNED_METADATA_FOCUSED_HARNESS: "1" }),
@@ -20996,8 +21012,11 @@ const REVERTS = [
             /^changed clean-tab reads use the fixed production bridge instead of renderer raw IPC$/,
             /^pending-Save reopening requires a current native ticket after settlement and the freeze fence without renderer disk fallback$/,
             /^main windows always load the packaged production bridge, including marked tests$/,
+            /^approved open verifies committed authority and lexical owner source before selection or alias seeding without renderer disk probes$/,
+            /^delegated reload verifies actual retained owner source and version through one fixed metadata helper on both sides of display$/,
           ],
           requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 1,
         },
         {
           id: "R872",
@@ -21098,8 +21117,11 @@ const REVERTS = [
           mustPass: [
             /^changed clean-tab reads use the fixed production bridge instead of renderer raw IPC$/,
             /^pending-Save reopening requires a current native ticket after settlement and the freeze fence without renderer disk fallback$/,
+            /^approved open uses the actual selected owner after capability consumption and keeps native baseline aliases on freshness refusal$/,
+            /^delegated reload completion fences local sequence selection spelling tab and freeze before checks and any stale effects$/,
           ],
           requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 1,
         },
         {
           id: "R877",
@@ -21112,8 +21134,334 @@ const REVERTS = [
           mustPass: [
             /^changed clean-tab reads use the fixed production bridge instead of renderer raw IPC$/,
             /^pending-Save reopening requires a current native ticket after settlement and the freeze fence without renderer disk fallback$/,
+            /^approved open uses the actual selected owner after capability consumption and keeps native baseline aliases on freshness refusal$/,
+            /^delegated reload completion fences local sequence selection spelling tab and freeze before checks and any stale effects$/,
           ],
           requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R878",
+          what: "accept a committed open approval for a different lexical owner spelling",
+          file: RENDERER,
+          from: "      if (approval.ownerSpelling === incomingSpelling &&",
+          to: "      if (true &&",
+          suite: "test:sec08-renderer-open-evidence",
+          expect: [/^SEC-08 renderer open lexical-owner refuses before selection alias seeding and document ownership changes$/],
+          mustPass: [
+            /^SEC-08 renderer open lexical-owner setup reaches a genuine committed native approval and the intended mutation$/,
+            /^SEC-08 renderer open lexical-source refuses before selection alias seeding and document ownership changes$/,
+            /^SEC-08 renderer open post-version preserves approved RAM and sticky native baseline after postselection refusal$/,
+            /^SEC-08 renderer ordinary authenticated Save still settles once without new metadata checks$/,
+            /^the error sentinel was demonstrably watching both channels$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R879",
+          what: "accept a committed open approval for a different captured source spelling",
+          file: RENDERER,
+          from: "          approval.incomingSpelling === fileTrackingPathKey(\n" +
+            "            options.fileOpenSourcePath || openedPath\n" +
+            "          )) {",
+          to: "          true) {",
+          suite: "test:sec08-renderer-open-evidence",
+          expect: [/^SEC-08 renderer open lexical-source refuses before selection alias seeding and document ownership changes$/],
+          mustPass: [
+            /^SEC-08 renderer open lexical-source setup reaches a genuine committed native approval and the intended mutation$/,
+            /^SEC-08 renderer open lexical-owner refuses before selection alias seeding and document ownership changes$/,
+            /^SEC-08 renderer open post-binding preserves approved RAM and sticky native baseline after postselection refusal$/,
+            /^SEC-08 renderer ordinary authenticated Save still settles once without new metadata checks$/,
+            /^the error sentinel was demonstrably watching both channels$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R880",
+          what: "continue into native selection after the committed open approval refuses",
+          file: RENDERER,
+          from: "      if (!approved) {\n        console.error('File target moved before approved open');",
+          to: "      if (false) {\n        console.error('File target moved before approved open');",
+          suite: "test:sec08-renderer-open-evidence",
+          expect: [
+            /^SEC-08 renderer open lexical-owner refuses before selection alias seeding and document ownership changes$/,
+            /^SEC-08 renderer open lexical-source refuses before selection alias seeding and document ownership changes$/,
+            /^SEC-08 renderer open expired refuses before selection alias seeding and document ownership changes$/,
+            /^SEC-08 renderer open version refuses before selection alias seeding and document ownership changes$/,
+            /^SEC-08 renderer open binding refuses before selection alias seeding and document ownership changes$/,
+          ],
+          mustPass: [
+            /^SEC-08 renderer open expired setup reaches a genuine committed native approval and the intended mutation$/,
+            /^SEC-08 renderer open version setup reaches a genuine committed native approval and the intended mutation$/,
+            /^SEC-08 renderer open binding setup reaches a genuine committed native approval and the intended mutation$/,
+            /^SEC-08 renderer open post-version preserves approved RAM and sticky native baseline after postselection refusal$/,
+            /^SEC-08 renderer open post-binding preserves approved RAM and sticky native baseline after postselection refusal$/,
+            /^SEC-08 renderer ordinary authenticated Save still settles once without new metadata checks$/,
+            /^the error sentinel was demonstrably watching both channels$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 5,
+        },
+        {
+          id: "R881",
+          what: "skip freshness verification after Main has actually selected the adopted open owner",
+          file: RENDERER,
+          from: "  const postSelectionPathConflict = !!options.deletionAdoptionApproval &&\n" +
+            "    !approvedOwnedReloadSnapshotMatches(\n" +
+            "      openedPath,\n" +
+            "      options.fileOpenSourcePath || openedPath,\n" +
+            "      trackingDecision.owner,\n" +
+            "      options.deletionAdoptionApproval.pathKey,\n" +
+            "      options.deletionAdoptionApproval.version\n" +
+            "    );",
+          to: "  const postSelectionPathConflict = false;",
+          suite: "test:sec08-renderer-open-evidence",
+          expect: [
+            /^SEC-08 renderer open post-version preserves approved RAM and sticky native baseline after postselection refusal$/,
+            /^SEC-08 renderer open post-binding preserves approved RAM and sticky native baseline after postselection refusal$/,
+          ],
+          mustPass: [
+            /^SEC-08 renderer open post-version setup reaches a genuine committed native approval and the intended mutation$/,
+            /^SEC-08 renderer open post-binding setup reaches a genuine committed native approval and the intended mutation$/,
+            /^SEC-08 renderer open expired refuses before selection alias seeding and document ownership changes$/,
+            /^SEC-08 renderer ordinary authenticated Save still settles once without new metadata checks$/,
+            /^the error sentinel was demonstrably watching both channels$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 2,
+        },
+        {
+          id: "R882",
+          what: "restore raw committed-check IPC at the approved open consumer",
+          file: RENDERER,
+          from: "          const checked = window.folia.checkCommittedDiskAdoption({",
+          to: "          const checked = ipcRenderer.sendSync('check-committed-disk-adoption', {",
+          suite: "test:packaging",
+          expect: [/^approved open verifies committed authority and lexical owner source before selection or alias seeding without renderer disk probes$/],
+          mustPass: [
+            /^approved open uses the actual selected owner after capability consumption and keeps native baseline aliases on freshness refusal$/,
+            /^delegated reload verifies actual retained owner source and version through one fixed metadata helper on both sides of display$/,
+            /^post-render approved metadata uses the actual retained owner and fixed Main port between local completion fences$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R883",
+          what: "restore raw owned-metadata IPC in the shared renderer reload helper",
+          file: RENDERER,
+          from: "    const checked = window.folia.checkOwnedTabDiskSnapshot({\n" +
+            "      filePath, sourcePath, owner,",
+          to: "    const checked = ipcRenderer.sendSync('check-owned-tab-disk-snapshot', {\n" +
+            "      filePath, sourcePath, owner,",
+          suite: "test:packaging",
+          expect: [/^delegated reload verifies actual retained owner source and version through one fixed metadata helper on both sides of display$/],
+          mustPass: [
+            /^approved open verifies committed authority and lexical owner source before selection or alias seeding without renderer disk probes$/,
+            /^approved open uses the actual selected owner after capability consumption and keeps native baseline aliases on freshness refusal$/,
+            /^post-render approved metadata uses the actual retained owner and fixed Main port between local completion fences$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R884",
+          what: "replace the actual selected open owner with no retained authority",
+          file: RENDERER,
+          from: "      options.fileOpenSourcePath || openedPath,\n" +
+            "      trackingDecision.owner,\n" +
+            "      options.deletionAdoptionApproval.pathKey,",
+          to: "      options.fileOpenSourcePath || openedPath,\n" +
+            "      null,\n" +
+            "      options.deletionAdoptionApproval.pathKey,",
+          suite: "test:packaging",
+          expect: [/^approved open uses the actual selected owner after capability consumption and keeps native baseline aliases on freshness refusal$/],
+          mustPass: [
+            /^approved open verifies committed authority and lexical owner source before selection or alias seeding without renderer disk probes$/,
+            /^delegated reload verifies actual retained owner source and version through one fixed metadata helper on both sides of display$/,
+            /^post-render approved metadata uses the actual retained owner and fixed Main port between local completion fences$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R885",
+          what: "drop the native selected baseline alias publication at the approved open boundary",
+          file: RENDERER,
+          from: "        reloadPathAliases.set(spelling, trackingDecision.owner.pathKey);",
+          to: "        void spelling;",
+          suite: "test:packaging",
+          expect: [/^approved open uses the actual selected owner after capability consumption and keeps native baseline aliases on freshness refusal$/],
+          mustPass: [
+            /^approved open verifies committed authority and lexical owner source before selection or alias seeding without renderer disk probes$/,
+            /^delegated reload completion fences local sequence selection spelling tab and freeze before checks and any stale effects$/,
+            /^post-render approved metadata uses the actual retained owner and fixed Main port between local completion fences$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R886",
+          what: "paint a delegated reload after its real predisplay metadata check refuses",
+          file: RENDERER,
+          from: "    if (!approvedBeforeDisplay) {",
+          to: "    if (false) {",
+          suite: "test:sec08-renderer-reload-evidence",
+          expect: [
+            /^SEC-08 renderer reload before-version consumer forwards the actual retained native owner and approved source version$/,
+            /^SEC-08 renderer reload before-owner consumer forwards the actual retained native owner and approved source version$/,
+            /^SEC-08 renderer reload before-source consumer forwards the actual retained native owner and approved source version$/,
+            /^SEC-08 renderer reload before-version exact refusal reports quarantines and preserves approved RAM with sticky native aliases$/,
+            /^SEC-08 renderer reload before-owner exact refusal reports quarantines and preserves approved RAM with sticky native aliases$/,
+            /^SEC-08 renderer reload before-source exact refusal reports quarantines and preserves approved RAM with sticky native aliases$/,
+          ],
+          mustPass: [
+            /^SEC-08 renderer reload before-version setup uses a genuine native delivery and actual selected retained owner$/,
+            /^SEC-08 renderer reload before-owner setup uses a genuine native delivery and actual selected retained owner$/,
+            /^SEC-08 renderer reload before-source setup uses a genuine native delivery and actual selected retained owner$/,
+            /^SEC-08 renderer reload unchanged reaches both real Main successes and restores scroll without conflict$/,
+            /^SEC-08 renderer reload after-source exact refusal reports quarantines and preserves approved RAM with sticky native aliases$/,
+            /^SEC-08 renderer ordinary authenticated Save still settles once without new metadata checks$/,
+            /^the error sentinel was demonstrably watching both channels$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 6,
+        },
+        {
+          id: "R887",
+          what: "accept a delegated render after its real postdisplay metadata check refuses",
+          file: RENDERER,
+          from: "    if (!approvedAfterDisplay) {",
+          to: "    if (false) {",
+          suite: "test:sec08-renderer-reload-evidence",
+          expect: [
+            /^SEC-08 renderer reload after-version exact refusal reports quarantines and preserves approved RAM with sticky native aliases$/,
+            /^SEC-08 renderer reload after-owner exact refusal reports quarantines and preserves approved RAM with sticky native aliases$/,
+            /^SEC-08 renderer reload after-source exact refusal reports quarantines and preserves approved RAM with sticky native aliases$/,
+          ],
+          mustPass: [
+            /^SEC-08 renderer reload after-version setup uses a genuine native delivery and actual selected retained owner$/,
+            /^SEC-08 renderer reload after-owner setup uses a genuine native delivery and actual selected retained owner$/,
+            /^SEC-08 renderer reload after-source setup uses a genuine native delivery and actual selected retained owner$/,
+            /^SEC-08 renderer reload unchanged reaches both real Main successes and restores scroll without conflict$/,
+            /^SEC-08 renderer reload before-source exact refusal reports quarantines and preserves approved RAM with sticky native aliases$/,
+            /^SEC-08 renderer ordinary authenticated Save still settles once without new metadata checks$/,
+            /^the error sentinel was demonstrably watching both channels$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 3,
+        },
+        {
+          id: "R888",
+          what: "perform delegated completion metadata checks after local freeze or supersession",
+          file: RENDERER,
+          from: "    if (!stillSelected() ||\n" +
+            "        !mayMutateRendererDocument('ipc-reload-result-after-render')) return;\n",
+          to: "",
+          suite: "test:sec08-renderer-reload-evidence",
+          expect: [
+            /^SEC-08 renderer reload frozen consumer forwards the actual retained native owner and approved source version$/,
+            /^SEC-08 renderer reload superseded consumer forwards the actual retained native owner and approved source version$/,
+            /^SEC-08 renderer reload local-selection consumer forwards the actual retained native owner and approved source version$/,
+            /^SEC-08 renderer reload frozen completion makes no later metadata conflict or alias update$/,
+            /^SEC-08 renderer reload superseded completion makes no later metadata conflict or alias update$/,
+            /^SEC-08 renderer reload local-selection completion makes no later metadata conflict or alias update$/,
+          ],
+          mustPass: [
+            /^SEC-08 renderer reload frozen setup uses a genuine native delivery and actual selected retained owner$/,
+            /^SEC-08 renderer reload superseded setup uses a genuine native delivery and actual selected retained owner$/,
+            /^SEC-08 renderer reload local-selection genuinely supersedes native selection without changing path tab or open sequence$/,
+            /^SEC-08 renderer reload unchanged reaches both real Main successes and restores scroll without conflict$/,
+            /^SEC-08 renderer reload before-source exact refusal reports quarantines and preserves approved RAM with sticky native aliases$/,
+            /^the error sentinel was demonstrably watching both channels$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 6,
+        },
+        {
+          id: "R889",
+          what: "omit delegated relevance and freeze revalidation immediately after the synchronous metadata check",
+          file: RENDERER,
+          from: "    if (!stillSelected() ||\n" +
+            "        !mayMutateRendererDocument('ipc-reload-result-after-render-check')) return;\n",
+          to: "",
+          suite: "test:packaging",
+          expect: [/^delegated reload completion fences local sequence selection spelling tab and freeze before checks and any stale effects$/],
+          mustPass: [
+            /^delegated reload verifies actual retained owner source and version through one fixed metadata helper on both sides of display$/,
+            /^approved open verifies committed authority and lexical owner source before selection or alias seeding without renderer disk probes$/,
+            /^post-render approved metadata uses the actual retained owner and fixed Main port between local completion fences$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R890",
+          what: "ignore a genuine newer native selection when the reload path tab and open sequence stay unchanged",
+          file: RENDERER,
+          from: "      acceptedSelectionGeneration === activeFileSelectionGeneration &&\n",
+          to: "",
+          suite: "test:sec08-renderer-reload-evidence",
+          expect: [
+            /^SEC-08 renderer reload local-selection consumer forwards the actual retained native owner and approved source version$/,
+            /^SEC-08 renderer reload local-selection completion makes no later metadata conflict or alias update$/,
+          ],
+          mustPass: [
+            /^SEC-08 renderer reload local-selection setup uses a genuine native delivery and actual selected retained owner$/,
+            /^SEC-08 renderer reload local-selection genuinely supersedes native selection without changing path tab or open sequence$/,
+            /^SEC-08 renderer reload frozen completion makes no later metadata conflict or alias update$/,
+            /^SEC-08 renderer reload superseded completion makes no later metadata conflict or alias update$/,
+            /^SEC-08 renderer reload unchanged reaches both real Main successes and restores scroll without conflict$/,
+            /^the error sentinel was demonstrably watching both channels$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 2,
+        },
+        {
+          id: "R891",
+          what: "drop the selected native reload baseline aliases instead of retaining their correlation on refusal",
+          file: RENDERER,
+          from: "      if (spelling) reloadPathAliases.set(spelling, approvedPathKey);",
+          to: "      void spelling;",
+          suite: "test:packaging",
+          expect: [/^delegated reload completion fences local sequence selection spelling tab and freeze before checks and any stale effects$/],
+          mustPass: [
+            /^delegated reload verifies actual retained owner source and version through one fixed metadata helper on both sides of display$/,
+            /^approved open uses the actual selected owner after capability consumption and keeps native baseline aliases on freshness refusal$/,
+            /^post-render approved metadata uses the actual retained owner and fixed Main port between local completion fences$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R892",
+          what: "reset native authority tables while ending a focused freeze fixture",
+          file: path.join(ROOT, "test", "test-tab-refresh.js"),
+          from: "  const aborted = __shutdown.abortCommit(commitId);",
+          to: "  const aborted = (__shutdown.reset(), true);",
+          suite: "test:packaging",
+          expect: [/^owned metadata freeze fixtures abort the exact native commit without resetting authority and prove refusal thaw and preserved baselines$/],
+          mustPass: [
+            /^owned metadata terminal fixture awaits the actual destroyed producer and checks Main before its definitive footer$/,
+            /^owned metadata cleanup proves exact tab removal and native reference retirement instead of counting historical owner rows$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R893",
+          what: "replace actual native renderer destruction settlement with an event-loop proxy",
+          file: path.join(ROOT, "test", "test-tab-refresh.js"),
+          from: "    await destroyed;\n",
+          to: "",
+          suite: "test:packaging",
+          expect: [/^owned metadata terminal fixture awaits the actual destroyed producer and checks Main before its definitive footer$/],
+          mustPass: [
+            /^owned metadata freeze fixtures abort the exact native commit without resetting authority and prove refusal thaw and preserved baselines$/,
+            /^owned metadata cleanup proves exact tab removal and native reference retirement instead of counting historical owner rows$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R894",
+          what: "accept a requested cleanup close without proving the exact tab was removed",
+          file: path.join(ROOT, "test", "test-tab-refresh.js"),
+          from: "    item.removed && admissionCurrent[index] === false &&",
+          to: "    admissionCurrent[index] === false &&",
+          suite: "test:packaging",
+          expect: [/^owned metadata cleanup proves exact tab removal and native reference retirement instead of counting historical owner rows$/],
+          mustPass: [
+            /^owned metadata freeze fixtures abort the exact native commit without resetting authority and prove refusal thaw and preserved baselines$/,
+            /^owned metadata terminal fixture awaits the actual destroyed producer and checks Main before its definitive footer$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
         },
       ];
 
@@ -22194,7 +22542,7 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760,R840,R841,R845,R849,R853,R858,R860";
+      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760,R840,R841,R845,R849,R853,R858,R860,R871,R876,R877,R878,R879,R880,R881,R882,R883,R884,R885,R886,R887,R888,R889,R890,R891,R892,R893,R894";
   const toolbarAllowanceIsRecordScoped =
     REVERTS.filter((r) =>
       exactShutdownTailForMutation(r) === TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL,

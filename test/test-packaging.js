@@ -658,6 +658,101 @@ async function main() {
         ownedMetadataCompletion,
       ),
   );
+  const rendererBoundarySource = read("src/renderer.js");
+  const approvedOpenPreselection = rendererBoundarySource.split(
+    "function beginFileOpen(data, options = {}) {",
+  )[1]?.split("// Clear undo/redo history on new file")[0] || "";
+  const committedOpenPort = approvedOpenPreselection.indexOf(
+    "window.folia.checkCommittedDiskAdoption({",
+  );
+  const approvedOpenRefusal = approvedOpenPreselection.indexOf("if (!approved) {");
+  const approvedOpenAlias = approvedOpenPreselection.indexOf(
+    "reloadPathAliases.set(incomingSpelling, approval.pathKey);",
+  );
+  check(
+    "approved open verifies committed authority and lexical owner source before selection or alias seeding without renderer disk probes",
+    committedOpenPort >= 0 && approvedOpenRefusal > committedOpenPort &&
+      approvedOpenAlias > approvedOpenRefusal &&
+      approvedOpenPreselection.includes("approval.ownerSpelling === incomingSpelling") &&
+      approvedOpenPreselection.includes("approval.incomingSpelling === fileTrackingPathKey(") &&
+      approvedOpenPreselection.indexOf("approval.ownerSpelling === incomingSpelling") < committedOpenPort &&
+      approvedOpenPreselection.indexOf("approval.incomingSpelling === fileTrackingPathKey(") < committedOpenPort &&
+      approvedOpenPreselection.includes("capability: approval.capability,") &&
+      approvedOpenPreselection.includes("pageSession: reloadRequestSession,") &&
+      approvedOpenPreselection.includes("rendererGeneration: approval.rendererGeneration,") &&
+      approvedOpenPreselection.includes("checked.valid === true") &&
+      approvedOpenPreselection.includes("checked.pathKey === approval.pathKey") &&
+      approvedOpenPreselection.includes("diskVersionsEqual(checked.version, approval.version)") &&
+      !/bindApprovedReloadPath\s*\(|approvedReloadSnapshotMatches\s*\(|currentReloadPhysicalKey\s*\(|(?:ipcRenderer|window\.fs)\./.test(
+        approvedOpenPreselection,
+      ),
+  );
+  const approvedOpenPostselection = rendererBoundarySource.split(
+    "if (options.deletionAdoptionApproval && trackingDecision.owner) {",
+  )[1]?.split("if (typeof options.onTrackingCommitted")[0] || "";
+  check(
+    "approved open uses the actual selected owner after capability consumption and keeps native baseline aliases on freshness refusal",
+    approvedOpenPostselection.includes("reloadPathAliases.set(spelling, trackingDecision.owner.pathKey);") &&
+      approvedOpenPostselection.indexOf("reloadPathAliases.set(") >= 0 &&
+      approvedOpenPostselection.indexOf("reloadPathAliases.set(") <
+        approvedOpenPostselection.indexOf("!approvedOwnedReloadSnapshotMatches(") &&
+      /!approvedOwnedReloadSnapshotMatches\(\s*openedPath,\s*options\.fileOpenSourcePath \|\| openedPath,\s*trackingDecision\.owner,\s*options\.deletionAdoptionApproval\.pathKey,\s*options\.deletionAdoptionApproval\.version/.test(
+        approvedOpenPostselection,
+      ) &&
+      !/checkCommittedDiskAdoption|approvedReloadSnapshotMatches\s*\(|bindApprovedReloadPath\s*\(|currentReloadPhysicalKey\s*\(/.test(
+        approvedOpenPostselection,
+      ),
+  );
+  const ownedReloadHelper = rendererBoundarySource.split(
+    "function approvedOwnedReloadSnapshotMatches(",
+  )[1]?.split("function normaliseReloadSnapshot(")[0] || "";
+  const delegatedReload = rendererBoundarySource.split(
+    "documentEvents.on('file-reload-result', async (event, data) => {",
+  )[1]?.split("// Handle external file open request")[0] || "";
+  const beforeReloadDisplay = delegatedReload.indexOf("const approvedBeforeDisplay =");
+  const reloadRender = delegatedReload.indexOf("await renderMarkdown(data.content);");
+  const afterReloadDisplay = delegatedReload.indexOf("const approvedAfterDisplay =");
+  check(
+    "delegated reload verifies actual retained owner source and version through one fixed metadata helper on both sides of display",
+    ownedReloadHelper.includes("window.folia.checkOwnedTabDiskSnapshot({") &&
+      ownedReloadHelper.includes("filePath, sourcePath, owner,") &&
+      ownedReloadHelper.includes("pageSession: owner.pageSession,") &&
+      ownedReloadHelper.includes("rendererGeneration: owner.rendererGeneration,") &&
+      ownedReloadHelper.includes("diskVersion: version,") &&
+      ownedReloadHelper.includes("checked.matches === true && checked.pathKey === pathKey") &&
+      ownedReloadHelper.includes("diskVersionsEqual(checked.diskVersion, version)") &&
+      beforeReloadDisplay >= 0 && reloadRender > beforeReloadDisplay &&
+      afterReloadDisplay > reloadRender &&
+      (delegatedReload.match(/approvedOwnedReloadSnapshotMatches\(/g) || []).length === 2 &&
+      delegatedReload.includes("const acceptedOwner = data.trackingSelection.owner;") &&
+      delegatedReload.includes("const acceptedSourcePath = data.path;") &&
+      delegatedReload.includes("const acceptedDiskVersion = data.trackingSelection.diskVersion;") &&
+      (delegatedReload.match(/acceptedOwnerPath, acceptedSourcePath, acceptedOwner,/g) || []).length === 2 &&
+      (delegatedReload.match(/approvedPathKey, acceptedDiskVersion/g) || []).length === 2 &&
+      !/approvedReloadSnapshotMatches\s*\(|bindApprovedReloadPath\s*\(|currentReloadPhysicalKey\s*\(|(?:window\.fs|ipcRenderer)\.|checkCommittedDiskAdoption/.test(
+        ownedReloadHelper + delegatedReload,
+      ),
+  );
+  const delegatedAfterRender = delegatedReload.slice(reloadRender, afterReloadDisplay);
+  const delegatedAfterCheck = delegatedReload.slice(afterReloadDisplay).split(
+    "if (!approvedAfterDisplay)",
+  )[0];
+  check(
+    "delegated reload completion fences local sequence selection spelling tab and freeze before checks and any stale effects",
+    delegatedReload.includes("acceptedSequence === fileOpenSequence") &&
+      delegatedReload.includes("acceptedSelectionGeneration === activeFileSelectionGeneration") &&
+      delegatedReload.includes("acceptedStateKey === fileTrackingPathKey(currentFilePath)") &&
+      delegatedReload.includes("window.CustomTabs.getActiveTabId() === acceptedOwner.tabId") &&
+      delegatedAfterRender.includes("if (!stillSelected() ||") &&
+      delegatedAfterRender.includes("ipc-reload-result-after-render") &&
+      delegatedAfterCheck.includes("if (!stillSelected() ||") &&
+      delegatedAfterCheck.includes("ipc-reload-result-after-render-check") &&
+      delegatedReload.includes("ipc-reload-result-after-check") &&
+      delegatedReload.indexOf("reloadPathAliases.set(spelling, approvedPathKey);") >
+        delegatedReload.indexOf("ipc-reload-result-after-check") &&
+      delegatedReload.indexOf("reloadPathAliases.set(spelling, approvedPathKey);") <
+        delegatedReload.indexOf("if (!approvedBeforeDisplay)"),
+  );
   check(
     "dialog extras use the grant-only production bridge instead of renderer raw IPC",
     read("src/custom-tabs.js").includes(
@@ -666,6 +761,50 @@ async function main() {
       !read("src/custom-tabs.js").includes(
         'tabIpc.invoke("read-dialog-extra"',
       ),
+  );
+  const ownedFixtureSource = read("test/test-tab-refresh.js");
+  const ownedAbortFixture = ownedFixtureSource.split(
+    "async function abortOwnedMetadataFixtureFreeze(exec, label) {",
+  )[1]?.split("async function closeOwnedMetadataFixtureTabs")[0] || "";
+  const ownedCloseFixture = ownedFixtureSource.split(
+    "async function closeOwnedMetadataFixtureTabs(exec, ids, label) {",
+  )[1]?.split("async function runOwnedMetadataScenarios")[0] || "";
+  const ownedTerminalFixture = ownedFixtureSource.slice(
+    ownedFixtureSource.lastIndexOf("  if (ownedMetadataFocusedHarness) {"),
+  );
+  check(
+    "owned metadata freeze fixtures abort the exact native commit without resetting authority and prove refusal thaw and preserved baselines",
+    ownedAbortFixture.includes("__shutdown.abortCommit(commitId + 1)") &&
+      ownedAbortFixture.includes("const aborted = __shutdown.abortCommit(commitId);") &&
+      ownedAbortFixture.includes("doubleAbortRefused") &&
+      ownedAbortFixture.includes("after.commitPendingId === 0 && !after.authorized") &&
+      ownedAbortFixture.includes('after.commitRefusedWhy === "test-fixture-abort"') &&
+      ownedAbortFixture.includes("owner.deletion?.known === true && preserved[index].deletion?.known === true") &&
+      ownedAbortFixture.includes("__shutdown.documentAdmissionIsCurrent(owner.identity.documentRef)") &&
+      !ownedAbortFixture.includes("__shutdown.reset(") &&
+      (ownedFixtureSource.match(/await abortOwnedMetadataFixtureFreeze\(exec,/g) || []).length === 2 &&
+      mainJs.includes("abortCommit: (id) => {") &&
+      mainJs.includes("attempt.id !== id || attempt.settled"),
+  );
+  check(
+    "owned metadata terminal fixture awaits the actual destroyed producer and checks Main before its definitive footer",
+    ownedTerminalFixture.includes('win.webContents.once("destroyed"') &&
+      ownedTerminalFixture.indexOf("await destroyed;") > ownedTerminalFixture.indexOf("win.destroy();") &&
+      ownedTerminalFixture.indexOf("await destroyed;") < ownedTerminalFixture.indexOf("setImmediate(resolve)") &&
+      ownedTerminalFixture.includes('shutdown.rendererUnusableReason === "webContents destroyed"') &&
+      ownedTerminalFixture.indexOf("failed = results.filter") <
+        ownedTerminalFixture.indexOf("=== ${results.length - failed}/${results.length} passed"),
+  );
+  check(
+    "owned metadata cleanup proves exact tab removal and native reference retirement instead of counting historical owner rows",
+    ownedCloseFixture.includes("deletion.known !== true") &&
+      ownedCloseFixture.includes("await window.CustomTabs.closeTab(id);") &&
+      ownedCloseFixture.includes("removed: !window.CustomTabs.getTabs().some(tab => tab.id === id)") &&
+      ownedCloseFixture.includes("item.removed && admissionCurrent[index] === false") &&
+      ownedCloseFixture.includes("owner.documentGeneration === item.identity.documentGeneration") &&
+      ownedCloseFixture.includes("owner.documentRef === item.identity.documentRef") &&
+      ownedCloseFixture.includes('if (!valid) throw new Error("Owned metadata fixture cleanup') &&
+      !ownedCloseFixture.includes("owners.length === ids.length"),
   );
   const pendingReopenConsumer = read("src/custom-tabs.js").split(
     "const handleFileOpened = async (event, data) => {",

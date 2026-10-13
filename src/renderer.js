@@ -1423,6 +1423,28 @@ function approvedReloadSnapshotMatches(filePath, pathKey, version) {
   }
 }
 
+function approvedOwnedReloadSnapshotMatches(
+  filePath, sourcePath, owner, pathKey, version
+) {
+  if (!owner || owner.pathKey !== pathKey) {
+    console.error('Could not verify the approved snapshot: retained owner mismatch');
+    return false;
+  }
+  try {
+    const checked = window.folia.checkOwnedTabDiskSnapshot({
+      filePath, sourcePath, owner,
+      pageSession: owner.pageSession,
+      rendererGeneration: owner.rendererGeneration,
+      diskVersion: version,
+    });
+    return checked.matches === true && checked.pathKey === pathKey &&
+      diskVersionsEqual(checked.diskVersion, version);
+  } catch (error) {
+    console.error('Could not verify the approved owned snapshot:', error);
+    return false;
+  }
+}
+
 function normaliseReloadSnapshot(value) {
   return typeof value === 'string' ? value.replace(/\r\n?/g, '\n') : value;
 }
@@ -8128,12 +8150,27 @@ function beginFileOpen(data, options = {}) {
   const openSequence = ++fileOpenSequence;
   if (options.adoptPathIdentity === true && openedPath) {
     if (options.deletionAdoptionApproval) {
-      if (!bindApprovedReloadPath(
-        openedPath, options.deletionAdoptionApproval.pathKey
-      ) || !approvedReloadSnapshotMatches(
-        openedPath, options.deletionAdoptionApproval.pathKey,
-        options.deletionAdoptionApproval.version
-      )) {
+      const approval = options.deletionAdoptionApproval;
+      let approved = false;
+      if (approval.ownerSpelling === incomingSpelling &&
+          approval.incomingSpelling === fileTrackingPathKey(
+            options.fileOpenSourcePath || openedPath
+          )) {
+        try {
+          // Selection spends this capability and replaces its old owner.
+          const checked = window.folia.checkCommittedDiskAdoption({
+            capability: approval.capability,
+            pageSession: reloadRequestSession,
+            rendererGeneration: approval.rendererGeneration,
+          });
+          approved = checked.valid === true &&
+            checked.pathKey === approval.pathKey &&
+            diskVersionsEqual(checked.version, approval.version);
+        } catch (error) {
+          console.error('Could not verify the committed open approval:', error);
+        }
+      }
+      if (!approved) {
         console.error('File target moved before approved open');
         fileOpenSequence = prior.sequence;
         if (incomingSpelling) {
@@ -8160,6 +8197,7 @@ function beginFileOpen(data, options = {}) {
         );
         return null;
       }
+      reloadPathAliases.set(incomingSpelling, approval.pathKey);
     } else {
       rebindReloadPath(openedPath);
     }
@@ -8293,15 +8331,24 @@ function beginFileOpen(data, options = {}) {
     return null;
   }
 
+  if (options.deletionAdoptionApproval && trackingDecision.owner) {
+    for (const spelling of [
+      incomingSpelling,
+      fileTrackingPathKey(options.fileOpenSourcePath || openedPath),
+    ]) {
+      if (spelling) {
+        reloadPathAliases.set(spelling, trackingDecision.owner.pathKey);
+      }
+    }
+  }
   const postSelectionPathConflict = !!options.deletionAdoptionApproval &&
-    (!approvedReloadSnapshotMatches(
-      openedPath, options.deletionAdoptionApproval.pathKey,
-      options.deletionAdoptionApproval.version
-    ) || !approvedReloadSnapshotMatches(
+    !approvedOwnedReloadSnapshotMatches(
+      openedPath,
       options.fileOpenSourcePath || openedPath,
+      trackingDecision.owner,
       options.deletionAdoptionApproval.pathKey,
       options.deletionAdoptionApproval.version
-    ));
+    );
   if (postSelectionPathConflict) {
     markReloadConflict(openedPath);
     reportAdoptionTrackingConflict(openedPath, trackingDecision.owner);
@@ -9017,21 +9064,30 @@ documentEvents.on('file-reload-result', async (event, data) => {
     }
     const approvedPathKey = data.trackingSelection.pathKey;
     const acceptedOwnerPath = currentFilePath;
-    if (!bindApprovedReloadPath(data.path, approvedPathKey) ||
-        !bindApprovedReloadPath(acceptedOwnerPath, approvedPathKey) ||
-        !approvedReloadSnapshotMatches(
-          data.path, approvedPathKey, data.trackingSelection.diskVersion
-        ) ||
-        !approvedReloadSnapshotMatches(
-          acceptedOwnerPath, approvedPathKey,
-          data.trackingSelection.diskVersion
-        )) {
-      for (const spelling of [
-        fileTrackingPathKey(data.path),
-        fileTrackingPathKey(acceptedOwnerPath),
-      ]) {
-        if (spelling) reloadPathAliases.set(spelling, approvedPathKey);
-      }
+    const acceptedSourcePath = data.path;
+    const acceptedOwner = data.trackingSelection.owner;
+    const acceptedDiskVersion = data.trackingSelection.diskVersion;
+    const acceptedStateKey = fileTrackingPathKey(acceptedOwnerPath);
+    const acceptedSequence = fileOpenSequence;
+    const acceptedSelectionGeneration = activeFileSelectionGeneration;
+    const stillSelected = () =>
+      acceptedSequence === fileOpenSequence &&
+      acceptedSelectionGeneration === activeFileSelectionGeneration &&
+      acceptedStateKey === fileTrackingPathKey(currentFilePath) &&
+      window.CustomTabs.getActiveTabId() === acceptedOwner.tabId;
+    const approvedBeforeDisplay = approvedOwnedReloadSnapshotMatches(
+      acceptedOwnerPath, acceptedSourcePath, acceptedOwner,
+      approvedPathKey, acceptedDiskVersion
+    );
+    if (!stillSelected() ||
+        !mayMutateRendererDocument('ipc-reload-result-after-check')) return;
+    // Main already selected this baseline; aliases correlate it, not freshness.
+    for (const spelling of [
+      fileTrackingPathKey(acceptedSourcePath), acceptedStateKey,
+    ]) {
+      if (spelling) reloadPathAliases.set(spelling, approvedPathKey);
+    }
+    if (!approvedBeforeDisplay) {
       markReloadConflict(acceptedOwnerPath);
       reportAdoptionTrackingConflict(
         acceptedOwnerPath, data.trackingSelection.owner
@@ -9044,7 +9100,6 @@ documentEvents.on('file-reload-result', async (event, data) => {
       error.code = 'RELOAD_PATH_RETARGETED';
       throw error;
     }
-    const acceptedStateKey = fileTrackingPathKey(acceptedOwnerPath);
     const selectedReload = window.customTabsOwnsReloadResults &&
       data.trackingSelection &&
       data.trackingSelection.accepted === true;
@@ -9077,15 +9132,18 @@ documentEvents.on('file-reload-result', async (event, data) => {
 
     // Re-render the markdown
     await renderMarkdown(data.content);
-    if (!approvedReloadSnapshotMatches(
-      data.path, approvedPathKey, data.trackingSelection.diskVersion
-    ) || !approvedReloadSnapshotMatches(
-      acceptedOwnerPath, approvedPathKey,
-      data.trackingSelection.diskVersion
-    )) {
+    if (!stillSelected() ||
+        !mayMutateRendererDocument('ipc-reload-result-after-render')) return;
+    const approvedAfterDisplay = approvedOwnedReloadSnapshotMatches(
+      acceptedOwnerPath, acceptedSourcePath, acceptedOwner,
+      approvedPathKey, acceptedDiskVersion
+    );
+    if (!stillSelected() ||
+        !mayMutateRendererDocument('ipc-reload-result-after-render-check')) return;
+    if (!approvedAfterDisplay) {
       markReloadConflict(acceptedOwnerPath);
       reportAdoptionTrackingConflict(
-        acceptedOwnerPath, data.trackingSelection.owner
+        acceptedOwnerPath, acceptedOwner
       );
       const error = new Error('Reload target moved during rendering');
       error.code = 'RELOAD_PATH_MOVED_DURING_RENDER';

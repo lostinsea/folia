@@ -844,7 +844,7 @@ RPC to this approved completion phase; latency and final responsiveness are
 unqualified. No body read/serialization is added and the clean-tab unchanged
 fast path does not take this port.
 
-**Next renderer adoption boundaries — design accepted, implementation pending.**
+**Renderer adoption boundaries — IMPLEMENTED / PROVEN, review converged, unintegrated.**
 Independent Sol6.1/high and Luna6/high agree that deferred local generations
 do not supersede Main's old native owner before selection. Reuse the committed
 capability check before selection, with authenticated owner/source spelling
@@ -853,8 +853,71 @@ owner's metadata port afterward and at fallback reload boundaries. They
 converged on preserving Main's already-selected sticky baseline aliases even
 when later freshness fails: these are correlation, not permission or fresh
 binding. Preselection refusal rolls back; a superseded completion must not
-overwrite newer aliases. No new Main endpoint/framework is needed. Current
-proof-window closure is the edit prerequisite; other raw helpers remain later.
+overwrite newer aliases. No new Main endpoint/framework is needed.
+The preceding metadata unit is committed as `3e369e83`; its proof window is
+closed. `beginFileOpen` now verifies the committed capability and lexical
+owner/source association before alias seeding, then checks the actual retained
+selection owner after Main spends the capability. Delegated reload uses that
+same metadata port before display and after render, preserving native-selected
+baseline aliases even on freshness refusal. Captured selection/sequence/path/
+tab witnesses and freeze guards prevent stale visual completions from updating
+newer aliases or conflicts. This replaces these consumer filesystem probes,
+not the remaining raw helpers or Node-enabled production flags.
+Performance is not qualified.
+Native consumer controls reach 98/98; the earlier completion-focused route
+reaches 51/51 with explicit begin/completion attribution and actual retained
+owner/spent-capability witnesses. Parent reproduces 98/98 and source packaging
+387/0 on restored checkpoint bytes and viewed approved-RAM conflict captures.
+The initial 23/37 run remains retained: newly added postselection checks were
+being counted as completion calls. Corrected assertions separate phases while
+still requiring zero completion calls for frozen/superseded outcomes. Separate
+source coverage changes only the shared helper input after genuine native
+selection and has a real Main positive witness; it is not an independently
+produced native reload-source delivery. Other failed fixture assumptions stay
+retained.
+R878-R891 and affected R871/R876/R877 are individually exact PROVEN; the R1
+R878/R888 transcripts were initially UNUSABLE because teardown did not await
+Main's actual `webContents destroyed` producer. Their corrected R3 reproofs
+and fixture records R892-R894 are individually exact PROVEN. The freeze
+fixture also used `__shutdown.reset`, clearing native baselines while leaving
+authenticated owners; awaiting close did not prove removal. The source-only,
+non-packaged exact-ID `abortCommit` now uses the existing decline/thaw path
+without clearing document authority. Wrong/double abort, actual thaw,
+preserved native refs/baselines and exact tab/ref retirement are witnessed.
+The original restored combined 62/63 timeout remains unexplained; the
+instrumented 98/98 pass despite contamination is diagnostic only. R3's sole
+writer combined run failed 75/77 on an overstrict historical recognition-row
+count; its correction checks the actual live identity and native ref, not
+superseded recognition rows. Corrected open/reload selectors are 47/47 and
+69/69; the earlier metadata route is 53/53. Parent's direct PowerShell GUI
+launch lost stdout and is retained as UNUSABLE, not a passing suite. The
+installed Electron CLI wrapper then retained the actual child's lifetime and
+transcript: combined 119/119, source packaging 390/0, zero Electron, matching
+sealed R3 product/test/proof hashes, syntax/encoding/diff checks and resolving
+anchors (not proof). Parent viewed the approved-RAM/conflict captures.
+Evidence is retained under `renderer-boundaries-execution-r1`,
+`renderer-boundaries-fixture-execution-r2/r3` and
+`renderer-boundaries-parent-final-r3`. Fresh independent complete-unit
+Sol6.1/high and Luna6/high R3 reviews both found no significant issues or
+remaining disagreement. Remaining tab/path consumers, Node-off production
+and final measured responsiveness stay open.
+
+**Next tab authority consumers — design converged, implementation pending.**
+Independent Sol/Luna agree on one coherent custom-tab migration: committed
+capability before Main completion, actual retained owner afterward, composing
+consecutive synchronous staging checks rather than adding RPC at each former
+filesystem line. Post-render relevance precedes quarantine, and rollback
+freshness is decided before abandonment. Restore/create must retain its old
+stale-snapshot refusal even for background restored entries; successful Save
+bookkeeping must retain moved-to-null without requiring the old owner to stay
+retained. Both use the existing non-null ref-bound native query: reserve once
+and reuse that reservation for restore creation; use the matched decision
+identity for Save. Pure snapshot, null-tab and unconditional owned-check
+suggestions were corrected after tracing the actual bridge copy shape and
+admission lifetime. No new path-key gate or alias rebind is added to the old
+nonapproval version gate. Save success/dirty behavior and unchanged refresh
+remain untouched. This adds bounded metadata RPCs whose latency is still
+unqualified, not a new endpoint or deferred Save-alias campaign.
 
 The capability-protocol unit is IMPLEMENTED / PROVEN, unintegrated: preparation, commit, completion and abandonment
 of existing disk-adoption capabilities to four fixed preload methods. It

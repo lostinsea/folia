@@ -1194,6 +1194,19 @@ journeys. Its render measurements remain useful only within that scope.
 Minimal real-action timing in the existing harness is still required after
 final wiring; no timing, threshold change or synthetic backport is claimed.
 
+The next renderer boundary migration reuses the committed-capability check
+before an approved selection and the retained-owner metadata check afterward
+and on each side of delegated reload rendering. No new endpoint, body read or
+body serialization is added. Other paths are not migrated by this unit and no
+latency comparison has yet qualified the additional small metadata RPCs.
+The corrected native combined controls reach 119/119 with source packaging
+390/0 and converged independent Sol/Luna review. These prove function and
+authority ordering, not responsiveness. The source-only fixture abort and
+actual renderer-destruction barrier do not add shipped RPCs or rendering work.
+The original combined timeout remains unexplained; a diagnostic pass despite
+contaminated cleanup is not timing evidence, and the parent GUI launch with
+lost stdout is retained as unusable rather than a latency sample.
+
 ## Measured and found already fast
 - **Custom tab sync I/O is not the current bottleneck.**
   - `custom-tabs.js:69-111,640`

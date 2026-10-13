@@ -760,6 +760,30 @@ finding was retracted after tracing the actual memory-only closing parser,
 not the adjacent I/O reader. Failed runs and registry correction remain
 recorded in the roadmap. Other raw helpers remain.
 
+The renderer boundary consumer migration is implemented and functionally proven:
+committed capability plus lexical source/owner association before selection,
+actual retained-owner metadata after selection and around delegated reload
+display. Main endpoints are unchanged; the new exact-ID fixture abort control
+is withheld from packaged exports and adds no renderer endpoint. This is not
+Node-off production or closure of the remaining browser/path helpers. Native checkpoint
+controls reach 98/98 and the phase-corrected completion route 51/51; parent
+reproduces 98/98 and source packaging 387/0 on restored bytes. The separate-source
+leg changes only helper input after genuine native selection, with actual Main
+success; it is not an independently native-produced source delivery.
+R878-R891 and affected R871/R876/R877 are individually exact PROVEN. Initially
+unusable R878/R888 transcripts now have corrected R3 exact reproofs, with
+R892-R894 protecting the narrow fixture corrections. Native freeze cleanup
+declines/thaws the actual held commit without clearing authority; requested
+closes prove exact tab removal and native-reference retirement. Teardown
+awaits the actual destroyed event before the definitive footer. Corrected
+open/reload selectors are 47/47 and 69/69, original metadata 53/53; parent
+combined native controls reproduce 119/119 and source packaging 390/0 on the
+sealed R3 source. Both fresh independent Sol/Luna complete-unit reviews find
+no significant issues or disagreement. Failed runs and the unusable parent
+GUI-launch transcript remain retained, not erased by this result; the original
+62/63 timeout cause remains unknown. The roadmap records their distinct
+fixture/launcher corrections. Final responsiveness remains unqualified.
+
 The **production main window still has Node enabled and isolation disabled**.
 Preparation, commit, completion and abandonment of disk-adoption capabilities
 now use fixed copied/validated preload methods; main's actual authority,

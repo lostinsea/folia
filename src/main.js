@@ -14871,6 +14871,15 @@ module.exports = {
                 ? updaterQuitBoundary.attempt.id
                 : 0,
             }),
+          // Cancel a held fixture commit without erasing live document authority.
+          abortCommit: (id) => {
+            const attempt = pendingShutdownCommit;
+            if (!attempt || attempt.id !== id || attempt.settled) return false;
+            finishShutdownCommit(attempt, false, "test-fixture-abort", {
+              reraise: false,
+            });
+            return true;
+          },
           timing: {
             enable: enableShutdownTiming,
             disable: disableShutdownTiming,
