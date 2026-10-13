@@ -575,6 +575,17 @@ async function runFileHelpersLoaderProbe({
     `${extensionCases.length} ${extensionCases.length === 1 ? "case" : "cases"}`;
   const commonJsCore = require("../src/file-helpers-core.js");
   const commonJsAdapter = require("../src/file-helpers.js");
+  const utf8Cases = [
+    "", "ASCII\r\n", "\u007f\u0080\u07ff\u0800",
+    "caf\u00e9 \u6f22\u5b57", "\ud83d\ude80",
+    "\ud800", "\udc00", "\ud800\ud800\udc00",
+    "\udc00\ud800A\ud83d\ude80",
+  ];
+  const commonJsByteCounts = utf8Cases.map(commonJsCore.utf8ByteLength);
+  const commonJsRejected = [null, undefined, 0, [], {}].map(value => {
+    try { commonJsCore.utf8ByteLength(value); return false; }
+    catch (error) { return error instanceof TypeError; }
+  });
   const expectedAdapterKeys = [
     "FENCED_LINE_DISCOUNT",
     "LARGE_DOC_BUDGET_MS",
@@ -588,6 +599,7 @@ async function runFileHelpersLoaderProbe({
     "readMarkdownFile",
     "removeBOM",
     "sendIPCResult",
+    "utf8ByteLength",
     "wrapMermaidContent",
   ];
   const adapterProbePath = path.join(dir, "file-helpers-loader.mmd");
@@ -725,6 +737,15 @@ async function runFileHelpersLoaderProbe({
           estimated,
           large,
           cases,
+          utf8Counts: typeof api?.utf8ByteLength === "function"
+            ? ${JSON.stringify(utf8Cases)}.map(api.utf8ByteLength)
+            : null,
+          utf8Rejected: typeof api?.utf8ByteLength === "function"
+            ? [null, undefined, 0, [], {}].map(value => {
+              try { api.utf8ByteLength(value); return false; }
+              catch (error) { return error instanceof TypeError; }
+            })
+            : null,
         };
       })()`,
       true,
@@ -771,6 +792,16 @@ async function runFileHelpersLoaderProbe({
       `SEC-08 classic file-helpers-core script follows its browser platform extension rules (${extensionCaseLabel})`,
       JSON.stringify(probe.cases) === JSON.stringify(expectedBrowserCases),
       JSON.stringify({ probe, expectedBrowserCases }),
+    );
+    const expectedByteCounts = utf8Cases.map(value => Buffer.byteLength(value, "utf8"));
+    check(
+      "SEC-08 Node-free and CommonJS UTF-8 counts match native Unicode bytes and reject non-strings",
+      JSON.stringify(probe.utf8Counts) === JSON.stringify(expectedByteCounts) &&
+        JSON.stringify(commonJsByteCounts) === JSON.stringify(expectedByteCounts) &&
+        commonJsRejected.every(Boolean) &&
+        probe.utf8Rejected?.length === commonJsRejected.length &&
+        probe.utf8Rejected.every(Boolean),
+      JSON.stringify({ probe, commonJsByteCounts, expectedByteCounts, commonJsRejected }),
     );
 
     const alive = await proveSentinelAlive(loaderWin, sentinel);

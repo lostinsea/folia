@@ -505,6 +505,16 @@ R710-R712, shared-guard R736 and R738-R740 are exact PROVEN on this slice;
 evidence is `dialog-bridge-exact-proofs-r3-20261012.log`. This migration adds
 no content-read IPC and does not establish latency or full isolation.
 
+**Browser primitives (2026-10-12, unintegrated).** Renderer session IDs use
+browser `crypto.randomUUID`; tab attestation uses browser SHA-256 over
+`TextEncoder` bytes, retaining existing main verification/currentness. Enabled
+diagnostics use a shared allocation-free UTF-8 counter, including surrogate
+pairs and replacement encoding for isolated surrogates. Node-free/CommonJS
+parity and actual Unicode disk adoption passed; R743-R745 and R714-R718 are
+exact PROVEN (`browser-primitives-exact-proofs-r1-20261012.log`). This removes
+crypto/Buffer consumers only; it does not qualify responsiveness or path
+authority.
+
 The **production main window still has Node enabled and isolation disabled**.
 Renderer registration remains provisional authority; remaining callers,
 main-owned authority and the test harness must migrate before the final

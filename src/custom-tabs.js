@@ -16,7 +16,6 @@
   // Keep the per-tab clipboard local instead of borrowing renderer.js's scope.
   // The menu helpers come from the preceding classic script, not a Node require.
   const { clipboard, ipcRenderer: tabIpc } = require("electron");
-  const crypto = require("crypto");
   if (!window.FoliaContextMenu) {
     throw new Error("FoliaContextMenu must load before custom-tabs.js");
   }
@@ -812,8 +811,8 @@
       if (newlineAlignmentDiagnosticsEnabled) {
         reportNewlineAlignment(
           result.includes(uniformEnding) ? 1 : 0,
-          Buffer.byteLength(content, "utf8") +
-            Buffer.byteLength(exactReference, "utf8"),
+          fileHelpers.utf8ByteLength(content) +
+            fileHelpers.utf8ByteLength(exactReference),
           "uniform",
         );
       }
@@ -1145,8 +1144,8 @@
     if (newlineAlignmentDiagnosticsEnabled) {
       reportNewlineAlignment(
         restoredSpans,
-        Buffer.byteLength(content, "utf8") +
-          Buffer.byteLength(exactReference, "utf8"),
+        fileHelpers.utf8ByteLength(content) +
+          fileHelpers.utf8ByteLength(exactReference),
         alignmentMode,
         lineMatches === null,
         ambiguousBoundaries,
@@ -1781,9 +1780,12 @@
     let state;
     let preparation;
     try {
-      contentDigest = Buffer.from(await crypto.webcrypto.subtle.digest(
-        "SHA-256", Buffer.from(content, "utf8"),
-      )).toString("hex");
+      const digest = await window.crypto.subtle.digest(
+        "SHA-256", new TextEncoder().encode(content),
+      );
+      contentDigest = Array.from(new Uint8Array(digest), byte =>
+        byte.toString(16).padStart(2, "0"),
+      ).join("");
       preparation = Object.freeze({
         filePath,
         ownerFilePath: tab ? tab.filePath : filePath,

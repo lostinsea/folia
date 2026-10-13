@@ -8286,7 +8286,7 @@ async function run(win) {
     JSON.stringify(cleanRefreshFastPath),
   );
 
-  write(fileB, "# Beta\n\nSEC08_MAIN_OWNED_READ\n");
+  write(fileB, "# Beta\n\nSEC08_MAIN_OWNED_READ\n\ncaf\u00e9 \u6f22\u5b57 \ud83d\ude80\n");
   const mainOwnedRefresh = await exec(`
     (async () => {
       const ipc = window.ipcRenderer;
@@ -8393,6 +8393,8 @@ async function run(win) {
       String(mainOwnedRefresh.validSnapshot.content).includes("SEC08_MAIN_OWNED_READ") &&
       mainOwnedRefresh.validAttestationCalls > 0 &&
       String(mainOwnedRefresh.content).includes("SEC08_MAIN_OWNED_READ") &&
+      mainOwnedRefresh.content === mainOwnedRefresh.validSnapshot.content &&
+      String(mainOwnedRefresh.content).includes("caf\u00e9 \u6f22\u5b57 \ud83d\ude80") &&
       mainOwnedRefresh.original === mainOwnedRefresh.content &&
       mainOwnedRefresh.dirty === false,
     JSON.stringify(mainOwnedRefresh),

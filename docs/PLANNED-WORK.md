@@ -117,6 +117,30 @@ an empty-window teardown. The focused route now also verifies an ordinary
 authenticated open after the refusals; no transcript rule was relaxed for it.
 Main-window security flags and performance qualification are still pending.
 
+**Browser primitive transition — IMPLEMENTED / PROVEN, unintegrated.** Removed
+renderer Node crypto and Buffer dependencies using native Web Crypto/TextEncoder for the existing
+attestation and an allocation-free shared UTF-8 byte counter for explicitly
+enabled diagnostics. Independent Sol/Luna design feedback agrees on the bounded
+plan and requested Unicode in the actual adopted-disk journey, not only in a
+helper oracle. No additional IPC or default-path diagnostic scan is introduced;
+actual final-source responsiveness and remaining main authority are still open.
+The Node-free/CommonJS helper route is 9/9; the actual owned-read/dialog journey
+is 59/59 with complete BMP/astral Unicode adoption; source packaging is 362/0
+(`browser-primitives-loader-r1-20261012.log`,
+`browser-primitives-tabs-r1-20261012.log`,
+`browser-primitives-packaging-r1-20261012.log`). R743-R745 and the affected
+R714-R718 are individually exact PROVEN in
+`browser-primitives-exact-proofs-r1-20261012.log`; all source was restored.
+Fresh independent Sol/Luna implementation reviews both found no blockers or
+disagreement. Byte counting stays within opted-in diagnostics; no latency
+neutrality for enabled diagnostics or final isolation is inferred.
+
+**Next isolation transition — ACTIVE design/implementation.** Replace the
+remaining browser privileged consumers and provisional path authority with
+fixed main-owned operations, preserving restore/basic Save and unchanged-tab
+fast paths. Node-off/context-isolation/sandbox and live-grant foreign-sender
+controls follow the production ports, not a test-only Node facade.
+
 | Status | Meaning |
 |---|---|
 | **ACTIVE** | Being implemented right now. **At most one ACTIVE item per delivery stream** (see *Parallel delivery without reducing quality*); the number of ACTIVE items equals the number of live streams. Today that is one. |
@@ -4241,7 +4265,7 @@ divergence waiting to happen.
 needed; every removal proven unreachable before deletion, not after; suites and
 `--anchors` clean.
 
-### `w2-upstream` — classify the 16 outstanding upstream commits · BLOCKED on `upstream-toolbar-overflow`
+### `w2-upstream` — classify the outstanding upstream commits · CLASSIFIED; narrow correctness evaluations pending
 
 Folia is a hard fork, not a branch: upstream commits are taken as deliberate
 individual cherry-picks, never merged wholesale
@@ -4263,6 +4287,41 @@ would mean classifying against a moving target.
 *escalated to the maintainer*, with the reason recorded per commit; everything
 taken carries tests and a revert; `docs/CUSTOMIZATIONS.md` updated for anything
 that changes the fork's divergence.
+
+**2026-10-12 classification against immutable `4be4d31` and the retained
+`upstream/main` ref.** The local cohort is the following commits; absence from
+ancestry is not absence of a hard-fork adaptation. No wholesale merge, upstream
+version adoption or new feature acceptance follows from this inventory.
+The coordinator, using delegated lean-release scope management, deferred
+standalone HTML export and persistent refresh-button blinking. This is a
+coordinator decision, not a new user quotation; neither feature is implemented.
+
+| Upstream commit | Disposition and evidence |
+|---|---|
+| `397a7a8` | Decline upstream README/identity/feature advertising; Folia maintains its own. |
+| `03b5423` | Batch-error/popout adaptations taken in `67d04bf`; obsolete Mermaid-10 lifeline workaround declined. The completed `8e075ad` geometry fix is separate. |
+| `a5f2b00` | Decline upstream-only version bump. |
+| `6089305` | Offline libraries/fonts adapted by vendoring; CommonMark soft-break change declined in `774cdd8`; HTML export deferred; Mermaid paragraph-wrapper spacing/patch effect still needs narrow evaluation. |
+| `550017f` | Decline upstream-only version bump; remaining manifest delta is line-ending churn. |
+| `ef81474` | Dialog/drag-drop/splitter/view lookup adapted in `7088418`; fork save handling retained and non-note view-mode autosave superseded by `584ae4a` policy. |
+| `80646de` | Zoom-correct scrolling adapted in `dee261b`; temporary diagnostics declined; blinking deferred; right-click-menu viewport overflow needs bounded reproduction/correction. |
+| `d64b166` | Decline upstream-only version bump. |
+| `28d1cb4` | Decline tscircuit-specific label filtering, bundle and authoring material under the existing feature rejection. |
+| `7e48d9f` | Decline upstream-local ignore-directory policy; no runtime fix. |
+| `b0e991b` | Number-marker correction adapted in `fd12632`; keep Folia's wider numbered gutter and unchanged bullet indent. |
+| `6b9c51a` | Decline the previously rejected tscircuit feature family/dependencies/associations. |
+| `b439565` | Decline line-ending-only churn; every changed historical blob matches after EOL normalization. |
+| `bc70edd` | Decline the height-cap change for rejected D2 support. |
+| `f100ddf` | Toolbar overflow adapted in `4be4d31`; D2 remains declined. |
+| `29d6060` | Parameterized HTML parsing adapted in `c713900`; per-block HTML zoom remains declined. |
+
+Astra's read-only classification established no additional mandatory security
+fix in this cohort. Two residual correctness evaluations remain: uncapped
+right-click menus can be positioned negatively when larger than the viewport;
+and Mermaid placeholder paragraph cleanup may be inapplicable to Folia's
+sanitizer/patch pipeline. Neither has a fresh runtime verdict yet. Reproduce/fix
+the menu mechanism minimally while preserving all commands; evaluate paragraph
+spacing only, without reopening the completed clipping/compactness unit.
 
 ### `w2-kbscroll` — keyboard scrolling of the document · PENDING
 

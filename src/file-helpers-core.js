@@ -112,6 +112,29 @@ function removeBOM(content) {
   return content;
 }
 
+function utf8ByteLength(content) {
+  if (typeof content !== 'string') {
+    throw new TypeError('UTF-8 byte counting requires a string');
+  }
+  let bytes = content.length;
+  for (let index = 0; index < content.length; index++) {
+    const code = content.charCodeAt(index);
+    if (code <= 0x7f) continue;
+    if (code <= 0x7ff) {
+      bytes += 1;
+      continue;
+    }
+    bytes += 2;
+    // A pair encodes as four bytes; isolated surrogates encode as U+FFFD.
+    if (code >= 0xd800 && code <= 0xdbff &&
+        content.charCodeAt(index + 1) >= 0xdc00 &&
+        content.charCodeAt(index + 1) <= 0xdfff) {
+      index += 1;
+    }
+  }
+  return bytes;
+}
+
 /**
  * Estimate how much work rendering a document will be, WITHOUT parsing it.
  *
@@ -203,6 +226,7 @@ const fileHelpersCore = {
   isMarkdownFile,
   wrapMermaidContent,
   removeBOM,
+  utf8ByteLength,
   estimateRenderUnits,
   estimateRenderMs,
   isLargeDocument

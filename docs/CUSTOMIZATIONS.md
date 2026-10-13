@@ -138,6 +138,14 @@ synchronous and makes no snapshot IPC. These are consumer migrations, not a
 claim that main-window Node access, provisional registration or restore
 authority are already removed.
 
+**Browser crypto and byte counting (2026-10-12, unintegrated).** Session IDs
+and tab disk attestation use native browser crypto and exact UTF-8 encoding.
+Diagnostic byte counts share a pure browser/CommonJS helper instead of Node
+Buffer. Surrogate parity and complete Unicode adoption are protected without
+introducing IPC or work on the default diagnostic-disabled path. Main
+authorization/adoption semantics are unchanged; remaining isolation and final
+responsiveness gates are separate.
+
 **Narrow-window menus (2026-10-12, unintegrated).** The upstream viewport-cap
 fix is adapted without its nested-flyout clipping. Wide menus preserve their
 original minimum widths and cap content expansion; compact menus put nested

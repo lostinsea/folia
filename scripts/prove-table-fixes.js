@@ -18564,6 +18564,63 @@ const REVERTS = [
           requireExactFailures: true,
           expectedFailureCount: 7,
         },
+        {
+          id: "R743",
+          what: "count both UTF-16 surrogate halves as separate UTF-8 replacements",
+          file: FILE_HELPERS_CORE,
+          from: "      index += 1;",
+          to: "      // The paired low surrogate is incorrectly counted again.",
+          suite: SEC08_FILE_HELPERS_PUBLICATION_EVIDENCE_SUITE,
+          expect: [
+            /^SEC-08 Node-free and CommonJS UTF-8 counts match native Unicode bytes and reject non-strings$/,
+          ],
+          mustPass: [
+            /^SEC-08 classic file-helpers-core script runs without Node globals$/,
+            /^SEC-08 classic file-helpers-core script preserves BOM, Mermaid, and estimator behavior$/,
+            /^SEC-08 file-helpers adapter preserves its CommonJS API, reader errors, and IPC payloads$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R744",
+          what: "restore a Node crypto import in the actual renderer consumer",
+          file: RENDERER,
+          from: "const { pathToFileURL } = require('url');",
+          to: "const crypto = require('crypto');\nconst { pathToFileURL } = require('url');",
+          suite: "test:packaging",
+          expect: [
+            /^SEC-08 renderer crypto and tab byte consumers use browser primitives without Node crypto or Buffer$/,
+          ],
+          mustPass: [
+            /^changed clean-tab reads use the fixed production bridge instead of renderer raw IPC$/,
+            /^dialog extras use the grant-only production bridge instead of renderer raw IPC$/,
+            /^SEC-08 file-helpers\.js remains a Node adapter over the browser core$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R745",
+          what: "restore Node Buffer encoding in the actual tab attestation consumer",
+          file: TABS,
+          from: '"SHA-256", new TextEncoder().encode(content),',
+          to: '"SHA-256", Buffer.from(content, "utf8"),',
+          suite: "test:packaging",
+          expect: [
+            /^SEC-08 renderer crypto and tab byte consumers use browser primitives without Node crypto or Buffer$/,
+          ],
+          mustPass: [
+            /^changed clean-tab reads use the fixed production bridge instead of renderer raw IPC$/,
+            /^dialog extras use the grant-only production bridge instead of renderer raw IPC$/,
+            /^SEC-08 file-helpers\.js remains a Node adapter over the browser core$/,
+          ],
+          requireMustPassAssertions: true,
+          requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
       ];
 
 // These are release exceptions, not passing or withdrawn proofs. An explicit
@@ -19611,7 +19668,7 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742";
+      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745";
   const toolbarAllowanceIsRecordScoped =
     REVERTS.filter((r) =>
       exactShutdownTailForMutation(r) === TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL,

@@ -865,6 +865,17 @@ async function main() {
       coreRequiresNode: /require\s*\(/.test(fileHelpersCoreSource),
     }),
   );
+  check(
+    "SEC-08 renderer crypto and tab byte consumers use browser primitives without Node crypto or Buffer",
+    !/require\s*\(\s*['"](?:node:)?crypto['"]\s*\)/.test(rendererSource) &&
+      !/require\s*\(\s*['"](?:node:)?crypto['"]\s*\)/.test(customTabsSource) &&
+      !/\bBuffer\s*\./.test(rendererSource) &&
+      !/\bBuffer\s*\./.test(customTabsSource) &&
+      rendererSource.includes("window.crypto.randomUUID()") &&
+      customTabsSource.includes("window.crypto.subtle.digest(") &&
+      customTabsSource.includes("new TextEncoder().encode(content)") &&
+      customTabsSource.includes("fileHelpers.utf8ByteLength(content)"),
+  );
   const customTabsContextMenuBinding =
     /const\s*\{\s*positionContextMenu\s*:\s*positionTabMenu\s*,\s*hideContextMenu\s*:\s*hideTabMenuEl\s*,?\s*\}\s*=\s*window\.FoliaContextMenu\s*;/.test(
       customTabsSource,

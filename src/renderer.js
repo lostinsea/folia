@@ -4,7 +4,6 @@
 const { ipcRenderer, shell, clipboard } = require('electron');
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
 const { pathToFileURL } = require('url');
 
 // Navigation can be cancelled by the first tab activation. Keep its state
@@ -1306,7 +1305,7 @@ let originalMarkdown = '';
 let previewDebounceTimer = null;
 let reloadRequestSequence = 0;
 const latestReloadRequestByPath = new Map();
-const reloadRequestSession = crypto.randomUUID();
+const reloadRequestSession = window.crypto.randomUUID();
 let latestReloadMainEpoch = 0;
 let foreignReloadResultCount = 0;
 let reloadConflictResultCount = 0;
