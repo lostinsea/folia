@@ -1152,6 +1152,18 @@ the final-source responsiveness contracts. Native-backed core 109/109 and exact
 R852-R857 controls (`adoption-fence-exact-proofs-r2.log`) pin actual grant/
 refusal behavior, not latency. No literal zero-overhead claim is made.
 
+### SEC-08 settled native reopen — unchanged normal operation count, not latency
+
+The pending-Save consumer removes only its legacy renderer fallback. A normal
+native reopen still waits for Save and makes the same existing one-use Main
+ticket request, whose body is read behind the existing queue/revision/epoch
+fences. No normal-path IPC, digest, read or large-string transfer is added by
+this change. Actual resolved receipts and explicit missing-ticket refusal are
+covered by the focused 28/28 and exact R858-R860 controls, not by a timing run.
+Unchanged operation count does not qualify final-source responsiveness; the
+remaining renderer metadata migrations and isolation flags still require the
+already-defined representative final measurements.
+
 ## Measured and found already fast
 - **Custom tab sync I/O is not the current bottleneck.**
   - `custom-tabs.js:69-111,640`

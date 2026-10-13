@@ -769,6 +769,42 @@ is not proof. The restored Alpha/ALPHA_V2 capture was opened and viewed
 (`screenshots/adoption-fence-final.png`). These are functional/source controls;
 broader provisional fixtures, production flags and responsiveness remain open.
 
+**Pending-Save reopen consumer — IMPLEMENTED / PROVEN, review converged, unintegrated.**
+The next bounded migration refuses a missing/malformed native open ticket
+after the actual Save wait, rather than reading the caller's path in the
+renderer. The normal ticket-backed Main read and its queue/epoch/revision
+checks are unchanged; no normal-path IPC or body read is added. Independent
+Sol/Luna design feedback agrees on this scope and requires a genuinely held
+Save/missing-admission refusal plus the actual returned native snapshot in the
+positive control. Reader helpers temporarily remain for the existing explicit
+R711 legacy-reader mutant, not a production fallback. The focused consumer
+selector must preserve the default correction campaign while excluding its
+separate deferred Save-alias edge cases only from this bounded route.
+The bounded actual-native consumer route is 28/28 and source packaging 382/0
+(`settled-reopen-focused-sealed.log`, `settled-reopen-packaging-final.log`).
+R858-R860 are individually exact PROVEN (`settled-reopen-proof-*-sealed.log`),
+with product/docs restored to their pre-proof normalized hashes. The legacy
+fallback mutant actually performs its body/stat reads; the receipt oracle is
+independently sensitive to incorrect returned metadata rather than saved RAM.
+Both missing-document and missing-open-ticket deliveries originate in Main
+while a real authenticated Save is held. Their exact post-settlement error is
+forwarded and observed, not hidden by a silent sentinel. Default corrections
+remain intact and their original baseline is restored before that campaign.
+The first focused run retains issuance-ticket and forwarded-source oracle
+failures; resolved descriptors legitimately omit the issuance ticket and an
+empty forwarded console source is not evidence of a silent error. The first
+R858 proof's post-footer shutdown tail was fixed by restoring an actual ordinary
+authenticated final open, not relaxing transcript rules. The first R860 RAM
+substitution also triggered Main's real attestation refusal; its narrower
+receipt-metadata mutation isolates the intended oracle. The initial exact-count
+inventory mismatch remains retained. Fresh independent Sol6.1/high and
+Luna6/high implementation reviews both found no significant issues, with no
+remaining disagreement. Parent verification reproduces 28/28 and source
+packaging 382/0 on the sealed proof/review bytes; parent also viewed both
+restored captures. The final anchor audit resolves, not proof. Broader metadata
+helpers, Node-off production and responsiveness stay
+open, without a performance qualification.
+
 The capability-protocol unit is IMPLEMENTED / PROVEN, unintegrated: preparation, commit, completion and abandonment
 of existing disk-adoption capabilities to four fixed preload methods. It
 preserves async/sync ordering, nonce/digest/version/owner provenance and

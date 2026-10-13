@@ -4136,11 +4136,13 @@
           await window.waitForPendingSaves(data.path);
           if (!mayMutateDocument("ipc:file-opened-after-save")) return;
           try {
-            const settledSnapshot = data.document
-              ? await window.folia.readOpenTicketSnapshot({
-                  openTicket: data.document.openTicket,
-                })
-              : readStableDiskSnapshot(data.path);
+            if (!data.document || typeof data.document.openTicket !== "string" ||
+                !/^[a-f0-9]{64}$/.test(data.document.openTicket)) {
+              throw new Error("Reopening after Save requires a current native open ticket");
+            }
+            const settledSnapshot = await window.folia.readOpenTicketSnapshot({
+              openTicket: data.document.openTicket,
+            });
             if (!settledSnapshot) {
               throw new Error("The admitted open was superseded or its ticket was spent");
             }

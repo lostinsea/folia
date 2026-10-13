@@ -165,6 +165,12 @@ const VIRTUAL_SUITES = Object.freeze({
       SEC08_DIALOG_EXTRA_FOCUSED_HARNESS: "1", SEC08_ADMISSION_LIFECYCLE_ONLY: "1",
     }),
   }),
+  "test:sec08-admission-consumers-evidence": Object.freeze({
+    npmScript: "test:tabs",
+    environment: Object.freeze({
+      SEC08_DIALOG_EXTRA_FOCUSED_HARNESS: "1", SEC08_ADMISSION_CONSUMERS_ONLY: "1",
+    }),
+  }),
   "test:sec08-owned-read-evidence": Object.freeze({
     npmScript: "test:tabs",
     environment: Object.freeze({ SEC08_OWNED_READ_FOCUSED_HARNESS: "1" }),
@@ -20680,6 +20686,90 @@ const REVERTS = [
           ],
           requireMustPassAssertions: true, requireExactFailures: true,
         },
+        {
+          id: "R858",
+          what: "restore a renderer-path fallback to the settled native reopen consumer",
+          file: TABS,
+          from: '            if (!data.document || typeof data.document.openTicket !== "string" ||\n' +
+            '                !/^[a-f0-9]{64}$/.test(data.document.openTicket)) {\n' +
+            '              throw new Error("Reopening after Save requires a current native open ticket");\n' +
+            '            }\n' +
+            '            const settledSnapshot = await window.folia.readOpenTicketSnapshot({\n' +
+            '              openTicket: data.document.openTicket,\n' +
+            '            });',
+          to: '            const settledSnapshot = data.document\n' +
+            '              ? await window.folia.readOpenTicketSnapshot({\n' +
+            '                  openTicket: data.document.openTicket,\n' +
+            '                })\n' +
+            '              : readStableDiskSnapshot(data.path);',
+          suite: "test:sec08-admission-consumers-evidence",
+          expect: [
+            /^SEC-08 missing-document settled reopen fails closed without legacy reads or ticket calls and forwards the exact refusal$/,
+            /^SEC-08 missing-open-ticket settled reopen fails closed without legacy reads or ticket calls and forwards the exact refusal$/,
+          ],
+          mustPass: [
+            /^SEC-08 pending reopen really receives pre-Save disk bytes while the authenticated Save is held$/,
+            /^SEC-08 admitted pending-Save reopen waits for settlement then rereads via its specific main ticket$/,
+            /^SEC-08 pending-Save ticket response itself contains the fresh native bytes descriptor and consistent metadata$/,
+            /^SEC-08 missing-document reopen genuinely delivers a native packet during an authenticated held Save without early refusal$/,
+            /^SEC-08 missing-open-ticket reopen genuinely delivers a native packet during an authenticated held Save without early refusal$/,
+            /^SEC-08 settled-reopen refusal controls restore their original saved baseline and drain the real Save gate$/,
+            /^SEC-08 an ordinary authenticated native open remains usable after settled-reopen refusals$/,
+            /^the error sentinel was demonstrably watching both channels$/,
+            /^nothing rendered a visible error at any point during the suite$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 2,
+        },
+        {
+          id: "R859",
+          what: "restore the forbidden stable disk helper in the production settled reopen consumer",
+          file: TABS,
+          from: '            const settledSnapshot = await window.folia.readOpenTicketSnapshot({\n' +
+            '              openTicket: data.document.openTicket,\n' +
+            '            });',
+          to: '            const settledSnapshot = readStableDiskSnapshot(data.path);',
+          suite: "test:packaging",
+          expect: [
+            /^pending-Save reopening requires a current native ticket after settlement and the freeze fence without renderer disk fallback$/,
+          ],
+          mustPass: [
+            /^changed clean-tab reads use the fixed production bridge instead of renderer raw IPC$/,
+            /^dialog extras use the grant-only production bridge instead of renderer raw IPC$/,
+            /^main windows always load the packaged production bridge, including marked tests$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R860",
+          what: "return inconsistent native reopen receipt metadata while saved RAM and the ticket read remain fresh",
+          file: MAIN,
+          from: '    record.snapshotVersion = snapshot.diskVersion;\n' +
+            '    return { content: snapshot.content, modifiedTime: snapshot.modifiedTime,\n' +
+            '      diskVersion: snapshot.diskVersion, document: record.descriptor };',
+          to: '    record.snapshotVersion = snapshot.diskVersion;\n' +
+            '    return { content: snapshot.content, modifiedTime: snapshot.modifiedTime,\n' +
+            '      diskVersion: { ...snapshot.diskVersion, ctimeMs: snapshot.diskVersion.ctimeMs + 1000 },\n' +
+            '      document: record.descriptor };',
+          suite: "test:sec08-admission-consumers-evidence",
+          expect: [
+            /^SEC-08 pending-Save ticket response itself contains the fresh native bytes descriptor and consistent metadata$/,
+          ],
+          mustPass: [
+            /^SEC-08 pending reopen really receives pre-Save disk bytes while the authenticated Save is held$/,
+            /^SEC-08 admitted pending-Save reopen waits for settlement then rereads via its specific main ticket$/,
+            /^SEC-08 missing-document reopen genuinely delivers a native packet during an authenticated held Save without early refusal$/,
+            /^SEC-08 missing-document settled reopen fails closed without legacy reads or ticket calls and forwards the exact refusal$/,
+            /^SEC-08 missing-open-ticket reopen genuinely delivers a native packet during an authenticated held Save without early refusal$/,
+            /^SEC-08 missing-open-ticket settled reopen fails closed without legacy reads or ticket calls and forwards the exact refusal$/,
+            /^SEC-08 settled-reopen refusal controls restore their original saved baseline and drain the real Save gate$/,
+            /^SEC-08 an ordinary authenticated native open remains usable after settled-reopen refusals$/,
+            /^the error sentinel was demonstrably watching both channels$/,
+            /^nothing rendered a visible error at any point during the suite$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
       ];
 
 // These are release exceptions, not passing or withdrawn proofs. An explicit
@@ -21759,7 +21849,7 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760,R840,R841,R845,R849,R853";
+      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760,R840,R841,R845,R849,R853,R858,R860";
   const toolbarAllowanceIsRecordScoped =
     REVERTS.filter((r) =>
       exactShutdownTailForMutation(r) === TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL,

@@ -643,6 +643,34 @@ async function main() {
         'tabIpc.invoke("read-dialog-extra"',
       ),
   );
+  const pendingReopenConsumer = read("src/custom-tabs.js").split(
+    "const handleFileOpened = async (event, data) => {",
+  )[1]?.split("const superseded =")[0] || "";
+  const pendingReopenWait = pendingReopenConsumer.indexOf(
+    "await window.waitForPendingSaves(data.path);",
+  );
+  const pendingReopenFreeze = pendingReopenConsumer.indexOf(
+    'if (!mayMutateDocument("ipc:file-opened-after-save")) return;',
+  );
+  const pendingReopenGuard = pendingReopenConsumer.indexOf(
+    'if (!data.document || typeof data.document.openTicket !== "string" ||',
+  );
+  const pendingReopenRead = pendingReopenConsumer.indexOf(
+    "const settledSnapshot = await window.folia.readOpenTicketSnapshot({",
+  );
+  check(
+    "pending-Save reopening requires a current native ticket after settlement and the freeze fence without renderer disk fallback",
+    pendingReopenWait >= 0 && pendingReopenFreeze > pendingReopenWait &&
+      pendingReopenGuard > pendingReopenFreeze && pendingReopenRead > pendingReopenGuard &&
+      pendingReopenConsumer.includes("!/^[a-f0-9]{64}$/.test(data.document.openTicket)") &&
+      pendingReopenConsumer.includes(
+        'throw new Error("Reopening after Save requires a current native open ticket");',
+      ) &&
+      pendingReopenConsumer.includes("openTicket: data.document.openTicket,") &&
+      !/readStableDiskSnapshot\s*\(|readFromDisk\s*\(|window\.fs|(?:tabIpc|ipcRenderer)\.invoke/.test(
+        pendingReopenConsumer,
+      ),
+  );
 
   // 2. Scripts and stylesheets loaded by the renderer document.
   const indexHtml = read("src/index.html");

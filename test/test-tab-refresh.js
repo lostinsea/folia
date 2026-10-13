@@ -146,6 +146,8 @@ const ownedReadFocusedHarness = process.env.SEC08_OWNED_READ_FOCUSED_HARNESS ===
 const approvedRequestFocusedHarness = process.env.SEC08_APPROVED_REQUEST_FOCUSED_HARNESS === "1";
 const nativeAuthorityFocusedHarness = process.env.SEC08_NATIVE_AUTHORITY_FOCUSED_HARNESS === "1";
 const dialogExtraFocusedHarness = process.env.SEC08_DIALOG_EXTRA_FOCUSED_HARNESS === "1";
+const admissionConsumersOnly = dialogExtraFocusedHarness &&
+  process.env.SEC08_ADMISSION_CONSUMERS_ONLY === "1";
 if ((ownedReadFocusedHarness || dialogExtraFocusedHarness || approvedRequestFocusedHarness || nativeAuthorityFocusedHarness) &&
     !process.argv.includes("--folia-test-preload")) {
   process.argv.push("--folia-test-preload");
@@ -11233,7 +11235,8 @@ async function runDialogBatchScenarios(exec, sentinel, closeFixtureTabsSource, c
 
 }
 
-async function runAdmissionConsumerScenarios(win, exec, clearFixtureTabs, sentinel) {
+async function runAdmissionConsumerScenarios(win, exec, clearFixtureTabs, sentinel,
+  { consumersOnly = false } = {}) {
   const source = path.join(dir, "admission-native.md");
   const linked = path.join(dir, "admission-linked.md");
   write(source, "# Admitted source\n\n[Trusted local open](admission-linked.md)\n");
@@ -11497,7 +11500,8 @@ async function runAdmissionConsumerScenarios(win, exec, clearFixtureTabs, sentin
         window.CustomTabs.updateTabContent(window.originalMarkdown, true);
         window.__admissionSave = saveMarkdownFile();
         window.__admissionPendingProbe = {
-          oldDelivered: false, ticketReads: 0, rendererReads: 0,
+          oldDelivered: false, deliveredDocument: null,
+          ticketReads: 0, ticketResponse: null, rendererReads: 0,
           realInvoke: window.ipcRenderer.invoke,
           realRead: window.fs.readFileSync,
         };
@@ -11505,12 +11509,18 @@ async function runAdmissionConsumerScenarios(win, exec, clearFixtureTabs, sentin
         probe.listener = (_event, data) => {
           if (data.path === ${JSON.stringify(linked)}) {
             probe.oldDelivered = data.content.includes('ADMISSION_BEFORE_SAVE');
+            probe.deliveredDocument = data.document;
           }
         };
         window.ipcRenderer.on('file-opened', probe.listener);
         window.ipcRenderer.invoke = function(channel) {
-          if (channel === 'read-open-ticket-snapshot') probe.ticketReads++;
-          return probe.realInvoke.apply(this, arguments);
+          const result = probe.realInvoke.apply(this, arguments);
+          if (channel !== 'read-open-ticket-snapshot') return result;
+          probe.ticketReads++;
+          return result.then(snapshot => {
+            probe.ticketResponse = snapshot;
+            return snapshot;
+          });
         };
         window.fs.readFileSync = function(filePath) {
           if (filePath === ${JSON.stringify(linked)}) {
@@ -11531,37 +11541,286 @@ async function runAdmissionConsumerScenarios(win, exec, clearFixtureTabs, sentin
       __shutdown.saveGate.release(gate);
       released = true;
       const freshLanded = await waitForCondition(exec,
-        `!window.getPendingSaveStatus(${JSON.stringify(linked)}).pending &&
+        `window.__admissionPendingProbe.ticketResponse !== null &&
+          !window.getPendingSaveStatus(${JSON.stringify(linked)}).pending &&
           document.getElementById('viewer').textContent.includes('ADMISSION_AFTER_SAVE') &&
           window.CustomTabs.getActiveTab().hasUnsavedChanges === false`, 10000);
       const probe = await exec(`({
         ticketReads: window.__admissionPendingProbe.ticketReads,
+        ticketResponse: window.__admissionPendingProbe.ticketResponse,
+        deliveredDocument: window.__admissionPendingProbe.deliveredDocument,
         rendererReads: window.__admissionPendingProbe.rendererReads,
       })`);
       check("SEC-08 admitted pending-Save reopen waits for settlement then rereads via its specific main ticket",
         freshLanded && probe.ticketReads === 1 && probe.rendererReads === 0 &&
           fs.readFileSync(linked, "utf8").includes("ADMISSION_AFTER_SAVE"),
         JSON.stringify({ freshLanded, probe }));
+      const snapshot = probe.ticketResponse;
+      const diskStats = fs.statSync(linked);
+      const versionFields = ["dev", "ino", "size", "mtimeMs", "ctimeMs"];
+      check("SEC-08 pending-Save ticket response itself contains the fresh native bytes descriptor and consistent metadata",
+        snapshot?.content === "# Admitted linked\n\nADMISSION_AFTER_SAVE\n" &&
+          snapshot.content === fs.readFileSync(linked, "utf8") &&
+          snapshot.document?.logicalPath === linked &&
+          snapshot.document?.readTarget === fs.realpathSync.native(linked) &&
+          /^[a-f0-9]{64}$/.test(snapshot.document?.ref) &&
+          /^[a-f0-9]{64}$/.test(probe.deliveredDocument?.openTicket) &&
+          ["ref", "entryId", "logicalPath", "spellingKey", "readTarget", "pathKey", "documentUrl"]
+            .every(field => snapshot.document[field] === probe.deliveredDocument[field]) &&
+          Number.isFinite(snapshot.modifiedTime) &&
+          snapshot.modifiedTime === snapshot.diskVersion?.mtimeMs &&
+          versionFields.every(field => Number.isFinite(snapshot.diskVersion?.[field]) &&
+            snapshot.diskVersion[field] === diskStats[field]),
+        JSON.stringify({ snapshot, deliveredDocument: probe.deliveredDocument }));
     } finally {
-      if (!released) __shutdown.saveGate.release(gate);
-      await exec(`(() => {
-        const probe = window.__admissionPendingProbe;
-        if (probe) {
-          window.ipcRenderer.invoke = probe.realInvoke;
-          window.fs.readFileSync = probe.realRead;
-          window.ipcRenderer.removeListener('file-opened', probe.listener);
-          delete window.__admissionPendingProbe;
+      try {
+        if (!released) {
+          const gateState = __shutdown.saveGate.state();
+          if (gateState.held?.token === gate) __shutdown.saveGate.release(gate);
+          else if (gateState.armedToken === gate) __shutdown.saveGate.cancel(gate);
         }
-        return null;
-      })()`);
+        await exec(`(async () => {
+          await window.__admissionSave;
+          await window.waitForPendingSaves(${JSON.stringify(linked)});
+        })()`);
+      } finally {
+        await exec(`(() => {
+          const probe = window.__admissionPendingProbe;
+          if (probe) {
+            window.ipcRenderer.invoke = probe.realInvoke;
+            window.fs.readFileSync = probe.realRead;
+            window.ipcRenderer.removeListener('file-opened', probe.listener);
+            delete window.__admissionPendingProbe;
+          }
+          delete window.__admissionSave;
+          return null;
+        })()`);
+      }
     }
-    await runAdmissionCorrectionScenarios(win, exec, clearFixtureTabs,
-      envelope, oldLinkedAdmission, value => { nativeSelection = value; }, sentinel);
+    await runPendingReopenTicketRefusals(win, exec, linked,
+      value => { nativeSelection = value; }, sentinel);
+    if (!consumersOnly) {
+      await runAdmissionCorrectionScenarios(win, exec, clearFixtureTabs,
+        envelope, oldLinkedAdmission, value => { nativeSelection = value; }, sentinel);
+    }
   } finally {
     if (foreign) foreign.destroy();
     restoreChooser();
   }
   await clearFixtureTabs("admission consumer teardown");
+}
+
+async function runPendingReopenTicketRefusals(win, exec, linked, selectNativePath, sentinel) {
+  const prefix = "[CustomTabs] Refusing stale reopen after save settlement:";
+  const message = "Reopening after Save requires a current native open ticket";
+  const originalContent = fs.readFileSync(linked, "utf8");
+  for (const shape of ["missing-document", "missing-open-ticket"]) {
+    const beforeDisk = fs.readFileSync(linked, "utf8");
+    const savedContent = `# Admitted linked\n\nADMISSION_SAVED_${shape}\n`;
+    const gate = __shutdown.saveGate.arm({ path: linked, holdMs: 20000, armMs: 10000 });
+    let released = false;
+    let muted = false;
+    let nativePacket = null;
+    let nativeDeliveries = 0;
+    const forwardedErrors = [];
+    const onConsole = details => {
+      if (details.message?.startsWith(prefix)) forwardedErrors.push(details);
+    };
+    win.webContents.on("console-message", onConsole);
+    const realSend = win.webContents.send;
+    const restoreSend = replaceMethod(win.webContents, "send", function (channel, data) {
+      if (channel !== "file-opened" || data?.path !== linked) {
+        return realSend.apply(this, arguments);
+      }
+      nativeDeliveries++;
+      nativePacket = data;
+      const packet = { ...data };
+      if (shape === "missing-document") delete packet.document;
+      else {
+        packet.document = { ...data.document };
+        delete packet.document.openTicket;
+      }
+      return realSend.call(this, channel, packet);
+    });
+    try {
+      await exec(`(() => {
+        const probe = window.__admissionRefusalProbe = {
+          selectedId: window.CustomTabs.getActiveTabId(),
+          documentRef: window.CustomTabs.getDocumentDescriptor().ref,
+          delivered: false, missingShape: false, ticketReads: 0,
+          legacyBodyReads: 0, legacyStats: 0, errors: [],
+          realInvoke: window.ipcRenderer.invoke,
+          realRead: window.fs.readFileSync, realStat: window.fs.statSync,
+          realError: console.error,
+        };
+        probe.listener = (_event, data) => {
+          if (data.path !== ${JSON.stringify(linked)}) return;
+          probe.delivered = true;
+          probe.missingShape = ${JSON.stringify(shape)} === 'missing-document'
+            ? !data.document
+            : !!data.document && data.document.openTicket === undefined;
+        };
+        window.ipcRenderer.on('file-opened', probe.listener);
+        window.ipcRenderer.invoke = function(channel) {
+          if (channel === 'read-open-ticket-snapshot') probe.ticketReads++;
+          return probe.realInvoke.apply(this, arguments);
+        };
+        // Save ACK may legitimately inspect metadata; only the removed reopen
+        // helper's stack is forbidden here. Forward reads so its mutant is real.
+        window.fs.readFileSync = function(filePath) {
+          if (filePath === ${JSON.stringify(linked)} &&
+              /readStableDiskSnapshot/.test(new Error().stack)) probe.legacyBodyReads++;
+          return probe.realRead.apply(this, arguments);
+        };
+        window.fs.statSync = function(filePath) {
+          if (filePath === ${JSON.stringify(linked)} &&
+              /readStableDiskSnapshot/.test(new Error().stack)) probe.legacyStats++;
+          return probe.realStat.apply(this, arguments);
+        };
+        console.error = function() {
+          probe.errors.push({ prefix: String(arguments[0]),
+            message: arguments[1]?.message, stack: arguments[1]?.stack });
+          return probe.realError.apply(this, arguments);
+        };
+        window.originalMarkdown = ${JSON.stringify(savedContent)};
+        window.CustomTabs.updateTabContent(window.originalMarkdown, true);
+        window.__admissionRefusalSave = saveMarkdownFile();
+        return null;
+      })()`);
+      const held = await __shutdown.saveGate.waitForHold(gate);
+      selectNativePath(linked);
+      await exec("window.folia.openFileDialog(); null");
+      const delivered = await waitForCondition(exec,
+        "window.__admissionRefusalProbe.delivered", 8000);
+      await sentinel.drain();
+      const waiting = await exec(`({
+        pending: window.getPendingSaveStatus(${JSON.stringify(linked)}).pending,
+        missingShape: window.__admissionRefusalProbe.missingShape,
+        errors: window.__admissionRefusalProbe.errors,
+        ticketReads: window.__admissionRefusalProbe.ticketReads,
+        legacyBodyReads: window.__admissionRefusalProbe.legacyBodyReads,
+        legacyStats: window.__admissionRefusalProbe.legacyStats,
+        selected: window.currentFilePath,
+        selectedId: window.CustomTabs.getActiveTabId(),
+        expectedId: window.__admissionRefusalProbe.selectedId,
+        content: window.CustomTabs.getActiveTab().content,
+      })`);
+      check(`SEC-08 ${shape} reopen genuinely delivers a native packet during an authenticated held Save without early refusal`,
+        delivered && nativeDeliveries === 1 && held?.path === linked &&
+          /^[a-f0-9]{64}$/.test(nativePacket?.document?.ref) &&
+          /^[a-f0-9]{64}$/.test(nativePacket?.document?.openTicket) &&
+          nativePacket.document.logicalPath === linked &&
+          nativePacket.content === beforeDisk &&
+          fs.readFileSync(linked, "utf8") === beforeDisk &&
+          waiting.pending && waiting.missingShape && waiting.errors.length === 0 &&
+          forwardedErrors.length === 0 && waiting.ticketReads === 0 &&
+          waiting.legacyBodyReads === 0 && waiting.legacyStats === 0 &&
+          waiting.selected === linked && waiting.selectedId === waiting.expectedId &&
+          waiting.content === savedContent,
+        JSON.stringify({ delivered, nativeDeliveries, held, nativePacket, waiting }));
+      await sentinel.mute(`controlled ${shape} pending-Save reopen refusal`);
+      muted = true;
+      __shutdown.saveGate.release(gate);
+      released = true;
+      await exec(`(async () => {
+        await window.__admissionRefusalSave;
+        await window.waitForPendingSaves(${JSON.stringify(linked)});
+      })()`);
+      const finished = await waitForCondition(exec,
+        `window.__admissionRefusalProbe.errors.length > 0 ||
+          window.__admissionRefusalProbe.legacyBodyReads > 0`, 8000);
+      await sentinel.drain();
+      const result = await exec(`({
+        errors: window.__admissionRefusalProbe.errors,
+        ticketReads: window.__admissionRefusalProbe.ticketReads,
+        legacyBodyReads: window.__admissionRefusalProbe.legacyBodyReads,
+        legacyStats: window.__admissionRefusalProbe.legacyStats,
+        pending: window.getPendingSaveStatus(${JSON.stringify(linked)}).pending,
+        selected: window.currentFilePath, selectedId: window.CustomTabs.getActiveTabId(),
+        expectedId: window.__admissionRefusalProbe.selectedId,
+        documentRef: window.CustomTabs.getDocumentDescriptor().ref,
+        expectedRef: window.__admissionRefusalProbe.documentRef,
+        content: window.CustomTabs.getActiveTab().content,
+        originalMarkdown: window.originalMarkdown,
+        dirty: window.CustomTabs.getActiveTab().hasUnsavedChanges,
+        notification: document.getElementById('notificationMessage').textContent,
+      })`);
+      const suppressed = sentinel.currentMute().suppressed;
+      check(`SEC-08 ${shape} settled reopen fails closed without legacy reads or ticket calls and forwards the exact refusal`,
+        finished && result.errors.length === 1 &&
+          result.errors[0].prefix === prefix && result.errors[0].message === message &&
+          /handleFileOpened/.test(result.errors[0].stack) &&
+          /custom-tabs\.js/.test(result.errors[0].stack) &&
+          result.ticketReads === 0 && result.legacyBodyReads === 0 && result.legacyStats === 0 &&
+          forwardedErrors.length === 1 &&
+          forwardedErrors[0].message === `${prefix} Error: ${message}` &&
+          typeof forwardedErrors[0].sourceId === "string" &&
+          Number.isFinite(forwardedErrors[0].lineNumber) &&
+          suppressed.length === 1 && suppressed[0].kind === "console-error" &&
+          suppressed[0].detail === `${prefix} Error: ${message} @ ` +
+            `${forwardedErrors[0].sourceId}:${forwardedErrors[0].lineNumber}` &&
+          result.notification.endsWith(message) &&
+          !result.pending && !result.dirty &&
+          result.selected === linked && result.selectedId === result.expectedId &&
+          result.documentRef === result.expectedRef &&
+          result.content === savedContent && result.originalMarkdown === savedContent &&
+          fs.readFileSync(linked, "utf8") === savedContent,
+        JSON.stringify({ finished, result, forwardedErrors, suppressed }));
+    } finally {
+      try {
+        if (!released) {
+          const gateState = __shutdown.saveGate.state();
+          if (gateState.held?.token === gate) __shutdown.saveGate.release(gate);
+          else if (gateState.armedToken === gate) __shutdown.saveGate.cancel(gate);
+        }
+        await exec(`(async () => {
+          await window.__admissionRefusalSave;
+          await window.waitForPendingSaves(${JSON.stringify(linked)});
+          await window.CustomTabs.settleSessionLayout();
+        })()`);
+      } finally {
+        restoreSend();
+        try {
+          await exec(`(() => {
+            const probe = window.__admissionRefusalProbe;
+            if (probe) {
+              window.ipcRenderer.invoke = probe.realInvoke;
+              window.fs.readFileSync = probe.realRead;
+              window.fs.statSync = probe.realStat;
+              console.error = probe.realError;
+              window.ipcRenderer.removeListener('file-opened', probe.listener);
+            }
+            delete window.__admissionRefusalProbe;
+            delete window.__admissionRefusalSave;
+            return null;
+          })()`);
+        } finally {
+          try {
+            if (muted) await sentinel.unmute();
+          } finally {
+            win.webContents.removeListener("console-message", onConsole);
+          }
+        }
+        // The default caller continues into the existing correction campaign,
+        // whose admitted linked fixture still owns its original saved baseline.
+        await exec(`(async () => {
+          window.originalMarkdown = ${JSON.stringify(originalContent)};
+          window.CustomTabs.updateTabContent(window.originalMarkdown, true);
+          await saveMarkdownFile();
+          await window.waitForPendingSaves(${JSON.stringify(linked)});
+        })()`);
+        check("SEC-08 settled-reopen refusal controls restore their original saved baseline and drain the real Save gate",
+          fs.readFileSync(linked, "utf8") === originalContent &&
+            __shutdown.saveGate.state().held === null &&
+            __shutdown.saveGate.state().armedToken === null &&
+            await exec(`!window.getPendingSaveStatus(${JSON.stringify(linked)}).pending &&
+              window.originalMarkdown === ${JSON.stringify(originalContent)} &&
+              window.CustomTabs.getActiveTab().content === ${JSON.stringify(originalContent)} &&
+              !window.CustomTabs.getActiveTab().hasUnsavedChanges &&
+              !window.__admissionPendingProbe && !window.__admissionRefusalProbe`));
+      }
+    }
+  }
 }
 
 async function runAdmissionCorrectionScenarios(win, exec, clearFixtureTabs,
@@ -12520,6 +12779,35 @@ async function run(win) {
       bridgeExposure.subframePdfRestore === "undefined",
     JSON.stringify(bridgeExposure),
   );
+  if (admissionConsumersOnly) {
+    await clearFixtureTabs("admission consumers preflight");
+    await runAdmissionConsumerScenarios(win, exec, clearFixtureTabs, sentinel,
+      { consumersOnly: true });
+    const ordinaryPath = path.join(dir, "admission-native.md");
+    const restoreChooser = replaceMethod(dialog, "showOpenDialog", async () => ({
+      canceled: false, filePaths: [ordinaryPath],
+    }));
+    try {
+      await exec("window.folia.openFileDialog(); null");
+      const ordinaryOpen = await waitForCondition(exec,
+        `window.currentFilePath === ${JSON.stringify(ordinaryPath)} &&
+          window.CustomTabs.getDocumentDescriptor()?.logicalPath === ${JSON.stringify(ordinaryPath)} &&
+          document.getElementById('viewer').textContent.includes('Admitted source')`, 8000);
+      check("SEC-08 an ordinary authenticated native open remains usable after settled-reopen refusals",
+        ordinaryOpen);
+    } finally { restoreChooser(); }
+    await exec("window.CustomTabs.settleSessionLayout()");
+    console.log("admission consumer final screenshot:",
+      await captureScreenshot(win, "tabs-admission-consumers-final"));
+    const alive = await proveSentinelAlive(win, sentinel);
+    check("the error sentinel was demonstrably watching both channels",
+      alive.console === true && alive.dom === true, JSON.stringify(alive));
+    const report = await sentinel.stop();
+    consoleAttribution.stop(report);
+    check("nothing rendered a visible error at any point during the suite",
+      report.hits.length === 0, JSON.stringify(report.hits));
+    return;
+  }
   if (approvedRequestFocusedHarness) {
     await runApprovedDocumentTransport(exec);
     await runApprovedDocumentBoundary(win, exec);
@@ -38396,7 +38684,7 @@ app.whenReady().then(async () => {
     // Its healthy log spans 91.12s; negative alias/restore polls add up to 28s.
     // This is a functional completion bound, not a responsiveness acceptance gate.
     : dialogExtraFocusedHarness && process.env.SEC08_DIALOG_BATCH_ONLY !== "1" &&
-      process.env.SEC08_ADMISSION_LIFECYCLE_ONLY !== "1"
+      process.env.SEC08_ADMISSION_LIFECYCLE_ONLY !== "1" && !admissionConsumersOnly
     ? 120000
     : newlineFocusedHarness || focusedCommitHarness || queueFocusedHarness ||
       ownedReadFocusedHarness || dialogExtraFocusedHarness || approvedRequestFocusedHarness || nativeAuthorityFocusedHarness

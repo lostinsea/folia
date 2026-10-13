@@ -720,6 +720,24 @@ The roadmap retains the distinct pre-dialog design finding and failed initial
 oracle/proof outcomes. The restored rendered control capture was viewed.
 This is not full browser migration, Node-off closure or measured responsiveness.
 
+**Pending-Save reopen consumer — IMPLEMENTED / PROVEN, review converged, unintegrated.**
+A reopened file waiting on Save settlement now requires a current native open
+ticket. Missing/malformed ticket data is explicitly caught, logged and notified
+before adoption; no renderer caller-path read is attempted. The existing Main
+ticket handler, one-use/epoch/native scope, save-queue and target-revision fences
+are unchanged, as is the normal native request/read count. The retained private
+legacy reader helpers serve the explicit R711 mutant, not this production path.
+The actual-native focused controls are 28/28, source packaging 382/0, and
+R858-R860 individually exact PROVEN (`settled-reopen-*-sealed.log`), with
+restoration. Both held-Save missing-admission shapes retain saved RAM/selection
+and forward their exact observed refusal; the positive asserts the resolved
+native body/descriptor/metadata. The roadmap retains failed first oracles,
+proof coupling and teardown outcomes. Fresh independent Sol6.1/high and
+Luna6/high reviews both found no significant issues; parent verification
+reproduces the focused/source-packaging results on the sealed bytes and both
+captures were viewed. Other raw metadata/browser consumers and
+production Node-off/sandbox are not closed.
+
 The **production main window still has Node enabled and isolation disabled**.
 Preparation, commit, completion and abandonment of disk-adoption capabilities
 now use fixed copied/validated preload methods; main's actual authority,
