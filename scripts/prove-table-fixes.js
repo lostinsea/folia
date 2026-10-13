@@ -7070,7 +7070,7 @@ const REVERTS = [
   },
   {
     id: "R254",
-    suite: "test:tabs",
+    suite: "test:sec08-batch-evidence",
     // The already-open branch of 'file-opened' returns early, so it never
     // reaches createTab's confirmed flag and needs the acceptance recorded
     // separately.
@@ -17209,10 +17209,12 @@ const REVERTS = [
             '    <script src="mermaid-config.js"></script>\n' +
             '    <script src="context-menu-utils.js"></script>\n' +
             '    <script src="file-helpers-core.js"></script>\n' +
+            '    <script src="document-events.js"></script>\n' +
             '    <script src="renderer.js"></script>',
           to:
             '    <script src="emoji-map.js"></script>\n' +
             '    <script src="emoji-parser.js"></script>\n' +
+            '    <script src="document-events.js"></script>\n' +
             '    <script src="renderer.js"></script>\n' +
             '    <script src="utils.js"></script>\n' +
             '    <script src="mermaid-config.js"></script>\n' +
@@ -17287,11 +17289,13 @@ const REVERTS = [
             '    <script src="mermaid-config.js"></script>\n' +
             '    <script src="context-menu-utils.js"></script>\n' +
             '    <script src="file-helpers-core.js"></script>\n' +
+            '    <script src="document-events.js"></script>\n' +
             '    <script src="renderer.js"></script>',
           to:
             '    <script src="emoji-map.js"></script>\n' +
             '    <script src="emoji-parser.js"></script>\n' +
             '    <script src="utils.js"></script>\n' +
+            '    <script src="document-events.js"></script>\n' +
             '    <script src="renderer.js"></script>\n' +
             '    <script src="mermaid-config.js"></script>\n' +
             '    <script src="context-menu-utils.js"></script>\n' +
@@ -17378,12 +17382,14 @@ const REVERTS = [
             '    <script src="mermaid-config.js"></script>\n' +
             '    <script src="context-menu-utils.js"></script>\n' +
             '    <script src="file-helpers-core.js"></script>\n' +
+            '    <script src="document-events.js"></script>\n' +
             '    <script src="renderer.js"></script>',
           to:
             '    <script src="emoji-map.js"></script>\n' +
             '    <script src="emoji-parser.js"></script>\n' +
             '    <script src="utils.js"></script>\n' +
             '    <script src="mermaid-config.js"></script>\n' +
+            '    <script src="document-events.js"></script>\n' +
             '    <script src="renderer.js"></script>\n' +
             '    <script src="context-menu-utils.js"></script>\n' +
             '    <script src="file-helpers-core.js"></script>',
@@ -17703,10 +17709,12 @@ const REVERTS = [
           from:
             '    <script src="context-menu-utils.js"></script>\n' +
             '    <script src="file-helpers-core.js"></script>\n' +
+            '    <script src="document-events.js"></script>\n' +
             '    <script src="renderer.js"></script>\n' +
             '    <script src="custom-tabs.js"></script>',
           to:
             '    <script src="context-menu-utils.js"></script>\n' +
+            '    <script src="document-events.js"></script>\n' +
             '    <script src="renderer.js"></script>\n' +
             '    <script src="custom-tabs.js"></script>\n' +
             '    <script src="file-helpers-core.js"></script>',
@@ -19480,6 +19488,224 @@ const REVERTS = [
           mustPass: [
             /^SEC-08 an unsent reload preserves its earlier authoritative request and visible update prompt$/,
             /^SEC-08 ordinary reload remains usable after a refused transport dispatch$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R789",
+          what: "subscribe the fixed Save result port to reload results instead",
+          file: path.join(SRC, "main-preload.js"),
+          from: '    return subscribeDocumentEvent("save-markdown-result", callback);',
+          to: '    return subscribeDocumentEvent("file-reload-result", callback);',
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 actual isolated document ports deliver only payloads on their exact five channels$/,
+            /^SEC-08 actual isolated document ports preserve text empty values and complete Save correlation$/,
+            /^SEC-08 isolated document projection retains descriptors versions navigation watcher ownership and Save dispositions$/,
+            /^SEC-08 document ports deliver uncorrelated negative envelopes without repairing echoed identities$/,
+          ],
+          mustPass: [
+            /^SEC-08 each fixed document subscription rejects a nonfunction callback$/,
+            /^SEC-08 Node-free document registry accepts frozen input once without deep copying or mutating its source$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R790",
+          what: "pass unrecognized nested Save identity fields through the fixed event port",
+          file: path.join(SRC, "main-preload.js"),
+          from: "    const nested = DOCUMENT_EVENT_RECORD_FIELDS[field];",
+          to: '    const nested = field === "saveRequest" ? null : DOCUMENT_EVENT_RECORD_FIELDS[field];',
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 actual isolated document ports deliver only payloads on their exact five channels$/,
+          ],
+          mustPass: [
+            /^SEC-08 actual isolated document ports preserve text empty values and complete Save correlation$/,
+            /^SEC-08 document ports deliver uncorrelated negative envelopes without repairing echoed identities$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R791",
+          what: "repair malformed echoed event records into absence",
+          file: path.join(SRC, "main-preload.js"),
+          from: '  if (!value || typeof value !== "object" || Array.isArray(value)) return value;',
+          to: '  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;',
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 document ports deliver uncorrelated negative envelopes without repairing echoed identities$/,
+          ],
+          mustPass: [
+            /^SEC-08 actual isolated document ports deliver only payloads on their exact five channels$/,
+            /^SEC-08 actual isolated document ports preserve text empty values and complete Save correlation$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R792",
+          what: "remove every privileged channel subscriber instead of only the unsubscribing wrapper",
+          file: path.join(SRC, "main-preload.js"),
+          from: "    ipcRenderer.removeListener(channel, listener);",
+          to: "    ipcRenderer.removeAllListeners(channel);",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 document unsubscribe is idempotent and removes only its own listener$/,
+          ],
+          mustPass: [
+            /^SEC-08 actual isolated document ports deliver only payloads on their exact five channels$/,
+            /^SEC-08 clearing local document listeners retains the fixed preload subscription$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R793",
+          what: "reuse the frozen ContextBridge event object without its one mutable ingress copy",
+          file: path.join(SRC, "document-events.js"),
+          from: '      const data = payload && typeof payload === "object" && !Array.isArray(payload)\n        ? { ...payload } : payload;',
+          to: "      const data = payload;",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 Node-free document registry accepts frozen input once without deep copying or mutating its source$/,
+          ],
+          mustPass: [
+            /^SEC-08 actual isolated document ports deliver only payloads on their exact five channels$/,
+            /^SEC-08 browser document registry preserves duplicates and last-occurrence removal without IPC capabilities$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R794",
+          what: "let listener mutations change the document delivery currently in progress",
+          file: path.join(SRC, "document-events.js"),
+          from: "      for (const listener of getListeners(channel).slice()) listener(undefined, data);",
+          to: "      for (const listener of getListeners(channel)) listener(undefined, data);",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 browser document delivery snapshots listeners and shares one mutable payload for memoization$/,
+            /^SEC-08 listener mutations affect only the next document delivery$/,
+          ],
+          mustPass: [
+            /^SEC-08 browser document registry preserves duplicates and last-occurrence removal without IPC capabilities$/,
+            /^SEC-08 clearing local document listeners retains the fixed preload subscription$/,
+            /^SEC-08 Node-free document registry accepts frozen input once without deep copying or mutating its source$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R795",
+          what: "remove the earliest duplicate local document listener instead of the last",
+          file: path.join(SRC, "document-events.js"),
+          from: "      const index = current.lastIndexOf(listener);",
+          to: "      const index = current.indexOf(listener);",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 browser document registry preserves duplicates and last-occurrence removal without IPC capabilities$/,
+            /^SEC-08 browser document delivery snapshots listeners and shares one mutable payload for memoization$/,
+            /^SEC-08 listener mutations affect only the next document delivery$/,
+          ],
+          mustPass: [
+            /^SEC-08 clearing local document listeners retains the fixed preload subscription$/,
+            /^SEC-08 Node-free document registry accepts frozen input once without deep copying or mutating its source$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R796",
+          what: "omit the production browser document registry from the packaged app",
+          file: PKG,
+          from: '      "src/document-events.js",\n',
+          to: "",
+          suite: "test:packaging",
+          expect: [
+            /^SEC-08 document-events\.js is packaged for its classic-script consumers$/,
+            /^src\/document-events\.js is in build\.files$/,
+          ],
+          mustPass: [
+            /^SEC-08 document-events\.js loads exactly once before both consumers$/,
+            /^SEC-08 renderer consumes the browser document registry without raw document IPC$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R797",
+          what: "load the browser document registry after both consumers",
+          file: HTML,
+          from: '    <script src="document-events.js"></script>\n    <script src="renderer.js"></script>\n    <script src="custom-tabs.js"></script>',
+          to: '    <script src="renderer.js"></script>\n    <script src="custom-tabs.js"></script>\n    <script src="document-events.js"></script>',
+          suite: "test:packaging",
+          expect: [
+            /^SEC-08 document-events\.js loads exactly once before both consumers$/,
+          ],
+          mustPass: [
+            /^SEC-08 document-events\.js is packaged for its classic-script consumers$/,
+            /^SEC-08 file-helpers-core\.js loads exactly once after context-menu-utils\.js and before both consumers$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        ...["renderer", "custom-tabs"].map((consumer, index) => ({
+          id: `R${798 + index}`,
+          what: `restore ${consumer}'s raw document IPC binding`,
+          file: consumer === "renderer" ? RENDERER : TABS,
+          from: "const documentEvents = window.FoliaDocumentEvents;",
+          to: `const documentEvents = ${consumer === "renderer" ? "ipcRenderer" : "tabIpc"};`,
+          suite: "test:packaging",
+          expect: [
+            new RegExp(`^SEC-08 ${consumer} consumes the browser document registry without raw document IPC$`),
+          ],
+          mustPass: [
+            /^SEC-08 document-events\.js loads exactly once before both consumers$/,
+            /^SEC-08 document-events\.js is packaged for its classic-script consumers$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        })),
+        {
+          id: "R800",
+          what: "clone document payloads separately for listeners instead of sharing the memoization identity",
+          file: path.join(SRC, "document-events.js"),
+          from: "      for (const listener of getListeners(channel).slice()) listener(undefined, data);",
+          to: '      for (const listener of getListeners(channel).slice()) listener(undefined,\n        data && typeof data === "object" && !Array.isArray(data) ? { ...data } : data);',
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 browser document delivery snapshots listeners and shares one mutable payload for memoization$/,
+            /^SEC-08 Node-free document registry accepts frozen input once without deep copying or mutating its source$/,
+          ],
+          mustPass: [
+            /^SEC-08 browser document registry preserves duplicates and last-occurrence removal without IPC capabilities$/,
+            /^SEC-08 listener mutations affect only the next document delivery$/,
+            /^SEC-08 clearing local document listeners retains the fixed preload subscription$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R801",
+          what: "swallow synchronous document listener exceptions",
+          file: path.join(SRC, "document-events.js"),
+          from: "      for (const listener of getListeners(channel).slice()) listener(undefined, data);",
+          to: "      try {\n        for (const listener of getListeners(channel).slice()) listener(undefined, data);\n      } catch (error) { /* reverted for proof: swallowed listener failure */ }",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 document listener exceptions propagate synchronously and stop remaining fanout$/,
+          ],
+          mustPass: [
+            /^SEC-08 browser document delivery snapshots listeners and shares one mutable payload for memoization$/,
+            /^SEC-08 Node-free document registry accepts frozen input once without deep copying or mutating its source$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R802",
+          what: "omit the live watcher owner's path key during event projection",
+          file: path.join(SRC, "main-preload.js"),
+          from: '  owner: ["pageSession", "rendererGeneration", "tabId", "documentGeneration", "pathKey"],',
+          to: '  owner: ["pageSession", "rendererGeneration", "tabId", "documentGeneration"],',
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 isolated document projection retains descriptors versions navigation watcher ownership and Save dispositions$/,
+          ],
+          mustPass: [
+            /^SEC-08 actual isolated document ports deliver only payloads on their exact five channels$/,
+            /^SEC-08 actual isolated document ports preserve text empty values and complete Save correlation$/,
           ],
           requireMustPassAssertions: true, requireExactFailures: true,
         },

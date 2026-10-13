@@ -652,6 +652,7 @@ async function main() {
   const mermaidConfigScript = '<script src="mermaid-config.js"></script>';
   const contextMenuScript = '<script src="context-menu-utils.js"></script>';
   const fileHelpersCoreScript = '<script src="file-helpers-core.js"></script>';
+  const documentEventsScript = '<script src="document-events.js"></script>';
   const rendererScript = '<script src="renderer.js"></script>';
   const customTabsScript = '<script src="custom-tabs.js"></script>';
   const emojiMapScriptAt = indexHtml.indexOf(emojiMapScript);
@@ -660,6 +661,7 @@ async function main() {
   const mermaidConfigScriptAt = indexHtml.indexOf(mermaidConfigScript);
   const contextMenuScriptAt = indexHtml.indexOf(contextMenuScript);
   const fileHelpersCoreScriptAt = indexHtml.indexOf(fileHelpersCoreScript);
+  const documentEventsScriptAt = indexHtml.indexOf(documentEventsScript);
   const rendererScriptAt = indexHtml.indexOf(rendererScript);
   const customTabsScriptAt = indexHtml.indexOf(customTabsScript);
   check(
@@ -728,6 +730,29 @@ async function main() {
     }),
   );
   const rendererSource = stripJsComments(read("src/renderer.js"));
+  check(
+    "SEC-08 document-events.js loads exactly once before both consumers",
+    documentEventsScriptAt >= 0 &&
+      rendererScriptAt > documentEventsScriptAt &&
+      customTabsScriptAt > documentEventsScriptAt &&
+      indexHtml.indexOf(documentEventsScript,
+        documentEventsScriptAt + documentEventsScript.length) === -1,
+    JSON.stringify({ documentEventsScriptAt, rendererScriptAt, customTabsScriptAt }),
+  );
+  check(
+    "SEC-08 document-events.js is packaged for its classic-script consumers",
+    isPackaged(files, "src/document-events.js"),
+    JSON.stringify({ packaged: isPackaged(files, "src/document-events.js") }),
+  );
+  for (const consumer of ["renderer", "custom-tabs"]) {
+    const source = stripJsComments(read(`src/${consumer}.js`));
+    check(
+      `SEC-08 ${consumer} consumes the browser document registry without raw document IPC`,
+      /const\s+documentEvents\s*=\s*window\.FoliaDocumentEvents\s*;/.test(source) &&
+        /if\s*\(\s*!window\.FoliaDocumentEvents\s*\)/.test(source) &&
+        !/(?:ipcRenderer|tabIpc)\.(?:on|listeners|removeAllListeners)\(\s*["'](?:file-opened|file-open-result|file-reload-result|save-markdown-result|file-changed-externally)["']/.test(source),
+    );
+  }
   check(
     "SEC-08 emoji-map.js is packaged for its classic-script parser",
     isPackaged(files, "src/emoji-map.js"),

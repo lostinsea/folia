@@ -7676,6 +7676,240 @@ async function runDocumentTransportValidation(exec) {
     JSON.stringify(probe));
 }
 
+async function runDocumentEventBoundary(win) {
+  const exec = code => win.webContents.executeJavaScript(code, true);
+  const channels = [
+    ["file-opened", "onFileOpened"], ["file-open-result", "onFileOpenResult"],
+    ["file-reload-result", "onFileReloadResult"],
+    ["save-markdown-result", "onSaveMarkdownResult"],
+    ["file-changed-externally", "onFileChangedExternally"],
+  ];
+  const malformedCallbacks = await exec(`(() => {
+    const methods = ${JSON.stringify(channels.map(([, method]) => method))};
+    window.__documentEventPackets = [];
+    window.__documentEventOff = [];
+    window.__documentEventSecondary = 0;
+    const rejected = methods.map(method => {
+      try { window.folia[method](null); return false; }
+      catch (error) { return error.message.includes('Invalid document event callback'); }
+    });
+    for (const method of methods) {
+      window.__documentEventOff.push(window.folia[method](function(...args) {
+        window.__documentEventPackets.push({ method, argc: args.length, data: args[0] });
+      }));
+    }
+    window.__documentEventSecondaryOff = window.folia.onFileOpened(() => {
+      window.__documentEventSecondary += 1;
+    });
+    return rejected;
+  })()`);
+  check("SEC-08 each fixed document subscription rejects a nonfunction callback",
+    malformedCallbacks.length === 5 && malformedCallbacks.every(Boolean),
+    JSON.stringify(malformedCallbacks));
+  const text = "EVENT_CR\r\nUnicode:λ😀\0\n".repeat(4096);
+  const identity = {
+    pageSession: "event-probe", rendererGeneration: 1, tabId: 2,
+    documentGeneration: 3, pathKey: "physical-key", selectionGeneration: 4,
+    sequence: 5, requestId: 6, documentRef: "a".repeat(64), unknownNested: "drop",
+  };
+  const packet = {
+    path: "logical-path", content: text, savedContent: "", success: false,
+    modifiedTime: 10, requestId: 6, saveRequestSession: "event-probe",
+    saveRequest: identity, saveResultAttempt: 2, error: "refused", conflict: true,
+    deleted: false, settlementOnly: true, pathReplaced: true,
+    originalPathKey: "old-key", saveBlocked: "reason", saveBlockedStage: "stage",
+    saveBlockedWhy: "why", allPaths: ["logical-path"], extraReadGrants: [],
+    openRequest: { token: "nav-token", targetIndex: 2, path: "nav-path", unknownNested: "drop" },
+    diskVersion: { dev: 1, ino: 2, size: 3, mtimeMs: 10, ctimeMs: 11, unknownNested: "drop" },
+    document: { ref: "a".repeat(64), entryId: "b".repeat(32), logicalPath: "logical-path",
+      spellingKey: "spelling-key", readTarget: "physical-target", pathKey: "physical-key",
+      documentUrl: "file:///fixture.md", openTicket: "c".repeat(64), unknownNested: "drop" },
+    reloadRequest: { sequence: 7, path: "canonical-path", snapshot: text,
+      session: "event-probe", tabId: 2, documentGeneration: 3, pathKey: "physical-key",
+      rendererGeneration: 1, selectionGeneration: 4, unknownNested: "drop" },
+    reloadSession: { epoch: 1, rendererGeneration: 1, pageSession: "event-probe", unknownNested: "drop" },
+    reason: "reason", message: null,
+    watcher: { pageSession: "event-probe", rendererGeneration: 1,
+      selectionGeneration: 4, watcherGeneration: 8, owner: identity, unknownNested: "drop" },
+    unknownTop: "drop",
+  };
+  for (const [channel] of channels) win.webContents.send(channel, { ...packet, path: channel });
+  const received = await waitForCondition(exec, "window.__documentEventPackets.length === 5");
+  const projected = await exec(`(() => {
+    const packets = window.__documentEventPackets;
+    const nested = packets.flatMap(({data}) => [
+      data?.document, data?.diskVersion, data?.openRequest, data?.saveRequest,
+      data?.reloadRequest, data?.reloadSession, data?.watcher, data?.watcher?.owner,
+    ].filter(Boolean));
+    return { methods: packets.map(item => item.method), paths: packets.map(item => item.data?.path),
+      argc: packets.map(item => item.argc),
+      noUnknown: packets.every(item => item.data && typeof item.data === 'object' &&
+        !('unknownTop' in item.data)) &&
+        nested.every(item => !('unknownNested' in item)),
+      content: packets[0]?.data?.content, snapshot: packets[2]?.data?.reloadRequest?.snapshot,
+      saved: packets[3]?.data?.savedContent,
+      saveIdentity: packets[3]?.data?.saveRequest,
+      saveBlocked: packets[3]?.data?.saveBlocked,
+      document: packets[0]?.data?.document, version: packets[0]?.data?.diskVersion,
+      navigation: packets[1]?.data?.openRequest, session: packets[2]?.data?.reloadSession,
+      watcher: packets[4]?.data?.watcher,
+      saveFlags: Object.fromEntries(${JSON.stringify([
+        "success", "requestId", "saveRequestSession", "saveResultAttempt", "modifiedTime",
+        "error", "conflict", "deleted", "settlementOnly", "pathReplaced", "originalPathKey",
+        "saveBlocked", "saveBlockedStage", "saveBlockedWhy",
+      ])}.map(key => [key, packets[3]?.data?.[key]])),
+      message: packets[1]?.data?.message,
+      require: typeof require,
+    };
+  })()`);
+  check("SEC-08 actual isolated document ports deliver only payloads on their exact five channels",
+    received && projected.methods.join(",") === channels.map(([, method]) => method).join(",") &&
+      projected.paths.join(",") === channels.map(([channel]) => channel).join(",") &&
+      projected.argc.every(value => value === 1) && projected.noUnknown &&
+      projected.require === "undefined", JSON.stringify({ ...projected, content: "<retained>", snapshot: "<retained>" }));
+  check("SEC-08 actual isolated document ports preserve text empty values and complete Save correlation",
+    projected.content === text && projected.snapshot === text && projected.saved === "" &&
+      projected.message === null && projected.saveBlocked === "reason" &&
+      Object.entries(identity).filter(([key]) => key !== "unknownNested")
+        .every(([key, value]) => projected.saveIdentity?.[key] === value));
+  const retainsFields = (actual, expected) => !!actual &&
+    Object.entries(expected).filter(([key]) => key !== "unknownNested")
+      .every(([key, value]) => actual[key] === value);
+  const watcherOwner = Object.fromEntries(
+    ["pageSession", "rendererGeneration", "tabId", "documentGeneration", "pathKey"]
+      .map(key => [key, identity[key]]),
+  );
+  check("SEC-08 isolated document projection retains descriptors versions navigation watcher ownership and Save dispositions",
+    retainsFields(projected.document, packet.document) &&
+      retainsFields(projected.version, packet.diskVersion) &&
+      retainsFields(projected.navigation, packet.openRequest) &&
+      retainsFields(projected.session, packet.reloadSession) &&
+      retainsFields(projected.watcher, { pageSession: "event-probe", rendererGeneration: 1,
+        selectionGeneration: 4, watcherGeneration: 8 }) &&
+      retainsFields(projected.watcher?.owner, watcherOwner) &&
+      retainsFields(projected.saveFlags, Object.fromEntries(
+        Object.keys(projected.saveFlags).map(key => [key, packet[key]]))),
+    JSON.stringify({ document: projected.document, version: projected.version,
+      navigation: projected.navigation, session: projected.session,
+      watcher: projected.watcher, saveFlags: projected.saveFlags }));
+  await exec("window.__documentEventOff[0](); window.__documentEventOff[0](); null;");
+  win.webContents.send("file-opened", { path: "after-unsubscribe", content: "" });
+  const secondarySurvived = await waitForCondition(exec, "window.__documentEventSecondary === 2");
+  check("SEC-08 document unsubscribe is idempotent and removes only its own listener",
+    secondarySurvived && await exec("window.__documentEventPackets.length === 5"));
+  win.webContents.send("file-reload-result", {
+    success: false, reloadRequest: { sequence: null, snapshot: "", session: 42 }, error: "refused",
+  });
+  const negativeReceived = await waitForCondition(exec, "window.__documentEventPackets.length === 6");
+  const negative = await exec(`(() => {
+    const data = window.__documentEventPackets[5]?.data;
+    return { absentPath: data && !('path' in data), sequence: data?.reloadRequest?.sequence,
+      snapshot: data?.reloadRequest?.snapshot, session: data?.reloadRequest?.session };
+  })()`);
+  win.webContents.send("save-markdown-result", { success: false, path: null, saveRequest: null });
+  const nullSaveReceived = await waitForCondition(exec, "window.__documentEventPackets.length === 7");
+  const nullSave = await exec(`(() => {
+    const data = window.__documentEventPackets[6]?.data;
+    return !!data && data.path === null && data.saveRequest === null && !('requestId' in data);
+  })()`);
+  check("SEC-08 document ports deliver uncorrelated negative envelopes without repairing echoed identities",
+    negativeReceived && negative.absentPath && negative.sequence === null &&
+      negative.snapshot === "" && negative.session === 42 && nullSaveReceived && nullSave,
+    JSON.stringify({ negative, nullSaveReceived, nullSave }));
+  await exec("window.__documentEventOff.forEach(off => off()); window.__documentEventSecondaryOff(); null;");
+  await exec(fs.readFileSync(path.join(__dirname, "../src/document-events.js"), "utf8"));
+  const local = await exec(`(() => {
+    const events = window.FoliaDocumentEvents;
+    const first = (_event, data) => {
+      window.__registryCalls.push('first'); window.__registryObjects.push(data);
+      data.sharedAnnotation = 'local';
+      events.removeListener('file-opened', second);
+      events.on('file-opened', added);
+    };
+    const second = (event, data) => {
+      window.__registryCalls.push('second'); window.__registryObjects.push(data);
+      window.__registrySecond = { eventMissing: event === undefined,
+        annotation: data.sharedAnnotation, mutable: !Object.isFrozen(data) };
+    };
+    const added = () => window.__registryCalls.push('added');
+    window.__registryCalls = []; window.__registryObjects = [];
+    events.on('file-opened', first).on('file-opened', second).on('file-opened', first);
+    events.removeListener('file-opened', first);
+    const remaining = events.listeners('file-opened');
+    let unknown = false, callback = false;
+    try { events.on('download-update', first); } catch (error) { unknown = error instanceof TypeError; }
+    try { events.removeListener('file-opened', null); } catch (error) { callback = error instanceof TypeError; }
+    return { lastDuplicate: remaining.length === 2 && remaining[0] === first && remaining[1] === second,
+      unknown, callback, keys: Object.keys(events).sort().join(','),
+      require: typeof require };
+  })()`);
+  check("SEC-08 browser document registry preserves duplicates and last-occurrence removal without IPC capabilities",
+    local.lastDuplicate && local.unknown && local.callback &&
+      local.keys === "listeners,on,removeAllListeners,removeListener" &&
+      local.require === "undefined", JSON.stringify(local));
+  win.webContents.send("file-opened", { content: "", path: "registry-first" });
+  const firstDelivered = await waitForCondition(exec, "window.__registryCalls.length === 2");
+  const shared = await exec(`({
+    calls: window.__registryCalls, same: window.__registryObjects[0] === window.__registryObjects[1],
+    second: window.__registrySecond
+  })`);
+  check("SEC-08 browser document delivery snapshots listeners and shares one mutable payload for memoization",
+    firstDelivered && shared.calls.join(",") === "first,second" && shared.same &&
+      shared.second.eventMissing && shared.second.annotation === "local" && shared.second.mutable,
+    JSON.stringify(shared));
+  win.webContents.send("file-opened", { content: "", path: "registry-second" });
+  const nextDelivered = await waitForCondition(exec, "window.__registryCalls.length === 4");
+  check("SEC-08 listener mutations affect only the next document delivery",
+    nextDelivered && await exec("window.__registryCalls.join(',') === 'first,second,first,added'"));
+  await exec(`window.FoliaDocumentEvents.removeAllListeners('file-opened');
+    window.FoliaDocumentEvents.on('file-opened', () => { window.__registryClearedDelivery = true; }); null;`);
+  win.webContents.send("file-opened", { content: "", path: "registry-after-clear" });
+  check("SEC-08 clearing local document listeners retains the fixed preload subscription",
+    await waitForCondition(exec, "window.__registryClearedDelivery === true"));
+  const frozen = await exec(`(() => {
+    const callbacks = {}, subscriptions = [], received = [];
+    let unload, cleanup = 0;
+    const fake = {
+      folia: Object.fromEntries(${JSON.stringify(channels.map(([, method]) => method))}
+        .map(method => [method, callback => {
+          subscriptions.push(method); callbacks[method] = callback;
+          return () => { cleanup += 1; };
+        }])),
+      addEventListener(name, callback) { if (name === 'unload') unload = callback; },
+    };
+    new Function('window', ${JSON.stringify(fs.readFileSync(path.join(__dirname, "../src/document-events.js"), "utf8"))})(fake);
+    const nested = Object.freeze({ requestId: 7 });
+    const input = Object.freeze({ savedContent: '', saveRequest: nested });
+    fake.FoliaDocumentEvents.on('save-markdown-result', (_event, data) => {
+      received.push(data); Reflect.set(data, 'annotation', 'shared');
+    });
+    fake.FoliaDocumentEvents.on('save-markdown-result', (_event, data) => received.push(data));
+    callbacks.onSaveMarkdownResult(input);
+    const controlledError = new Error('controlled document listener failure');
+    let threwSynchronously = false, laterListenerRan = false;
+    fake.FoliaDocumentEvents.on('file-opened', () => { throw controlledError; });
+    fake.FoliaDocumentEvents.on('file-opened', () => { laterListenerRan = true; });
+    try { callbacks.onFileOpened({ content: '', path: 'throwing-listener' }); }
+    catch (error) { threwSynchronously = error === controlledError; }
+    unload();
+    return { subscriptions: subscriptions.length, cleanup,
+      synchronous: received.length === 2, same: received[0] === received[1],
+      mutable: received[1]?.annotation === 'shared',
+      nestedSame: received[1]?.saveRequest === nested,
+      originalFrozen: Object.isFrozen(input) && !('annotation' in input),
+      saved: received[1]?.savedContent, require: typeof require,
+      threwSynchronously, laterListenerRan };
+  })()`);
+  check("SEC-08 Node-free document registry accepts frozen input once without deep copying or mutating its source",
+    frozen.subscriptions === 5 && frozen.cleanup === 5 && frozen.synchronous &&
+      frozen.same && frozen.mutable && frozen.nestedSame && frozen.originalFrozen &&
+      frozen.saved === "" && frozen.require === "undefined", JSON.stringify(frozen));
+  check("SEC-08 document listener exceptions propagate synchronously and stop remaining fanout",
+    frozen.threwSynchronously && !frozen.laterListenerRan, JSON.stringify({
+      threwSynchronously: frozen.threwSynchronously, laterListenerRan: frozen.laterListenerRan,
+    }));
+}
+
 async function runReloadTransportFailure(exec, sentinel) {
   await sentinel.mute("controlled reload dispatch failure");
   let result;
@@ -10019,6 +10253,8 @@ async function run(win) {
     "restoreSession", "saveSessionLayout", "readOpenTicketSnapshot",
     "acceptDocumentOpenTicket", "cancelDocumentOpenTicket", "openReadme",
     "saveMarkdown", "requestReload", "acknowledgeSaveResult",
+    "onFileOpened", "onFileOpenResult", "onFileReloadResult",
+    "onSaveMarkdownResult", "onFileChangedExternally",
   ].sort().join(",");
   check(
     "SEC-08 main launch retains production owned-read and only its explicitly marked PDF test signal",
@@ -10093,6 +10329,7 @@ async function run(win) {
         isolatedBoundary.dialogEmptyBatchRejected === true,
       JSON.stringify(isolatedBoundary),
     );
+    await runDocumentEventBoundary(isolatedBridgeWindow);
     check(
       "SEC-08 session test preload does not expose the PDF signal to an unmarked window or subframe",
       isolatedBoundary.pdfRestore === "undefined" &&

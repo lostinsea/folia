@@ -548,6 +548,21 @@ Targeted controls and exact reverts are recorded in `docs/PLANNED-WORK.md`.
 This transport slice does not close provisional authority, raw event/command
 consumers, production flags or final responsiveness qualification.
 
+**Fixed document-result subscriptions (2026-10-13).** The five document
+open/open-result/reload-result/Save-result/watcher subscriptions now cross
+fixed preload methods, never an Electron event object or generic channel API.
+Recognized fields are projected without coercing malformed echoed identities
+or discarding legitimate uncorrelated refusals. A packaged browser-only local
+registry preserves tab-first takeover, duplicate/last-occurrence removal and
+snapshot delivery. Its single shallow mutable ingress copy preserves shared
+Save memoization/delegation and frozen-operation replay without deep copying
+document text. Main producers and authority remain unchanged. Actual isolated
+production-preload and Node-free controls pass. Fresh independent Sol/Luna
+implementation feedback converged; final exact controls and their precise
+remaining scope are recorded in `docs/PLANNED-WORK.md`.
+Other commands/browser privileged consumers and production flags remain open;
+this transition is neither complete isolation nor measured responsiveness.
+
 The **production main window still has Node enabled and isolation disabled**.
 Preparation, commit, completion and abandonment of disk-adoption capabilities
 now use fixed copied/validated preload methods; main's actual authority,

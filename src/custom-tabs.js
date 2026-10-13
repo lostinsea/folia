@@ -16,6 +16,10 @@
   // Keep the per-tab clipboard local instead of borrowing renderer.js's scope.
   // The menu helpers come from the preceding classic script, not a Node require.
   const { clipboard, ipcRenderer: tabIpc } = require("electron");
+  if (!window.FoliaDocumentEvents) {
+    throw new Error("FoliaDocumentEvents must load before custom-tabs.js");
+  }
+  const documentEvents = window.FoliaDocumentEvents;
   if (!window.FoliaContextMenu) {
     throw new Error("FoliaContextMenu must load before custom-tabs.js");
   }
@@ -3962,12 +3966,12 @@
     return true;
   }
 
-  if (window.ipcRenderer) {
+  if (documentEvents) {
     if (!canOwnFileOpen) {
       // Keep renderer's public fallback in control. The wrapper adds only the
       // freeze queue; after thaw it invokes the exact upstream handler once.
       if (typeof rendererFileOpenHandler === "function") {
-        window.ipcRenderer.removeListener(
+        documentEvents.removeListener(
           "file-opened",
           rendererFileOpenHandler,
         );
@@ -3986,14 +3990,14 @@
           }
           rendererFileOpenHandler(event, data);
         };
-        window.ipcRenderer.on("file-opened", handleCompatibleFileOpened);
+        documentEvents.on("file-opened", handleCompatibleFileOpened);
       }
       console.error(
         "[CustomTabs] Renderer file-open lifecycle API unavailable; " +
           "keeping the upstream file-open handler in control.",
       );
     } else {
-      window.ipcRenderer.removeListener(
+      documentEvents.removeListener(
         "file-opened",
         rendererFileOpenHandler,
       );
@@ -4625,14 +4629,14 @@
           notify("The file could not be opened.", 6000);
         });
       };
-      window.ipcRenderer.on("file-opened", dispatchFileOpened);
+      documentEvents.on("file-opened", dispatchFileOpened);
     }
 
-    const rendererFileOpenResultHandlers = window.ipcRenderer.listeners
-      ? window.ipcRenderer.listeners("file-open-result").slice()
+    const rendererFileOpenResultHandlers = documentEvents.listeners
+      ? documentEvents.listeners("file-open-result").slice()
       : [];
     if (rendererFileOpenResultHandlers.length > 0) {
-      window.ipcRenderer.removeAllListeners("file-open-result");
+      documentEvents.removeAllListeners("file-open-result");
       const handleFileOpenResult = (event, data) => {
         if (
           deferFrozenDocumentOperation("ipc:file-open-result", () =>
@@ -4645,7 +4649,7 @@
           handler(event, data),
         );
       };
-      window.ipcRenderer.on("file-open-result", handleFileOpenResult);
+      documentEvents.on("file-open-result", handleFileOpenResult);
     }
   }
 
@@ -4711,7 +4715,7 @@
   // A reload takeover is only safe after CustomTabs has taken ownership of
   // file-open lifecycle. In compatibility mode there may be no target tab, so
   // leave renderer's reload listener installed rather than dropping replies.
-  if (window.ipcRenderer && canOwnFileOpen) {
+  if (documentEvents && canOwnFileOpen) {
     window.customTabsOwnsReloadResults = true;
     // renderer.js handles 'file-reload-result' by updating its own
     // module-level `originalMarkdown` and repainting the viewer. It has no
@@ -4724,12 +4728,12 @@
     // content into the tab store, restore the position afterwards, and skip
     // the repaint entirely if the user switched tabs while the disk read was
     // still in flight.
-    const rendererReloadHandlers = window.ipcRenderer.listeners
-      ? window.ipcRenderer.listeners("file-reload-result").slice()
+    const rendererReloadHandlers = documentEvents.listeners
+      ? documentEvents.listeners("file-reload-result").slice()
       : [];
 
     if (rendererReloadHandlers.length > 0) {
-      window.ipcRenderer.removeAllListeners("file-reload-result");
+      documentEvents.removeAllListeners("file-reload-result");
     } else {
       console.warn(
         "[CustomTabs] No existing 'file-reload-result' handler found; " +
@@ -5521,15 +5525,15 @@
           ) pendingConfirmedReload = null;
         });
     };
-    window.ipcRenderer.on("file-reload-result", dispatchReloadResult);
-  } else if (window.ipcRenderer) {
+    documentEvents.on("file-reload-result", dispatchReloadResult);
+  } else if (documentEvents) {
     // Compatibility mode still needs freeze-safe delivery even though the
     // upstream renderer remains the sole owner of reload acceptance.
-    const compatibilityReloadHandlers = window.ipcRenderer.listeners
-      ? window.ipcRenderer.listeners("file-reload-result").slice()
+    const compatibilityReloadHandlers = documentEvents.listeners
+      ? documentEvents.listeners("file-reload-result").slice()
       : [];
     if (compatibilityReloadHandlers.length > 0) {
-      window.ipcRenderer.removeAllListeners("file-reload-result");
+      documentEvents.removeAllListeners("file-reload-result");
       const handleCompatibleReloadResult = (event, data) => {
         const source =
           data && data.success
@@ -5546,14 +5550,14 @@
           handler(event, data),
         );
       };
-      window.ipcRenderer.on(
+      documentEvents.on(
         "file-reload-result",
         handleCompatibleReloadResult,
       );
     }
   }
 
-  if (window.ipcRenderer) {
+  if (documentEvents) {
     // Save completion is independent: captured renderer handlers are always
     // delegated, and tab mirroring already no-ops when no target tab exists.
     // Saving writes renderer state to disk. Mirror it into the tab so the
@@ -5565,8 +5569,8 @@
     // flag. If the user switched tabs during the write that marks the WRONG
     // document clean. Take the channel over and only delegate when the result
     // belongs to the document the renderer is currently showing.
-    const rendererSaveHandlers = window.ipcRenderer.listeners
-      ? window.ipcRenderer.listeners("save-markdown-result").slice()
+    const rendererSaveHandlers = documentEvents.listeners
+      ? documentEvents.listeners("save-markdown-result").slice()
       : [];
     const rendererSaveHandler =
       rendererSaveHandlers.length === 1
@@ -5577,7 +5581,7 @@
         `[CustomTabs] Expected exactly one renderer save handler, found ${rendererSaveHandlers.length}`,
       );
     }
-    window.ipcRenderer.removeAllListeners("save-markdown-result");
+    documentEvents.removeAllListeners("save-markdown-result");
 
     const handleSaveResult = (event, data) => {
       if (isDocumentFrozen()) {
@@ -5621,22 +5625,22 @@
       };
       applyDecision();
     };
-    window.ipcRenderer.on("save-markdown-result", handleSaveResult);
+    documentEvents.on("save-markdown-result", handleSaveResult);
   }
 
-  if (window.ipcRenderer && canOwnFileOpen) {
+  if (documentEvents && canOwnFileOpen) {
     // The watcher follows the active tab, but a change event queued just
     // before a tab switch can still arrive afterwards. renderer.js prompts
     // without checking which file the event was for, and its "Reload" action
     // reloads currentFilePath - i.e. the wrong document. Drop stale events.
     // This filter is installed only while CustomTabs owns file-open lifecycle;
     // compatibility mode leaves renderer's notification handler untouched.
-    const rendererChangeHandlers = window.ipcRenderer.listeners
-      ? window.ipcRenderer.listeners("file-changed-externally").slice()
+    const rendererChangeHandlers = documentEvents.listeners
+      ? documentEvents.listeners("file-changed-externally").slice()
       : [];
-    window.ipcRenderer.removeAllListeners("file-changed-externally");
+    documentEvents.removeAllListeners("file-changed-externally");
 
-    window.ipcRenderer.on("file-changed-externally", (event, data) => {
+    documentEvents.on("file-changed-externally", (event, data) => {
       const activeTab = getActiveTab();
       if (!activeTab) {
         // No tab is open (all closed): there is nothing to prompt about.

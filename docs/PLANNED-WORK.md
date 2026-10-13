@@ -392,6 +392,40 @@ this foundation is not full path-authority closure. Representative final-source
 responsiveness remains unqualified. The retained old hosted comparison did not
 run and cannot certify these or future bytes. No performance contract changed.
 
+**Document result/event transition — IMPLEMENTED / PROVEN; review converged,
+unintegrated.**
+Five fixed preload subscriptions now feed a browser-only local registry used by
+the actual renderer/tab consumers. Tab-first takeover, duplicate/last-occurrence
+removal, snapshot delivery, renderer delegation and frozen-operation replay
+remain intact. One shallow mutable ingress copy is shared across listeners,
+preserving Save's object-keyed memoization without deep copying document text.
+No Electron event object, public emit or generic IPC capability is exposed.
+Recognized fields are projected without coercing or dropping legitimate
+uncorrelated refusals or repairing malformed echoed identities into absence.
+Main event production and authority stay unchanged, with no new read or IPC.
+Independent fresh Sol/Luna implementation reviews found no blockers and agreed
+on projection, shared-object delivery and the bounded migration. Sol identified
+nonblocking retained-field and synchronous-listener-error coverage gaps; Luna
+did not identify those gaps independently. Both improvements were implemented
+and both reviewers accepted the final controls, with no outstanding disagreement.
+The final owned baseline is 58/58 (`document-events-owned-r3.log`); unchanged
+product-byte queue and F22 focused evidence remains 12/12 and 75/75
+(`document-events-queue-r1.log`, `document-events-f22-r1.log`). Source packaging
+is 371/0 (`document-events-packaging-r1.log`), not installed-asar acceptance.
+R789-R802 and affected R252 are individually exact PROVEN on final controls
+(`document-events-exact-proofs-r2.log`); repaired equivalent R681/R684/R688/R703
+script-order controls are exact PROVEN in `document-events-exact-proofs-r1.log`.
+R254 now uses the existing real batch selector, which already executes its
+original scenario and must-pass controls; its exact proof is retained in
+`document-events-accepted-reopen-proof-r1.log`. Every completed mutation window
+restored its source hashes exactly. No legacy full-suite failures were waived
+or relabeled. R98's ordinary background-Save record has not been reproven in
+this tranche; retain it for the final consumer/harness integration, rather than
+infer qualification from the registry identity probe. Other command/quit/
+clipboard/path consumers, production flags and final measured responsiveness
+remain subsequent gates; these results do not qualify responsiveness or full
+isolation.
+
 **Browser primitive transition — IMPLEMENTED / PROVEN, unintegrated.** Removed
 renderer Node crypto and Buffer dependencies using native Web Crypto/TextEncoder for the existing
 attestation and an allocation-free shared UTF-8 byte counter for explicitly

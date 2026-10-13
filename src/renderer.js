@@ -5,6 +5,10 @@ const { ipcRenderer, shell, clipboard } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
+if (!window.FoliaDocumentEvents) {
+  throw new Error('FoliaDocumentEvents must load before renderer.js');
+}
+const documentEvents = window.FoliaDocumentEvents;
 
 // Navigation can be cancelled by the first tab activation. Keep its state
 // initialized before any startup callback or overlay can reach that path.
@@ -1745,7 +1749,7 @@ function handleFileOpenResult(event, data) {
   }
 }
 
-ipcRenderer.on('file-open-result', handleFileOpenResult);
+documentEvents.on('file-open-result', handleFileOpenResult);
 
 function requestHistoryNavigation(targetIndex) {
   const entry = navigationHistory[targetIndex];
@@ -4997,7 +5001,7 @@ function handleSaveMarkdownResult(event, data) {
   return decision;
 }
 
-ipcRenderer.on('save-markdown-result', handleSaveMarkdownResult);
+documentEvents.on('save-markdown-result', handleSaveMarkdownResult);
 
 // Update unsaved indicator
 function updateUnsavedIndicator(allowTrackingTransition = true) {
@@ -8385,7 +8389,7 @@ async function handleFileOpened(event, data) {
 }
 
 // Handle file opened
-ipcRenderer.on('file-opened', handleFileOpened);
+documentEvents.on('file-opened', handleFileOpened);
 
 // Handle file changed externally
 function authorisesCurrentWatcherEvent(data) {
@@ -8440,7 +8444,7 @@ function authorisesCurrentWatcherEvent(data) {
   );
 }
 
-ipcRenderer.on('file-changed-externally', (event, data) => {
+documentEvents.on('file-changed-externally', (event, data) => {
   if (!authorisesCurrentWatcherEvent(data)) {
     console.log('Ignoring unauthorized watcher change event');
     return;
@@ -8903,7 +8907,7 @@ ipcRenderer.on('file-not-found', (event, data) => {
 });
 
 // Handle file reload result
-ipcRenderer.on('file-reload-result', async (event, data) => {
+documentEvents.on('file-reload-result', async (event, data) => {
   if (data && data.success) {
     if (!mayMutateRendererDocument('ipc-reload-result')) return;
     const reloadValidation = validateReloadResultForCurrentPage(data);

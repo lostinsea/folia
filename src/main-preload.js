@@ -202,6 +202,65 @@ function copySaveTransport(request) {
   };
 }
 
+const DOCUMENT_EVENT_IDENTITY_FIELDS = [
+  "pageSession", "rendererGeneration", "tabId", "documentGeneration", "pathKey",
+  "documentRef", "selectionGeneration", "sequence", "requestId",
+];
+const DOCUMENT_EVENT_FIELDS = {
+  "file-opened": ["path", "content", "allPaths", "extraReadGrants", "openRequest",
+    "modifiedTime", "diskVersion", "document"],
+  "file-open-result": ["success", "path", "openRequest", "reason", "message"],
+  "file-reload-result": ["success", "path", "content", "modifiedTime", "diskVersion",
+    "error", "reloadRequest", "reloadSession"],
+  "save-markdown-result": ["success", "path", "requestId", "saveRequestSession",
+    "saveRequest", "saveResultAttempt", "savedContent", "modifiedTime", "diskVersion",
+    "error", "conflict", "deleted", "settlementOnly", "pathReplaced", "originalPathKey",
+    "saveBlocked", "saveBlockedStage", "saveBlockedWhy"],
+  "file-changed-externally": ["path", "modifiedTime", "watcher"],
+};
+const DOCUMENT_EVENT_RECORD_FIELDS = {
+  diskVersion: ["dev", "ino", "size", "mtimeMs", "ctimeMs"],
+  document: ["ref", "entryId", "logicalPath", "spellingKey", "readTarget",
+    "pathKey", "documentUrl", "openTicket"],
+  openRequest: ["token", "targetIndex", "path"],
+  reloadRequest: ["sequence", "path", "snapshot", "session", "tabId",
+    "documentGeneration", "pathKey", "rendererGeneration", "selectionGeneration"],
+  reloadSession: ["epoch", "rendererGeneration", "pageSession"],
+  saveRequest: DOCUMENT_EVENT_IDENTITY_FIELDS,
+  watcher: ["pageSession", "rendererGeneration", "selectionGeneration",
+    "watcherGeneration", "owner"],
+  owner: ["pageSession", "rendererGeneration", "tabId", "documentGeneration", "pathKey"],
+};
+
+function projectDocumentEventRecord(value, fields) {
+  // Refusals can echo malformed identities. Projection must not repair them
+  // into absence or prevent the existing settlement/rejection gates seeing them.
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const projected = {};
+  for (const field of fields) {
+    if (!Object.prototype.hasOwnProperty.call(value, field)) continue;
+    const nested = DOCUMENT_EVENT_RECORD_FIELDS[field];
+    projected[field] = nested
+      ? projectDocumentEventRecord(value[field], nested) : value[field];
+  }
+  return projected;
+}
+
+function subscribeDocumentEvent(channel, callback) {
+  if (typeof callback !== "function") {
+    throw new TypeError("Invalid document event callback");
+  }
+  const listener = (_event, data) =>
+    callback(projectDocumentEventRecord(data, DOCUMENT_EVENT_FIELDS[channel]));
+  ipcRenderer.on(channel, listener);
+  let subscribed = true;
+  return () => {
+    if (!subscribed) return;
+    subscribed = false;
+    ipcRenderer.removeListener(channel, listener);
+  };
+}
+
 function copyReloadTransport(request) {
   if (!request || typeof request !== "object" || Array.isArray(request) ||
       !isPath(request.filePath) || !isPath(request.reloadRequestPath) ||
@@ -385,6 +444,21 @@ function copyDocumentQueryReply(result, fields) {
 }
 
 const api = Object.freeze({
+  onFileOpened(callback) {
+    return subscribeDocumentEvent("file-opened", callback);
+  },
+  onFileOpenResult(callback) {
+    return subscribeDocumentEvent("file-open-result", callback);
+  },
+  onFileReloadResult(callback) {
+    return subscribeDocumentEvent("file-reload-result", callback);
+  },
+  onSaveMarkdownResult(callback) {
+    return subscribeDocumentEvent("save-markdown-result", callback);
+  },
+  onFileChangedExternally(callback) {
+    return subscribeDocumentEvent("file-changed-externally", callback);
+  },
   saveMarkdown(request) {
     const payload = copySaveTransport(request);
     if (!isPath(request.filePath) || typeof request.content !== "string") {
