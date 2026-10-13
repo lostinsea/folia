@@ -6820,6 +6820,74 @@ function retainedTabDiskOwnerFromEnvelope(event, data) {
     isKnownDocumentOwner(owner) && owner.readTarget ? owner : null;
 }
 
+ipcMain.on("check-owned-tab-disk-snapshot", function checkOwnedTabDiskSnapshot(event, data) {
+  // returnValue sends immediately; a default reply would outrun the check.
+  const refuse = why => Object.freeze({ matches: false, why });
+  if (approvalRendererState !== "ready" || !data ||
+      typeof data.filePath !== "string" || data.filePath.length > 32768) {
+    event.returnValue = refuse("invalid-owner");
+    return;
+  }
+  const owner = retainedTabDiskOwnerFromEnvelope(event, data);
+  const expectedVersion = normaliseDiskVersion(data.diskVersion);
+  if (!owner || !expectedVersion) {
+    event.returnValue = refuse("invalid-owner");
+    return;
+  }
+  const ownerPath = normaliseFilePath(data.filePath).resolved;
+  const sourcePath = data.sourcePath === undefined ? ownerPath : data.sourcePath;
+  if (typeof sourcePath !== "string" || !sourcePath ||
+      sourcePath.includes("\0") || sourcePath.length > 32768) {
+    event.returnValue = refuse("invalid-source");
+    return;
+  }
+  const logicalSource = normaliseFilePath(sourcePath).resolved;
+  let sourcePermission = null;
+  if (logicalSource !== ownerPath) {
+    try {
+      sourcePermission = approvedBrowserDocumentPermission(event, logicalSource);
+    } catch (error) {
+      console.error("Refusing owned snapshot source permission:", error.message);
+      event.returnValue = refuse("unapproved-source");
+      return;
+    }
+  }
+  const current = () => {
+    if (approvalRendererState !== "ready" ||
+        (sourcePermission && !approvedBrowserPermissionIsCurrent(sourcePermission))) return false;
+    const retained = retainedTabDiskOwnerFromEnvelope(event, data);
+    return sameDocumentOwner(owner, retained) &&
+      retained.documentRef === owner.documentRef &&
+      retained.readTarget === owner.readTarget;
+  };
+  // Canonical equality is a binding fence, never permission. Authenticate both
+  // logical paths in memory before either one can cause a filesystem probe.
+  const bindingsMatch = () =>
+    current() && resolveCanonicalFilePath(ownerPath) === owner.readTarget &&
+    current() &&
+    (logicalSource === ownerPath ||
+      (resolveCanonicalFilePath(sourcePermission.filePath) === owner.readTarget &&
+        current()));
+  if (!bindingsMatch()) {
+    event.returnValue = refuse("binding");
+    return;
+  }
+  const stats = readDocumentStats(owner.readTarget, "checking owned disk snapshot");
+  const diskVersion = stats && stats.isFile()
+    ? normaliseDiskVersion(diskVersionFromStats(stats)) : null;
+  if (!diskVersion || !sameDiskVersion(expectedVersion, diskVersion)) {
+    event.returnValue = refuse("version");
+    return;
+  }
+  if (!bindingsMatch()) {
+    event.returnValue = refuse("binding");
+    return;
+  }
+  event.returnValue = Object.freeze({
+    matches: true, pathKey: owner.pathKey, diskVersion,
+  });
+});
+
 ipcMain.handle("refresh-owned-tab-disk-snapshot", async function refreshOwnedTabDiskSnapshot(event, data) {
   const owner = retainedTabDiskOwnerFromEnvelope(event, data);
   const cachedVersion = data && normaliseDiskVersion(data.diskVersion);

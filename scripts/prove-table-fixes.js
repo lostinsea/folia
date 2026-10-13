@@ -137,6 +137,24 @@ const TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL = Object.freeze([
   "Shutdown approval renderer unusable: webContents destroyed",
 ]);
 const VIRTUAL_SUITES = Object.freeze({
+  "test:sec08-owned-metadata-evidence": Object.freeze({
+    npmScript: "test:tabs",
+    environment: Object.freeze({ SEC08_OWNED_METADATA_FOCUSED_HARNESS: "1" }),
+  }),
+  "test:sec08-owned-metadata-owner-retirement-evidence": Object.freeze({
+    npmScript: "test:tabs",
+    environment: Object.freeze({
+      SEC08_OWNED_METADATA_FOCUSED_HARNESS: "1",
+      SEC08_OWNED_METADATA_RETIREMENT_PHASE: "owner-probe",
+    }),
+  }),
+  "test:sec08-owned-metadata-authority-evidence": Object.freeze({
+    npmScript: "test:tabs",
+    environment: Object.freeze({
+      SEC08_OWNED_METADATA_FOCUSED_HARNESS: "1",
+      SEC08_OWNED_METADATA_AUTHORITY_ONLY: "1",
+    }),
+  }),
   "test:sec08-owned-read-core-evidence": Object.freeze({
     npmScript: "test:tabs",
     environment: { SEC08_OWNED_READ_FOCUSED_HARNESS: "1", SEC08_OWNED_READ_CORE_ONLY: "1" },
@@ -20437,8 +20455,10 @@ const REVERTS = [
           id: "R844",
           what: "probe a conditional refresh path before memory-only native owner authorization",
           file: MAIN,
-          from: "  const owner = retainedTabDiskOwnerFromEnvelope(event, data);",
-          to: "  await fs.promises.realpath(data.filePath).catch(error => {\n" +
+          from: 'ipcMain.handle("refresh-owned-tab-disk-snapshot", async function refreshOwnedTabDiskSnapshot(event, data) {\n' +
+            "  const owner = retainedTabDiskOwnerFromEnvelope(event, data);",
+          to: 'ipcMain.handle("refresh-owned-tab-disk-snapshot", async function refreshOwnedTabDiskSnapshot(event, data) {\n' +
+            "  await fs.promises.realpath(data.filePath).catch(error => {\n" +
             '    if (error.code !== "ENOENT" && error.code !== "ENOTDIR") throw error;\n' +
             "  });\n" +
             "  const owner = retainedTabDiskOwnerFromEnvelope(event, data);",
@@ -20769,6 +20789,331 @@ const REVERTS = [
           ],
           requireMustPassAssertions: true, requireExactFailures: true,
           expectedFailureCount: 1,
+        },
+        {
+          id: "R861",
+          what: "probe owned metadata before authenticating native owner and distinct source memory",
+          file: MAIN,
+          from: 'ipcMain.on("check-owned-tab-disk-snapshot", function checkOwnedTabDiskSnapshot(event, data) {',
+          to: 'ipcMain.on("check-owned-tab-disk-snapshot", function checkOwnedTabDiskSnapshot(event, data) {\n' +
+            '  fs.statSync(__filename);',
+          suite: "test:sec08-owned-metadata-evidence",
+          expect: [
+            /^SEC-08 owned metadata Main rejects invalid unknown stale foreign and unapproved source authority before any filesystem probe$/,
+            /^SEC-08 owned metadata actual isolated foreign sender cannot use the retained native owner$/,
+            /^SEC-08 owned metadata positive witness freshly checks one retained stat and both bindings twice without consuming authority or reading bodies$/,
+            /^SEC-08 owned metadata case-distinct source is not deduplicated into an unapproved permission$/,
+          ],
+          mustPass: [
+            /^SEC-08 owned metadata setup retains a genuine ready native owner and two separately approved logical bindings$/,
+            /^SEC-08 owned metadata bridge rejects malformed paths versions and absent native refs before IPC$/,
+            /^SEC-08 owned metadata unchanged completion preserves RAM conflict and scroll ordering through the fixed port$/,
+            /^the error sentinel was demonstrably watching both channels$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R862",
+          what: "trust cached version without a fresh regular retained-target stat",
+          file: MAIN,
+          from: '  const stats = readDocumentStats(owner.readTarget, "checking owned disk snapshot");\n' +
+            '  const diskVersion = stats && stats.isFile()\n' +
+            '    ? normaliseDiskVersion(diskVersionFromStats(stats)) : null;',
+          to: '  const diskVersion = expectedVersion;',
+          suite: "test:sec08-owned-metadata-evidence",
+          expect: [
+            /^SEC-08 owned metadata positive witness freshly checks one retained stat and both bindings twice without consuming authority or reading bodies$/,
+            /^SEC-08 owned metadata final owner binding fence observes a real move after its retained stat$/,
+            /^SEC-08 owned metadata final source binding fence observes a real move after its retained stat$/,
+            /^SEC-08 owned metadata refuses a real directory at its retained target even when the caller version matches$/,
+            /^SEC-08 owned metadata version completion preserves RAM conflict and scroll ordering through the fixed port$/,
+          ],
+          mustPass: [
+            /^SEC-08 owned metadata Main rejects invalid unknown stale foreign and unapproved source authority before any filesystem probe$/,
+            /^SEC-08 owned metadata bridge copies only fixed owner source and version fields$/,
+            /^SEC-08 owned metadata unchanged completion preserves RAM conflict and scroll ordering through the fixed port$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R863",
+          what: "omit the owner's logical-to-retained binding fences",
+          file: MAIN,
+          from: '    current() && resolveCanonicalFilePath(ownerPath) === owner.readTarget &&',
+          to: '    current() &&',
+          suite: "test:sec08-owned-metadata-evidence",
+          expect: [
+            /^SEC-08 owned metadata positive witness freshly checks one retained stat and both bindings twice without consuming authority or reading bodies$/,
+            /^SEC-08 owned metadata deduplicates only the exact case-preserving normalized logical binding$/,
+            /^SEC-08 owned metadata final owner binding fence observes a real move after its retained stat$/,
+            /^SEC-08 owned metadata owner-binding completion preserves RAM conflict and scroll ordering through the fixed port$/,
+          ],
+          mustPass: [
+            /^SEC-08 owned metadata Main rejects invalid unknown stale foreign and unapproved source authority before any filesystem probe$/,
+            /^SEC-08 owned metadata source-binding completion preserves RAM conflict and scroll ordering through the fixed port$/,
+            /^SEC-08 owned metadata version completion preserves RAM conflict and scroll ordering through the fixed port$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R864",
+          what: "omit the separately approved source's retained binding fences",
+          file: MAIN,
+          from: '      (resolveCanonicalFilePath(sourcePermission.filePath) === owner.readTarget &&\n' +
+            '        current()));',
+          to: '      current());',
+          suite: "test:sec08-owned-metadata-evidence",
+          expect: [
+            /^SEC-08 owned metadata positive witness freshly checks one retained stat and both bindings twice without consuming authority or reading bodies$/,
+            /^SEC-08 owned metadata final source binding fence observes a real move after its retained stat$/,
+            /^SEC-08 owned metadata source-binding completion preserves RAM conflict and scroll ordering through the fixed port$/,
+          ],
+          mustPass: [
+            /^SEC-08 owned metadata Main rejects invalid unknown stale foreign and unapproved source authority before any filesystem probe$/,
+            /^SEC-08 owned metadata owner-binding completion preserves RAM conflict and scroll ordering through the fixed port$/,
+            /^SEC-08 owned metadata version completion preserves RAM conflict and scroll ordering through the fixed port$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R865",
+          what: "omit the final logical binding check after the retained metadata stat",
+          file: MAIN,
+          from: '  if (!bindingsMatch()) {\n' +
+            '    event.returnValue = refuse("binding");\n' +
+            '    return;\n' +
+            '  }\n' +
+            '  event.returnValue = Object.freeze({\n' +
+            '    matches: true, pathKey: owner.pathKey, diskVersion,',
+          to: '  event.returnValue = Object.freeze({\n' +
+            '    matches: true, pathKey: owner.pathKey, diskVersion,',
+          suite: "test:sec08-owned-metadata-evidence",
+          expect: [
+            /^SEC-08 owned metadata positive witness freshly checks one retained stat and both bindings twice without consuming authority or reading bodies$/,
+            /^SEC-08 owned metadata deduplicates only the exact case-preserving normalized logical binding$/,
+            /^SEC-08 owned metadata final owner binding fence observes a real move after its retained stat$/,
+            /^SEC-08 owned metadata final source binding fence observes a real move after its retained stat$/,
+          ],
+          mustPass: [
+            /^SEC-08 owned metadata Main rejects invalid unknown stale foreign and unapproved source authority before any filesystem probe$/,
+            /^SEC-08 owned metadata owner-binding completion preserves RAM conflict and scroll ordering through the fixed port$/,
+            /^SEC-08 owned metadata source-binding completion preserves RAM conflict and scroll ordering through the fixed port$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R866",
+          what: "forward arbitrary metadata request owner and version fields",
+          file: path.join(SRC, "main-preload.js"),
+          from: '  checkOwnedTabDiskSnapshot(request) {\n' +
+            '    const kind = "owned tab disk check";\n' +
+            '    const payload = copyOwnedTabDiskRequest(request);',
+          to: '  checkOwnedTabDiskSnapshot(request) {\n' +
+            '    const kind = "owned tab disk check";\n' +
+            '    const payload = { ...request, ...copyOwnedTabDiskRequest(request) };',
+          suite: "test:sec08-owned-metadata-evidence",
+          expect: [/^SEC-08 owned metadata bridge copies only fixed owner source and version fields$/],
+          mustPass: [
+            /^SEC-08 owned metadata bridge rejects malformed paths versions and absent native refs before IPC$/,
+            /^SEC-08 owned metadata bridge rejects extra nested body and mismatched receipts while permitting finite ctime drift$/,
+            /^SEC-08 owned metadata unchanged completion preserves RAM conflict and scroll ordering through the fixed port$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R867",
+          what: "allow an absent native reference through the metadata preload port",
+          file: path.join(SRC, "main-preload.js"),
+          from: '    if (!payload.owner.documentRef || payload.filePath.length > 32768 ||',
+          to: '    if (payload.filePath.length > 32768 ||',
+          suite: "test:sec08-owned-metadata-evidence",
+          expect: [/^SEC-08 owned metadata bridge rejects malformed paths versions and absent native refs before IPC$/],
+          mustPass: [
+            /^SEC-08 owned metadata bridge copies only fixed owner source and version fields$/,
+            /^SEC-08 owned metadata Main rejects invalid unknown stale foreign and unapproved source authority before any filesystem probe$/,
+            /^SEC-08 owned metadata unchanged completion preserves RAM conflict and scroll ordering through the fixed port$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R868",
+          what: "accept extra or body-bearing metadata receipt fields",
+          file: path.join(SRC, "main-preload.js"),
+          from: '    if (Object.keys(result).some(key => !allowedFields.includes(key))) {\n' +
+            '      throw new TypeError(`Invalid ${kind} response`);\n' +
+            '    }',
+          to: '',
+          suite: "test:sec08-owned-metadata-evidence",
+          expect: [/^SEC-08 owned metadata bridge rejects extra nested body and mismatched receipts while permitting finite ctime drift$/],
+          mustPass: [
+            /^SEC-08 owned metadata bridge copies only fixed owner source and version fields$/,
+            /^SEC-08 owned metadata bridge rejects malformed paths versions and absent native refs before IPC$/,
+            /^SEC-08 owned metadata unchanged completion preserves RAM conflict and scroll ordering through the fixed port$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R869",
+          what: "accept arbitrary fields nested inside a metadata receipt version",
+          file: path.join(SRC, "main-preload.js"),
+          from: '        Object.keys(result.diskVersion).some(key => !Object.hasOwn(diskVersion, key)) ||\n',
+          to: '',
+          suite: "test:sec08-owned-metadata-evidence",
+          expect: [/^SEC-08 owned metadata bridge rejects extra nested body and mismatched receipts while permitting finite ctime drift$/],
+          mustPass: [
+            /^SEC-08 owned metadata bridge copies only fixed owner source and version fields$/,
+            /^SEC-08 owned metadata bridge rejects malformed paths versions and absent native refs before IPC$/,
+            /^SEC-08 owned metadata unchanged completion preserves RAM conflict and scroll ordering through the fixed port$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R870",
+          what: "accept a mismatched finite metadata receipt version",
+          file: path.join(SRC, "main-preload.js"),
+          from: '        ["dev", "ino", "size", "mtimeMs"].some(\n' +
+            '          key => diskVersion[key] !== payload.diskVersion[key],\n' +
+            '        )) {',
+          to: '        false) {',
+          suite: "test:sec08-owned-metadata-evidence",
+          expect: [/^SEC-08 owned metadata bridge rejects extra nested body and mismatched receipts while permitting finite ctime drift$/],
+          mustPass: [
+            /^SEC-08 owned metadata bridge copies only fixed owner source and version fields$/,
+            /^SEC-08 owned metadata bridge rejects malformed paths versions and absent native refs before IPC$/,
+            /^SEC-08 owned metadata unchanged completion preserves RAM conflict and scroll ordering through the fixed port$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R871",
+          what: "restore raw renderer IPC in the approved post-render metadata consumer",
+          file: RENDERER,
+          from: '        const checked = window.folia.checkOwnedTabDiskSnapshot({',
+          to: '        const checked = ipcRenderer.sendSync("check-owned-tab-disk-snapshot", {',
+          suite: "test:packaging",
+          expect: [/^post-render approved metadata uses the actual retained owner and fixed Main port between local completion fences$/],
+          mustPass: [
+            /^changed clean-tab reads use the fixed production bridge instead of renderer raw IPC$/,
+            /^pending-Save reopening requires a current native ticket after settlement and the freeze fence without renderer disk fallback$/,
+            /^main windows always load the packaged production bridge, including marked tests$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R872",
+          what: "send a default synchronous refusal before the real metadata check completes",
+          file: MAIN,
+          from: '  // returnValue sends immediately; a default reply would outrun the check.\n' +
+            '  const refuse = why => Object.freeze({ matches: false, why });',
+          to: '  // returnValue sends immediately; a default reply would outrun the check.\n' +
+            '  const refuse = why => Object.freeze({ matches: false, why });\n' +
+            '  event.returnValue = refuse("invalid-owner");',
+          suite: "test:sec08-owned-metadata-authority-evidence",
+          expect: [
+            /^SEC-08 owned metadata native chooser renders complete through the real production consumer$/,
+            /^SEC-08 owned metadata bridge copies only fixed owner source and version fields$/,
+            /^SEC-08 owned metadata positive witness freshly checks one retained stat and both bindings twice without consuming authority or reading bodies$/,
+            /^SEC-08 owned metadata deduplicates only the exact case-preserving normalized logical binding$/,
+            /^SEC-08 owned metadata final owner binding fence observes a real move after its retained stat$/,
+            /^SEC-08 owned metadata final source binding fence observes a real move after its retained stat$/,
+            /^SEC-08 owned metadata refuses a real directory at its retained target even when the caller version matches$/,
+          ],
+          mustPass: [
+            /^SEC-08 owned metadata Main rejects invalid unknown stale foreign and unapproved source authority before any filesystem probe$/,
+            /^SEC-08 owned metadata actual isolated foreign sender cannot use the retained native owner$/,
+            /^SEC-08 owned metadata bridge rejects malformed paths versions and absent native refs before IPC$/,
+            /^the error sentinel was demonstrably watching both channels$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R873",
+          what: "continue metadata filesystem probes after the retained native owner retires inside a probe",
+          file: MAIN,
+          from: '  const current = () => {\n' +
+            '    if (approvalRendererState !== "ready" ||\n' +
+            '        (sourcePermission && !approvedBrowserPermissionIsCurrent(sourcePermission))) return false;\n' +
+            '    const retained = retainedTabDiskOwnerFromEnvelope(event, data);\n' +
+            '    return sameDocumentOwner(owner, retained) &&\n' +
+            '      retained.documentRef === owner.documentRef &&\n' +
+            '      retained.readTarget === owner.readTarget;\n' +
+            '  };',
+          to: '  const current = () => true;',
+          suite: "test:sec08-owned-metadata-owner-retirement-evidence",
+          expect: [/^SEC-08 owned metadata owner-probe retirement refuses before the next filesystem probe and stale reuse is memory-only$/],
+          mustPass: [
+            /^SEC-08 owned metadata owner-probe retirement setup deauthorizes the genuine native reference inside the real callback$/,
+            /^SEC-08 owned metadata positive witness freshly checks one retained stat and both bindings twice without consuming authority or reading bodies$/,
+            /^SEC-08 owned metadata Main rejects invalid unknown stale foreign and unapproved source authority before any filesystem probe$/,
+            /^the error sentinel was demonstrably watching both channels$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R874",
+          what: "treat a retained directory with matching metadata as a regular document",
+          file: MAIN,
+          from: '  const stats = readDocumentStats(owner.readTarget, "checking owned disk snapshot");\n' +
+            '  const diskVersion = stats && stats.isFile()',
+          to: '  const stats = readDocumentStats(owner.readTarget, "checking owned disk snapshot");\n' +
+            '  const diskVersion = stats',
+          suite: "test:sec08-owned-metadata-evidence",
+          expect: [/^SEC-08 owned metadata refuses a real directory at its retained target even when the caller version matches$/],
+          mustPass: [
+            /^SEC-08 owned metadata positive witness freshly checks one retained stat and both bindings twice without consuming authority or reading bodies$/,
+            /^SEC-08 owned metadata unchanged completion preserves RAM conflict and scroll ordering through the fixed port$/,
+            /^SEC-08 owned metadata restored native document is actually painted after all refusal controls$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R875",
+          what: "read document bodies on the supposedly metadata-only owned port",
+          file: MAIN,
+          from: '  const stats = readDocumentStats(owner.readTarget, "checking owned disk snapshot");',
+          to: '  try { fs.readFileSync(owner.readTarget, "utf8"); }\n' +
+            '  catch (error) { if (error.code !== "EISDIR") throw error; }\n' +
+            '  const stats = readDocumentStats(owner.readTarget, "checking owned disk snapshot");',
+          suite: "test:sec08-owned-metadata-evidence",
+          expect: [/^SEC-08 owned metadata positive witness freshly checks one retained stat and both bindings twice without consuming authority or reading bodies$/],
+          mustPass: [
+            /^SEC-08 owned metadata Main rejects invalid unknown stale foreign and unapproved source authority before any filesystem probe$/,
+            /^SEC-08 owned metadata refuses a real directory at its retained target even when the caller version matches$/,
+            /^SEC-08 owned metadata unchanged completion preserves RAM conflict and scroll ordering through the fixed port$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R876",
+          what: "omit the immediate local sequence fence after the synchronous owned metadata port",
+          file: RENDERER,
+          from: '  if (context.sequence !== fileOpenSequence) {\n' +
+            '    supersededFileOpenCompletionCount += 1;\n' +
+            '    return false;\n' +
+            '  }\n' +
+            "  if (!mayMutateRendererDocument('ipc-file-opened-after-check')) {",
+          to: "  if (!mayMutateRendererDocument('ipc-file-opened-after-check')) {",
+          suite: "test:packaging",
+          expect: [/^post-render approved metadata uses the actual retained owner and fixed Main port between local completion fences$/],
+          mustPass: [
+            /^changed clean-tab reads use the fixed production bridge instead of renderer raw IPC$/,
+            /^pending-Save reopening requires a current native ticket after settlement and the freeze fence without renderer disk fallback$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R877",
+          what: "omit the immediate local freeze fence after the synchronous owned metadata port",
+          file: RENDERER,
+          from: "  if (!mayMutateRendererDocument('ipc-file-opened-after-check')) {",
+          to: '  if (false) {',
+          suite: "test:packaging",
+          expect: [/^post-render approved metadata uses the actual retained owner and fixed Main port between local completion fences$/],
+          mustPass: [
+            /^changed clean-tab reads use the fixed production bridge instead of renderer raw IPC$/,
+            /^pending-Save reopening requires a current native ticket after settlement and the freeze fence without renderer disk fallback$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
         },
       ];
 

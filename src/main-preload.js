@@ -1129,6 +1129,42 @@ const api = Object.freeze({
     if (snapshot === null) return null;
     return copyDiskSnapshot(snapshot, "owned tab disk snapshot");
   },
+  checkOwnedTabDiskSnapshot(request) {
+    const kind = "owned tab disk check";
+    const payload = copyOwnedTabDiskRequest(request);
+    if (!payload.owner.documentRef || payload.filePath.length > 32768 ||
+        (request.sourcePath !== undefined &&
+          (!isPath(request.sourcePath) || request.sourcePath.length > 32768))) {
+      throw new TypeError(`Invalid ${kind} request`);
+    }
+    payload.diskVersion = copyDiskVersion(request.diskVersion, kind);
+    if (request.sourcePath !== undefined) payload.sourcePath = request.sourcePath;
+    const result = ipcRenderer.sendSync("check-owned-tab-disk-snapshot", payload);
+    if (!result || typeof result !== "object" || Array.isArray(result) ||
+        typeof result.matches !== "boolean") {
+      throw new TypeError(`Invalid ${kind} response`);
+    }
+    const allowedFields = result.matches
+      ? ["matches", "pathKey", "diskVersion"] : ["matches", "why"];
+    if (Object.keys(result).some(key => !allowedFields.includes(key))) {
+      throw new TypeError(`Invalid ${kind} response`);
+    }
+    if (!result.matches) {
+      if (typeof result.why !== "string" || !result.why || result.why.length > 128) {
+        throw new TypeError(`Invalid ${kind} response`);
+      }
+      return Object.freeze({ matches: false, why: result.why });
+    }
+    const diskVersion = copyDiskVersion(result.diskVersion, kind);
+    if (result.pathKey !== payload.owner.pathKey ||
+        Object.keys(result.diskVersion).some(key => !Object.hasOwn(diskVersion, key)) ||
+        ["dev", "ino", "size", "mtimeMs"].some(
+          key => diskVersion[key] !== payload.diskVersion[key],
+        )) {
+      throw new TypeError(`Invalid ${kind} response`);
+    }
+    return Object.freeze({ matches: true, pathKey: result.pathKey, diskVersion });
+  },
   async refreshOwnedTabDiskSnapshot(request) {
     const payload = copyOwnedTabDiskRequest(request);
     if (!payload.owner.documentRef) {

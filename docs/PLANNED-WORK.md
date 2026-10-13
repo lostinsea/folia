@@ -805,6 +805,57 @@ restored captures. The final anchor audit resolves, not proof. Broader metadata
 helpers, Node-off production and responsiveness stay
 open, without a performance qualification.
 
+**Post-render owned metadata consumer — IMPLEMENTED / PROVEN, review converged, unintegrated.**
+The accepted independent Sol/Luna design now has one fixed Main/preload
+`checkOwnedTabDiskSnapshot` and its first `completeFileOpen` consumer. Main
+authenticates the actual retained native owner and a distinct lexical source
+permission before filesystem probes; both case-preserving bindings fence one
+regular-target stat. Permission/owner currentness is rechecked between probes.
+The receipt is strict match/refusal metadata, never a body, FD or new grant.
+The consumer retains sequence/freeze, conflict/report/notification and scroll
+ordering, with a further sequence/freeze fence after the synchronous port.
+This replaces this phase's two renderer checks, not the remaining raw helpers.
+Syntax checks pass. Initial anchors fail R844's now-ambiguous short owner-check
+anchor; narrow it to its existing conditional handler and reprove, rather than
+weakening its exact contract. Genuine native positive controls found that the
+entry `event.returnValue` refusal replied before the checks; later assignment
+could not replace it. The corrected handler replies once per terminal path.
+Both reviewers agree this supersedes their initial no-blocker static result.
+The corrected actual production metadata route is 37/37, authority route
+22/22, owner-probe retirement route 24/24, and preserved native Save consumers
+28/28 (`owned-metadata-runs-r1/green-r2-*.log`). Product/docs restore exactly to
+the corrected r2 hashes and no owned Electron remains at this handoff.
+R861-R877 and affected R844 are individually exact PROVEN, restored to the
+complete review snapshot (`owned-metadata-runs-r1/final-evidence-r3.json` and
+its referenced logs). R844's unmutated route reaches 109/109 and its individual
+mutant has exactly its declared failure; the earlier tab-switch timeout and
+popup-notification collateral stay retained without product popup changes or
+baseline-only attribution. R872's accidental registry nesting was corrected
+only in the registry; final anchors resolve, not proof.
+Final metadata is 37/37; owner/source/stat-probe retirement routes are 24/24
+each; source packaging is 383/0. Parent reproduces metadata 37/37, source-probe
+24/24 and packaging 383/0 on byte-identical product/test/proof files and viewed
+the approved-RAM captures. Fresh complete-unit Sol6.1/high and Luna6/high reviews
+converged without blockers. Luna's initial canonical-preflight finding was
+retracted after both traced the actual lexical closing-parser path rather than
+the adjacent I/O reader; no preauthorization probe occurs on this endpoint.
+This adds one small synchronous
+RPC to this approved completion phase; latency and final responsiveness are
+unqualified. No body read/serialization is added and the clean-tab unchanged
+fast path does not take this port.
+
+**Next renderer adoption boundaries — design accepted, implementation pending.**
+Independent Sol6.1/high and Luna6/high agree that deferred local generations
+do not supersede Main's old native owner before selection. Reuse the committed
+capability check before selection, with authenticated owner/source spelling
+association checks before alias seeding; use the actual retained selection
+owner's metadata port afterward and at fallback reload boundaries. They
+converged on preserving Main's already-selected sticky baseline aliases even
+when later freshness fails: these are correlation, not permission or fresh
+binding. Preselection refusal rolls back; a superseded completion must not
+overwrite newer aliases. No new Main endpoint/framework is needed. Current
+proof-window closure is the edit prerequisite; other raw helpers remain later.
+
 The capability-protocol unit is IMPLEMENTED / PROVEN, unintegrated: preparation, commit, completion and abandonment
 of existing disk-adoption capabilities to four fixed preload methods. It
 preserves async/sync ordering, nonce/digest/version/owner provenance and

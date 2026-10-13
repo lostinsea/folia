@@ -634,6 +634,30 @@ async function main() {
         'tabIpc.invoke("refresh-owned-tab-disk-snapshot"',
       ),
   );
+  const ownedMetadataCompletion = read("src/renderer.js").split(
+    "function completeFileOpen(context, visualCompletion = null) {",
+  )[1]?.split("// Upstream fallback:")[0] || "";
+  const ownedMetadataPort = ownedMetadataCompletion.indexOf(
+    "window.folia.checkOwnedTabDiskSnapshot({",
+  );
+  const ownedMetadataAfterCheck = ownedMetadataCompletion.slice(ownedMetadataPort).split(
+    "if (!approvedSnapshotMatches)",
+  )[0];
+  check(
+    "post-render approved metadata uses the actual retained owner and fixed Main port between local completion fences",
+    ownedMetadataPort >= 0 &&
+      ownedMetadataCompletion.includes("const owner = context.approvedOwner;") &&
+      ownedMetadataCompletion.includes("owner.pathKey === context.approvedPathKey") &&
+      ownedMetadataCompletion.includes("sourcePath: context.approvedSourcePath,") &&
+      ownedMetadataCompletion.includes("diskVersion: context.approvedDiskVersion,") &&
+      ownedMetadataCompletion.indexOf("context.sequence !== fileOpenSequence") < ownedMetadataPort &&
+      ownedMetadataAfterCheck.includes("context.sequence !== fileOpenSequence") &&
+      ownedMetadataCompletion.indexOf("ipc-file-opened-after-render") < ownedMetadataPort &&
+      ownedMetadataAfterCheck.includes("ipc-file-opened-after-check") &&
+      !/approvedReloadSnapshotMatches\s*\(|window\.fs|(?:tabIpc|ipcRenderer)\.(?:invoke|sendSync)/.test(
+        ownedMetadataCompletion,
+      ),
+  );
   check(
     "dialog extras use the grant-only production bridge instead of renderer raw IPC",
     read("src/custom-tabs.js").includes(

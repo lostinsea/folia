@@ -145,10 +145,11 @@ const queueFocusedHarness = process.env.F22_QUEUE_FOCUSED_HARNESS === "1";
 const ownedReadFocusedHarness = process.env.SEC08_OWNED_READ_FOCUSED_HARNESS === "1";
 const approvedRequestFocusedHarness = process.env.SEC08_APPROVED_REQUEST_FOCUSED_HARNESS === "1";
 const nativeAuthorityFocusedHarness = process.env.SEC08_NATIVE_AUTHORITY_FOCUSED_HARNESS === "1";
+const ownedMetadataFocusedHarness = process.env.SEC08_OWNED_METADATA_FOCUSED_HARNESS === "1";
 const dialogExtraFocusedHarness = process.env.SEC08_DIALOG_EXTRA_FOCUSED_HARNESS === "1";
 const admissionConsumersOnly = dialogExtraFocusedHarness &&
   process.env.SEC08_ADMISSION_CONSUMERS_ONLY === "1";
-if ((ownedReadFocusedHarness || dialogExtraFocusedHarness || approvedRequestFocusedHarness || nativeAuthorityFocusedHarness) &&
+if ((ownedReadFocusedHarness || dialogExtraFocusedHarness || approvedRequestFocusedHarness || nativeAuthorityFocusedHarness || ownedMetadataFocusedHarness) &&
     !process.argv.includes("--folia-test-preload")) {
   process.argv.push("--folia-test-preload");
 }
@@ -7085,6 +7086,625 @@ function startConsoleAttributionSidecar(win, sentinel) {
   };
 }
 
+async function runOwnedMetadataScenarios(win, exec, dir, sentinel) {
+  const nativeCompletions = [];
+  const openNative = async (filePath, marker) => {
+    const restoreChooser = replaceMethod(dialog, "showOpenDialog", async () => ({
+      canceled: false, filePaths: [filePath],
+    }));
+    try {
+      await exec(`(() => {
+        const probe = window.__ownedMetadataNativeOpen = {
+          complete: window.completeFileOpen, completed: false,
+          sequence: window.getFileOpenDiagnostics().sequence,
+        };
+        window.completeFileOpen = function(context, visual) {
+          const result = probe.complete.call(this, context, visual);
+          if (context.path === ${JSON.stringify(filePath)} &&
+              context.sequence > probe.sequence) {
+            probe.completed = true;
+            probe.accepted = result === true;
+          }
+          return result;
+        };
+        return null;
+      })()`);
+      await exec("window.folia.openFileDialog(); null;");
+      if (!await waitForCondition(exec,
+        `window.currentFilePath === ${JSON.stringify(filePath)} &&
+         window.__ownedMetadataNativeOpen.completed === true &&
+         !!window.CustomTabs.getDocumentDescriptor()?.ref &&
+         document.getElementById('viewer').textContent.includes(${JSON.stringify(marker)})`, 8000)) {
+        throw new Error(`Owned metadata native fixture did not paint: ${filePath}`);
+      }
+      const completed = await exec(`({
+        id: window.CustomTabs.getActiveTabId(),
+        accepted: window.__ownedMetadataNativeOpen.accepted,
+      })`);
+      nativeCompletions.push({ filePath, ...completed });
+      return completed.id;
+    } finally {
+      restoreChooser();
+      await exec(`(() => {
+        const probe = window.__ownedMetadataNativeOpen;
+        if (probe) window.completeFileOpen = probe.complete;
+        delete window.__ownedMetadataNativeOpen;
+        return null;
+      })()`);
+    }
+  };
+  const requestFor = async id => exec(`(() => {
+    const tab = window.CustomTabs.getTabs().find(tab => tab.id === ${id});
+    const owner = window.CustomTabs.getDocumentIdentityForTab(
+      tab.id, tab.filePath, window.getReloadRequestSession());
+    return { filePath: tab.filePath, pageSession: owner.pageSession,
+      rendererGeneration: owner.rendererGeneration, owner, diskVersion: tab.diskVersion };
+  })()`);
+  const controlPath = path.join(dir, "owned-metadata-control.md");
+  write(controlPath, "# Metadata control\n\nMETADATA_CONTROL\n");
+  const controlId = await openNative(controlPath, "METADATA_CONTROL");
+  const targetDir = path.join(dir, "owned-metadata-target");
+  const otherDir = path.join(dir, "owned-metadata-other");
+  fs.mkdirSync(targetDir);
+  fs.mkdirSync(otherDir);
+  const body = "# Owned metadata\n\nMETADATA_APPROVED_RAM\n\n" +
+    Array.from({ length: 90 }, (_, index) => `Paragraph ${index} stays in the approved copy.\n`).join("\n");
+  const target = path.join(targetDir, "document.md");
+  write(target, body);
+  write(path.join(otherDir, "document.md"), "# Foreign target\n\nFOREIGN_TARGET\n");
+  const ownerAlias = path.join(dir, "owned-metadata-owner");
+  const sourceAlias = path.join(dir, "owned-metadata-source");
+  const unapprovedAlias = path.join(dir, "owned-metadata-unapproved");
+  for (const alias of [ownerAlias, sourceAlias, unapprovedAlias]) {
+    fs.symlinkSync(targetDir, alias, process.platform === "win32" ? "junction" : "dir");
+  }
+  const ownerPath = path.join(ownerAlias, "document.md");
+  const sourcePath = path.join(sourceAlias, "document.md");
+  const unapprovedPath = path.join(unapprovedAlias, "document.md");
+  const renderAliases = [];
+  let foreign;
+  try {
+    await openNative(sourcePath, "METADATA_APPROVED_RAM");
+    const ownerId = await openNative(ownerPath, "METADATA_APPROVED_RAM");
+    const request = await requestFor(ownerId);
+    check("SEC-08 owned metadata native chooser renders complete through the real production consumer",
+      nativeCompletions.length === 3 && nativeCompletions.every(completion =>
+        completion.accepted === true && completion.id > 0),
+      JSON.stringify(nativeCompletions));
+    const retained = __shutdown.documentSessionState().owners.find(owner =>
+      owner.tabId === request.owner.tabId &&
+      owner.documentGeneration === request.owner.documentGeneration);
+    console.log("OWNED_METADATA_NATIVE_SETUP", JSON.stringify({
+      request, retained, guards: __shutdown.documentOwnerGuards(request.owner, request.filePath),
+    }));
+    check("SEC-08 owned metadata setup retains a genuine ready native owner and two separately approved logical bindings",
+      retained?.documentRef === request.owner.documentRef &&
+        retained.readTarget === fs.realpathSync.native(target) &&
+        __shutdown.documentAdmissionIsCurrent(request.owner.documentRef) &&
+        __shutdown.state().renderer === "ready" &&
+        __shutdown.documentSessionState().history.some(entry => entry.filePath === sourcePath) &&
+        !__shutdown.documentSessionState().history.some(entry => entry.filePath === unapprovedPath) &&
+        ownerPath !== sourcePath && fs.realpathSync.native(sourcePath) === retained.readTarget &&
+        ["dev", "ino", "size", "mtimeMs", "ctimeMs"].every(key =>
+          Number.isFinite(request.diskVersion[key])),
+      JSON.stringify({ request, retained, sourcePath, unapprovedPath }));
+    const transport = await exec(`(() => {
+      const request = ${JSON.stringify(request)}, ipc = window.ipcRenderer;
+      const sync = ipc.sendSync;
+      let calls = 0, forwarded;
+      ipc.sendSync = function(channel, data) {
+        if (channel === 'check-owned-tab-disk-snapshot') { calls += 1; forwarded = data; }
+        return sync.apply(this, arguments);
+      };
+      try {
+        const invalid = [
+          null, [], { ...request, filePath: 'bad\\0path' },
+          { ...request, filePath: 'x'.repeat(32769) },
+          { ...request, sourcePath: 'bad\\0path' },
+          { ...request, sourcePath: 'x'.repeat(32769) },
+          { ...request, owner: { ...request.owner, documentRef: undefined } },
+          { ...request, owner: { ...request.owner, pageSession: 'foreign' } },
+          { ...request, diskVersion: undefined },
+          { ...request, diskVersion: { ...request.diskVersion, ctimeMs: Infinity } },
+        ];
+        const rejected = invalid.map(input => {
+          try { window.folia.checkOwnedTabDiskSnapshot(input); return false; }
+          catch (error) { return error.message.includes('Invalid'); }
+        });
+        const malformedCalls = calls;
+        calls = 0;
+        const first = window.folia.checkOwnedTabDiskSnapshot({
+          ...request, sourcePath: ${JSON.stringify(sourcePath)}, ignored: 'body',
+          owner: { ...request.owner, ignored: 'body' },
+          diskVersion: { ...request.diskVersion, ignored: 'body' },
+        });
+        const fields = { request: Object.keys(forwarded).sort(),
+          owner: Object.keys(forwarded.owner).sort(), version: Object.keys(forwarded.diskVersion).sort() };
+        const receipt = { matches: true, pathKey: request.owner.pathKey,
+          diskVersion: { ...request.diskVersion } };
+        const malformedReplies = [
+          undefined, [], { ...receipt, matches: 'true' },
+          { ...receipt, pathKey: 'other-file' },
+          { ...receipt, content: 'body' }, { ...receipt, modifiedTime: 1 },
+          { ...receipt, document: { ref: request.owner.documentRef } },
+          { ...receipt, diskVersion: { ...receipt.diskVersion, content: 'nested-body' } },
+          { ...receipt, diskVersion: { ...receipt.diskVersion, size: Infinity } },
+          ...['dev', 'ino', 'size', 'mtimeMs'].map(key => ({
+            ...receipt, diskVersion: { ...receipt.diskVersion,
+              [key]: receipt.diskVersion[key] + Math.max(1, Math.abs(receipt.diskVersion[key]) * Number.EPSILON * 4) },
+          })),
+          { matches: false }, { matches: false, why: '' },
+          { matches: false, why: 'x'.repeat(129) },
+          { matches: false, why: 'refused', diskVersion: receipt.diskVersion },
+        ];
+        const responses = malformedReplies.map(response => {
+          ipc.sendSync = () => response;
+          try { window.folia.checkOwnedTabDiskSnapshot(request); return false; }
+          catch (error) { return error.message.includes('Invalid owned tab disk check response'); }
+        });
+        ipc.sendSync = () => ({ ...receipt,
+          diskVersion: { ...receipt.diskVersion, ctimeMs: receipt.diskVersion.ctimeMs + 1 } });
+        const ctime = window.folia.checkOwnedTabDiskSnapshot(request);
+        ipc.sendSync = () => ({ matches: false, why: 'binding' });
+        const refusal = window.folia.checkOwnedTabDiskSnapshot(request);
+        return { rejected, malformedCalls, fields, first, responses, ctime, refusal,
+          frozen: Object.isFrozen(ctime) && Object.isFrozen(ctime.diskVersion) };
+      } finally { ipc.sendSync = sync; }
+    })()`);
+    check("SEC-08 owned metadata bridge rejects malformed paths versions and absent native refs before IPC",
+      transport.rejected.length === 10 && transport.rejected.every(Boolean) &&
+        transport.malformedCalls === 0, JSON.stringify(transport));
+    check("SEC-08 owned metadata bridge copies only fixed owner source and version fields",
+      transport.first.matches === true &&
+        transport.fields.request.join(",") === "diskVersion,filePath,owner,pageSession,rendererGeneration,sourcePath" &&
+        transport.fields.owner.join(",") === "documentGeneration,documentRef,pageSession,pathKey,rendererGeneration,tabId" &&
+        transport.fields.version.join(",") === "ctimeMs,dev,ino,mtimeMs,size",
+      JSON.stringify(transport));
+    check("SEC-08 owned metadata bridge rejects extra nested body and mismatched receipts while permitting finite ctime drift",
+      transport.responses.length === 17 && transport.responses.every(Boolean) &&
+        transport.ctime.matches === true && transport.frozen &&
+        transport.refusal.matches === false && transport.refusal.why === "binding",
+      JSON.stringify(transport));
+
+    const pendingPath = path.join(dir, "owned-metadata-undelivered.md");
+    write(pendingPath, "# Undelivered metadata owner\n");
+    let pendingDelivery;
+    const send = win.webContents.send;
+    const restoreDelivery = replaceMethod(win.webContents, "send", function(channel, data) {
+      if (channel === "file-opened" && data?.path === pendingPath) {
+        pendingDelivery = data;
+        return;
+      }
+      return send.apply(this, arguments);
+    });
+    const restorePendingChooser = replaceMethod(dialog, "showOpenDialog", async () => ({
+      canceled: false, filePaths: [pendingPath],
+    }));
+    try {
+      await exec("window.folia.openFileDialog(); null;");
+      if (!await waitUntil(() => !!pendingDelivery?.document?.ref, 5000)) {
+        throw new Error("Owned metadata native undelivered reference did not arrive");
+      }
+    } finally { restorePendingChooser(); restoreDelivery(); }
+    const unregisteredRequest = {
+      ...request, filePath: pendingPath, diskVersion: pendingDelivery.diskVersion,
+      owner: { ...request.owner, tabId: request.owner.tabId + 10000,
+        pathKey: pendingDelivery.document.pathKey,
+        documentRef: pendingDelivery.document.ref },
+    };
+    check("SEC-08 owned metadata unregistered control holds a real native delivery without creating its tab owner",
+      /^[a-f0-9]{64}$/.test(unregisteredRequest.owner.documentRef) &&
+        __shutdown.documentAdmissionIsCurrent(unregisteredRequest.owner.documentRef) &&
+        !__shutdown.documentSessionState().owners.some(owner =>
+          owner.documentRef === unregisteredRequest.owner.documentRef),
+      JSON.stringify(unregisteredRequest));
+    const probes = [];
+    const restores = [];
+    for (const [object, method, kind] of [
+      [fs, "statSync", "stat"], [fs.realpathSync, "native", "binding"],
+      [fs, "readFileSync", "body"], [fs, "openSync", "descriptor"],
+    ]) {
+      const original = object[method];
+      restores.push(replaceMethod(object, method, function(file) {
+        if (/\bcheckOwnedTabDiskSnapshot\b/.test(String(new Error().stack))) {
+          probes.push({ kind, file: String(file) });
+        }
+        return original.apply(this, arguments);
+      }));
+    }
+    try {
+      const refused = await exec(`(() => {
+        const request = ${JSON.stringify(request)};
+        return [
+          null, { ...request, owner: { ...request.owner, tabId: request.owner.tabId + 10000 } },
+          { ...request, owner: { ...request.owner, documentRef: undefined } },
+          { ...request, owner: { ...request.owner, documentRef: 'f'.repeat(64) } },
+          { ...request, owner: { ...request.owner, documentGeneration: request.owner.documentGeneration + 1 } },
+          { ...request, pageSession: 'foreign', owner: { ...request.owner, pageSession: 'foreign' } },
+          { ...request, rendererGeneration: request.rendererGeneration + 1,
+            owner: { ...request.owner, rendererGeneration: request.rendererGeneration + 1 } },
+          { ...request, diskVersion: { ...request.diskVersion, size: Infinity } },
+          { ...request, sourcePath: ${JSON.stringify(unapprovedPath)} },
+          ${JSON.stringify(unregisteredRequest)},
+        ].map(input => window.ipcRenderer.sendSync('check-owned-tab-disk-snapshot', input));
+      })()`);
+      check("SEC-08 owned metadata Main rejects invalid unknown stale foreign and unapproved source authority before any filesystem probe",
+        refused.length === 10 && refused.every(reply => reply.matches === false) &&
+          probes.length === 0, JSON.stringify({ refused, probes }));
+      foreign = new BrowserWindow({ show: false, webPreferences: {
+        preload: path.join(__dirname, "../src/main-preload.js"),
+        nodeIntegration: false, contextIsolation: true, sandbox: true,
+      } });
+      await foreign.loadURL("data:text/html,<p>Foreign metadata sender</p>");
+      const foreignReply = await foreign.webContents.executeJavaScript(
+        `window.folia.checkOwnedTabDiskSnapshot(${JSON.stringify(request)})`, true);
+      check("SEC-08 owned metadata actual isolated foreign sender cannot use the retained native owner",
+        foreignReply.matches === false && probes.length === 0,
+        JSON.stringify({ foreignReply, probes }));
+      foreign.destroy(); foreign = null;
+      const first = await exec(`window.folia.checkOwnedTabDiskSnapshot(${JSON.stringify(request)})`);
+      const firstProbes = probes.splice(0);
+      const second = await exec(`window.folia.checkOwnedTabDiskSnapshot(${JSON.stringify({
+        ...request, sourcePath,
+      })})`);
+      const secondProbes = probes.splice(0);
+      const ctime = await exec(`window.folia.checkOwnedTabDiskSnapshot(${JSON.stringify({
+        ...request, diskVersion: { ...request.diskVersion, ctimeMs: request.diskVersion.ctimeMs + 1 },
+      })})`);
+      check("SEC-08 owned metadata positive witness freshly checks one retained stat and both bindings twice without consuming authority or reading bodies",
+        first.matches === true && second.matches === true && ctime.matches === true &&
+          first.pathKey === request.owner.pathKey &&
+          Object.keys(first).sort().join(",") === "diskVersion,matches,pathKey" &&
+          firstProbes.filter(probe => probe.kind === "stat").length === 1 &&
+          firstProbes.filter(probe => probe.kind === "binding").length === 2 &&
+          secondProbes.filter(probe => probe.kind === "stat").length === 1 &&
+          secondProbes.filter(probe => probe.kind === "binding").length === 4 &&
+          [...firstProbes, ...secondProbes, ...probes].every(probe =>
+            probe.kind === "stat" || probe.kind === "binding") &&
+          secondProbes.filter(probe => probe.kind === "stat").every(probe =>
+            probe.file === retained.readTarget),
+        JSON.stringify({ first, second, ctime, firstProbes, secondProbes, probes }));
+      console.log("OWNED_METADATA_FILESYSTEM_WITNESS", JSON.stringify({
+        first, second, ctime, firstProbes, secondProbes, ctimeProbes: probes,
+      }));
+      probes.length = 0;
+      const normalised = await exec(`window.folia.checkOwnedTabDiskSnapshot(${JSON.stringify({
+        ...request, sourcePath: ownerAlias + path.sep + "." + path.sep + "document.md",
+      })})`);
+      check("SEC-08 owned metadata deduplicates only the exact case-preserving normalized logical binding",
+        normalised.matches === true &&
+          probes.filter(probe => probe.kind === "binding").length === 2,
+        JSON.stringify({ normalised, probes }));
+      if (process.platform === "win32") {
+        probes.length = 0;
+        const index = ownerPath.search(/[A-Za-z]/);
+        const letter = ownerPath[index];
+        const distinctCase = ownerPath.slice(0, index) +
+          (letter === letter.toLowerCase() ? letter.toUpperCase() : letter.toLowerCase()) +
+          ownerPath.slice(index + 1);
+        const reply = await exec(`window.folia.checkOwnedTabDiskSnapshot(${JSON.stringify({
+          ...request, sourcePath: distinctCase,
+        })})`);
+        check("SEC-08 owned metadata case-distinct source is not deduplicated into an unapproved permission",
+          distinctCase !== ownerPath && distinctCase.toLowerCase() === ownerPath.toLowerCase() &&
+            reply.matches === false && probes.length === 0,
+          JSON.stringify({ distinctCase, reply, probes }));
+      }
+    } finally { for (const restore of restores.reverse()) restore(); }
+
+    await exec(`window.folia.pauseFileWatching(${JSON.stringify({
+      filePath: request.filePath, owner: retained,
+      pageSession: request.pageSession, rendererGeneration: request.rendererGeneration,
+    })}); null;`);
+    for (const [name, alias] of [["owner", ownerAlias], ["source", sourceAlias]]) {
+      const originalStat = fs.statSync;
+      let moved = false;
+      const restoreStat = replaceMethod(fs, "statSync", function(file) {
+        const stats = originalStat.apply(this, arguments);
+        if (!moved && file === retained.readTarget &&
+            /\bcheckOwnedTabDiskSnapshot\b/.test(String(new Error().stack))) {
+          moved = true;
+          fs.unlinkSync(alias);
+          fs.symlinkSync(otherDir, alias, process.platform === "win32" ? "junction" : "dir");
+        }
+        return stats;
+      });
+      let reply;
+      try {
+        reply = await exec(`window.folia.checkOwnedTabDiskSnapshot(${JSON.stringify({
+          ...request, sourcePath,
+        })})`);
+        check(`SEC-08 owned metadata final ${name} binding fence observes a real move after its retained stat`,
+          moved && fs.realpathSync.native(path.join(alias, "document.md")) ===
+            fs.realpathSync.native(path.join(otherDir, "document.md")) &&
+            reply.matches === false && reply.why === "binding",
+          JSON.stringify({ moved, reply }));
+      } finally {
+        restoreStat();
+        if (moved) {
+          fs.unlinkSync(alias);
+          fs.symlinkSync(targetDir, alias, process.platform === "win32" ? "junction" : "dir");
+        }
+      }
+    }
+    const retainedOriginal = path.join(targetDir, "retained-original.md");
+    fs.renameSync(target, retainedOriginal);
+    fs.mkdirSync(target);
+    try {
+      const directoryStats = fs.statSync(target);
+      const directoryVersion = Object.fromEntries(
+        ["dev", "ino", "size", "mtimeMs", "ctimeMs"].map(key => [key, directoryStats[key]]));
+      const reply = await exec(`window.folia.checkOwnedTabDiskSnapshot(${JSON.stringify({
+        ...request, diskVersion: directoryVersion,
+      })})`);
+      check("SEC-08 owned metadata refuses a real directory at its retained target even when the caller version matches",
+        directoryStats.isDirectory() && fs.realpathSync.native(target) === retained.readTarget &&
+          reply.matches === false && reply.why === "version",
+        JSON.stringify({ directoryVersion, reply }));
+    } finally {
+      fs.rmdirSync(target);
+      fs.renameSync(retainedOriginal, target);
+    }
+
+    if (ownedMetadataFocusedHarness &&
+        process.env.SEC08_OWNED_METADATA_AUTHORITY_ONLY === "1") return;
+    const retirementPhase = ownedMetadataFocusedHarness
+      ? process.env.SEC08_OWNED_METADATA_RETIREMENT_PHASE : null;
+    if (retirementPhase && !["owner-probe", "source-probe", "retained-stat"].includes(retirementPhase)) {
+      throw new Error("Invalid owned metadata retirement phase");
+    }
+    for (const phase of retirementPhase ? [retirementPhase] : []) {
+      const id = await openNative(ownerPath, "METADATA_APPROVED_RAM");
+      await exec("window.CustomTabs.settleSessionLayout()");
+      const currentRequest = await requestFor(id);
+      const currentRetained = __shutdown.documentSessionState().owners.find(owner =>
+        owner.tabId === id && owner.documentGeneration === currentRequest.owner.documentGeneration);
+      let bindings = 0, stats = 0, retiring = false, retirement;
+      const retire = () => {
+        retiring = true;
+        try {
+          const event = { sender: win.webContents, senderFrame: win.webContents.mainFrame };
+          ipcMain.listeners("retire-deleted-document-owner")[0](event, {
+            ...currentRetained, filePath: ownerPath, acknowledgedDeletion: false,
+          });
+          retirement = event.returnValue;
+        } finally { retiring = false; }
+      };
+      const realpath = fs.realpathSync.native;
+      const stat = fs.statSync;
+      const restoreRealpath = replaceMethod(fs.realpathSync, "native", function() {
+        const result = realpath.apply(this, arguments);
+        if (!retiring && /\bcheckOwnedTabDiskSnapshot\b/.test(String(new Error().stack))) {
+          bindings += 1;
+          if (!retirement && ((phase === "owner-probe" && bindings === 1) ||
+              (phase === "source-probe" && bindings === 2))) retire();
+        }
+        return result;
+      });
+      const restoreStat = replaceMethod(fs, "statSync", function(file) {
+        const result = stat.apply(this, arguments);
+        if (!retiring && /\bcheckOwnedTabDiskSnapshot\b/.test(String(new Error().stack))) {
+          stats += 1;
+          if (!retirement && phase === "retained-stat" && file === currentRetained.readTarget) retire();
+        }
+        return result;
+      });
+      let reply, stale;
+      try {
+        reply = await exec(`window.folia.checkOwnedTabDiskSnapshot(${JSON.stringify({
+          ...currentRequest, sourcePath,
+        })})`);
+        const afterRetirement = { bindings, stats };
+        stale = await exec(`window.folia.checkOwnedTabDiskSnapshot(${JSON.stringify(currentRequest)})`);
+        check(`SEC-08 owned metadata ${phase} retirement setup deauthorizes the genuine native reference inside the real callback`,
+          retirement?.retired === true &&
+            !__shutdown.documentAdmissionIsCurrent(currentRequest.owner.documentRef),
+          JSON.stringify({ retirement, reply, stale, afterRetirement }));
+        check(`SEC-08 owned metadata ${phase} retirement refuses before the next filesystem probe and stale reuse is memory-only`,
+          reply.matches === false && stale.matches === false &&
+            bindings === afterRetirement.bindings && stats === afterRetirement.stats &&
+            bindings === (phase === "owner-probe" ? 1 : 2) &&
+            stats === (phase === "retained-stat" ? 1 : 0),
+          JSON.stringify({ retirement, reply, stale, bindings, stats, afterRetirement }));
+      } finally { restoreStat(); restoreRealpath(); }
+    }
+    if (retirementPhase) return;
+
+    for (const mode of ["frozen", "unchanged", "version", "owner-binding", "source-binding", "retired", "superseded"]) {
+      const ownerAlias = path.join(dir, `owned-metadata-render-${mode}`);
+      fs.symlinkSync(targetDir, ownerAlias, process.platform === "win32" ? "junction" : "dir");
+      renderAliases.push(ownerAlias);
+      const ownerPath = path.join(ownerAlias, "document.md");
+      // Each case owns a fresh native logical tab; refused RAM is never cleared by a fixture assignment.
+      write(target, body);
+      const id = await openNative(ownerPath, "METADATA_APPROVED_RAM");
+      await exec(`window.CustomTabs.switchToTab(${controlId})`);
+      const updated = body + `\nAPPROVED_RENDER_${mode}\n`;
+      write(target, updated);
+      await exec(`(() => {
+        const probe = window.__ownedMetadataRender = {
+          render: window.renderMarkdown, begin: window.beginFileOpen,
+          complete: window.completeFileOpen, sync: window.ipcRenderer.sendSync,
+          report: window.reportAdoptionTrackingConflict,
+          ready: false, completed: false, calls: [], reports: [], context: null,
+        };
+        window.reportAdoptionTrackingConflict = function(filePath, owner) {
+          probe.reports.push({ filePath, owner });
+          return probe.report.apply(this, arguments);
+        };
+        window.beginFileOpen = function(data, options) {
+          let context = probe.begin.apply(this, arguments);
+          if (context?.path === ${JSON.stringify(ownerPath)}) {
+            // The selection grant keeps its original source. Only completion
+            // exercises the independently native-approved second spelling.
+            context = Object.freeze({ ...context, approvedSourcePath: ${JSON.stringify(sourcePath)} });
+            probe.context = context;
+          }
+          return context;
+        };
+        window.renderMarkdown = async function(text) {
+          await probe.render.apply(this, arguments);
+          if (!String(text).includes(${JSON.stringify(`APPROVED_RENDER_${mode}`)})) return;
+          probe.ready = true;
+          await new Promise(resolve => { probe.release = resolve; });
+        };
+        window.ipcRenderer.sendSync = function(channel, data) {
+          if (channel === 'check-owned-tab-disk-snapshot') probe.calls.push(data);
+          return probe.sync.apply(this, arguments);
+        };
+        window.completeFileOpen = function(context, visual) {
+          const result = probe.complete.call(this, context, visual);
+          if (context === probe.context) { probe.result = result; probe.completed = true; }
+          return result;
+        };
+        probe.switch = window.CustomTabs.switchToTab(${id});
+        return null;
+      })()`);
+      if (!await waitForCondition(exec, "window.__ownedMetadataRender.ready === true", 8000)) {
+        const state = await exec(`(() => {
+          const probe = window.__ownedMetadataRender, tab = window.CustomTabs.getTabs().find(tab => tab.id === ${id});
+          return { ready: probe.ready, context: probe.context, active: window.CustomTabs.getActiveTabId(),
+            content: tab?.content, state: tab && window.CustomTabs.__documentState(tab),
+            current: window.currentFilePath, notification: document.getElementById('notificationMessage').textContent };
+        })()`);
+        throw new Error(`Owned metadata ${mode} did not hold an actual terminal render: ${JSON.stringify(state)}`);
+      }
+      const setup = await exec(`(() => {
+        const probe = window.__ownedMetadataRender;
+        const scroller = window.CustomTabs.__getScroller();
+        scroller.scrollTop = 140;
+        const tab = window.CustomTabs.getActiveTab();
+        return { context: probe.context, ready: probe.ready, completed: probe.completed,
+          calls: probe.calls.length, heading: document.getElementById('viewer').textContent,
+          content: tab.content, original: tab.originalContent, scroll: scroller.scrollTop,
+          overflows: scroller.scrollHeight > scroller.clientHeight, id: tab.id };
+      })()`);
+      check(`SEC-08 owned metadata ${mode} setup holds an actual painted render with native approved owner and nonzero scroll before completion`,
+        setup.ready && !setup.completed && setup.calls === 0 && setup.context?.approvedPathKey &&
+          setup.context.approvedOwner.documentRef &&
+          setup.context.approvedOwner.tabId === id &&
+          setup.context.approvedSourcePath === sourcePath &&
+          setup.heading.includes(`APPROVED_RENDER_${mode}`) &&
+          setup.content === updated && setup.original === updated &&
+          setup.overflows && setup.scroll > 0,
+        JSON.stringify(setup));
+      const restoreAlias = mode === "owner-binding" ? ownerAlias :
+        mode === "source-binding" ? sourceAlias : null;
+      try {
+        await exec(`(() => {
+          const probe = window.__ownedMetadataRender;
+          const owner = probe.context.approvedOwner;
+          window.folia.pauseFileWatching({ filePath: probe.context.path, owner,
+            pageSession: owner.pageSession, rendererGeneration: owner.rendererGeneration });
+          return null;
+        })()`);
+        if (mode === "version") write(target, "# Late disk version\n\nLATE_DISK_NOT_RAM\n");
+        if (restoreAlias) {
+          fs.unlinkSync(restoreAlias);
+          fs.symlinkSync(otherDir, restoreAlias, process.platform === "win32" ? "junction" : "dir");
+        }
+        if (mode === "retired") {
+          await exec(`(async () => {
+            const confirm = window.confirm; window.confirm = () => true;
+            try { await window.CustomTabs.closeTab(${id}); }
+            finally { window.confirm = confirm; }
+          })()`);
+        } else if (mode === "superseded") {
+          await exec(`window.CustomTabs.switchToTab(${controlId})`);
+        } else if (mode === "frozen") {
+          await exec(`(() => {
+            const probe = window.__ownedMetadataRender; probe.send = window.ipcRenderer.send;
+            window.ipcRenderer.send = function(channel, data) {
+              if (channel === 'quit-approval-committed') { probe.commit = data; return; }
+              return probe.send.apply(this, arguments);
+            };
+            return null;
+          })()`);
+          app.emit("before-quit", { preventDefault() {} });
+          if (!await waitForCondition(exec, "window.CustomTabs.isDocumentFrozen()", 2000)) {
+            throw new Error("Owned metadata did not reach actual phase-two freeze");
+          }
+        }
+        await exec("window.__ownedMetadataRender.release(); null;");
+        if (!await waitForCondition(exec, "window.__ownedMetadataRender.completed === true", 8000)) {
+          throw new Error(`Owned metadata ${mode} completion did not settle`);
+        }
+        const outcome = await exec(`(() => {
+          const probe = window.__ownedMetadataRender;
+          const tab = window.CustomTabs.getTabs().find(tab => tab.id === ${id});
+          return { result: probe.result, calls: probe.calls, reports: probe.reports, context: probe.context,
+            content: tab?.content, original: tab?.originalContent,
+            state: tab && window.CustomTabs.__documentState(tab),
+            live: window.originalMarkdown, active: window.CustomTabs.getActiveTabId(),
+            scroll: window.CustomTabs.__getScroller().scrollTop,
+            frozen: window.CustomTabs.isDocumentFrozen(),
+            rendererConflict: window.getReloadRequestDiagnostics().conflicts.includes(${JSON.stringify(
+              process.platform === "win32" ? path.normalize(ownerPath).toLowerCase() : path.normalize(ownerPath),
+            )}),
+            rendererDirty: hasUnsavedChanges,
+            notification: document.getElementById('notificationMessage').textContent };
+        })()`);
+        const moved = ["version", "owner-binding", "source-binding"].includes(mode);
+        check(`SEC-08 owned metadata ${mode} completion preserves RAM conflict and scroll ordering through the fixed port`,
+          (mode === "unchanged"
+            ? outcome.result === true && outcome.calls.length === 1 &&
+              outcome.state.reloadConflict === false
+            : moved
+              ? outcome.result === false && outcome.calls.length === 1 &&
+                outcome.rendererConflict === true && outcome.rendererDirty === true &&
+                outcome.reports.some(report => report.filePath === ownerPath &&
+                  report.owner.documentRef === setup.context.approvedOwner.documentRef) &&
+                outcome.scroll === setup.scroll &&
+                outcome.notification.includes("during display") &&
+                outcome.content === updated && outcome.original === updated && outcome.live === updated
+              : outcome.result === false && outcome.calls.length === 0 &&
+                (mode === "frozen" ? outcome.frozen && outcome.scroll === setup.scroll :
+                  (mode === "retired" ? outcome.active !== id : outcome.active === controlId))) &&
+            (outcome.calls.length === 0 || outcome.calls.every(call =>
+              call.owner.documentRef === setup.context.approvedOwner.documentRef &&
+              call.owner.tabId === setup.context.approvedOwner.tabId &&
+              call.owner.documentGeneration === setup.context.approvedOwner.documentGeneration &&
+              call.sourcePath === sourcePath)),
+          JSON.stringify(outcome));
+      } finally {
+        if (restoreAlias) {
+          fs.unlinkSync(restoreAlias);
+          fs.symlinkSync(targetDir, restoreAlias, process.platform === "win32" ? "junction" : "dir");
+        }
+        if (mode === "frozen") __shutdown.reset();
+        await exec(`(() => {
+          const probe = window.__ownedMetadataRender;
+          probe.release?.();
+          window.renderMarkdown = probe.render; window.beginFileOpen = probe.begin;
+          window.completeFileOpen = probe.complete; window.ipcRenderer.sendSync = probe.sync;
+          window.reportAdoptionTrackingConflict = probe.report;
+          if (probe.send) window.ipcRenderer.send = probe.send;
+          delete window.__ownedMetadataRender;
+          return null;
+        })()`);
+        if (mode === "frozen") {
+          if (!await waitForCondition(exec, "!window.CustomTabs.isDocumentFrozen()", 5000)) {
+            throw new Error("Owned metadata freeze control did not thaw");
+          }
+        }
+      }
+    }
+    write(target, body);
+    const restoredPath = path.join(dir, "owned-metadata-restored.md");
+    write(restoredPath, body);
+    await openNative(restoredPath, "METADATA_APPROVED_RAM");
+    check("SEC-08 owned metadata restored native document is actually painted after all refusal controls",
+      await exec(`document.getElementById('viewer').textContent.includes('METADATA_APPROVED_RAM') &&
+        window.originalMarkdown === ${JSON.stringify(body)} &&
+        window.CustomTabs.getActiveTab().content === ${JSON.stringify(body)}`));
+  } finally {
+    if (foreign && !foreign.isDestroyed()) foreign.destroy();
+    for (const alias of [ownerAlias, sourceAlias, unapprovedAlias, ...renderAliases]) {
+      if (fs.existsSync(alias)) fs.unlinkSync(alias);
+    }
+  }
+}
+
 async function runConditionalRefreshValidation(win, exec, dir, filePath) {
   const request = await exec(`(() => {
     const tab = window.CustomTabs.findTabByPath(${JSON.stringify(filePath)});
@@ -12754,7 +13374,7 @@ async function run(win) {
     "prepareDocumentDiskAdoption", "commitDocumentDiskAdoption",
     "checkCommittedDiskAdoption",
     "completeDocumentDiskAdoption", "abandonDocumentDiskAdoption",
-    "readOwnedTabDiskSnapshot", "refreshOwnedTabDiskSnapshot", "readDialogExtra",
+    "readOwnedTabDiskSnapshot", "checkOwnedTabDiskSnapshot", "refreshOwnedTabDiskSnapshot", "readDialogExtra",
     "restoreSession", "saveSessionLayout", "readOpenTicketSnapshot",
     "acceptDocumentOpenTicket", "cancelDocumentOpenTicket", "openReadme",
     "saveMarkdown", "requestReload", "acknowledgeSaveResult",
@@ -12779,6 +13399,23 @@ async function run(win) {
       bridgeExposure.subframePdfRestore === "undefined",
     JSON.stringify(bridgeExposure),
   );
+  if (ownedMetadataFocusedHarness) {
+    await clearFixtureTabs("owned metadata preflight");
+    await runOwnedMetadataScenarios(win, exec, dir, sentinel);
+    await exec("window.CustomTabs.settleSessionLayout()");
+    console.log("owned metadata final screenshot:",
+      await captureScreenshot(win, "tabs-owned-metadata-final" +
+        (process.env.SEC08_OWNED_METADATA_RETIREMENT_PHASE
+          ? "-" + process.env.SEC08_OWNED_METADATA_RETIREMENT_PHASE : "")));
+    const alive = await proveSentinelAlive(win, sentinel);
+    check("the error sentinel was demonstrably watching both channels",
+      alive.console === true && alive.dom === true, JSON.stringify(alive));
+    const report = await sentinel.stop();
+    consoleAttribution.stop(report);
+    check("nothing rendered a visible error at any point during the suite",
+      report.hits.length === 0, JSON.stringify(report.hits));
+    return;
+  }
   if (admissionConsumersOnly) {
     await clearFixtureTabs("admission consumers preflight");
     await runAdmissionConsumerScenarios(win, exec, clearFixtureTabs, sentinel,
@@ -38687,7 +39324,7 @@ app.whenReady().then(async () => {
       process.env.SEC08_ADMISSION_LIFECYCLE_ONLY !== "1" && !admissionConsumersOnly
     ? 120000
     : newlineFocusedHarness || focusedCommitHarness || queueFocusedHarness ||
-      ownedReadFocusedHarness || dialogExtraFocusedHarness || approvedRequestFocusedHarness || nativeAuthorityFocusedHarness
+      ownedReadFocusedHarness || dialogExtraFocusedHarness || approvedRequestFocusedHarness || nativeAuthorityFocusedHarness || ownedMetadataFocusedHarness
     ? 90000
     : portableHarness
       ? COMPANION_WATCHDOG_MS.portable
@@ -38802,7 +39439,7 @@ app.whenReady().then(async () => {
     } else if (queueFocusedHarness) {
       await runF22QueueFocusedScenario((code) =>
         win.webContents.executeJavaScript(code, true));
-    } else if (ownedReadFocusedHarness || dialogExtraFocusedHarness || approvedRequestFocusedHarness || nativeAuthorityFocusedHarness) {
+    } else if (ownedReadFocusedHarness || dialogExtraFocusedHarness || approvedRequestFocusedHarness || nativeAuthorityFocusedHarness || ownedMetadataFocusedHarness) {
       await run(win);
     } else if (companionSelfcheck) {
       await runCompanionSettlementScenarios();
@@ -38932,6 +39569,11 @@ app.whenReady().then(async () => {
   }
   let restoreBatchQuit = null;
   if (dialogExtraFocusedHarness && process.env.SEC08_DIALOG_BATCH_ONLY === "1") {
+    restoreBatchQuit = replaceMethod(app, "quit", () => {});
+    win.destroy();
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  if (ownedMetadataFocusedHarness) {
     restoreBatchQuit = replaceMethod(app, "quit", () => {});
     win.destroy();
     await new Promise(resolve => setImmediate(resolve));

@@ -8380,13 +8380,37 @@ function completeFileOpen(context, visualCompletion = null) {
     frozenFileOpenCompletionCount += 1;
     return false;
   }
-  if (context.approvedPathKey &&
-      (!approvedReloadSnapshotMatches(
-        context.path, context.approvedPathKey, context.approvedDiskVersion
-      ) || !approvedReloadSnapshotMatches(
-        context.approvedSourcePath, context.approvedPathKey,
-        context.approvedDiskVersion
-      ))) {
+  let approvedSnapshotMatches = true;
+  if (context.approvedPathKey) {
+    approvedSnapshotMatches = false;
+    const owner = context.approvedOwner;
+    if (owner && owner.pathKey === context.approvedPathKey) {
+      try {
+        const checked = window.folia.checkOwnedTabDiskSnapshot({
+          filePath: context.path,
+          sourcePath: context.approvedSourcePath,
+          owner,
+          pageSession: owner.pageSession,
+          rendererGeneration: owner.rendererGeneration,
+          diskVersion: context.approvedDiskVersion,
+        });
+        approvedSnapshotMatches = checked.matches === true &&
+          checked.pathKey === context.approvedPathKey &&
+          diskVersionsEqual(checked.diskVersion, context.approvedDiskVersion);
+      } catch (error) {
+        console.error('Could not verify the approved post-render snapshot:', error);
+      }
+    }
+  }
+  if (context.sequence !== fileOpenSequence) {
+    supersededFileOpenCompletionCount += 1;
+    return false;
+  }
+  if (!mayMutateRendererDocument('ipc-file-opened-after-check')) {
+    frozenFileOpenCompletionCount += 1;
+    return false;
+  }
+  if (!approvedSnapshotMatches) {
     markReloadConflict(context.path);
     reportAdoptionTrackingConflict(context.path, context.approvedOwner);
     showNotification(

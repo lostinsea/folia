@@ -1164,6 +1164,36 @@ Unchanged operation count does not qualify final-source responsiveness; the
 remaining renderer metadata migrations and isolation flags still require the
 already-defined representative final measurements.
 
+### SEC-08 post-render metadata port — latency unqualified
+
+`completeFileOpen` now batches its owner/source binding checks into one fixed
+synchronous Main metadata request with one target stat. It carries only native
+owner/source strings and finite version metadata, not content or a new
+capability; distinct paths retain separate binding fences. Ordinary completion
+without an approved adoption and the clean-tab unchanged fast path do not take
+this port.
+Replacing renderer metadata probes with this small RPC is not a timing verdict.
+Native success/refusal and authority controls are green on corrected r2 source;
+these are functional evidence only, not latency measurements.
+Actual final isolated-source journeys and their existing numerical gates remain
+required; no measurement in the earlier frozen comparison qualifies these bytes.
+
+The source-diff-verified historical comparison reference is
+`f87aa779b4d402c5c3b398880dd1c2adb313dd26`, immediately before `c44308c` moved
+production dialog-extra reads from renderer stat/read/stat to Main-owned
+one-use grants. It already includes browser-loader preparation, but not that
+production reader-authority migration. Its application source/package/assets
+match the historically exercised `cbe233f8c679d49cf7cd8aa89523ee6fff7d6d3f`
+reference; it has not been freshly launched here. Compare the real historical
+application rather than disabling flags on the final architecture. Disclose
+later Mermaid rendering/wrapping (`8e075ad`), diagnostic logging (`d553f22`),
+menu layout and label changes: this is not isolation-only causal attribution.
+The corpus runner loads production Main but times direct `renderMarkdown`
+after warmup, excluding native admission/IPC and startup/reload/tab/Save/scroll
+journeys. Its render measurements remain useful only within that scope.
+Minimal real-action timing in the existing harness is still required after
+final wiring; no timing, threshold change or synthetic backport is claimed.
+
 ## Measured and found already fast
 - **Custom tab sync I/O is not the current bottleneck.**
   - `custom-tabs.js:69-111,640`

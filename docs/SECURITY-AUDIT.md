@@ -738,6 +738,28 @@ reproduces the focused/source-packaging results on the sealed bytes and both
 captures were viewed. Other raw metadata/browser consumers and
 production Node-off/sandbox are not closed.
 
+**Post-render owned metadata consumer — IMPLEMENTED / PROVEN, review converged, unintegrated.**
+The first `completeFileOpen` completion fence now asks the fixed Main-owned
+metadata port, with its actual tracking-decision owner/native ref and approved
+source. Retained owner and separate lexical source permission precede all
+probes; both case-preserving bindings are freshly checked around one regular
+target stat, with authority rechecked between probes. The copied/validated
+receipt cannot carry body/descriptor/FD fields; finite ctime-only drift retains
+the existing content-version policy. Sequence/freeze/conflict/scroll behavior
+remains fenced. Actual production metadata success/refusal controls are 37/37,
+authority 22/22, owner-probe retirement 24/24 and preserved Save consumers
+28/28 on corrected r2 bytes (`owned-metadata-runs-r1/green-r2-*.log`).
+The real positive caught the premature entry reply; it now replies once per
+terminal branch. R861-R877 and affected R844 are individually exact PROVEN,
+with restored review bytes and source packaging 383/0
+(`owned-metadata-runs-r1/final-evidence-r3.json`). Owner/source/stat retirement
+routes reach 24/24 each; parent reproduces metadata 37/37, source retirement
+24/24 and source packaging 383/0 and viewed approved-RAM captures. Fresh
+complete-unit Sol/Luna reviews converge; the initial canonical-preflight
+finding was retracted after tracing the actual memory-only closing parser,
+not the adjacent I/O reader. Failed runs and registry correction remain
+recorded in the roadmap. Other raw helpers remain.
+
 The **production main window still has Node enabled and isolation disabled**.
 Preparation, commit, completion and abandonment of disk-adoption capabilities
 now use fixed copied/validated preload methods; main's actual authority,
