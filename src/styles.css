@@ -2886,9 +2886,31 @@ body.dark-mode .app-update-toast {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
   padding: 6px 0;
   min-width: 200px;
+  max-width: calc(100vw - 20px);
+  max-height: calc(100vh - 20px);
+  overflow: auto;
+  box-sizing: border-box;
   z-index: 10003;
   display: none;
   animation: contextMenuFadeIn 0.15s ease;
+}
+
+@media (max-width: 220px) {
+  .context-menu {
+    min-width: 0;
+    width: calc(100vw - 20px);
+  }
+
+  .context-menu-item {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    padding: 8px;
+  }
+
+  .context-menu-item span {
+    max-width: 100%;
+  }
 }
 
 @keyframes contextMenuFadeIn {
@@ -2908,6 +2930,7 @@ body.dark-mode .app-update-toast {
 
 .context-menu-item {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 12px;
   padding: 10px 16px;
@@ -2943,9 +2966,13 @@ body.dark-mode .app-update-toast {
 
 .context-menu-item span:first-of-type {
   flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .context-menu-item .shortcut {
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-size: 11px;
   color: var(--text-secondary);
   opacity: 0.7;

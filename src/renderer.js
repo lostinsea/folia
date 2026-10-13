@@ -8565,10 +8565,7 @@ function commitDocumentDiskAdoption(request) {
     request.pageSession !== reloadRequestSession
   ) return null;
   try {
-    const result = ipcRenderer.sendSync(
-      'commit-document-disk-adoption',
-      request,
-    );
+    const result = window.folia.commitDocumentDiskAdoption(request);
     return result && typeof result === 'object' ? result : null;
   } catch (error) {
     console.error('Could not commit verified disk adoption:', error);
@@ -8583,10 +8580,7 @@ async function prepareDocumentDiskAdoption(request) {
     request.pageSession !== reloadRequestSession
   ) return null;
   try {
-    const result = await ipcRenderer.invoke(
-      'prepare-document-disk-adoption',
-      request,
-    );
+    const result = await window.folia.prepareDocumentDiskAdoption(request);
     return result && typeof result === 'object' ? result : null;
   } catch (error) {
     console.error('Could not attest document bytes:', error);
@@ -8597,9 +8591,7 @@ async function prepareDocumentDiskAdoption(request) {
 function completeDocumentDiskAdoption(request) {
   if (!request || request.pageSession !== reloadRequestSession) return null;
   try {
-    const result = ipcRenderer.sendSync(
-      'complete-document-disk-adoption', request,
-    );
+    const result = window.folia.completeDocumentDiskAdoption(request);
     return result && typeof result === 'object' ? result : null;
   } catch (error) {
     console.error('Could not complete disk adoption:', error);
@@ -8610,7 +8602,7 @@ function completeDocumentDiskAdoption(request) {
 function abandonDocumentDiskAdoption(capability, rendererGeneration) {
   if (typeof capability !== 'string') return false;
   try {
-    ipcRenderer.send('abandon-document-disk-adoption', {
+    window.folia.abandonDocumentDiskAdoption({
       capability,
       pageSession: reloadRequestSession,
       rendererGeneration,

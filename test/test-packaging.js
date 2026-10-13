@@ -876,6 +876,14 @@ async function main() {
       customTabsSource.includes("new TextEncoder().encode(content)") &&
       customTabsSource.includes("fileHelpers.utf8ByteLength(content)"),
   );
+  check(
+    "disk adoption consumers use fixed production bridge methods instead of raw protocol IPC",
+    ["prepare", "commit", "complete", "abandon"].every((phase) =>
+      rendererSource.includes(`window.folia.${phase}DocumentDiskAdoption(`) &&
+      !new RegExp(
+        `ipcRenderer\\.(?:invoke|sendSync|send)\\s*\\(\\s*['"]${phase}-document-disk-adoption['"]`,
+      ).test(rendererSource)),
+  );
   const customTabsContextMenuBinding =
     /const\s*\{\s*positionContextMenu\s*:\s*positionTabMenu\s*,\s*hideContextMenu\s*:\s*hideTabMenuEl\s*,?\s*\}\s*=\s*window\.FoliaContextMenu\s*;/.test(
       customTabsSource,

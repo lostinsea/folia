@@ -18621,6 +18621,196 @@ const REVERTS = [
           requireExactFailures: true,
           expectedFailureCount: 1,
         },
+        {
+          id: "R746",
+          what: "forward an invalid proposed tab identity through the adoption bridge",
+          file: path.join(SRC, "main-preload.js"),
+          from: "      !positiveInteger(identity.tabId) ||",
+          to: "",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [/^SEC-08 adoption bridge rejects malformed requests before any protocol IPC$/],
+          mustPass: [
+            /^SEC-08 adoption bridge preserves fixed fields, nullable owners, protocol order and completion evidence$/,
+            /^SEC-08 adoption bridge preserves historical resolution and explicit refusals$/,
+            /^SEC-08 changed clean-tab refresh reads through main without renderer content reads or a modal$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R747",
+          what: "drop completion's unresolved deletion evidence from the adoption bridge",
+          file: path.join(SRC, "main-preload.js"),
+          from: '        "capability", "revision", "unresolvedEvidence",',
+          to: '        "capability", "revision",',
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 adoption bridge preserves fixed fields, nullable owners, protocol order and completion evidence$/,
+            /^SEC-08 adoption bridge rejects malformed replies and preserves transport failures$/,
+          ],
+          mustPass: [
+            /^SEC-08 adoption bridge rejects malformed requests before any protocol IPC$/,
+            /^SEC-08 adoption bridge preserves historical resolution and explicit refusals$/,
+            /^SEC-08 changed clean-tab refresh reads through main without renderer content reads or a modal$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 2,
+        },
+        {
+          id: "R748",
+          what: "bypass the fixed production bridge in the complete renderer adoption protocol",
+          file: RENDERER,
+          from: "    const result = await window.folia.prepareDocumentDiskAdoption(request);",
+          to: "    const result = await ipcRenderer.invoke('prepare-document-disk-adoption', request);",
+          also: [
+            {
+              file: RENDERER,
+              from: "    const result = window.folia.commitDocumentDiskAdoption(request);",
+              to: "    const result = ipcRenderer.sendSync('commit-document-disk-adoption', request);",
+            },
+            {
+              file: RENDERER,
+              from: "    const result = window.folia.completeDocumentDiskAdoption(request);",
+              to: "    const result = ipcRenderer.sendSync('complete-document-disk-adoption', request);",
+            },
+            {
+              file: RENDERER,
+              from: "    window.folia.abandonDocumentDiskAdoption({",
+              to: "    ipcRenderer.send('abandon-document-disk-adoption', {",
+            },
+          ],
+          suite: "test:packaging",
+          expect: [/^disk adoption consumers use fixed production bridge methods instead of raw protocol IPC$/],
+          mustPass: [
+            /^changed clean-tab reads use the fixed production bridge instead of renderer raw IPC$/,
+            /^dialog extras use the grant-only production bridge instead of renderer raw IPC$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R749",
+          what: "restore transient painted-rectangle positioning with negative viewport coordinates",
+          file: path.join(SRC, "context-menu-utils.js"),
+          from: "  menuElement.style.left = '10px';\n  menuElement.style.top = '10px';",
+          to: "  menuElement.style.left = `${x}px`;\n  menuElement.style.top = `${y}px`;",
+          also: [{
+            file: path.join(SRC, "context-menu-utils.js"),
+            from: "  const left = Math.max(10, Math.min(x, windowWidth - menuElement.offsetWidth - 10));\n  const top = Math.max(10, Math.min(y, windowHeight - menuElement.offsetHeight - 10));\n  menuElement.style.left = `${left}px`;\n  menuElement.style.top = `${top}px`;",
+            to: "  const menuRect = menuElement.getBoundingClientRect();\n  if (menuRect.right > windowWidth) menuElement.style.left = `${windowWidth - menuRect.width - 10}px`;\n  if (menuRect.bottom > windowHeight) menuElement.style.top = `${windowHeight - menuRect.height - 10}px`;",
+          }],
+          suite: "test:theme",
+          expect: [
+            /^context-viewport: edge 999,699 remains inside the viewport$/,
+            /^context-viewport: edge 0,0 remains inside the viewport$/,
+            /^context-viewport: edge -50,-50 remains inside the viewport$/,
+            /^context-viewport: edge 999,0 remains inside the viewport$/,
+            /^context-viewport: edge 0,699 remains inside the viewport$/,
+            /^context-viewport: minimum-width menu fits without losing or horizontally clipping commands$/,
+            /^context-viewport: oversized height is a bounded vertical scrollport$/,
+            /^context-viewport: every edit-mode command remains reachable in the short viewport$/,
+            /^context-viewport: every edit-mode command remains reachable at minimum width$/,
+            /^context-viewport: every edit-mode command fits at requested width 320$/,
+            /^context-viewport: every edit-mode command fits at requested width 220$/,
+            /^context-viewport: every edit-mode command fits at requested width 221$/,
+          ],
+          mustPass: [
+            /^context-viewport: actual right-click opens the unchanged command set \(control\)$/,
+            /^context-viewport: ordinary positioning keeps the requested point without scrolling$/,
+            /^context-viewport: outside document scrolling still dismisses the menu \(control\)$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 12,
+        },
+        {
+          id: "R750",
+          what: "restore uncapped and unwrapped context menus without a viewport scrollport",
+          file: CSS,
+          from: "  max-width: calc(100vw - 20px);\n  max-height: calc(100vh - 20px);\n  overflow: auto;\n  box-sizing: border-box;",
+          to: "",
+          also: [
+            {
+              file: CSS,
+              from: "@media (max-width: 220px) {\n  .context-menu {\n    min-width: 0;\n    width: calc(100vw - 20px);\n  }\n\n  .context-menu-item {\n    flex-direction: column;\n    align-items: flex-start;\n    gap: 4px;\n    padding: 8px;\n  }\n\n  .context-menu-item span {\n    max-width: 100%;\n  }\n}\n\n",
+              to: "",
+            },
+            {
+              file: CSS,
+              from: ".context-menu-item {\n  display: flex;\n  flex-wrap: wrap;",
+              to: ".context-menu-item {\n  display: flex;",
+            },
+            {
+              file: CSS,
+              from: ".context-menu-item span:first-of-type {\n  flex: 1;\n  min-width: 0;\n  overflow-wrap: anywhere;",
+              to: ".context-menu-item span:first-of-type {\n  flex: 1;",
+            },
+            {
+              file: CSS,
+              from: ".context-menu-item .shortcut {\n  min-width: 0;\n  overflow-wrap: anywhere;",
+              to: ".context-menu-item .shortcut {",
+            },
+          ],
+          suite: "test:theme",
+          expect: [
+            /^context-viewport: minimum-width menu fits without losing or horizontally clipping commands$/,
+            /^context-viewport: every minimum-width command remains hit-testable after scrolling$/,
+            /^context-viewport: oversized height is a bounded vertical scrollport$/,
+            /^context-viewport: actual menu scrolling keeps the final command hit-testable$/,
+            /^context-viewport: the final Select All command still executes its real handler$/,
+            /^context-viewport: every edit-mode command remains reachable in the short viewport$/,
+            /^context-viewport: every edit-mode command remains reachable at minimum width$/,
+            /^context-viewport: every edit-mode command fits at requested width 220$/,
+            /^context-viewport: every edit-mode command fits at requested width 221$/,
+          ],
+          mustPass: [
+            /^context-viewport: ordinary positioning keeps the requested point without scrolling$/,
+            /^context-viewport: two requests measure the actual OS minimum width \(control\)$/,
+            /^10m: every baseline declaration that kept its selector still paints the baseline value$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 9,
+        },
+        {
+          id: "R751",
+          what: "dismiss context-menu commands on the menu's own scroll",
+          file: path.join(SRC, "context-menu-utils.js"),
+          from: "      if (event.target.nodeType && menuElement.contains(event.target)) event.stopPropagation();",
+          to: "",
+          suite: "test:theme",
+          expect: [
+            /^context-viewport: every minimum-width command remains hit-testable after scrolling$/,
+            /^context-viewport: actual menu scrolling keeps the final command hit-testable$/,
+            /^context-viewport: every oversized-height command remains reachable$/,
+            /^context-viewport: the final Select All command still executes its real handler$/,
+            /^context-viewport: every edit-mode command remains reachable in the short viewport$/,
+            /^context-viewport: every edit-mode command remains reachable at minimum width$/,
+            /^context-viewport: every edit-mode command fits at requested width 220$/,
+            /^context-viewport: every edit-mode command fits at requested width 221$/,
+          ],
+          mustPass: [
+            /^context-viewport: actual right-click opens the unchanged command set \(control\)$/,
+            /^context-viewport: ordinary positioning keeps the requested point without scrolling$/,
+            /^context-viewport: outside document scrolling still dismisses the menu \(control\)$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 8,
+        },
+        {
+          id: "R752",
+          what: "retain old scroll offsets when reopening the context menu",
+          file: path.join(SRC, "context-menu-utils.js"),
+          from: "  menuElement.scrollTop = 0;\n  menuElement.scrollLeft = 0;",
+          to: "",
+          suite: "test:theme",
+          expect: [/^context-viewport: reopening starts at the first command$/],
+          mustPass: [
+            /^context-viewport: oversized height is a bounded vertical scrollport$/,
+            /^context-viewport: actual menu scrolling keeps the final command hit-testable$/,
+            /^context-viewport: Escape still dismisses the menu \(control\)$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
       ];
 
 // These are release exceptions, not passing or withdrawn proofs. An explicit
@@ -18669,6 +18859,37 @@ function proveUniqueRevertIds() {
 }
 
 proveUniqueRevertIds();
+function additionalEdits(r) {
+  if (Object.hasOwn(r, "edits")) {
+    throw new Error(`Unsupported edits field in ${r.id}; compound mutations use also`);
+  }
+  return r.also ? (Array.isArray(r.also) ? r.also : [r.also]) : [];
+}
+
+function proveCompoundEditSchema() {
+  for (const record of REVERTS) additionalEdits(record);
+  const edit = { from: "control", to: "mutant" };
+  const valid =
+    additionalEdits({ id: "empty-control" }).length === 0 &&
+    additionalEdits({ id: "single-control", also: edit })[0] === edit &&
+    additionalEdits({ id: "array-control", also: [edit] })[0] === edit;
+  const rejected = [
+    { id: "wrong-array", edits: [edit] },
+    { id: "wrong-object", edits: edit },
+    { id: "mixed-fields", also: [edit], edits: [edit] },
+  ].every((record) => {
+    try { additionalEdits(record); }
+    catch (error) {
+      return error.message.includes("Unsupported edits field");
+    }
+    return false;
+  });
+  if (!valid || !rejected) {
+    throw new Error("SELF-CHECK FAILED: compound mutation field discrimination");
+  }
+  console.log("compound-edit self-check OK: supported also forms work; unsupported edits forms are rejected");
+}
+proveCompoundEditSchema();
 // A refactor cannot break a revert's ASSERTIONS without also running its suite,
 // but it breaks a revert's ANCHOR - the text the harness perturbs - for free,
 // silently, and the report only arrives hours later at the end of a full run.
@@ -19384,7 +19605,8 @@ function exactShutdownTailForMutation(r) {
   // reordered or added line, and every fatal marker remain health failures.
   if (r.id === "R454") return R454_POPUP_POLICY_WIRING_TAIL;
   if (r.id === "R319") return R319_MERMAID_SCOPE_TAIL;
-  if ((r.id === "R741" || r.id === "R742") && r.suite === "test:theme") {
+  if (["R741", "R742", "R749", "R750", "R751", "R752"].includes(r.id) &&
+      r.suite === "test:theme") {
     return TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL;
   }
   return r.id === "R660" &&
@@ -19668,11 +19890,11 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745";
+      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752";
   const toolbarAllowanceIsRecordScoped =
     REVERTS.filter((r) =>
       exactShutdownTailForMutation(r) === TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL,
-    ).map((r) => r.id).join(",") === "R741,R742" &&
+    ).map((r) => r.id).join(",") === "R741,R742,R749,R750,R751,R752" &&
     exactShutdownTailForMutation({ id: "R741", suite: "test:tabs" }) === undefined;
   const toolbarTailHealth = (out) => suiteTranscriptHealth(out, {
     requirePassingFooter: false,
@@ -20626,7 +20848,6 @@ const deferred = new Map();
 // work outside this run was about to be silently overwritten. It still fails
 // the exit code, because the rescued copy needs a human before it is dropped.
 let midRunEdits = 0;
-const additionalEdits = (r) => (r.also ? (Array.isArray(r.also) ? r.also : [r.also]) : []);
 
 // A revert harness that leaves the tree dirty is worse than none at all: the
 // next run would measure a file it had itself corrupted. Snapshot every file

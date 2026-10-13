@@ -7078,6 +7078,262 @@ function startConsoleAttributionSidecar(win, sentinel) {
   };
 }
 
+async function runAdoptionBridgeValidation(exec) {
+  const probe = await exec(`
+    (async () => {
+      const api = window.folia;
+      const ipc = window.ipcRenderer;
+      const originals = { invoke: ipc.invoke, sendSync: ipc.sendSync, send: ipc.send };
+      const owner = {
+        pageSession: 'adoption-bridge-probe', rendererGeneration: 1,
+        tabId: 2, documentGeneration: 3, pathKey: 'physical-key',
+      };
+      const version = { dev: 1, ino: 2, size: 17, mtimeMs: 123, ctimeMs: 124 };
+      const target = {
+        pageSession: owner.pageSession, rendererGeneration: 1,
+        filePath: 'logical-path', ownerFilePath: 'owner-path',
+        modifiedTime: 123, diskVersion: version, contentDigest: 'a'.repeat(64),
+        replaceDocument: true, proposedOwner: { ...owner, documentGeneration: 4 },
+      };
+      const prepare = { ...target, tabId: null };
+      const commit = {
+        ...target, capability: 'b'.repeat(32), revision: 0, oldOwner: null,
+      };
+      const complete = {
+        pageSession: owner.pageSession, rendererGeneration: 1,
+        capability: commit.capability, revision: 0,
+        filePath: target.filePath, ownerFilePath: target.ownerFilePath,
+        actualOwner: { ...target.proposedOwner, selectionGeneration: 5 },
+      };
+      const abandon = {
+        pageSession: owner.pageSession, rendererGeneration: 1,
+        capability: commit.capability,
+      };
+      const replies = {
+        'prepare-document-disk-adoption': {
+          known: true, pathKey: owner.pathKey, revision: 0, versionMatches: true,
+          capability: commit.capability, ownDeletion: false, orphaned: false,
+          pathOnly: false, overflow: false, relatedOrphanCount: 0,
+        },
+        'commit-document-disk-adoption': {
+          accepted: true, capability: commit.capability, incomingSpelling: 'incoming',
+          ownerSpelling: 'owner', tabId: 2, documentGeneration: 4, version,
+          contentDigest: target.contentDigest, confirmed: false,
+          pathKey: owner.pathKey, revision: 0,
+        },
+        'complete-document-disk-adoption': {
+          completed: true, capability: commit.capability, revision: 1,
+          unresolvedEvidence: true,
+        },
+      };
+      const calls = [];
+      let failure = null;
+      const record = (channel, payload) => {
+        calls.push({ channel, payload });
+        if (failure) throw new Error(failure);
+        return replies[channel];
+      };
+      ipc.invoke = function(channel, payload) {
+        return channel === 'prepare-document-disk-adoption'
+          ? Promise.resolve().then(() => record(channel, payload))
+          : originals.invoke.apply(this, arguments);
+      };
+      ipc.sendSync = function(channel, payload) {
+        return channel === 'commit-document-disk-adoption' ||
+          channel === 'complete-document-disk-adoption'
+          ? record(channel, payload) : originals.sendSync.apply(this, arguments);
+      };
+      ipc.send = function(channel, payload) {
+        return channel === 'abandon-document-disk-adoption'
+          ? record(channel, payload) : originals.send.apply(this, arguments);
+      };
+      try {
+        const requests = {
+          prepareDocumentDiskAdoption: prepare, commitDocumentDiskAdoption: commit,
+          completeDocumentDiskAdoption: complete, abandonDocumentDiskAdoption: abandon,
+        };
+        const malformed = [];
+        for (const [method, input] of Object.entries(requests)) {
+          const cases = [
+            null, [], { ...input, pageSession: '' },
+            { ...input, pageSession: 's'.repeat(129) },
+            { ...input, rendererGeneration: 0 },
+            { ...input, rendererGeneration: 1.5 },
+          ];
+          if (method !== 'abandonDocumentDiskAdoption') cases.push(
+            { ...input, filePath: 'bad\\0path' },
+            { ...input, ownerFilePath: '' },
+          );
+          if (method === 'prepareDocumentDiskAdoption' ||
+              method === 'commitDocumentDiskAdoption') cases.push(
+            { ...input, diskVersion: { ...version, size: Infinity } },
+            { ...input, modifiedTime: 125 },
+            { ...input, contentDigest: 'not-a-digest' },
+            { ...input, replaceDocument: 1 },
+            { ...input, proposedOwner: { ...target.proposedOwner, tabId: 0 } },
+            { ...input, proposedOwner: { ...target.proposedOwner, pageSession: 'foreign' } },
+          );
+          if (method === 'prepareDocumentDiskAdoption') cases.push(
+            { ...input, tabId: null, documentGeneration: 3 },
+            { ...input, tabId: 2, documentGeneration: 3, pathKey: '' },
+          );
+          if (method !== 'prepareDocumentDiskAdoption') cases.push(
+            { ...input, capability: '' }, { ...input, capability: 'b'.repeat(31) },
+          );
+          if (method === 'commitDocumentDiskAdoption' ||
+              method === 'completeDocumentDiskAdoption') cases.push(
+            { ...input, revision: -1 }, { ...input, revision: 0.5 },
+          );
+          if (method === 'commitDocumentDiskAdoption') cases.push(
+            { ...input, oldOwner: { ...owner, pageSession: 'foreign' } },
+          );
+          if (method === 'completeDocumentDiskAdoption') cases.push(
+            { ...input, actualOwner: { ...complete.actualOwner, selectionGeneration: 0 } },
+            { ...input, actualOwner: { ...complete.actualOwner, pathKey: 'bad\\0key' } },
+          );
+          for (const bad of cases) {
+            try { await api[method](bad); malformed.push(false); }
+            catch (error) { malformed.push(error.message.includes('Invalid')); }
+          }
+        }
+        const malformedCalls = calls.length;
+        calls.length = 0;
+        const positive = {};
+        for (const [method, input] of Object.entries(requests)) {
+          positive[method] = await api[method]({
+            ...input, ignored: 'discard-me',
+            ...(input.proposedOwner ? {
+              proposedOwner: { ...input.proposedOwner, ignored: true },
+            } : {}),
+            ...(input.actualOwner ? {
+              actualOwner: { ...input.actualOwner, ignored: true },
+            } : {}),
+          });
+        }
+        const forwarding = calls.splice(0);
+        const previousOwner = { ...owner, pathKey: 'previous-physical-key' };
+        const existingPrepare = await api.prepareDocumentDiskAdoption({
+          ...target, ...previousOwner,
+        });
+        const existingCommit = api.commitDocumentDiskAdoption({
+          ...commit, oldOwner: { ...previousOwner, ignored: true },
+        });
+        const existingForwarding = calls.splice(0);
+        const selectionlessComplete = api.completeDocumentDiskAdoption({
+          ...complete, actualOwner: target.proposedOwner,
+        });
+        const selectionlessForwarding = calls.splice(0);
+        const prepChannel = 'prepare-document-disk-adoption';
+        const commitChannel = 'commit-document-disk-adoption';
+        const completeChannel = 'complete-document-disk-adoption';
+        const ordinary = { ...replies };
+        replies[prepChannel] = {
+          known: false, why: 'resolve-historical-episode', capability: commit.capability,
+          revision: 2, pathKey: owner.pathKey, remainingPhysicalEpisodes: 2,
+        };
+        replies[commitChannel] = {
+          accepted: false, why: 'resolved-historical-episode',
+          revision: 3, remainingPhysicalEpisodes: 1,
+        };
+        const historicalPrepare = await api.prepareDocumentDiskAdoption(prepare);
+        const historicalCommit = api.commitDocumentDiskAdoption(commit);
+        const refusals = [];
+        for (const [method, channel, flag] of [
+          ['prepareDocumentDiskAdoption', prepChannel, 'known'],
+          ['commitDocumentDiskAdoption', commitChannel, 'accepted'],
+          ['completeDocumentDiskAdoption', completeChannel, 'completed'],
+        ]) {
+          replies[channel] = { [flag]: false, why: 'controlled refusal' };
+          refusals.push((await api[method](requests[method])).why === 'controlled refusal');
+        }
+        const malformedReplies = [];
+        for (const [method, channel, bad] of [
+          ['prepareDocumentDiskAdoption', prepChannel, null],
+          ['prepareDocumentDiskAdoption', prepChannel, { ...ordinary[prepChannel], capability: '' }],
+          ['prepareDocumentDiskAdoption', prepChannel, { ...ordinary[prepChannel], known: 'true' }],
+          ['commitDocumentDiskAdoption', commitChannel, { ...ordinary[commitChannel], version: { ...version, ino: NaN } }],
+          ['commitDocumentDiskAdoption', commitChannel, { ...ordinary[commitChannel], confirmed: 'false' }],
+          ['completeDocumentDiskAdoption', completeChannel, { ...ordinary[completeChannel], unresolvedEvidence: 'true' }],
+          ['completeDocumentDiskAdoption', completeChannel, { completed: false }],
+        ]) {
+          replies[channel] = bad;
+          try { await api[method](requests[method]); malformedReplies.push(false); }
+          catch (error) { malformedReplies.push(error.message.includes('Invalid')); }
+        }
+        failure = 'controlled adoption transport failure';
+        const failures = [];
+        for (const [method, input] of Object.entries(requests)) {
+          try { await api[method](input); failures.push(null); }
+          catch (error) { failures.push(error.message); }
+        }
+        return {
+          malformed, malformedCalls, positive, forwarding,
+          existingPrepare, existingCommit, existingForwarding,
+          selectionlessComplete, selectionlessForwarding,
+          historicalPrepare, historicalCommit, refusals, malformedReplies, failures,
+        };
+      } finally { Object.assign(ipc, originals); }
+    })()
+  `);
+  check(
+    "SEC-08 adoption bridge rejects malformed requests before any protocol IPC",
+    probe.malformed.length === 57 &&
+      probe.malformed.every(Boolean) && probe.malformedCalls === 0,
+    JSON.stringify(probe),
+  );
+  check(
+    "SEC-08 adoption bridge preserves fixed fields, nullable owners, protocol order and completion evidence",
+    probe.forwarding.length === 4 &&
+      probe.forwarding.map((call) => call.channel).join(",") ===
+        "prepare-document-disk-adoption,commit-document-disk-adoption,complete-document-disk-adoption,abandon-document-disk-adoption" &&
+      probe.forwarding.every((call) => !("ignored" in call.payload)) &&
+      probe.forwarding[0].payload.tabId === null &&
+      probe.forwarding[0].payload.replaceDocument === true &&
+      !("documentGeneration" in probe.forwarding[0].payload) &&
+      probe.forwarding[1].payload.oldOwner === null &&
+      !("tabId" in probe.forwarding[1].payload) &&
+      !("ignored" in probe.forwarding[1].payload.proposedOwner) &&
+      probe.forwarding[2].payload.actualOwner.selectionGeneration === 5 &&
+      !("ignored" in probe.forwarding[2].payload.actualOwner) &&
+      Object.keys(probe.forwarding[3].payload).sort().join(",") ===
+        "capability,pageSession,rendererGeneration" &&
+      probe.positive.prepareDocumentDiskAdoption.versionMatches === true &&
+      probe.positive.commitDocumentDiskAdoption.contentDigest === "a".repeat(64) &&
+      probe.positive.commitDocumentDiskAdoption.version.mtimeMs === 123 &&
+      probe.positive.completeDocumentDiskAdoption.revision === 1 &&
+      probe.positive.completeDocumentDiskAdoption.unresolvedEvidence === true &&
+      probe.existingPrepare.known === true && probe.existingCommit.accepted === true &&
+      probe.existingForwarding.length === 2 &&
+      probe.existingForwarding[0].payload.tabId === 2 &&
+      probe.existingForwarding[0].payload.pathKey === "previous-physical-key" &&
+      probe.existingForwarding[1].payload.oldOwner.pathKey === "previous-physical-key" &&
+      Object.keys(probe.existingForwarding[1].payload.oldOwner).sort().join(",") ===
+        "documentGeneration,pageSession,pathKey,rendererGeneration,tabId" &&
+      probe.selectionlessComplete.completed === true &&
+      probe.selectionlessForwarding.length === 1 &&
+      !("selectionGeneration" in probe.selectionlessForwarding[0].payload.actualOwner),
+    JSON.stringify(probe),
+  );
+  check(
+    "SEC-08 adoption bridge preserves historical resolution and explicit refusals",
+    probe.historicalPrepare.why === "resolve-historical-episode" &&
+      probe.historicalPrepare.capability === "b".repeat(32) &&
+      probe.historicalPrepare.remainingPhysicalEpisodes === 2 &&
+      probe.historicalCommit.why === "resolved-historical-episode" &&
+      probe.historicalCommit.revision === 3 &&
+      probe.historicalCommit.remainingPhysicalEpisodes === 1 &&
+      probe.refusals.length === 3 && probe.refusals.every(Boolean),
+    JSON.stringify(probe),
+  );
+  check(
+    "SEC-08 adoption bridge rejects malformed replies and preserves transport failures",
+    probe.malformedReplies.length === 7 && probe.malformedReplies.every(Boolean) &&
+      probe.failures.length === 4 &&
+      probe.failures.every((message) => message === "controlled adoption transport failure"),
+    JSON.stringify(probe),
+  );
+}
+
 async function runDialogBatchScenarios(exec, sentinel, closeFixtureTabsSource, clearFixtureTabs) {
   // ---- Scenario 12: batch paths must not interrogate the reader ----------
   // Two defects, both MEASURED on the pre-fix tree before anything was
@@ -8014,9 +8270,14 @@ async function run(win) {
   })()`);
   const expectsPdfSignal =
     !app.isPackaged && process.argv.includes("--folia-test-preload");
+  const productionBridgeMethods = [
+    "prepareDocumentDiskAdoption", "commitDocumentDiskAdoption",
+    "completeDocumentDiskAdoption", "abandonDocumentDiskAdoption",
+    "readOwnedTabDiskSnapshot", "readDialogExtra",
+  ].sort().join(",");
   check(
     "SEC-08 main launch retains production owned-read and only its explicitly marked PDF test signal",
-    bridgeExposure.methods.join(",") === "readOwnedTabDiskSnapshot,readDialogExtra" &&
+    bridgeExposure.methods.slice().sort().join(",") === productionBridgeMethods &&
       bridgeExposure.pdfRestore === (expectsPdfSignal ? "function" : "undefined") &&
       bridgeExposure.subframePdfRestore === "undefined",
     JSON.stringify(bridgeExposure),
@@ -8079,7 +8340,7 @@ async function run(win) {
     `, true);
     check(
       "SEC-08 production bridge works under Node-off isolation and sandbox without exposing Node or arbitrary IPC",
-      isolatedBoundary.methods.join(",") === "readOwnedTabDiskSnapshot,readDialogExtra" &&
+      isolatedBoundary.methods.slice().sort().join(",") === productionBridgeMethods &&
         isolatedBoundary.require === "undefined" &&
         isolatedBoundary.rejected === true &&
         isolatedBoundary.refused === null &&
@@ -8408,6 +8669,7 @@ async function run(win) {
       String(mainOwnedRefresh.validSnapshot.content).includes("SEC08_MAIN_OWNED_READ"),
     JSON.stringify(mainOwnedRefresh),
   );
+  await runAdoptionBridgeValidation(exec);
   const bridgeValidation = await exec(`
     (async () => {
       const request = ${JSON.stringify(mainOwnedRefresh.validPayload)};

@@ -146,6 +146,21 @@ introducing IPC or work on the default diagnostic-disabled path. Main
 authorization/adoption semantics are unchanged; remaining isolation and final
 responsiveness gates are separate.
 
+**Disk-adoption capability ports (2026-10-12, unintegrated).** Preparation,
+commit, completion and abandonment use four fixed validated preload methods,
+with the original async/sync ordering and main checks unchanged. Distinct
+nullable/current/proposed owners, historical-deletion resolution, disk version,
+nonce/digest and completion's unresolved-evidence signal survive the boundary.
+The bridge adds no read or IPC; remaining authority/consumer transitions and
+final responsiveness acceptance stay open.
+
+**Right-click menu fit (2026-10-12, unintegrated).** Menus fit their untransformed
+layout size with normal viewport margins, scroll vertically when needed and
+wrap at extremely narrow widths. Only scrolling inside a menu avoids the
+existing document-scroll dismissal; ordinary document scrolling still closes
+it, and reopening starts at the first command. The existing flat command set,
+actual handlers and unrelated nested toolbar menus are preserved.
+
 **Narrow-window menus (2026-10-12, unintegrated).** The upstream viewport-cap
 fix is adapted without its nested-flyout clipping. Wide menus preserve their
 original minimum widths and cap content expansion; compact menus put nested

@@ -335,10 +335,257 @@ const SNAP_SWEEP = {
 
 require("../src/main.js");
 
+async function checkContextMenuViewport(win, exec) {
+  const bounds = win.getBounds();
+  const size = win.getContentSize();
+  const prefix = `theme-context-viewport-${process.pid}-${Date.now()}`;
+  const shots = [];
+  const savedMenu = await exec(`(() => {
+    const menu = document.getElementById("contextMenu");
+    return [menu, ...menu.querySelectorAll("*")].map(el => ({
+      className: el.getAttribute("class"), style: el.getAttribute("style"),
+    }));
+  })()`);
+  const frames = () => exec(`new Promise(r => requestAnimationFrame(() =>
+    requestAnimationFrame(() => r(true))))`);
+  const resize = async (width, height) => {
+    win.setContentSize(width, height);
+    let previous = "";
+    let stable = 0;
+    let measured;
+    await waitFor(async () => {
+      await frames();
+      measured = await exec(`({ width: innerWidth, height: innerHeight })`);
+      const current = JSON.stringify(measured);
+      stable = current === previous ? stable + 1 : 0;
+      previous = current;
+      const native = win.getContentSize();
+      return stable > 0 && Math.abs(native[0] - measured.width) <= 1 &&
+        Math.abs(native[1] - measured.height) <= 1;
+    }, "true", "context-menu resize reaches the renderer", 4000);
+    return measured;
+  };
+  function probe(action, x, y) {
+    const menu = document.getElementById("contextMenu");
+    const viewer = document.getElementById("viewer");
+    const rect = (el) => {
+      const r = el.getBoundingClientRect();
+      return { left: r.left, top: r.top, right: r.right, bottom: r.bottom,
+        width: r.width, height: r.height };
+    };
+    if (action === "open") {
+      document.body.click();
+      viewer.dispatchEvent(new MouseEvent("contextmenu", {
+        bubbles: true, cancelable: true, clientX: x, clientY: y,
+      }));
+      for (const animation of menu.getAnimations()) animation.finish();
+    } else if (action === "scroll") menu.scrollTop = menu.scrollHeight;
+    else if (action === "document-scroll") {
+      document.dispatchEvent(new Event("scroll"));
+    } else if (action === "escape") {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    } else if (action === "select") {
+      document.getElementById("ctxSelectAll").click();
+    }
+    const rows = [...menu.querySelectorAll(".context-menu-item")];
+    const visible = rows.filter((el) => getComputedStyle(el).display !== "none");
+    const r = rect(menu);
+    const hit = (el) => {
+      const b = rect(el);
+      const left = Math.max(b.left, r.left + menu.clientLeft);
+      const right = Math.min(b.right, r.left + menu.clientLeft + menu.clientWidth);
+      const top = Math.max(b.top, r.top + menu.clientTop);
+      const bottom = Math.min(b.bottom, r.top + menu.clientTop + menu.clientHeight);
+      if (right - left < 1 || bottom - top < 1 || top < 0 || left < 0 ||
+          bottom > innerHeight + 1 || right > innerWidth + 1) return false;
+      const target = document.elementFromPoint((left + right) / 2, (top + bottom) / 2);
+      return !!target && (target === el || el.contains(target));
+    };
+    return {
+      rect: r, width: innerWidth, height: innerHeight,
+      open: menu.classList.contains("visible"),
+      scrollTop: menu.scrollTop, scrollHeight: menu.scrollHeight,
+      clientHeight: menu.clientHeight, clientWidth: menu.clientWidth,
+      scrollWidth: menu.scrollWidth, overflow: getComputedStyle(menu).overflowY,
+      inventory: rows.map((el) => [el.id, el.textContent.trim()]),
+      visible: visible.map((el) => el.id),
+      lastHit: hit(document.getElementById("ctxSelectAll")),
+      selected: window.getSelection().toString(),
+      viewerText: viewer.innerText,
+    };
+  }
+  const read = (action, x = 0, y = 0) =>
+    exec(`(${probe.toString()})(${JSON.stringify(action)}, ${x}, ${y})`);
+  const bounded = (state) => state.open && state.rect.width > 0 && state.rect.height > 0 &&
+    state.rect.left >= 9 && state.rect.top >= 9 &&
+    state.rect.right <= state.width - 9 && state.rect.bottom <= state.height - 9;
+  const allReachable = async () => exec(`(async () => {
+    const menu = document.getElementById("contextMenu");
+    const rows = [...menu.querySelectorAll(".context-menu-item")]
+      .filter(el => getComputedStyle(el).display !== "none");
+    const misses = [];
+    for (const row of rows) {
+      row.scrollIntoView({ block: "nearest", inline: "nearest" });
+      await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const b = row.getBoundingClientRect();
+      const m = menu.getBoundingClientRect();
+      const top = Math.max(b.top, m.top + menu.clientTop);
+      const bottom = Math.min(b.bottom, m.top + menu.clientTop + menu.clientHeight);
+      const left = Math.max(b.left, m.left + menu.clientLeft);
+      const right = Math.min(b.right, m.left + menu.clientLeft + menu.clientWidth);
+      const hit = document.elementFromPoint((left + right) / 2, (top + bottom) / 2);
+      if (!menu.classList.contains("visible") || right <= left || bottom <= top ||
+          b.left < m.left + menu.clientLeft - 1 ||
+          b.right > m.left + menu.clientLeft + menu.clientWidth + 1 ||
+          b.top < m.top + menu.clientTop - 1 ||
+          b.bottom > m.top + menu.clientTop + menu.clientHeight + 1 ||
+          !hit || !(hit === row || row.contains(hit))) misses.push(row.id);
+    }
+    return { count: rows.length, misses, scrollTop: menu.scrollTop,
+      open: menu.classList.contains("visible") };
+  })()`);
+  try {
+    await resize(1000, 700);
+    const ordinary = await read("open", 250, 150);
+    check("context-viewport: actual right-click opens the unchanged command set (control)",
+      ordinary.open && ordinary.visible.includes("ctxSelectAll") &&
+        ordinary.visible.includes("ctxCopy") && ordinary.viewerText.trim().length > 0,
+      JSON.stringify(ordinary));
+    check("context-viewport: ordinary positioning keeps the requested point without scrolling",
+      bounded(ordinary) && ordinary.rect.left === 250 && ordinary.rect.top === 150 &&
+        ordinary.scrollHeight <= ordinary.clientHeight + 1, JSON.stringify(ordinary));
+    for (const [x, y] of [[999, 699], [0, 0], [-50, -50], [999, 0], [0, 699]]) {
+      const edge = await read("open", x, y);
+      check(`context-viewport: edge ${x},${y} remains inside the viewport`,
+        bounded(edge), JSON.stringify(edge));
+    }
+    shots.push(await captureScreenshot(win, `${prefix}-wide-edge`));
+    const minimum = await resize(1, 340);
+    const repeated = await resize(2, 340);
+    check("context-viewport: two requests measure the actual OS minimum width (control)",
+      minimum.width > 2 && minimum.width === repeated.width, JSON.stringify({ minimum, repeated }));
+    const narrow = await read("open", repeated.width - 1, repeated.height - 1);
+    shots.push(await captureScreenshot(win, `${prefix}-minimum-top`));
+    check("context-viewport: minimum-width menu fits without losing or horizontally clipping commands",
+      bounded(narrow) && narrow.scrollWidth <= narrow.clientWidth + 1 &&
+        JSON.stringify(narrow.inventory) === JSON.stringify(ordinary.inventory) &&
+        JSON.stringify(narrow.visible) === JSON.stringify(ordinary.visible), JSON.stringify(narrow));
+    const narrowReach = await allReachable();
+    check("context-viewport: every minimum-width command remains hit-testable after scrolling",
+      narrowReach.count === ordinary.visible.length && narrowReach.misses.length === 0 &&
+        narrowReach.open, JSON.stringify(narrowReach));
+    shots.push(await captureScreenshot(win, `${prefix}-minimum-bottom`));
+    await resize(1000, 180);
+    const short = await read("open", 999, 179);
+    check("context-viewport: the short-height setup actually needs vertical scrolling (control)",
+      short.scrollHeight > short.height - 20, JSON.stringify(short));
+    check("context-viewport: oversized height is a bounded vertical scrollport",
+      bounded(short) && short.scrollHeight > short.clientHeight + 1 &&
+        /auto|scroll/.test(short.overflow), JSON.stringify(short));
+    await read("scroll");
+    await frames();
+    const scrolled = await read("inspect");
+    check("context-viewport: actual menu scrolling keeps the final command hit-testable",
+      scrolled.open && scrolled.scrollTop > 0 && scrolled.lastHit, JSON.stringify(scrolled));
+    shots.push(await captureScreenshot(win, `${prefix}-short-bottom`));
+    const shortReach = await allReachable();
+    check("context-viewport: every oversized-height command remains reachable",
+      shortReach.count === ordinary.visible.length && shortReach.misses.length === 0 &&
+        shortReach.open, JSON.stringify(shortReach));
+    await read("open", 999, 179);
+    const reopened = await read("inspect");
+    check("context-viewport: reopening starts at the first command",
+      reopened.open && reopened.scrollTop === 0, JSON.stringify(reopened));
+    await read("scroll");
+    await frames();
+    const beforeSelect = await read("inspect");
+    await read("select");
+    const selected = await read("inspect");
+    check("context-viewport: the final Select All command still executes its real handler",
+      beforeSelect.open && beforeSelect.lastHit &&
+        selected.selected.replace(/\s+/g, " ").trim() ===
+          selected.viewerText.replace(/\s+/g, " ").trim() &&
+        selected.selected.trim().length > 0 &&
+        !selected.open, JSON.stringify(selected));
+    await exec(`window.getSelection().removeAllRanges()`);
+    await read("open", 250, 100);
+    const dismissed = await read("document-scroll");
+    check("context-viewport: outside document scrolling still dismisses the menu (control)",
+      !dismissed.open, JSON.stringify(dismissed));
+    await read("open", 250, 100);
+    const escaped = await read("escape");
+    check("context-viewport: Escape still dismisses the menu (control)",
+      !escaped.open, JSON.stringify(escaped));
+    await exec(`document.getElementById("toggleEdit").click()`);
+    await waitFor(exec, `document.querySelector(".content-wrapper").classList.contains("split-view")`,
+      "real edit-mode entry enables the larger context menu");
+    const editing = await read("open", 999, 179);
+    check("context-viewport: the real edit-mode menu exposes additional commands (control)",
+      editing.visible.includes("ctxBold") && editing.visible.includes("ctxInsertTable") &&
+        editing.visible.length > ordinary.visible.length &&
+        JSON.stringify(editing.inventory) === JSON.stringify(ordinary.inventory), JSON.stringify(editing));
+    const editReach = await allReachable();
+    check("context-viewport: every edit-mode command remains reachable in the short viewport",
+      bounded(editing) && editReach.count === editing.visible.length &&
+        editReach.misses.length === 0 && editReach.open, JSON.stringify({ editing, editReach }));
+    await resize(1, 340);
+    const narrowEdit = await read("open", 99, 339);
+    const narrowEditReach = await allReachable();
+    check("context-viewport: every edit-mode command remains reachable at minimum width",
+      bounded(narrowEdit) && narrowEdit.scrollWidth <= narrowEdit.clientWidth + 1 &&
+        narrowEditReach.count === editing.visible.length &&
+        narrowEditReach.misses.length === 0 && narrowEditReach.open,
+      JSON.stringify({ narrowEdit, narrowEditReach }));
+    shots.push(await captureScreenshot(win, `${prefix}-minimum-edit-bottom`));
+    const ordinaryWidths = [];
+    for (const width of [320, 220, 221]) {
+      await resize(width, 700);
+      const state = await read("open", width - 1, 699);
+      const reachable = await allReachable();
+      ordinaryWidths.push({ width: state.width, rect: state.rect });
+      check(`context-viewport: every edit-mode command fits at requested width ${width}`,
+        bounded(state) && state.scrollWidth <= state.clientWidth + 1 &&
+          reachable.count === editing.visible.length &&
+          reachable.misses.length === 0 && reachable.open,
+        JSON.stringify({ state, reachable }));
+    }
+    shots.push(await captureScreenshot(win, `${prefix}-ordinary-edit-bottom`));
+    console.log(`  note: context-menu measured geometry: ${JSON.stringify({
+      ordinary: ordinary.rect, minimum, minimumMenu: narrow.rect,
+      shortViewport: [short.width, short.height], shortMenu: short.rect,
+      shortScroll: [short.scrollHeight, short.clientHeight, scrolled.scrollTop],
+      viewCommands: ordinary.visible.length, editCommands: editing.visible.length,
+      minimumEditMenu: narrowEdit.rect,
+      ordinaryWidths,
+    })}`);
+  } finally {
+    await exec(`(() => {
+      document.body.click();
+      window.getSelection().removeAllRanges();
+      if (document.querySelector(".content-wrapper").classList.contains("split-view")) {
+        document.getElementById("toggleEdit").click();
+      }
+      const menu = document.getElementById("contextMenu");
+      const saved = ${JSON.stringify(savedMenu)};
+      [menu, ...menu.querySelectorAll("*")].forEach((el, i) => {
+        for (const [key, value] of Object.entries(saved[i])) {
+          const attr = key === "className" ? "class" : key;
+          if (value === null) el.removeAttribute(attr); else el.setAttribute(attr, value);
+        }
+      });
+    })()`);
+    win.setBounds(bounds);
+    await resize(...size);
+  }
+  console.log(`  note: context-menu viewport captures awaiting review: ${shots.filter(Boolean).join(", ")}`);
+}
+
 app.whenReady().then(async () => {
   try {
     const win = await waitForWindow(BrowserWindow);
     const exec = (js) => win.webContents.executeJavaScript(js);
+
+    await checkContextMenuViewport(win, exec);
 
     const golden = JSON.parse(fs.readFileSync(GOLDEN_PATH, "utf8"));
 

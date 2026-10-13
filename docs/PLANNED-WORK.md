@@ -140,6 +140,26 @@ remaining browser privileged consumers and provisional path authority with
 fixed main-owned operations, preserving restore/basic Save and unchanged-tab
 fast paths. Node-off/context-isolation/sandbox and live-grant foreign-sender
 controls follow the production ports, not a test-only Node facade.
+The capability-protocol unit is IMPLEMENTED / PROVEN, unintegrated: preparation, commit, completion and abandonment
+of existing disk-adoption capabilities to four fixed preload methods. It
+preserves async/sync ordering, nonce/digest/version/owner provenance and
+historical-deletion resolution. Main handlers and their authority remain
+unchanged, with no added read or IPC. Independent Sol/Luna design feedback
+required preserving nullable initial identities, distinct prepare/commit
+envelopes, historical replies and completion's advanced evidence revision;
+implemented with focused malformed/positive controls. Final actual owned/dialog
+journey is 63/63 (`adoption-bridge-focused-r2-20261012.log`); source packaging is
+363/0. The initial 61/63 run retained an obsolete exact API inventory; its
+correction now pins the six fixed production methods, not arbitrary IPC.
+R746/R747 and affected shared-response R736 are exact PROVEN in
+`adoption-context-exact-proofs-r1-20261012.log`. R748's compound rollback was
+misdeclared under unsupported `edits`, so its earlier partial run does not prove
+the stated full rollback; the corrected complete rollback is exact PROVEN in
+`adoption-context-compound-proofs-r3-20261012.log`.
+Independent fresh Sol/Luna
+implementation reviews found no blockers or disagreement. Remaining metadata,
+restore, event/command, main path-authority and test-harness migrations precede
+the final security-flag and responsiveness gates.
 
 | Status | Meaning |
 |---|---|
@@ -4304,7 +4324,7 @@ coordinator decision, not a new user quotation; neither feature is implemented.
 | `6089305` | Offline libraries/fonts adapted by vendoring; CommonMark soft-break change declined in `774cdd8`; HTML export deferred; Mermaid paragraph-wrapper spacing/patch effect still needs narrow evaluation. |
 | `550017f` | Decline upstream-only version bump; remaining manifest delta is line-ending churn. |
 | `ef81474` | Dialog/drag-drop/splitter/view lookup adapted in `7088418`; fork save handling retained and non-note view-mode autosave superseded by `584ae4a` policy. |
-| `80646de` | Zoom-correct scrolling adapted in `dee261b`; temporary diagnostics declined; blinking deferred; right-click-menu viewport overflow needs bounded reproduction/correction. |
+| `80646de` | Zoom-correct scrolling adapted in `dee261b`; temporary diagnostics declined; blinking deferred; right-click-menu viewport fit adapted in this continuation (proof below). |
 | `d64b166` | Decline upstream-only version bump. |
 | `28d1cb4` | Decline tscircuit-specific label filtering, bundle and authoring material under the existing feature rejection. |
 | `7e48d9f` | Decline upstream-local ignore-directory policy; no runtime fix. |
@@ -4316,12 +4336,32 @@ coordinator decision, not a new user quotation; neither feature is implemented.
 | `29d6060` | Parameterized HTML parsing adapted in `c713900`; per-block HTML zoom remains declined. |
 
 Astra's read-only classification established no additional mandatory security
-fix in this cohort. Two residual correctness evaluations remain: uncapped
-right-click menus can be positioned negatively when larger than the viewport;
-and Mermaid placeholder paragraph cleanup may be inapplicable to Folia's
-sanitizer/patch pipeline. Neither has a fresh runtime verdict yet. Reproduce/fix
-the menu mechanism minimally while preserving all commands; evaluate paragraph
-spacing only, without reopening the completed clipping/compactness unit.
+fix in this cohort. **Right-click overflow is IMPLEMENTED / PROVEN, unintegrated.**
+The actual minimum viewport reproduced negative positioning; caps, narrow
+wrapping, logical-size positioning, menu-owned scrolling and reopening now
+preserve command access. Theme is 398/398
+(`.context-viewport-evidence/final-r5.log`); genuine Node-free/CommonJS loader
+is 27/27 (`context-menu-nodefree-loader-r1-20261012.log`). Before/after captures
+were viewed by the owner and integration stream. Fresh Sol/Luna reviews agree
+on no blockers. R749-R752 are individually exact PROVEN, with affected toolbar
+R741/R742 retained in `adoption-context-exact-proofs-r2-20261012.log`; R752's
+proof is in the first run. Initial guessed failure sets reported COLLATERAL,
+not proof; the complete measured name inventories were pinned and reproven.
+Only these named theme mutations, alongside R741/R742, accept the already
+observed lone post-footer shutdown diagnostic; extra, duplicate, reordered and
+fatal tails still fail. No shutdown fix or new release deferral is claimed.
+Final proof review disagreement: Sol found unsupported `edits` fields that
+silently omitted the compound parts of R748/R749/R750; Luna missed them. Thus
+the earlier R749/R750 partial-mutation verdicts do not establish their claimed
+complete rollbacks. Those records now use supported `also`; a narrow fail-loud
+field-discrimination self-check prevents recurrence. Complete R750 is exact
+PROVEN in `adoption-context-compound-proofs-r3-20261012.log`; complete R749's
+full name inventory is exact PROVEN in
+`adoption-context-compound-proofs-r4-20261012.log`. Partial and COLLATERAL
+histories are retained, not promoted. Final anchor audit also resolves the
+compound parts (`adoption-context-final-anchors-20261012.log`).
+Mermaid placeholder paragraph cleanup still needs only a narrow spacing/patch
+disposition; the completed clipping/compactness unit is not reopened.
 
 ### `w2-kbscroll` — keyboard scrolling of the document · PENDING
 

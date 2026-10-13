@@ -516,6 +516,14 @@ crypto/Buffer consumers only; it does not qualify responsiveness or path
 authority.
 
 The **production main window still has Node enabled and isolation disabled**.
+Preparation, commit, completion and abandonment of disk-adoption capabilities
+now use fixed copied/validated preload methods; main's actual authority,
+digest/nonce/deletion checks and IPC ordering are unchanged. Explicit refusals
+and historical-resolution branches remain distinct, including unresolved
+evidence after completion. The real owned/dialog route is 63/63; R746-R748 and
+shared-response R736 are exact PROVEN (`adoption-context-exact-proofs-r1-20261012.log`;
+R748's complete compound rollback: `adoption-context-compound-proofs-r3-20261012.log`).
+This is a port migration, not new path authority or a performance verdict.
 Renderer registration remains provisional authority; remaining callers,
 main-owned authority and the test harness must migrate before the final
 Node-off/isolation/sandbox transition. That transition and its user-visible
