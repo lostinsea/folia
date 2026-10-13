@@ -19354,6 +19354,135 @@ const REVERTS = [
           ],
           requireMustPassAssertions: true, requireExactFailures: true,
         },
+        {
+          id: "R781",
+          what: "bypass the actual fixed Save port and its synchronous delivery-failure boundary",
+          file: RENDERER,
+          from: "    window.folia.saveMarkdown({",
+          to: "    ipcRenderer.send('save-markdown-file', {",
+          suite: F22_QUEUE_EVIDENCE_SUITE,
+          expect: [
+            /^SEC-08 actual same-task Saves use the fixed transport only after correlated pending entries exist$/,
+            /^SEC-08 an actual Save dispatch throw settles its pending entry without writing or losing edits$/,
+          ],
+          mustPass: [
+            /^focused queue serialises two same-path Save operations$/,
+            /^SEC-08 actual Save outcomes acknowledge through the fixed port without stranded Main deliveries$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R782",
+          what: "replace the reload owner path key with a distinct canonical request path",
+          file: path.join(SRC, "main-preload.js"),
+          from: "    reloadRequestDocumentPathKey: request.reloadRequestDocumentPathKey,",
+          to: "    reloadRequestDocumentPathKey: request.reloadRequestPath,",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 Save and reload transport dispatch synchronously with exact fields and verbatim empty Unicode snapshots$/,
+          ],
+          mustPass: [
+            /^SEC-08 Save and reload transport reject malformed requests before any IPC$/,
+            /^SEC-08 ordinary reload remains usable after a refused transport dispatch$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R783",
+          what: "acknowledge actual Save results through raw IPC instead of the fixed port",
+          file: RENDERER,
+          from: "  window.folia\n    .acknowledgeSaveResult({",
+          to: "  ipcRenderer\n    .invoke('save-markdown-result-ack', {",
+          suite: F22_QUEUE_EVIDENCE_SUITE,
+          expect: [
+            /^SEC-08 actual Save outcomes acknowledge through the fixed port without stranded Main deliveries$/,
+          ],
+          mustPass: [
+            /^focused queue two same-path Save operations reached main-process settlement$/,
+            /^SEC-08 actual same-task Saves use the fixed transport only after correlated pending entries exist$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R784",
+          what: "let an unsent reload supersede the preceding authoritative request",
+          file: RENDERER,
+          from: "    if (latestReloadRequestByPath.get(requestPath) === sequence) {\n      if (previousSequence === undefined) latestReloadRequestByPath.delete(requestPath);\n      else latestReloadRequestByPath.set(requestPath, previousSequence);\n    }",
+          to: "    void previousSequence;",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 an unsent reload preserves its earlier authoritative request and visible update prompt$/,
+          ],
+          mustPass: [
+            /^SEC-08 reload dispatch failure setup reaches a real owner and observable delivery exception$/,
+            /^SEC-08 ordinary reload remains usable after a refused transport dispatch$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R785",
+          what: "accept a nonboolean Save acknowledgement reply",
+          file: path.join(SRC, "main-preload.js"),
+          from: "    if (typeof result !== \"boolean\") {\n      throw new TypeError(\"Invalid Save acknowledgement response\");\n    }",
+          to: "",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 Save acknowledgement preserves historical identity and false true retry attempts while rejecting bad replies$/,
+          ],
+          mustPass: [
+            /^SEC-08 Save and reload transport dispatch synchronously with exact fields and verbatim empty Unicode snapshots$/,
+            /^SEC-08 ordinary reload remains usable after a refused transport dispatch$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R786",
+          what: "turn synchronous Save validation failure into an unobserved promise rejection",
+          file: path.join(SRC, "main-preload.js"),
+          from: "  saveMarkdown(request) {",
+          to: "  async saveMarkdown(request) {",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 Save and reload transport reject malformed requests before any IPC$/,
+          ],
+          mustPass: [
+            /^SEC-08 Save and reload transport dispatch synchronously with exact fields and verbatim empty Unicode snapshots$/,
+            /^SEC-08 ordinary reload remains usable after a refused transport dispatch$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R787",
+          what: "turn synchronous reload validation failure into an unobserved promise rejection",
+          file: path.join(SRC, "main-preload.js"),
+          from: "  requestReload(request) {",
+          to: "  async requestReload(request) {",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 Save and reload transport reject malformed requests before any IPC$/,
+          ],
+          mustPass: [
+            /^SEC-08 Save and reload transport dispatch synchronously with exact fields and verbatim empty Unicode snapshots$/,
+            /^SEC-08 ordinary reload remains usable after a refused transport dispatch$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R788",
+          what: "roll back a newer reentrant reload when an earlier dispatch throws",
+          file: RENDERER,
+          from: "    if (latestReloadRequestByPath.get(requestPath) === sequence) {",
+          to: "    if (true) {",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 a newer reentrant reload retains its authority and successful prompt dismissal$/,
+          ],
+          mustPass: [
+            /^SEC-08 an unsent reload preserves its earlier authoritative request and visible update prompt$/,
+            /^SEC-08 ordinary reload remains usable after a refused transport dispatch$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
       ];
 
 // These are release exceptions, not passing or withdrawn proofs. An explicit

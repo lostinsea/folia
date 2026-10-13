@@ -3817,20 +3817,32 @@ function reloadCurrentFile() {
   if (!requestPath) return false;
   const sequence = ++reloadRequestSequence;
   const snapshot = currentReloadSnapshot();
+  const previousSequence = latestReloadRequestByPath.get(requestPath);
   latestReloadRequestByPath.set(requestPath, sequence);
+  try {
+    window.folia.requestReload({
+      filePath: currentFilePath,
+      reloadRequestSequence: sequence,
+      reloadRequestPath: requestPath,
+      reloadRequestSnapshot: snapshot,
+      reloadRequestSession,
+      reloadRequestTabId: tabId,
+      reloadRequestDocumentGeneration: documentGeneration,
+      reloadRequestDocumentPathKey: documentPathKey,
+      reloadRequestRendererGeneration: identity.rendererGeneration,
+      reloadRequestSelectionGeneration: activeFileSelectionGeneration,
+    });
+  } catch (error) {
+    // An unsent request must not supersede the earlier in-flight reload.
+    if (latestReloadRequestByPath.get(requestPath) === sequence) {
+      if (previousSequence === undefined) latestReloadRequestByPath.delete(requestPath);
+      else latestReloadRequestByPath.set(requestPath, previousSequence);
+    }
+    console.error('Reload request delivery failed:', error);
+    showNotification(i18n('notif.reloadFailed') + error.message, 4000);
+    return false;
+  }
   dismissFileUpdateNotification();
-  ipcRenderer.send('reload-file', {
-    filePath: currentFilePath,
-    reloadRequestSequence: sequence,
-    reloadRequestPath: requestPath,
-    reloadRequestSnapshot: snapshot,
-    reloadRequestSession,
-    reloadRequestTabId: tabId,
-    reloadRequestDocumentGeneration: documentGeneration,
-    reloadRequestDocumentPathKey: documentPathKey,
-    reloadRequestRendererGeneration: identity.rendererGeneration,
-    reloadRequestSelectionGeneration: activeFileSelectionGeneration,
-  });
   return true;
 }
 
@@ -4566,7 +4578,7 @@ function saveMarkdownFile() {
   latestSaveSequenceByDocument.set(identityKey, sequence);
   publishPendingSaveStatusChange();
   try {
-    ipcRenderer.send('save-markdown-file', {
+    window.folia.saveMarkdown({
       filePath: currentFilePath,
       content: content,
       requestId: requestId,
@@ -4772,8 +4784,8 @@ function acknowledgeSaveResult(data, remember = false) {
     }
   }
   if (!settledSaveResultMatches(data, remembered)) return false;
-  ipcRenderer
-    .invoke('save-markdown-result-ack', {
+  window.folia
+    .acknowledgeSaveResult({
       saveRequestSession: data.saveRequestSession,
       requestId: data.requestId,
       path: data.path,

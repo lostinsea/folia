@@ -535,6 +535,19 @@ final production flags still require migration. Functional evidence is not
 responsiveness qualification, and the old skipped comparison covers no final
 isolation bytes.
 
+**Fixed Save/reload transport (2026-10-13).** Actual Save, reload and Save-result
+acknowledgement consumers use three copied/validated preload ports, retaining
+same-stack request dispatch and asynchronous acknowledgement refusal/retry.
+Main handlers and authority are unchanged; document text is passed verbatim
+without another read, digest or content scan. Failed Save dispatch settles its
+correlation without writing or losing the editor text. Failed reload dispatch
+does not itself dismiss the update prompt and rolls back only its own unsent sequence, never a
+newer reentrant request. The real queue checks final disk bytes and acknowledged
+Main delivery, while the refusal case has its own native-admitted fixture.
+Targeted controls and exact reverts are recorded in `docs/PLANNED-WORK.md`.
+This transport slice does not close provisional authority, raw event/command
+consumers, production flags or final responsiveness qualification.
+
 The **production main window still has Node enabled and isolation disabled**.
 Preparation, commit, completion and abandonment of disk-adoption capabilities
 now use fixed copied/validated preload methods; main's actual authority,

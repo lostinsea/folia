@@ -179,6 +179,57 @@ function copyAdoptionIdentity(identity, envelope, allowSelection = false) {
   };
 }
 
+function copySaveTransport(request) {
+  if (!request || typeof request !== "object" || Array.isArray(request) ||
+      !positiveInteger(request.requestId) ||
+      !request.saveRequest || !positiveInteger(request.saveRequest.sequence) ||
+      !positiveInteger(request.saveRequest.selectionGeneration) ||
+      request.saveRequest.requestId !== request.requestId) {
+    throw new TypeError("Invalid Save transport request");
+  }
+  const envelope = copyAdoptionEnvelope({
+    pageSession: request.saveRequestSession,
+    rendererGeneration: request.saveRequest.rendererGeneration,
+  });
+  return {
+    saveRequestSession: envelope.pageSession,
+    requestId: request.requestId,
+    saveRequest: {
+      ...copyAdoptionIdentity(request.saveRequest, envelope, true),
+      sequence: request.saveRequest.sequence,
+      requestId: request.requestId,
+    },
+  };
+}
+
+function copyReloadTransport(request) {
+  if (!request || typeof request !== "object" || Array.isArray(request) ||
+      !isPath(request.filePath) || !isPath(request.reloadRequestPath) ||
+      !isPath(request.reloadRequestDocumentPathKey) ||
+      typeof request.reloadRequestSnapshot !== "string" ||
+      !["reloadRequestSequence", "reloadRequestTabId",
+        "reloadRequestDocumentGeneration", "reloadRequestSelectionGeneration"]
+        .every(field => positiveInteger(request[field]))) {
+    throw new TypeError("Invalid reload transport request");
+  }
+  const envelope = copyAdoptionEnvelope({
+    pageSession: request.reloadRequestSession,
+    rendererGeneration: request.reloadRequestRendererGeneration,
+  });
+  return {
+    filePath: request.filePath,
+    reloadRequestSequence: request.reloadRequestSequence,
+    reloadRequestPath: request.reloadRequestPath,
+    reloadRequestSnapshot: request.reloadRequestSnapshot,
+    reloadRequestSession: envelope.pageSession,
+    reloadRequestTabId: request.reloadRequestTabId,
+    reloadRequestDocumentGeneration: request.reloadRequestDocumentGeneration,
+    reloadRequestDocumentPathKey: request.reloadRequestDocumentPathKey,
+    reloadRequestRendererGeneration: envelope.rendererGeneration,
+    reloadRequestSelectionGeneration: request.reloadRequestSelectionGeneration,
+  };
+}
+
 function copyAdoptionTarget(request) {
   const envelope = copyAdoptionEnvelope(request);
   const diskVersion = copyDiskVersion(request.diskVersion, "disk adoption");
@@ -334,6 +385,31 @@ function copyDocumentQueryReply(result, fields) {
 }
 
 const api = Object.freeze({
+  saveMarkdown(request) {
+    const payload = copySaveTransport(request);
+    if (!isPath(request.filePath) || typeof request.content !== "string") {
+      throw new TypeError("Invalid Save transport content or path");
+    }
+    ipcRenderer.send("save-markdown-file", {
+      ...payload, filePath: request.filePath, content: request.content,
+    });
+  },
+  requestReload(request) {
+    ipcRenderer.send("reload-file", copyReloadTransport(request));
+  },
+  async acknowledgeSaveResult(request) {
+    const payload = copySaveTransport(request);
+    if (!isPath(request.path) || !positiveInteger(request.saveResultAttempt)) {
+      throw new TypeError("Invalid Save acknowledgement");
+    }
+    const result = await ipcRenderer.invoke("save-markdown-result-ack", {
+      ...payload, path: request.path, saveResultAttempt: request.saveResultAttempt,
+    });
+    if (typeof result !== "boolean") {
+      throw new TypeError("Invalid Save acknowledgement response");
+    }
+    return result;
+  },
   async acceptDocumentOpenTicket(request) {
     const result = await ipcRenderer.invoke("accept-native-document-ticket",
       copyNativeOpenTicket(request));

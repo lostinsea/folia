@@ -7542,6 +7542,199 @@ async function runDocumentControlBridgeValidation(exec) {
   );
 }
 
+async function runDocumentTransportValidation(exec) {
+  const probe = await exec(`(async () => {
+    const ipc = window.ipcRenderer, api = window.folia;
+    const originalSend = ipc.send, originalInvoke = ipc.invoke;
+    const calls = [];
+    const identity = {
+      pageSession: 'transport-probe', rendererGeneration: 1, tabId: 2,
+      documentGeneration: 3, pathKey: 'physical-target', selectionGeneration: 4,
+      sequence: 5, requestId: 6, documentRef: 'a'.repeat(64),
+    };
+    const text = ('CR\\r\\nLF\\nUnicode:\\u03bb\\ud83d\\ude00\\u0000').repeat(8192);
+    const save = { filePath: 'logical-file', content: text,
+      requestId: 6, saveRequestSession: identity.pageSession, saveRequest: identity };
+    const reload = {
+      filePath: 'logical-file', reloadRequestSequence: 7,
+      reloadRequestPath: 'canonical-target', reloadRequestSnapshot: text,
+      reloadRequestSession: identity.pageSession, reloadRequestTabId: 2,
+      reloadRequestDocumentGeneration: 3, reloadRequestDocumentPathKey: identity.pathKey,
+      reloadRequestRendererGeneration: 1, reloadRequestSelectionGeneration: 4,
+    };
+    const ack = { requestId: 6, saveRequestSession: identity.pageSession,
+      path: save.filePath, saveRequest: identity, saveResultAttempt: 8 };
+    let ackReply = false, failure = false, sendFailure = false;
+    ipc.send = function(channel, payload) {
+      if (channel !== 'save-markdown-file' && channel !== 'reload-file')
+        return originalSend.apply(this, arguments);
+      calls.push({ channel, payload });
+      if (sendFailure) throw new Error('controlled document send failure');
+    };
+    ipc.invoke = async function(channel, payload) {
+      if (channel !== 'save-markdown-result-ack')
+        return originalInvoke.apply(this, arguments);
+      calls.push({ channel, payload });
+      if (failure) throw new Error('controlled acknowledgement failure');
+      return ackReply;
+    };
+    try {
+      api.saveMarkdown({ ...save, unrelated: 'drop',
+        saveRequest: { ...identity, unrelated: 'drop' } });
+      const saveSynchronous = calls.length === 1;
+      api.requestReload({ ...reload, unrelated: 'drop' });
+      const reloadSynchronous = calls.length === 2;
+      api.saveMarkdown({ ...save, content: '', saveRequest: { ...identity, documentRef: undefined } });
+      api.requestReload({ ...reload, reloadRequestSnapshot: '' });
+      const negativeAck = await api.acknowledgeSaveResult(ack);
+      ackReply = true;
+      const positiveAck = await api.acknowledgeSaveResult({ ...ack, saveResultAttempt: 9 });
+      const validCalls = calls.slice();
+      sendFailure = true;
+      const sendFailures = [];
+      for (const [method, request] of [['saveMarkdown', save], ['requestReload', reload]]) {
+        try { await api[method](request); sendFailures.push(false); }
+        catch (error) { sendFailures.push(error.message === 'controlled document send failure'); }
+      }
+      sendFailure = false;
+      let saveRejectionSynchronous = false;
+      try {
+        const returned = api.saveMarkdown(null);
+        if (returned?.then) await returned.catch(() => {});
+      } catch (error) { saveRejectionSynchronous = error instanceof TypeError; }
+      let reloadRejectionSynchronous = false;
+      try {
+        const returned = api.requestReload(null);
+        if (returned?.then) await returned.catch(() => {});
+      } catch (error) { reloadRejectionSynchronous = error instanceof TypeError; }
+      const malformed = [];
+      for (const [method, value] of [
+        ['saveMarkdown', { ...save, saveRequest: { ...identity, requestId: 7 } }],
+        ['saveMarkdown', { ...save, saveRequestSession: 'different-session' }],
+        ['saveMarkdown', { ...save, saveRequest: { ...identity, selectionGeneration: undefined } }],
+        ['saveMarkdown', { ...save, saveRequest: { ...identity, sequence: Infinity } }],
+        ['saveMarkdown', { ...save, saveRequest: { ...identity, documentRef: null } }],
+        ['saveMarkdown', { ...save, filePath: 'bad\\u0000path' }],
+        ['saveMarkdown', { ...save, content: 3 }],
+        ['requestReload', { ...reload, reloadRequestSnapshot: null }],
+        ['requestReload', { ...reload, reloadRequestSelectionGeneration: 0 }],
+        ['requestReload', { ...reload, reloadRequestRendererGeneration: 1.5 }],
+        ['requestReload', { ...reload, reloadRequestDocumentPathKey: 'bad\\u0000path' }],
+        ['acknowledgeSaveResult', { ...ack, saveResultAttempt: 0 }],
+        ['acknowledgeSaveResult', { ...ack, saveRequest: { ...identity, requestId: 7 } }],
+      ]) {
+        const before = calls.length;
+        let rejected = false;
+        try { await api[method](value); }
+        catch (error) { rejected = error instanceof TypeError; }
+        malformed.push(rejected && calls.length === before);
+      }
+      ackReply = { accepted: true };
+      let badReply = false;
+      try { await api.acknowledgeSaveResult(ack); }
+      catch (error) { badReply = error instanceof TypeError; }
+      failure = true;
+      let transportFailure = false;
+      try { await api.acknowledgeSaveResult(ack); }
+      catch (error) { transportFailure = error.message === 'controlled acknowledgement failure'; }
+      return {
+        saveSynchronous, reloadSynchronous, saveRejectionSynchronous, reloadRejectionSynchronous,
+        malformed, negativeAck, positiveAck,
+        badReply, transportFailure, sendFailures,
+        fidelity: validCalls[0].payload.content === text &&
+          validCalls[1].payload.reloadRequestSnapshot === text &&
+          validCalls[2].payload.content === '' &&
+          validCalls[3].payload.reloadRequestSnapshot === '',
+        fields: validCalls.map(call => Object.keys(call.payload).sort().join(',')),
+        metadataMatches: Object.entries(identity).every(([key, value]) =>
+            validCalls[0].payload.saveRequest[key] === value) &&
+          Object.entries(reload).every(([key, value]) => validCalls[1].payload[key] === value) &&
+          Object.entries(identity).every(([key, value]) =>
+            validCalls[4].payload.saveRequest[key] === value),
+        saveIdentityFields: Object.keys(validCalls[0].payload.saveRequest).sort().join(','),
+        optionalRefAbsent: !('documentRef' in validCalls[2].payload.saveRequest),
+        ackAttempts: validCalls.slice(4).map(call => call.payload.saveResultAttempt),
+      };
+    } finally { ipc.send = originalSend; ipc.invoke = originalInvoke; }
+  })()`);
+  check("SEC-08 Save and reload transport reject malformed requests before any IPC",
+    probe.saveRejectionSynchronous && probe.reloadRejectionSynchronous &&
+      probe.malformed.length === 13 &&
+      probe.malformed.every(Boolean), JSON.stringify(probe));
+  check("SEC-08 Save and reload transport dispatch synchronously with exact fields and verbatim empty Unicode snapshots",
+    probe.saveSynchronous && probe.reloadSynchronous && probe.fidelity && probe.metadataMatches &&
+      probe.sendFailures.length === 2 && probe.sendFailures.every(Boolean) &&
+      probe.optionalRefAbsent &&
+      probe.fields[0] === "content,filePath,requestId,saveRequest,saveRequestSession" &&
+      probe.fields[1] === "filePath,reloadRequestDocumentGeneration,reloadRequestDocumentPathKey,reloadRequestPath,reloadRequestRendererGeneration,reloadRequestSelectionGeneration,reloadRequestSequence,reloadRequestSession,reloadRequestSnapshot,reloadRequestTabId" &&
+      probe.fields[4] === "path,requestId,saveRequest,saveRequestSession,saveResultAttempt" &&
+      probe.saveIdentityFields === "documentGeneration,documentRef,pageSession,pathKey,rendererGeneration,requestId,selectionGeneration,sequence,tabId",
+    JSON.stringify(probe));
+  check("SEC-08 Save acknowledgement preserves historical identity and false true retry attempts while rejecting bad replies",
+    probe.negativeAck === false && probe.positiveAck === true &&
+      probe.ackAttempts.join(",") === "8,9" && probe.badReply && probe.transportFailure,
+    JSON.stringify(probe));
+}
+
+async function runReloadTransportFailure(exec, sentinel) {
+  await sentinel.mute("controlled reload dispatch failure");
+  let result;
+  try {
+    result = await exec(`(() => {
+      const original = window.folia;
+      const requests = [];
+      let fail = false, reenter = false, nestedSequence = 0;
+      window.folia = { ...original, requestReload(request) {
+        requests.push(request);
+        if (fail) {
+          fail = false;
+          if (reenter && window.reloadCurrentFile()) {
+            nestedSequence = window.getLatestReloadRequestSequence(window.currentFilePath);
+          }
+          throw new Error('controlled reload dispatch failure');
+        }
+      } };
+      try {
+        const sent = window.reloadCurrentFile();
+        const prior = window.getLatestReloadRequestSequence(window.currentFilePath);
+        showFileUpdateNotification();
+        fail = true;
+        const refused = window.reloadCurrentFile();
+        const first = { sent, prior, refused, requests: requests.length,
+          latest: window.getLatestReloadRequestSequence(window.currentFilePath),
+          prompt: document.getElementById('fileUpdateToast').classList.contains('show'),
+          notification: document.getElementById('notificationMessage').textContent };
+        fail = true; reenter = true;
+        const reentrantRefused = window.reloadCurrentFile();
+        return { ...first, reentrantRefused, nestedSequence,
+          reentrantLatest: window.getLatestReloadRequestSequence(window.currentFilePath),
+          reentrantPrompt: document.getElementById('fileUpdateToast').classList.contains('show') };
+      } finally { window.folia = original; }
+    })()`);
+    await sentinel.drain();
+    check("SEC-08 reload dispatch failure setup reaches a real owner and observable delivery exception",
+      result.sent && result.prior > 0 && result.requests === 2 &&
+        sentinel.currentMute().suppressed.some(hit =>
+          hit.kind === "console-error" && hit.detail.includes("controlled reload dispatch failure")),
+      JSON.stringify(result));
+    check("SEC-08 an unsent reload preserves its earlier authoritative request and visible update prompt",
+      result.refused === false && result.latest === result.prior && result.prompt &&
+        result.notification.includes("controlled reload dispatch failure"), JSON.stringify(result));
+    check("SEC-08 a newer reentrant reload retains its authority and successful prompt dismissal",
+      result.reentrantRefused === false && result.nestedSequence > result.prior &&
+        result.reentrantLatest === result.nestedSequence && result.reentrantPrompt === false,
+      JSON.stringify(result));
+  } finally { await sentinel.unmute(); }
+  const sequence = await exec(`(() => {
+    if (!window.reloadCurrentFile()) return 0;
+    return window.getLatestReloadRequestSequence(window.currentFilePath);
+  })()`);
+  const settled = sequence > 0 && await waitForCondition(exec,
+    `window.CustomTabs.__reloadState().acceptedSequence === ${sequence}`, 8000);
+  check("SEC-08 ordinary reload remains usable after a refused transport dispatch",
+    settled && sequence > result.prior, JSON.stringify({ sequence, result }));
+}
+
 async function runDocumentControlCloseJourney(exec) {
   const file = path.join(dir, "document-control-close.md");
   const jsFile = JSON.stringify(file);
@@ -9825,6 +10018,7 @@ async function run(win) {
     "readOwnedTabDiskSnapshot", "readDialogExtra",
     "restoreSession", "saveSessionLayout", "readOpenTicketSnapshot",
     "acceptDocumentOpenTicket", "cancelDocumentOpenTicket", "openReadme",
+    "saveMarkdown", "requestReload", "acknowledgeSaveResult",
   ].sort().join(",");
   check(
     "SEC-08 main launch retains production owned-read and only its explicitly marked PDF test signal",
@@ -10225,6 +10419,7 @@ async function run(win) {
   );
   await runAdoptionBridgeValidation(exec);
   await runDocumentControlBridgeValidation(exec);
+  await runDocumentTransportValidation(exec);
   const bridgeValidation = await exec(`
     (async () => {
       const request = ${JSON.stringify(mainOwnedRefresh.validPayload)};
@@ -10770,6 +10965,7 @@ async function run(win) {
   );
 
   await runDocumentControlCloseJourney(exec);
+  await runReloadTransportFailure(exec, sentinel);
   if (ownedReadFocusedHarness || dialogExtraFocusedHarness) {
     if (dialogExtraFocusedHarness) {
       await clearFixtureTabs("dialog bridge preflight");
@@ -25722,6 +25918,23 @@ async function runF22QueueFocusedScenario(exec) {
       const alerts = [];
       const sentinel = "__f22_queue_alert_sentinel__";
       window.alert = (message) => alerts.push(String(message));
+      const originalApi = window.folia;
+      const dispatches = [], acknowledgements = [];
+      window.folia = {
+        ...originalApi,
+        saveMarkdown(request) {
+          dispatches.push({
+            pending: window.getPendingSaveStatus().count,
+            requestId: request.requestId, sequence: request.saveRequest.sequence,
+          });
+          return originalApi.saveMarkdown(request);
+        },
+        async acknowledgeSaveResult(request) {
+          const accepted = await originalApi.acknowledgeSaveResult(request);
+          acknowledgements.push(accepted);
+          return accepted;
+        },
+      };
       try {
         window.alert(sentinel);
         const alertCaptureLive = alerts.length === 1 && alerts[0] === sentinel;
@@ -25746,9 +25959,12 @@ async function runF22QueueFocusedScenario(exec) {
           alerts,
           activePath: window.currentFilePath,
           activeEdit: isEditMode,
+          dispatches,
+          acknowledgements,
         });
       } finally {
         window.alert = realAlert;
+        window.folia = originalApi;
       }
     })()
   `));
@@ -25775,9 +25991,71 @@ async function runF22QueueFocusedScenario(exec) {
     "focused queue serialises two same-path Save operations",
     setup &&
       after.saveQueueMaxActiveForSinglePath === 1 &&
-      after.saveQueueOverlapCount === before.saveQueueOverlapCount,
+      after.saveQueueOverlapCount === before.saveQueueOverlapCount &&
+      fs.readFileSync(queueFile, "utf8") === "# Queue focused\n\nQUEUE_SECOND\n",
     JSON.stringify({ before, after, alerts: outcome.alerts }),
   );
+  check("SEC-08 actual same-task Saves use the fixed transport only after correlated pending entries exist",
+    setup && outcome.dispatches.length === 2 &&
+      outcome.dispatches[0].pending === 1 && outcome.dispatches[1].pending === 2 &&
+      outcome.dispatches[0].requestId < outcome.dispatches[1].requestId &&
+      outcome.dispatches[0].sequence < outcome.dispatches[1].sequence,
+    JSON.stringify(outcome));
+  check("SEC-08 actual Save outcomes acknowledge through the fixed port without stranded Main deliveries",
+    setup && outcome.acknowledgements.length === 2 &&
+      outcome.acknowledgements.every(value => value === true) &&
+      after.saveOutcomeDeliveryCount === 0,
+    JSON.stringify({ outcome, deliveries: after.saveOutcomeDeliveryCount }));
+  const failureFile = path.join(dir, "save-dispatch-failure.md");
+  const failureBase = "# Save dispatch fixture\n\nDISPATCH_FAILURE_BASE\n";
+  write(failureFile, failureBase);
+  let chooserCalls = 0, failureOpened = false;
+  const restoreChooser = replaceMethod(dialog, "showOpenDialog", async () => {
+    chooserCalls += 1;
+    return { canceled: false, filePaths: [failureFile] };
+  });
+  try {
+    await exec(`window.ipcRenderer.send('open-file-dialog'); null;`);
+    const opened = await waitForCondition(exec, `
+      window.currentFilePath === ${JSON.stringify(failureFile)} &&
+      document.getElementById('viewer').textContent.includes('DISPATCH_FAILURE_BASE') &&
+      !!window.CustomTabs.getDocumentDescriptor()
+    `);
+    if (opened) {
+      await exec("if (!isEditMode) toggleEditBtn.click(); null;");
+      failureOpened = await waitForCondition(exec, `
+        isEditMode && window.markdownEditor.value === ${JSON.stringify(failureBase)}
+      `);
+    }
+  } finally { restoreChooser(); }
+  check("SEC-08 Save dispatch refusal has its own real admitted editable document",
+    failureOpened && chooserCalls === 1, JSON.stringify({ failureFile, chooserCalls }));
+  if (!failureOpened) throw new Error("Save dispatch fixture did not open");
+  const diskBeforeFailure = fs.readFileSync(failureFile, "utf8");
+  const failure = await exec(`(async () => {
+    const originalApi = window.folia, originalAlert = window.alert;
+    const alerts = [];
+    let pendingBeforeFailure = 0;
+    window.alert = message => alerts.push(String(message));
+    window.folia = { ...originalApi, saveMarkdown() {
+      pendingBeforeFailure = window.getPendingSaveStatus().count;
+      throw new Error('controlled Save dispatch failure');
+    } };
+    try {
+      markdownEditor.value = '# Queue focused\\n\\nUNDELIVERED_EDIT\\n';
+      markdownEditor.dispatchEvent(new Event('input'));
+      const saved = await saveMarkdownFile();
+      return { saved, pendingBeforeFailure, pending: window.getPendingSaveStatus().count,
+        dirty: hasUnsavedChanges, editor: markdownEditor.value, alerts };
+    } finally { window.folia = originalApi; window.alert = originalAlert; }
+  })()`);
+  check("SEC-08 an actual Save dispatch throw settles its pending entry without writing or losing edits",
+    failure.saved === false && failure.pendingBeforeFailure === 1 &&
+      failure.pending === 0 && failure.dirty &&
+      failure.editor === "# Queue focused\n\nUNDELIVERED_EDIT\n" &&
+      failure.alerts.some(message => message.includes("controlled Save dispatch failure")) &&
+      fs.readFileSync(failureFile, "utf8") === diskBeforeFailure,
+    JSON.stringify(failure));
   check("focused queue uncaught JS error listener was proven live", errorListener.seen, JSON.stringify(errorListener));
   const uncaughtErrors = JSON.parse(await exec(`JSON.stringify(window.__e2eErrors || [])`));
   check("focused queue had no uncaught JavaScript errors", uncaughtErrors.length === 0, JSON.stringify(uncaughtErrors));

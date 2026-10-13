@@ -350,7 +350,42 @@ it. Sol also caught an understated description of the lifecycle selector's
 omitted scenarios; that evidence-scope wording is corrected. No outstanding
 review disagreement remains on this tranche.
 
-Next: remaining fixed Save/reload/result/event and browser path consumers,
+**Save/reload transport — IMPLEMENTED / PROVEN; review converged, unintegrated.**
+The actual Save/reload/result-acknowledgement callers now use three fixed
+validated preload methods. Save and reload retain same-stack dispatch; result
+acknowledgement retains asynchronous rejection and exact boolean retry replies.
+Metadata is copied and validated; document text is type-checked and passed
+through verbatim, with no new IPC, read, digest or content scan.
+Both fresh Sol/Luna design reviews support the bounded transition; Sol additionally
+required restoring unsent reload bookkeeping and retaining its update prompt.
+The actual caller now surfaces delivery errors and restores only its own sequence.
+Boundary controls preserve full Unicode/CRLF/NUL document text and empty content;
+real queue controls prove pending-before-dispatch, Main serialization, acknowledged
+outcomes and rejected delivery without disk writes or lost edits. Independent
+Sol/Luna implementation reviews found no product blockers. Sol's nonblocking
+queue-byte/reentrant coverage gaps and Luna's underlying-send-throw gap are
+corrected, with no outstanding disagreement.
+The final owned baseline is 46/46 (`transport-owned-final-r3.log`); final queue-only
+is 12/12 (`transport-queue-final-r4.log`). An earlier existing F22 focused
+cross-check is 75/75
+(`transport-queue-baseline-r3.log`); its filename does not make it the narrow
+queue-only selector. R782 and R784-R788 are individually exact PROVEN in
+`transport-exact-proofs-r2.log`. That combined attempt remains nonpassing:
+R102 exposed the later refusal test reusing the conflicted queue tab.
+The refusal test now uses a separate actual native-dialog-admitted editable
+document, with explicit descriptor/DOM/editor setup and unconditional chooser
+restoration. R102, R781 and R783 are individually exact PROVEN in
+`transport-queue-exact-proofs-r4.log`; each completed window restored source
+hashes exactly. The failed plain-path fixture attempt remains retained; it did
+not supply Main approval and cannot prove admitted setup.
+Both independent reviews also converge on the final decoupled native fixture
+and its unconditional cleanup. This is not final isolation,
+installed-artifact acceptance or a measurement of responsiveness.
+Final source packaging is 365/0 (`transport-packaging-final-r1.log`), and the
+final anchor dry run resolves (`transport-final-anchors-r2.log`); a dry run is
+not a semantic proof.
+
+Next: remaining fixed result/event and browser path consumers,
 then production Node-off/context-isolation/sandbox and genuine live-grant
 foreign-sender coverage. Provisional/raw compatibility paths still exist;
 this foundation is not full path-authority closure. Representative final-source
