@@ -238,7 +238,7 @@ const DOCUMENT_EVENT_RECORD_FIELDS = {
     "pathKey", "documentUrl", "openTicket"],
   openRequest: ["token", "targetIndex", "path"],
   reloadRequest: ["sequence", "path", "snapshot", "session", "tabId",
-    "documentGeneration", "pathKey", "rendererGeneration", "selectionGeneration"],
+    "documentGeneration", "pathKey", "rendererGeneration", "selectionGeneration", "documentRef"],
   reloadSession: ["epoch", "rendererGeneration", "pageSession"],
   saveRequest: DOCUMENT_EVENT_IDENTITY_FIELDS,
   watcher: ["pageSession", "rendererGeneration", "selectionGeneration",
@@ -324,6 +324,8 @@ function copyReloadTransport(request) {
   if (!request || typeof request !== "object" || Array.isArray(request) ||
       !isPath(request.filePath) || !isPath(request.reloadRequestPath) ||
       !isPath(request.reloadRequestDocumentPathKey) ||
+      typeof request.reloadRequestDocumentRef !== "string" ||
+      !/^[a-f0-9]{64}$/.test(request.reloadRequestDocumentRef) ||
       typeof request.reloadRequestSnapshot !== "string" ||
       !["reloadRequestSequence", "reloadRequestTabId",
         "reloadRequestDocumentGeneration", "reloadRequestSelectionGeneration"]
@@ -343,6 +345,7 @@ function copyReloadTransport(request) {
     reloadRequestTabId: request.reloadRequestTabId,
     reloadRequestDocumentGeneration: request.reloadRequestDocumentGeneration,
     reloadRequestDocumentPathKey: request.reloadRequestDocumentPathKey,
+    reloadRequestDocumentRef: request.reloadRequestDocumentRef,
     reloadRequestRendererGeneration: envelope.rendererGeneration,
     reloadRequestSelectionGeneration: request.reloadRequestSelectionGeneration,
   };

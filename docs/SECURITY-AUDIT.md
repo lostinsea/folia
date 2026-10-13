@@ -632,6 +632,52 @@ source packaging 380/0.
 Production security flags and other provisional authority/metadata consumers
 are unchanged; this is not complete renderer isolation or performance evidence.
 
+**Native-reference authority closure (2026-10-13, implemented/proven,
+unintegrated).**
+Main owner and closing identities now require a current native reference
+before canonical probing. Retained live-owner and Save scopes also bind that
+reference; loss of write authority still uses the correlated terminal
+settlement path, not listener loss. An authenticated owner cannot authorize an
+independent adoption source: native/history lexical permission precedes its
+existing attestation, and captured source/proposal/old-owner authority is
+rechecked before grants, commit probes, both post-confirmation paths and
+completion. Nullable old-owner queries/preparation remain legitimate.
+Manual reload carries the actual reference through the existing fixed
+request/event and tab validation, authorizes the retained physical target before
+using the owned stable reader, and rechecks ownership after its body. Background
+settlement does not require still being active or watched.
+Sol's independent implementation review identified pre-refusal I/O through an
+already-retargeted link; Luna's first review did not identify it. The correction
+and actual no-body-read control passed on the preceding reader bytes.
+In round two Sol found an asynchronous-open retarget window; Luna found that
+an existing dangling symlink hid its deleted target. Both findings are accepted.
+Owned reads now open the retained physical name and attest descriptor/target
+identity before body I/O; missing-target refusal stats that retained target.
+Actual queued-open and watcher-stopped dangling-file-link controls pass in
+`native-authority-positive-r7.log` (37/37). This safety check adds one pre-body
+target stat, with no extra body read or metadata IPC; responsiveness is not
+qualified.
+The third independent review agrees on no Sol blocker; Luna additionally found
+deletion hidden by an alias retarget after descriptor acquisition. Reload
+refusal now checks the still-current retained target, and closing checks that
+same physical target instead of the replacement occupying its logical path.
+Real watcher-stopped queued deletion and warned-close controls pass (43/43 in
+`native-authority-positive-r8.log`). This failure-path classification adds no normal
+read/IPC, and the existing closing stat is redirected, not duplicated.
+The earlier optional-reference compatibility proofs R767/R768 are historical
+only; current refusal contracts replace them.
+Final unmutated native/core-reader/private/approved controls are 43/43, 81/81,
+61/61 and 21/21; source packaging is 380/0 (the corresponding
+`native-authority-*-final-*` logs). R651, R714-R718 and R833-R843 are individually
+exact PROVEN in `native-authority-final-exact-proofs-r7.log`, with exact source
+restoration. The native rendered capture was viewed. Fresh independent Sol/Luna
+correction reviews, including the corrected mutation witness, converge with
+no blockers. Their earlier distinct findings and failed campaigns remain
+recorded in the roadmap; the unchanged broader provisional confirmation
+fixture remains nongreen, not certified by the native-backed core selector.
+Browser physical helpers, production flags and
+measured responsiveness are subsequent gates, not covered by this unit.
+
 The **production main window still has Node enabled and isolation disabled**.
 Preparation, commit, completion and abandonment of disk-adoption capabilities
 now use fixed copied/validated preload methods; main's actual authority,

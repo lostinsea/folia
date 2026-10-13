@@ -4800,6 +4800,8 @@
         request.documentGeneration <= 0 ||
         typeof request.path !== "string" ||
         typeof request.pathKey !== "string" ||
+        typeof request.documentRef !== "string" ||
+        !/^[a-f0-9]{64}$/.test(request.documentRef) ||
         typeof request.snapshot !== "string" ||
         typeof request.session !== "string" ||
         request.session !== currentSession ||
@@ -4819,6 +4821,7 @@
       if (
         !targetState ||
         targetState.generation !== request.documentGeneration ||
+        targetState.admission?.ref !== request.documentRef ||
         tabPathKey(targetTab) !== request.pathKey
       ) {
         return "foreign-document-generation";

@@ -137,6 +137,14 @@ const TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL = Object.freeze([
   "Shutdown approval renderer unusable: webContents destroyed",
 ]);
 const VIRTUAL_SUITES = Object.freeze({
+  "test:sec08-owned-read-core-evidence": Object.freeze({
+    npmScript: "test:tabs",
+    environment: { SEC08_OWNED_READ_FOCUSED_HARNESS: "1", SEC08_OWNED_READ_CORE_ONLY: "1" },
+  }),
+  "test:sec08-native-authority-evidence": Object.freeze({
+    npmScript: "test:tabs",
+    environment: { SEC08_NATIVE_AUTHORITY_FOCUSED_HARNESS: "1" },
+  }),
   "test:sec08-approved-request-evidence": Object.freeze({
     npmScript: "test:tabs",
     environment: { SEC08_APPROVED_REQUEST_FOCUSED_HARNESS: "1" },
@@ -16597,21 +16605,32 @@ const REVERTS = [
   },
   {
     id: "R651",
-    suite: "test:tabs",
+    suite: "test:sec08-native-authority-evidence",
     what: "accept a reload request whose sender is not the approval owner",
     file: MAIN,
     from:
-      'ipcMain.on("reload-file", (event, data) => {\n' +
+      'ipcMain.on("reload-file", async (event, data) => {\n' +
       "  if (!isApprovalSender(event)) {",
     to:
-      'ipcMain.on("reload-file", (event, data) => {\n' +
+      'ipcMain.on("reload-file", async (event, data) => {\n' +
       "  if (false) { /* reverted for proof: foreign reload sender is accepted */",
+    also: [{
+      file: MAIN,
+      from: "function closingDocumentOwnerFromEnvelope(event, data) {\n  if (\n    !isApprovalSender(event) ||",
+      to: "function closingDocumentOwnerFromEnvelope(event, data) {\n  if (\n    false ||",
+    }, {
+      file: MAIN,
+      from: "function authorisedTabDiskRead(event, data) {\n  if (\n    !isApprovalSender(event) ||",
+      to: "function authorisedTabDiskRead(event, data) {\n  if (\n    false ||",
+    }],
     expect: [
-      /^reload ownership drops foreign sender, sequence, path, and page-session replies without inventing a conflict, while a moved live snapshot conflicts$/,
+      /^SEC-08 genuine foreign sender cannot use the Main owner's native reference for reload or adoption$/,
     ],
     mustPass: [
-      /^the retained freeze refuses public setters, tab operations, keyboard commands, and IPC completion paths without advancing the document$/,
+      /^SEC-08 native authority starts from a real painted admitted owner$/,
+      /^SEC-08 admitted manual reload preserves real Save baseline and paints fresh disk bytes$/,
     ],
+    requireMustPassAssertions: true, requireExactFailures: true,
   },
   {
     id: "R652",
@@ -17949,7 +17968,7 @@ const REVERTS = [
             "        rendererGeneration: identity.rendererGeneration,\n" +
             "        owner: identity,\n" +
             "      });",
-          suite: "test:sec08-owned-read-evidence",
+          suite: "test:sec08-owned-read-core-evidence",
           expect: [
             /^SEC-08 changed clean-tab refresh reads through main without renderer content reads or a modal$/,
           ],
@@ -17964,7 +17983,7 @@ const REVERTS = [
         },
         {
           id: "R715",
-          what: "accept an unknown requester tab identity as an otherwise exact known owner",
+          what: "accept an unknown requester through native-reference binding and retained-owner fallback",
           file: MAIN,
           from:
             "  const identity = normaliseDocumentIdentity(data.owner, data.filePath, {\n" +
@@ -17986,7 +18005,16 @@ const REVERTS = [
             "            known.spelling === exact.spelling &&\n" +
             "            isKnownDocumentOwner(known),\n" +
             "        ));",
-          suite: "test:sec08-owned-read-evidence",
+          also: [{
+            file: MAIN,
+            from: "  const admission = admittedDocumentReference(\n" +
+              "    owner.documentRef, owner, filePath, forAdoption,\n" +
+              "  );",
+            to: "  const admission = admittedDocumentReference(\n" +
+              "    owner.documentRef, null, filePath, forAdoption,\n" +
+              "  );",
+          }],
+          suite: "test:sec08-owned-read-core-evidence",
           expect: [
             /^SEC-08 main-owned tab reads refuse forged paths and foreign owners without denying the valid owner$/,
           ],
@@ -18006,7 +18034,7 @@ const REVERTS = [
           file: TABS,
           from: "      if (!current) return null;",
           to: "      if (false) return null;",
-          suite: "test:sec08-owned-read-evidence",
+          suite: "test:sec08-owned-read-core-evidence",
           expect: [
             /^SEC-08 a tab switch superseded during the held main read keeps its prior cache and refuses disk adoption$/,
           ],
@@ -18021,16 +18049,21 @@ const REVERTS = [
         },
         {
           id: "R717",
-          what: "skip the registered physical-target comparison after opening a case-preserved logical spelling",
+          what: "omit registered physical-target stats for an admitted case-preserved logical spelling",
           file: MAIN,
           from:
             "      const targetStats = filePath === owner.readTarget\n" +
             "        ? pathStats\n" +
             "        : await fs.promises.stat(owner.readTarget);",
           to: "      const targetStats = pathStats;",
-          suite: "test:sec08-owned-read-evidence",
+          also: [{
+            file: MAIN,
+            from: "      const targetBefore = await fs.promises.stat(owner.readTarget);",
+            to: "      const targetBefore = before;",
+          }],
+          suite: "test:sec08-owned-read-core-evidence",
           expect: [
-            /^SEC-08 case-preserved owned reads open the logical spelling and compare its registered physical target$/,
+            /^SEC-08 case-preserved owned reads open and attest the registered physical target of a native logical spelling$/,
           ],
           mustPass: [
             /^SEC-08 owned-read case probe changes only its registered logical spelling's case$/,
@@ -18064,7 +18097,7 @@ const REVERTS = [
             "          ) return null;\n" +
             "          return null;\n" +
             "        }",
-          suite: "test:sec08-owned-read-evidence",
+          suite: "test:sec08-owned-read-core-evidence",
           expect: [
             /^SEC-08 main snapshot retries same-path inode replacement and returns only replacement bytes$/,
           ],
@@ -19135,34 +19168,9 @@ const REVERTS = [
           ],
           requireMustPassAssertions: true, requireExactFailures: true,
         },
-        {
-          id: "R767",
-          what: "look up an older provisional owner without its authenticated path spelling at the identity retirement fence",
-          file: MAIN,
-          from: "    const knownKey = documentOwnerKey({ ...owner, spelling });",
-          to: "    const knownKey = documentOwnerKey(owner);",
-          suite: "test:sec08-dialog-extra-evidence",
-          expect: [/^SEC-08 a retained provisional tab keeps selection Save and close authority after native retirement pruning$/],
-          mustPass: [
-            /^SEC-08 retirement fence setup retains a real older provisional owner without a page-supplied spelling$/,
-            /^SEC-08 native junction spelling opens its exact scoped tab without rebinding existing edits$/,
-          ],
-          requireMustPassAssertions: true, requireExactFailures: true,
-        },
-        {
-          id: "R768",
-          what: "look up an older provisional owner without its authenticated path spelling at the closing retirement fence",
-          file: MAIN,
-          from: "    const knownKey = documentOwnerKey({ ...data, spelling });",
-          to: "    const knownKey = documentOwnerKey(data);",
-          suite: "test:sec08-dialog-extra-evidence",
-          expect: [/^SEC-08 a retained provisional tab keeps selection Save and close authority after native retirement pruning$/],
-          mustPass: [
-            /^SEC-08 retirement fence setup retains a real older provisional owner without a page-supplied spelling$/,
-            /^SEC-08 native junction spelling opens its exact scoped tab without rebinding existing edits$/,
-          ],
-          requireMustPassAssertions: true, requireExactFailures: true,
-        },
+        // R767/R768 remain consumed historical IDs. Their provisional-owner
+        // compatibility contract was removed by mandatory native references,
+        // now protected by R833/R834; retained outcomes are not reclassified.
         {
           id: "R769",
           what: "reuse a canonical physical sibling instead of the exact admitted logical tab on native open",
@@ -20209,6 +20217,206 @@ const REVERTS = [
             /^corrupt-unmarked: admission-only approved reopen retains native provenance without importing a corrupt manifest$/,
             /^corrupt-unmarked: the admission-only browser refusal fixture reaches a newly issued real result without replacing the live tab$/,
             /^corrupt-unmarked: the admission-only native refusal fixture reaches a newly issued real result without replacing the live tab$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R833",
+          what: "let an absent native reference reach owner path normalization",
+          file: MAIN,
+          from: "    owner.documentRef, owner, filePath, forAdoption,\n  );\n  if (!admission) return null;",
+          to: "    owner.documentRef, owner, filePath, forAdoption,\n  );\n  if (owner.documentRef !== undefined && !admission) return null;",
+          suite: "test:sec08-native-authority-evidence",
+          expect: [/^SEC-08 fabricated same-page owner without native reference is refused before path probing or registration$/],
+          mustPass: [
+            /^SEC-08 native authority starts from a real painted admitted owner$/,
+            /^SEC-08 admitted native Save writes and settles through the actual editor and fixed port$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R834",
+          what: "allow a current native owner to lose its reference at the closing boundary",
+          file: MAIN,
+          from: "    data.documentRef, data, data.filePath,\n  );\n  if (!admission || !spelling) return null;",
+          to: "    data.documentRef, data, data.filePath,\n  );\n  if (!spelling) return null;",
+          suite: "test:sec08-native-authority-evidence",
+          expect: [/^SEC-08 removing a live native reference cannot query or retire its Main owner$/],
+          mustPass: [
+            /^SEC-08 admitted manual reload preserves real Save baseline and paints fresh disk bytes$/,
+            /^SEC-08 actual close warns, acknowledges and retires only the deleted fixture owner$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R835",
+          what: "continue independent source probes after native/history permission refusal",
+          file: MAIN,
+          from: '  } catch (error) {\n    log("Refusing disk adoption query source:", error.message);\n    event.returnValue = unknown;\n    return;\n  }',
+          to: "  } catch (error) {\n    sourcePermission = { filePath: data.filePath };\n  }",
+          also: [{
+            file: MAIN,
+            from: '  } catch (error) {\n    log("Refusing disk adoption preparation source:", error.message);\n    return refuse("unapproved-adoption-source");\n  }',
+            to: "  } catch (error) {\n    sourcePermission = { filePath: data.filePath };\n  }",
+          }],
+          suite: "test:sec08-native-authority-evidence",
+          expect: [/^SEC-08 native owner cannot authorize an unapproved independent query or adoption source$/],
+          mustPass: [
+            /^SEC-08 native authority starts from a real painted admitted owner$/,
+            /^SEC-08 approved nullable-owner query and ref-bearing independent preparation remain usable$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R836",
+          what: "grant an adoption after its real proposed native reference retires during the body read",
+          file: MAIN,
+          from: "    !diskAdoptionAuthorityIsCurrent(sourcePermission, proposed, owner, data.ownerFilePath) ||",
+          to: "    false ||",
+          suite: "test:sec08-native-authority-evidence",
+          expect: [/^SEC-08 held native adoption cannot return content or grant authority after reference retirement$/],
+          mustPass: [
+            /^SEC-08 native adoption revocation control holds a successful body from a real admitted source$/,
+            /^SEC-08 native adoption revocation closes the actual owner and restores the previous document$/,
+            /^SEC-08 approved nullable-owner query and ref-bearing independent preparation remain usable$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R837",
+          what: "deliver a stable reload body after the same-page native owner was closed",
+          file: MAIN,
+          from: "    if (!snapshot || !retainedOwner || !freshOwner ||\n        freshOwner.readTarget !== owner.readTarget) {",
+          to: "    if (!snapshot) {",
+          suite: "test:sec08-native-authority-evidence",
+          expect: [/^SEC-08 held native reload cannot return content or grant authority after reference retirement$/],
+          mustPass: [
+            /^SEC-08 native reload revocation control holds a successful body from a real admitted source$/,
+            /^SEC-08 native reload revocation closes the actual owner and restores the previous document$/,
+            /^SEC-08 admitted manual reload preserves real Save baseline and paints fresh disk bytes$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R838",
+          what: "accept malformed reload references before invoking the fixed transport",
+          file: path.join(ROOT, "src", "main-preload.js"),
+          from: '      typeof request.reloadRequestDocumentRef !== "string" ||\n      !/^[a-f0-9]{64}$/.test(request.reloadRequestDocumentRef) ||',
+          to: "",
+          suite: "test:sec08-native-authority-evidence",
+          expect: [/^SEC-08 Save and reload transport reject malformed requests before any IPC$/],
+          mustPass: [
+            /^SEC-08 Save and reload transport dispatch synchronously with exact fields and verbatim empty Unicode snapshots$/,
+            /^SEC-08 admitted manual reload preserves real Save baseline and paints fresh disk bytes$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R839",
+          what: "read a newly retargeted logical link before checking its retained native target",
+          file: MAIN,
+          from: "  const authorisedOwner = authorisedTabDiskRead(event, readRequest);\n" +
+            "  if (!sameDocumentOwner(owner, authorisedOwner) ||\n" +
+            "      authorisedOwner.readTarget !== owner.readTarget) {\n" +
+            "    safeSendReloadResult(scope, false, {\n" +
+            "      error: reloadTargetRefusalError(owner, filePath),\n" +
+            "      path: filePath, reloadRequest,\n    });\n    return;\n  }\n",
+          to: "",
+          suite: "test:sec08-native-authority-evidence",
+          expect: [/^SEC-08 manual reload rejects a retargeted logical path before opening or reading a body$/],
+          mustPass: [
+            /^SEC-08 manual reload before-dispatch control starts with the real retained target and a distinct existing destination$/,
+            /^SEC-08 before-dispatch control closes its actual native tab and restores the previous document$/,
+            /^SEC-08 admitted manual reload preserves real Save baseline and paints fresh disk bytes$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R840",
+          what: "mistake a still-existing symbolic link for its deleted retained native target",
+          file: MAIN,
+          from: "    fs.statSync(owner.readTarget);",
+          to: "    fs.lstatSync(filePath);",
+          suite: "test:sec08-native-authority-evidence",
+          expect: [
+            /^SEC-08 admitted dangling reload reports the missing retained target and records deletion without body I\/O$/,
+            /^SEC-08 post-open retarget refusal records the missing retained target without body I\/O$/,
+          ],
+          mustPass: [
+            /^SEC-08 dangling reload control retains a real symbolic link after deleting its admitted target with the watcher stopped$/,
+            /^SEC-08 dangling reload control retires its deleted native owner and restores the previous document$/,
+            /^SEC-08 admitted manual reload preserves real Save baseline and paints fresh disk bytes$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 2,
+        },
+        {
+          id: "R841",
+          what: "follow a retargeted logical alias during queued open and read before retained-descriptor attestation",
+          file: MAIN,
+          from: '      handle = await fs.promises.open(owner.readTarget, "r");',
+          to: '      handle = await fs.promises.open(filePath, "r");',
+          also: [{
+            file: MAIN,
+            from: "      const currentOwner = authorisedTabDiskRead(event, data);\n" +
+              "      if (!sameDocumentOwner(owner, currentOwner) ||\n" +
+              "          currentOwner.readTarget !== owner.readTarget) return null;\n" +
+              "      const targetBefore = await fs.promises.stat(owner.readTarget);\n" +
+              "      const retained = knownDocumentOwners.get(documentOwnerKey(owner));\n" +
+              "      if (!sameDocumentOwner(owner, retained) ||\n" +
+              "          retained.documentRef !== owner.documentRef ||\n" +
+              "          retained.readTarget !== owner.readTarget ||\n" +
+              "          !isKnownDocumentOwner(retained)) return null;\n" +
+              "      if (!targetBefore.isFile() ||\n" +
+              "          before.dev !== targetBefore.dev || before.ino !== targetBefore.ino) {\n" +
+              "        if (targetBefore.isFile() && attempt < MAX_STABLE_FILE_READ_ATTEMPTS) continue;\n" +
+              "        throw new Error(`File changed repeatedly before being read: ${filePath}`);\n" +
+              "      }\n",
+            to: "",
+          }],
+          suite: "test:sec08-native-authority-evidence",
+          expect: [
+            /^SEC-08 queued reload open remains physically bound and refuses the retarget before any body read$/,
+            /^SEC-08 post-open retarget refusal records the missing retained target without body I\/O$/,
+          ],
+          mustPass: [
+            /^SEC-08 manual reload open-handoff control starts with the real retained target and a distinct existing destination$/,
+            /^SEC-08 open-handoff control closes its actual native tab and restores the previous document$/,
+            /^SEC-08 held native reload cannot return content or grant authority after reference retirement$/,
+            /^SEC-08 deleted queued-open control actually retargets its live alias after descriptor acquisition with its watcher stopped$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 2,
+        },
+        {
+          id: "R842",
+          what: "lose deletion evidence when a logical alias retargets after its retained descriptor opens",
+          file: MAIN,
+          from: "        error: retainedOwner\n" +
+            "          ? reloadTargetRefusalError(retainedOwner, filePath)\n" +
+            '          : "File reload refused: document or file target changed",',
+          to: '        error: "File reload refused: document or file target changed",',
+          suite: "test:sec08-native-authority-evidence",
+          expect: [/^SEC-08 post-open retarget refusal records the missing retained target without body I\/O$/],
+          mustPass: [
+            /^SEC-08 deleted queued-open control actually retargets its live alias after descriptor acquisition with its watcher stopped$/,
+            /^SEC-08 retargeted close queries the deleted retained target and actually warns before retirement$/,
+            /^SEC-08 held native reload cannot return content or grant authority after reference retirement$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R843",
+          what: "check a retargeted logical alias instead of the retained document when closing",
+          file: MAIN,
+          from: "      fs.statSync(retained.readTarget);",
+          to: "      fs.statSync(filePath);",
+          suite: "test:sec08-native-authority-evidence",
+          expect: [/^SEC-08 retargeted close queries the deleted retained target and actually warns before retirement$/],
+          mustPass: [
+            /^SEC-08 retargeted close control has a missing retained target and a live replacement with its actual watcher stopped$/,
+            /^SEC-08 post-open retarget refusal records the missing retained target without body I\/O$/,
+            /^SEC-08 actual close warns, acknowledges and retires only the deleted fixture owner$/,
           ],
           requireMustPassAssertions: true, requireExactFailures: true,
         },
@@ -21291,7 +21499,7 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760";
+      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760,R840,R841";
   const toolbarAllowanceIsRecordScoped =
     REVERTS.filter((r) =>
       exactShutdownTailForMutation(r) === TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL,

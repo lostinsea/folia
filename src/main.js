@@ -731,28 +731,11 @@ function normaliseDocumentIdentity(
   ) {
     return null;
   }
-  const admittedTabKey = [
-    owner.pageSession, owner.rendererGeneration, owner.tabId,
-  ].join("\0");
   const spelling = filePathSpellingKey(filePath);
-  const admission = owner.documentRef === undefined
-    ? null : admittedDocumentReference(owner.documentRef, owner, filePath, forAdoption);
-  if ((owner.documentRef !== undefined && !admission) ||
-      (admittedOwnerTabs.has(admittedTabKey) && !admission)) return null;
-  if (!admission && retiredAdmissionScope ===
-      `${owner.pageSession}\0${owner.rendererGeneration}` &&
-      owner.tabId <= retiredAdmissionTabFloor) {
-    const knownKey = documentOwnerKey({ ...owner, spelling });
-    const known = knownDocumentOwners.get(knownKey);
-    const provisionalAdoption = forAdoption && Array.from(knownDocumentOwners).some(
-      ([key, candidate]) => !candidate.documentRef &&
-        !supersededDocumentOwners.has(key) &&
-        candidate.pageSession === owner.pageSession &&
-        candidate.rendererGeneration === owner.rendererGeneration &&
-        candidate.tabId === owner.tabId && candidate.pathKey === owner.pathKey);
-    if (!provisionalAdoption && (!known || known.documentRef ||
-        supersededDocumentOwners.has(knownKey))) return null;
-  }
+  const admission = admittedDocumentReference(
+    owner.documentRef, owner, filePath, forAdoption,
+  );
+  if (!admission) return null;
   const pathKey = useCurrentPathIdentity
     ? resolveCanonicalFileKey(filePath) || spelling
     : canonicalFileKey(filePath);
@@ -764,7 +747,7 @@ function normaliseDocumentIdentity(
     documentGeneration: owner.documentGeneration,
     pathKey,
     spelling,
-    ...(admission ? { documentRef: owner.documentRef } : {}),
+    documentRef: owner.documentRef,
   });
 }
 
@@ -1175,16 +1158,15 @@ function rememberDocumentOwner(
   if (owner.documentRef && !admittedOwnerTabs.has(admittedTabKey)) {
     pruneAdmissionScopeFences();
   }
-  if (!canRememberDocumentOwner(owner)) return false;
-  const admission = owner.documentRef
-    ? admittedDocumentReference(owner.documentRef, owner, readPath, adopted)
-    : null;
+  const admission = admittedDocumentReference(
+    owner.documentRef, owner, readPath, adopted,
+  );
+  if (!admission || !canRememberDocumentOwner(owner)) return false;
   const suppliedAdmissionVersion = normaliseDiskVersion(diskVersion);
-  if (owner.documentRef && (!admission ||
-      (!acceptedReadTarget && suppliedAdmissionVersion &&
+  if ((!acceptedReadTarget && suppliedAdmissionVersion &&
         !sameDiskVersion(admission.snapshotVersion, suppliedAdmissionVersion)) ||
       (!acceptedReadTarget && !knownDocumentOwners.has(documentOwnerKey(owner)) &&
-        !suppliedAdmissionVersion))) return false;
+        !suppliedAdmissionVersion)) return false;
   const key = documentOwnerKey(owner);
   const previousReadTarget = knownDocumentOwners.get(key)?.readTarget;
   const resolvedReadTarget = readPath && (adopted || !previousReadTarget)
@@ -1325,7 +1307,9 @@ function isKnownDocumentOwner(owner) {
   const key = documentOwnerKey(owner);
   if (!key || supersededDocumentOwners.has(key)) return false;
   const known = knownDocumentOwners.get(key);
-  return sameDocumentSelectionOwner(known, owner);
+  return sameDocumentSelectionOwner(known, owner) &&
+    known.documentRef === owner.documentRef &&
+    !!admittedDocumentReference(owner.documentRef, owner);
 }
 
 function indexDeletionTombstone(index, key, record) {
@@ -2816,8 +2800,8 @@ function pruneAdmissionScopeFences() {
     retiredAdmissionScope = scope;
     retiredAdmissionTabFloor = 0;
   }
-  // Retirement must not let the same page remove its ref and regain the
-  // provisional path route. Only a dead frame/session can release this fence.
+  // Drop retired bindings, never current ones. Every new owner still needs
+  // a live reference; removing a fence cannot restore path-only authority.
   for (const [key, record] of admittedOwnerTabs) {
     if (!admissionScopeIsCurrent(record)) admittedOwnerTabs.delete(key);
     else if (record.retired) {
@@ -5619,6 +5603,8 @@ function saveScopeState(scope, { allowMissingPath = false } = {}) {
     // authority for anything. Read exactly like an owner that was collected.
     supersededDocumentOwners.has(currentOwnerKey) ||
     !sameDocumentOwner(currentOwner, scope.owner) ||
+    currentOwner.documentRef !== scope.owner.documentRef ||
+    !admittedDocumentReference(scope.owner.documentRef, scope.owner, scope.path) ||
     currentOwner.rendererGeneration !== approvalRendererGeneration ||
     currentOwner.pageSession !== approvalRendererPageSession
   ) {
@@ -6729,6 +6715,7 @@ function authorisedTabDiskRead(event, data) {
     identity.pageSession === data.pageSession &&
     identity.rendererGeneration === data.rendererGeneration &&
     sameDocumentOwner(owner, identity) &&
+    owner.documentRef === identity.documentRef &&
     isKnownDocumentOwner(owner) &&
     owner.readTarget &&
     resolveCanonicalFilePath(data.filePath) === owner.readTarget
@@ -6747,13 +6734,26 @@ async function readOwnedTabDiskSnapshot(owner, filePath, event, data) {
     }
     let handle;
     try {
-      // Follow the logical spelling once, then check the opened descriptor
-      // against both that spelling and the owner's registered physical target.
-      // A symlink that goes A -> B -> A during the read cannot bless B's bytes.
-      handle = await fs.promises.open(filePath, "r");
+      // A logical alias may retarget while open is queued. Open the retained
+      // case-preserving physical name and attest the descriptor before its body.
+      handle = await fs.promises.open(owner.readTarget, "r");
       const before = await handle.stat();
       if (!before.isFile()) {
         throw new Error(`Owned tab target is not a file: ${filePath}`);
+      }
+      const currentOwner = authorisedTabDiskRead(event, data);
+      if (!sameDocumentOwner(owner, currentOwner) ||
+          currentOwner.readTarget !== owner.readTarget) return null;
+      const targetBefore = await fs.promises.stat(owner.readTarget);
+      const retained = knownDocumentOwners.get(documentOwnerKey(owner));
+      if (!sameDocumentOwner(owner, retained) ||
+          retained.documentRef !== owner.documentRef ||
+          retained.readTarget !== owner.readTarget ||
+          !isKnownDocumentOwner(retained)) return null;
+      if (!targetBefore.isFile() ||
+          before.dev !== targetBefore.dev || before.ino !== targetBefore.ino) {
+        if (targetBefore.isFile() && attempt < MAX_STABLE_FILE_READ_ATTEMPTS) continue;
+        throw new Error(`File changed repeatedly before being read: ${filePath}`);
       }
       const raw = await handle.readFile({ encoding: "utf8" });
       const after = await handle.stat();
@@ -7374,23 +7374,11 @@ function closingDocumentOwnerFromEnvelope(event, data) {
   ) {
     return null;
   }
-  const admittedTabKey = [
-    data.pageSession, data.rendererGeneration, data.tabId,
-  ].join("\0");
   const spelling = filePathSpellingKey(data.filePath);
-  const admission = data.documentRef === undefined ? null :
-    admittedDocumentReference(data.documentRef, data, data.filePath);
-  if ((data.documentRef !== undefined && !admission) ||
-      (admittedOwnerTabs.has(admittedTabKey) && !admission)) return null;
-  if (!admission && retiredAdmissionScope ===
-      `${data.pageSession}\0${data.rendererGeneration}` &&
-      data.tabId <= retiredAdmissionTabFloor) {
-    const knownKey = documentOwnerKey({ ...data, spelling });
-    const known = knownDocumentOwners.get(knownKey);
-    if (!known || known.documentRef ||
-        supersededDocumentOwners.has(knownKey)) return null;
-  }
-  if (!spelling) return null;
+  const admission = admittedDocumentReference(
+    data.documentRef, data, data.filePath,
+  );
+  if (!admission || !spelling) return null;
   return Object.freeze({
     pageSession: data.pageSession,
     rendererGeneration: data.rendererGeneration,
@@ -7398,7 +7386,7 @@ function closingDocumentOwnerFromEnvelope(event, data) {
     documentGeneration: data.documentGeneration,
     pathKey: data.pathKey,
     spelling,
-    ...(admission ? { documentRef: data.documentRef } : {}),
+    documentRef: data.documentRef,
   });
 }
 
@@ -7410,10 +7398,14 @@ function closingDocumentOwnerFromEnvelope(event, data) {
 function describeDocumentDeletionState(owner, filePath) {
   const ownerKey = documentOwnerKey(owner);
   const baseline = ownerDocumentBaselines.get(ownerKey);
+  const retained = knownDocumentOwners.get(ownerKey);
   let unreadable = false;
-  if (baseline && sameDocumentOwner(baseline.owner, owner)) {
+  if (baseline && sameDocumentOwner(baseline.owner, owner) &&
+      sameDocumentOwner(retained, owner) &&
+      retained.documentRef === owner.documentRef &&
+      isKnownDocumentOwner(retained)) {
     try {
-      fs.statSync(filePath);
+      fs.statSync(retained.readTarget);
     } catch (error) {
       if (error.code === "ENOENT" || error.code === "ENOTDIR") {
         openDeletionDelivery(filePath, owner);
@@ -7641,6 +7633,15 @@ ipcMain.on("query-document-disk-adoption-state", (event, data) => {
     event.returnValue = unknown;
     return;
   }
+  let sourcePermission;
+  try {
+    sourcePermission = approvedBrowserDocumentPermission(event, data.filePath);
+  } catch (error) {
+    log("Refusing disk adoption query source:", error.message);
+    event.returnValue = unknown;
+    return;
+  }
+  const sourcePath = sourcePermission.filePath;
   const ownDeletion = !!(
     owner && documentDeletionTombstones.has(documentOwnerKey(owner))
   );
@@ -7648,13 +7649,13 @@ ipcMain.on("query-document-disk-adoption-state", (event, data) => {
   const version = normaliseDiskVersion(data.diskVersion);
   const first = version && Number.isFinite(data.modifiedTime) &&
     version.mtimeMs === data.modifiedTime
-    ? readDocumentStats(data.filePath, "while checking disk adoption")
+    ? readDocumentStats(sourcePath, "while checking disk adoption")
     : null;
-  const firstKey = first ? resolveCanonicalFileKey(data.filePath) : null;
+  const firstKey = first ? resolveCanonicalFileKey(sourcePath) : null;
   const second = firstKey
-    ? readDocumentStats(data.filePath, "while verifying disk adoption query")
+    ? readDocumentStats(sourcePath, "while verifying disk adoption query")
     : null;
-  const secondKey = second ? resolveCanonicalFileKey(data.filePath) : null;
+  const secondKey = second ? resolveCanonicalFileKey(sourcePath) : null;
   const versionMatches = !!(
     spelling &&
     version &&
@@ -7698,13 +7699,25 @@ ipcMain.handle("prepare-document-disk-adoption", async (event, data) => {
     : closingDocumentOwnerFromEnvelope(event, {
         ...data, filePath: data.ownerFilePath,
       });
+  if (data.tabId !== null && !owner) return refuse("invalid-adoption-identity");
+  let sourcePermission;
+  try {
+    sourcePermission = approvedBrowserDocumentPermission(event, data.filePath);
+  } catch (error) {
+    log("Refusing disk adoption preparation source:", error.message);
+    return refuse("unapproved-adoption-source");
+  }
+  const sourcePath = sourcePermission.filePath;
+  if (!admittedDocumentReference(
+    data.proposedOwner?.documentRef, data.proposedOwner, data.ownerFilePath, true,
+  )) return refuse("invalid-adoption-identity");
   const proposed = normaliseDocumentIdentity(
     data.proposedOwner,
     data.ownerFilePath,
     { useCurrentPathIdentity: true, forAdoption: true },
   );
   const version = normaliseDiskVersion(data.diskVersion);
-  const pathKey = resolveCanonicalFileKey(data.filePath);
+  const pathKey = resolveCanonicalFileKey(sourcePath);
   const spelling = filePathSpellingKey(data.filePath);
   const matchedSpelling = filePathSpellingKey(data.ownerFilePath);
   const oldKey = documentOwnerKey(owner);
@@ -7728,19 +7741,19 @@ ipcMain.handle("prepare-document-disk-adoption", async (event, data) => {
     ))
   ) return refuse("invalid-adoption-identity");
   const revision = deletionEvidenceRevision;
-  const acceptedReadTarget = resolveCanonicalFilePath(data.filePath);
+  const acceptedReadTarget = resolveCanonicalFilePath(sourcePath);
 
   let handle;
   try {
-    handle = await fs.promises.open(data.filePath, "r");
+    handle = await fs.promises.open(sourcePath, "r");
     const before = await handle.stat();
     const raw = await handle.readFile({ encoding: "utf8" });
     const after = await handle.stat();
-    const pathStats = await fs.promises.stat(data.filePath);
+    const pathStats = await fs.promises.stat(sourcePath);
     const targetStats = acceptedReadTarget
       ? await fs.promises.stat(acceptedReadTarget) : null;
     const content = wrapMermaidContent(
-      removeBOM(raw), data.filePath,
+      removeBOM(raw), sourcePath,
     );
     const digest = Buffer.from(await crypto.webcrypto.subtle.digest(
       "SHA-256", Buffer.from(content, "utf8"),
@@ -7748,9 +7761,9 @@ ipcMain.handle("prepare-document-disk-adoption", async (event, data) => {
     if (
       !before.isFile() ||
       !targetStats || !targetStats.isFile() ||
-      resolveCanonicalFilePath(data.filePath) !== acceptedReadTarget ||
+      resolveCanonicalFilePath(sourcePath) !== acceptedReadTarget ||
       diskVersionChanged(version, diskVersionFromStats(targetStats)) ||
-      resolveCanonicalFileKey(data.filePath) !== pathKey ||
+      resolveCanonicalFileKey(sourcePath) !== pathKey ||
       diskVersionChanged(version, diskVersionFromStats(before)) ||
       diskVersionChanged(version, diskVersionFromStats(after)) ||
       diskVersionChanged(version, diskVersionFromStats(pathStats)) ||
@@ -7767,8 +7780,9 @@ ipcMain.handle("prepare-document-disk-adoption", async (event, data) => {
     approvalRendererState !== "ready" ||
     data.pageSession !== approvalRendererPageSession ||
     data.rendererGeneration !== approvalRendererGeneration ||
+    !diskAdoptionAuthorityIsCurrent(sourcePermission, proposed, owner, data.ownerFilePath) ||
     revision !== deletionEvidenceRevision ||
-    resolveCanonicalFileKey(data.filePath) !== pathKey
+    resolveCanonicalFileKey(sourcePath) !== pathKey
   ) return refuse("adoption-moved-during-read");
   if (
     owner &&
@@ -7841,6 +7855,7 @@ ipcMain.handle("prepare-document-disk-adoption", async (event, data) => {
     incomingSpelling: spelling,
     ownerSpelling: filePathSpellingKey(data.ownerFilePath),
     sourcePath: data.filePath,
+    sourcePermission,
     ownerPath: data.ownerFilePath,
     oldOwnerKey: oldKey,
     proposedOwnerKey: documentOwnerKey(proposed),
@@ -7883,6 +7898,17 @@ ipcMain.handle("prepare-document-disk-adoption", async (event, data) => {
   });
 });
 
+function diskAdoptionAuthorityIsCurrent(permission, proposed, oldOwner, ownerPath) {
+  if (!approvedBrowserPermissionIsCurrent(permission) ||
+      !admittedDocumentReference(proposed.documentRef, proposed, ownerPath, true)) return false;
+  if (!oldOwner) return true;
+  const known = knownDocumentOwners.get(documentOwnerKey(oldOwner));
+  return known && !supersededDocumentOwners.has(documentOwnerKey(oldOwner)) &&
+    sameDocumentOwner(known, oldOwner) &&
+    known.documentRef === oldOwner.documentRef &&
+    !!admittedDocumentReference(oldOwner.documentRef, oldOwner, ownerPath);
+}
+
 ipcMain.on("commit-document-disk-adoption", (event, data) => {
   const refuse = (why) => {
     event.returnValue = Object.freeze({ accepted: false, why });
@@ -7919,8 +7945,23 @@ ipcMain.on("commit-document-disk-adoption", (event, data) => {
     refuse("stale-or-replayed-adoption-capability");
     return;
   }
+  if (!diskAdoptionAuthorityIsCurrent(
+    grant.sourcePermission, grant.proposedOwner, grant.oldOwner, grant.ownerPath,
+  )) {
+    refuse("adoption-authority-revoked");
+    return;
+  }
+  const sourcePath = grant.sourcePermission.filePath;
+  if (!admittedDocumentReference(
+    data.proposedOwner?.documentRef, data.proposedOwner, data.ownerFilePath, true,
+  ) || (data.oldOwner && !closingDocumentOwnerFromEnvelope(event, {
+    ...data.oldOwner, filePath: data.ownerFilePath,
+  }))) {
+    refuse("capability-target-mismatch");
+    return;
+  }
   const version = normaliseDiskVersion(data.diskVersion);
-  const currentKey = resolveCanonicalFileKey(data.filePath);
+  const currentKey = resolveCanonicalFileKey(sourcePath);
   const proposedOwner = normaliseDocumentIdentity(
     data.proposedOwner,
     data.ownerFilePath,
@@ -7943,6 +7984,7 @@ ipcMain.on("commit-document-disk-adoption", (event, data) => {
     proposedOwner.documentRef !== grant.proposedOwner.documentRef ||
     documentOwnerKey(proposedOwner) !== grant.proposedOwnerKey ||
     documentOwnerKey(oldOwner) !== grant.oldOwnerKey ||
+    (oldOwner && oldOwner.documentRef !== grant.oldOwner.documentRef) ||
     (data.oldOwner && !oldOwner) ||
     (oldOwner &&
       (oldOwner.tabId !== proposedOwner.tabId ||
@@ -8043,13 +8085,19 @@ ipcMain.on("commit-document-disk-adoption", (event, data) => {
       refuse("historical-episode-kept");
       return;
     }
+    if (!diskAdoptionAuthorityIsCurrent(
+      grant.sourcePermission, grant.proposedOwner, grant.oldOwner, grant.ownerPath,
+    )) {
+      refuse("adoption-authority-revoked");
+      return;
+    }
     const currentStats = readDocumentStats(
-      data.filePath, "while retiring a historical episode",
+      sourcePath, "while retiring a historical episode",
     );
     if (
       grant.revision !== deletionEvidenceRevision ||
       !currentStats ||
-      resolveCanonicalFileKey(data.filePath) !== currentKey ||
+      resolveCanonicalFileKey(sourcePath) !== currentKey ||
       diskVersionChanged(
         grant.version, diskVersionFromStats(currentStats),
       )
@@ -8163,20 +8211,23 @@ ipcMain.on("commit-document-disk-adoption", (event, data) => {
   }
   if (grant.revision !== deletionEvidenceRevision ||
       grant.pageSession !== approvalRendererPageSession ||
-      grant.rendererGeneration !== approvalRendererGeneration) {
+      grant.rendererGeneration !== approvalRendererGeneration ||
+      !diskAdoptionAuthorityIsCurrent(
+        grant.sourcePermission, grant.proposedOwner, grant.oldOwner, grant.ownerPath,
+      )) {
     refuse("adoption-moved-during-confirmation");
     return;
   }
   const before = readDocumentStats(
-    data.filePath, "while committing disk adoption",
+    sourcePath, "while committing disk adoption",
   );
   const after = before && readDocumentStats(
-    data.filePath, "while confirming disk adoption",
+    sourcePath, "while confirming disk adoption",
   );
   if (
     !before ||
     !after ||
-    resolveCanonicalFileKey(data.filePath) !== currentKey ||
+    resolveCanonicalFileKey(sourcePath) !== currentKey ||
     diskVersionChanged(version, diskVersionFromStats(before)) ||
     diskVersionChanged(version, diskVersionFromStats(after))
   ) {
@@ -8221,13 +8272,24 @@ function completeDocumentDiskAdoption(data) {
   if (!grant) {
     return refused("unknown-or-used-adoption-capability");
   }
+  if (data.filePath !== grant.sourcePath || data.ownerFilePath !== grant.ownerPath ||
+      !diskAdoptionAuthorityIsCurrent(
+        grant.sourcePermission, grant.proposedOwner, grant.oldOwner, grant.ownerPath,
+      ) || !admittedDocumentReference(
+        data.actualOwner?.documentRef, data.actualOwner, grant.ownerPath, true,
+      ) || data.actualOwner.documentRef !== grant.proposedOwner.documentRef ||
+      data.actualOwner.tabId !== grant.proposedOwner.tabId ||
+      data.actualOwner.documentGeneration !== grant.proposedOwner.documentGeneration ||
+      data.actualOwner.pathKey !== grant.proposedOwner.pathKey) {
+    return refused("adoption-authority-revoked");
+  }
   const owner = normaliseDocumentIdentity(
     data.actualOwner,
     grant.ownerPath,
     { useCurrentPathIdentity: true, forAdoption: true },
   );
   const stats = readDocumentStats(
-    grant.sourcePath,
+    grant.sourcePermission.filePath,
     "while completing disk adoption",
   );
   if (
@@ -8240,7 +8302,7 @@ function completeDocumentDiskAdoption(data) {
     grant.revision !== deletionEvidenceRevision ||
     Date.now() - grant.acceptedAt > DISK_ADOPTION_CAPABILITY_MS ||
     !stats ||
-    resolveCanonicalFileKey(grant.sourcePath) !== grant.versionPathKey ||
+    resolveCanonicalFileKey(grant.sourcePermission.filePath) !== grant.versionPathKey ||
     diskVersionChanged(grant.version, diskVersionFromStats(stats))
   ) {
     return refused("adoption-moved-before-completion");
@@ -8743,7 +8805,21 @@ function safeSendReloadResult(scope, success, data) {
 // dozens of times in a session for a document the reader already committed to.
 // The guard belongs on the paths that OPEN something new, not on the ones that
 // re-read something chosen.
-ipcMain.on("reload-file", (event, data) => {
+function reloadTargetRefusalError(owner, filePath) {
+  try {
+    fs.statSync(owner.readTarget);
+  } catch (failure) {
+    if (failure.code === "ENOENT" || failure.code === "ENOTDIR") {
+      openDeletionDelivery(filePath, owner);
+      return "File not found";
+    }
+    console.error("Could not check refused reload target:", failure);
+    return failure.message;
+  }
+  return "File reload refused: its retained target changed";
+}
+
+ipcMain.on("reload-file", async (event, data) => {
   if (!isApprovalSender(event)) {
     recordStaleReloadReply("untrusted-request");
     return;
@@ -8756,12 +8832,11 @@ ipcMain.on("reload-file", (event, data) => {
     generation: approvalRendererGeneration,
     frameTreeNodeId: frame.frameTreeNodeId,
     session: Object.freeze({
-      epoch: ++reloadRequestEpoch,
+      epoch: reloadRequestEpoch,
       rendererGeneration: approvalRendererGeneration,
       pageSession: data && data.reloadRequestSession,
     }),
   };
-  lastReloadRequestSession = scope.session;
   const requestedPath = data && data.filePath;
   const reloadRequest = Object.freeze({
     sequence: data && data.reloadRequestSequence,
@@ -8776,6 +8851,7 @@ ipcMain.on("reload-file", (event, data) => {
       data && data.reloadRequestRendererGeneration,
     selectionGeneration:
       data && data.reloadRequestSelectionGeneration,
+    documentRef: data && data.reloadRequestDocumentRef,
   });
   if (
     !Number.isSafeInteger(reloadRequest.sequence) ||
@@ -8790,7 +8866,14 @@ ipcMain.on("reload-file", (event, data) => {
     !Number.isSafeInteger(reloadRequest.documentGeneration) ||
     reloadRequest.documentGeneration <= 0 ||
     typeof reloadRequest.pathKey !== "string" ||
-    reloadRequest.pathKey.length === 0
+    reloadRequest.pathKey.length === 0 ||
+    !Number.isSafeInteger(reloadRequest.rendererGeneration) ||
+    reloadRequest.rendererGeneration !== approvalRendererGeneration ||
+    !Number.isSafeInteger(reloadRequest.selectionGeneration) ||
+    reloadRequest.selectionGeneration <= 0 ||
+    reloadRequest.session !== approvalRendererPageSession ||
+    typeof reloadRequest.documentRef !== "string" ||
+    !/^[a-f0-9]{64}$/.test(reloadRequest.documentRef)
   ) {
     safeSendReloadResult(scope, false, {
       error: "Invalid reload request identity",
@@ -8798,58 +8881,108 @@ ipcMain.on("reload-file", (event, data) => {
     });
     return;
   }
-  if (typeof requestedPath !== "string" || requestedPath.includes("\0")) {
+  if (typeof requestedPath !== "string" || !requestedPath || requestedPath.includes("\0")) {
     safeSendReloadResult(scope, false, {
       error: "Invalid file path",
       reloadRequest,
     });
     return;
   }
-  // This canonical path alone is filesystem authority. The request metadata is
-  // echoed opaquely so the renderer can prove that the document has not moved
-  // since send; it is never substituted into the disk read.
-  const filePath = path.resolve(requestedPath);
-
-  if (!fs.existsSync(filePath)) {
-    if (sameFilePath(watchedFilePath, filePath) && watchedOwner) {
-      openDeletionDelivery(filePath, watchedOwner);
-    }
+  const identity = closingDocumentOwnerFromEnvelope(event, {
+    filePath: requestedPath,
+    pageSession: reloadRequest.session,
+    rendererGeneration: reloadRequest.rendererGeneration,
+    tabId: reloadRequest.tabId,
+    documentGeneration: reloadRequest.documentGeneration,
+    pathKey: reloadRequest.pathKey,
+    documentRef: reloadRequest.documentRef,
+  });
+  const owner = identity && knownDocumentOwners.get(documentOwnerKey(identity));
+  if (!owner || !sameDocumentOwner(owner, identity) ||
+      owner.documentRef !== identity.documentRef ||
+      !isKnownDocumentOwner(owner) || !owner.readTarget) {
+    log("Refusing reload without a current admitted document owner");
     safeSendReloadResult(scope, false, {
-      error: "File not found",
-      path: filePath,
+      error: "File reload refused: document authority is no longer current",
+      path: requestedPath,
       reloadRequest,
     });
     return;
   }
+  const filePath = admittedDocumentReference(
+    owner.documentRef, owner, requestedPath,
+  ).descriptor.logicalPath;
+  const readRequest = {
+    filePath, pageSession: identity.pageSession,
+    rendererGeneration: identity.rendererGeneration, owner: identity,
+  };
+  const authorisedOwner = authorisedTabDiskRead(event, readRequest);
+  if (!sameDocumentOwner(owner, authorisedOwner) ||
+      authorisedOwner.readTarget !== owner.readTarget) {
+    safeSendReloadResult(scope, false, {
+      error: reloadTargetRefusalError(owner, filePath),
+      path: filePath, reloadRequest,
+    });
+    return;
+  }
+  const currentOwner = () => {
+    const retained = knownDocumentOwners.get(documentOwnerKey(owner));
+    return sameDocumentOwner(owner, retained) &&
+      retained.documentRef === owner.documentRef &&
+      retained.readTarget === owner.readTarget &&
+      isKnownDocumentOwner(retained) ? retained : null;
+  };
+  scope.session = Object.freeze({ ...scope.session, epoch: ++reloadRequestEpoch });
+  lastReloadRequestSession = scope.session;
 
-  // Use helper function for reading markdown files
-  readMarkdownSnapshot(filePath, (err, content, modifiedTime, diskVersion) => {
+  try {
+    const snapshot = await readOwnedTabDiskSnapshot(owner, filePath, event, readRequest);
     const staleWhy = reloadReplyScopeState(scope);
     if (staleWhy) {
       recordStaleReloadReply(staleWhy);
       return;
     }
-    if (err) {
-      console.error("Error reloading file:", err);
+    const freshOwner = authorisedTabDiskRead(event, readRequest);
+    const retainedOwner = currentOwner();
+    if (!snapshot || !retainedOwner || !freshOwner ||
+        freshOwner.readTarget !== owner.readTarget) {
       safeSendReloadResult(scope, false, {
-        error: err.message,
+        error: retainedOwner
+          ? reloadTargetRefusalError(retainedOwner, filePath)
+          : "File reload refused: document or file target changed",
         path: filePath,
         reloadRequest,
       });
-    } else {
-      if (!sameFilePath(watchedFilePath, filePath)) {
-        backgroundReloadWatcherBaselineSkipCount += 1;
-      }
-
-      safeSendReloadResult(scope, true, {
-        content,
-        path: filePath,
-        modifiedTime,
-        diskVersion,
-        reloadRequest,
-      });
+      return;
     }
-  });
+    // Selection is correlation, not authority: a still-owned background tab
+    // must receive its result without changing the foreground watcher.
+    if (!sameFilePath(watchedFilePath, filePath)) {
+      backgroundReloadWatcherBaselineSkipCount += 1;
+    }
+    safeSendReloadResult(scope, true, {
+      ...snapshot, path: filePath, reloadRequest,
+    });
+  } catch (error) {
+    const staleWhy = reloadReplyScopeState(scope);
+    if (staleWhy) {
+      recordStaleReloadReply(staleWhy);
+      return;
+    }
+    if (!currentOwner()) {
+      safeSendReloadResult(scope, false, {
+        error: "File reload refused: document authority changed",
+        path: filePath, reloadRequest,
+      });
+      return;
+    }
+    if (error.code === "ENOENT") openDeletionDelivery(filePath, owner);
+    else console.error("Error reloading file:", error);
+    safeSendReloadResult(scope, false, {
+      error: error.code === "ENOENT" ? "File not found" : error.message,
+      path: filePath, reloadRequest,
+    });
+  }
 });
 
 // ============================================

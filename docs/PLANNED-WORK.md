@@ -605,6 +605,106 @@ and 90-second bound. Final narrow positive is 21/21
 380/0 (`approved-request-packaging-final-r5.log`). All failed logs remain retained.
 This does not close the
 subsequent provisional document-owner or renderer physical-metadata routes.
+
+**Native-reference authority closure — IMPLEMENTED / PROVEN, unintegrated.**
+This is the prerequisite for exposing fresh physical metadata without granting
+arbitrary filesystem probes. Production native/startup/restore opens already
+issue Main references; remove the remaining missing-reference owner route,
+bind manual reload to its actual admitted owner and retained read target,
+and authorize adoption source paths before their existing filesystem checks.
+Preserve current native Save/reload, deletion retirement and held-read
+supersession. Browser recents/path strings and a fabricated same-page tuple
+must not become read/write/metadata authority. Reuse the actual native chooser,
+corrupt-manifest and isolated foreign-window controls; no Node test facade.
+Main-owned physical/browser logical helpers follow this authority boundary,
+then genuine production security flags and final measured responsiveness.
+No new stat/read/IPC is authorized merely to make the boundary easier to test.
+Owner normalization, closing identity and retained-owner/Save checks now require
+a current Main reference rather than a provisional same-page tuple. Independent
+adoption sources use the existing lexical native/history permission before
+probes; grants retain and recheck permission/proposed/old-owner authority at the
+read, commit, confirmation and completion boundaries. Nullable old owners and
+native ticket settlement remain distinct from live-owner authority.
+Manual reload carries its reference through the fixed request/event and actual
+tab validators, uses the existing owned stable reader, and preserves background
+settlement without changing the foreground watcher.
+
+Final focused native controls are 43/43 (`native-authority-positive-final-r9.log`):
+actual chooser/Save/reload/deleted-close, independently approved nullable
+preparation, genuine foreign-reference refusal, and successful held adoption
+and reload bodies revoked by actual same-page owner closure. Source packaging
+is 380/0 (`native-authority-packaging-final-r3.log`); private startup/corrupt-manifest
+compatibility is 61/61 (`native-authority-private-final-r4.log`), and approved
+selectors remain 21/21 (`native-authority-approved-final-r3.log`). These are not
+final isolation or responsiveness qualification.
+Both design reviewers accepted the boundary; Luna initially over-constrained
+background reload and accepted Sol's document-owned compatibility correction.
+In implementation round one, Sol found a persistent retargeted link could be
+read before the eventual refusal; Luna reported no significant issue. The
+writer accepted Sol's finding and restored the existing owned-target check
+before the body read, retaining missing-file deletion handling. The real
+retargeted-link body observer passed on the preceding reader bytes.
+In round two, Sol identified a retarget during asynchronous open, and Luna
+identified missing-target deletion hidden by a still-existing file symlink.
+Both findings are accepted: the reader now opens its retained case-preserving
+physical target and attests descriptor/target identity before body I/O; refusal
+checks the retained target, not the link itself. Actual queued-open retarget and
+watcher-stopped dangling-file-link controls pass. The safety attestation adds
+one pre-body target stat per owned read; its performance is not yet measured.
+It adds no body read or metadata IPC and does not change the synchronous
+unchanged-tab path. R651 and R833-R841 are exact in
+`native-authority-reader-exact-proofs-r4.log`, with restoration, on those bytes.
+Round three Sol found no significant issue; Luna found deletion could still be
+hidden if the admitted target disappeared while its logical alias retargeted
+after descriptor acquisition. The accepted correction classifies a refused
+reload against a still-current retained target and checks that target on close,
+not the replacement now occupying the logical alias. Actual watcher-stopped
+queued deletion and retargeted-close controls pass in
+`native-authority-positive-r8.log` (43/43). Fresh independent Sol/Luna correction
+reviews and the evidence-only follow-up converge with no blockers or remaining
+disagreement. Final R651, R714-R718 and R833-R843 are individually exact PROVEN
+in `native-authority-final-exact-proofs-r7.log`, with zero restoration drift.
+R841's preceding campaign was correctly COLLATERAL: its logical-open mutation
+also bypassed a target-only fixture hook. The real descriptor-acquired actor now
+recognizes both admitted spellings, preserving setup, and the compound reader
+revert declares its exact queued-open and deleted-target failures. That failed
+campaign remains retained. The final native rendered capture was opened and
+viewed (`screenshots/tabs-native-authority-final.png`); it is not performance evidence.
+R651 and R833-R839 were individually exact in
+`native-authority-final-exact-proofs-r3.log` on the preceding reader bytes;
+these historical results are superseded by the final-byte proof above.
+R651's first
+campaign was UNUSABLE after its later native setup failed; the foreign actor
+now drains any mutation-created descriptor before proceeding. Updated compound
+R651 and R839 are exact in `native-authority-corrected-exact-proofs-r2.log`.
+R767/R768 are consumed historical IDs, not current proofs: their former
+provisional-owner compatibility contract is intentionally removed, replaced
+by the missing-reference refusal controls and R833/R834. Retained outcomes
+are unchanged. The broader native scenario now checks mandatory-reference
+refusal and the admitted layout instead of expecting provisional Save authority.
+The initial native baseline also retained an invalid saved-preview expectation;
+the actual Save oracle is disk write plus terminal settlement, followed by a
+fresh manual-reload paint. The first foreign actor omitted its real selection
+generation and failed transport validation. The first retarget fixture left
+only a dangling junction after its target was swept; explicit owned-junction
+cleanup fixes the current run, while that failed root/log remains retained.
+The legacy owned-reader route now opens its initial fixtures through the actual
+native chooser, rather than inventing unadmitted tabs. The former timeout
+reported zero known owners; the native-backed core is 81/81
+(`native-authority-owned-core-final-r5.log`), preserving unchanged-path, read authority,
+held-currentness and atomic-replacement controls. R715's old fallback-only
+mutation became vacuous because native binding independently refused it;
+its current compound removes both binding protections. R717 now proves both
+physical-stat fences using an actually admitted alternate logical spelling.
+The existing broader confirmation fixture still creates provisional tabs;
+its full route is not green. The narrow core selector keeps all reader controls
+and the sentinel, and does not change or certify that broader fixture.
+The attempted native-descriptor-only confirmation fixture did not bind a real
+adoption and poisoned its later layout; that experiment was restored, not
+integrated, and its 99/105 log is retained separately from the earlier 100/105.
+The remaining isolated-production harness must replace such provisional
+fixtures rather than restore provisional authority.
+
 The capability-protocol unit is IMPLEMENTED / PROVEN, unintegrated: preparation, commit, completion and abandonment
 of existing disk-adoption capabilities to four fixed preload methods. It
 preserves async/sync ordering, nonce/digest/version/owner provenance and

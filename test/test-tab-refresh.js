@@ -144,8 +144,9 @@ const focusedCommitHarness = process.env.F22_COMMIT_FOCUSED_HARNESS === "1";
 const queueFocusedHarness = process.env.F22_QUEUE_FOCUSED_HARNESS === "1";
 const ownedReadFocusedHarness = process.env.SEC08_OWNED_READ_FOCUSED_HARNESS === "1";
 const approvedRequestFocusedHarness = process.env.SEC08_APPROVED_REQUEST_FOCUSED_HARNESS === "1";
+const nativeAuthorityFocusedHarness = process.env.SEC08_NATIVE_AUTHORITY_FOCUSED_HARNESS === "1";
 const dialogExtraFocusedHarness = process.env.SEC08_DIALOG_EXTRA_FOCUSED_HARNESS === "1";
-if ((ownedReadFocusedHarness || dialogExtraFocusedHarness || approvedRequestFocusedHarness) &&
+if ((ownedReadFocusedHarness || dialogExtraFocusedHarness || approvedRequestFocusedHarness || nativeAuthorityFocusedHarness) &&
     !process.argv.includes("--folia-test-preload")) {
   process.argv.push("--folia-test-preload");
 }
@@ -7563,6 +7564,7 @@ async function runDocumentTransportValidation(exec) {
       reloadRequestSession: identity.pageSession, reloadRequestTabId: 2,
       reloadRequestDocumentGeneration: 3, reloadRequestDocumentPathKey: identity.pathKey,
       reloadRequestRendererGeneration: 1, reloadRequestSelectionGeneration: 4,
+      reloadRequestDocumentRef: identity.documentRef,
     };
     const ack = { requestId: 6, saveRequestSession: identity.pageSession,
       path: save.filePath, saveRequest: identity, saveResultAttempt: 8 };
@@ -7621,6 +7623,8 @@ async function runDocumentTransportValidation(exec) {
         ['requestReload', { ...reload, reloadRequestSnapshot: null }],
         ['requestReload', { ...reload, reloadRequestSelectionGeneration: 0 }],
         ['requestReload', { ...reload, reloadRequestRendererGeneration: 1.5 }],
+        ['requestReload', { ...reload, reloadRequestDocumentRef: undefined }],
+        ['requestReload', { ...reload, reloadRequestDocumentRef: 'foreign' }],
         ['requestReload', { ...reload, reloadRequestDocumentPathKey: 'bad\\u0000path' }],
         ['acknowledgeSaveResult', { ...ack, saveResultAttempt: 0 }],
         ['acknowledgeSaveResult', { ...ack, saveRequest: { ...identity, requestId: 7 } }],
@@ -7661,14 +7665,14 @@ async function runDocumentTransportValidation(exec) {
   })()`);
   check("SEC-08 Save and reload transport reject malformed requests before any IPC",
     probe.saveRejectionSynchronous && probe.reloadRejectionSynchronous &&
-      probe.malformed.length === 13 &&
+      probe.malformed.length === 15 &&
       probe.malformed.every(Boolean), JSON.stringify(probe));
   check("SEC-08 Save and reload transport dispatch synchronously with exact fields and verbatim empty Unicode snapshots",
     probe.saveSynchronous && probe.reloadSynchronous && probe.fidelity && probe.metadataMatches &&
       probe.sendFailures.length === 2 && probe.sendFailures.every(Boolean) &&
       probe.optionalRefAbsent &&
       probe.fields[0] === "content,filePath,requestId,saveRequest,saveRequestSession" &&
-      probe.fields[1] === "filePath,reloadRequestDocumentGeneration,reloadRequestDocumentPathKey,reloadRequestPath,reloadRequestRendererGeneration,reloadRequestSelectionGeneration,reloadRequestSequence,reloadRequestSession,reloadRequestSnapshot,reloadRequestTabId" &&
+      probe.fields[1] === "filePath,reloadRequestDocumentGeneration,reloadRequestDocumentPathKey,reloadRequestDocumentRef,reloadRequestPath,reloadRequestRendererGeneration,reloadRequestSelectionGeneration,reloadRequestSequence,reloadRequestSession,reloadRequestSnapshot,reloadRequestTabId" &&
       probe.fields[4] === "path,requestId,saveRequest,saveRequestSession,saveResultAttempt" &&
       probe.saveIdentityFields === "documentGeneration,documentRef,pageSession,pathKey,rendererGeneration,requestId,selectionGeneration,sequence,tabId",
     JSON.stringify(probe));
@@ -8052,6 +8056,538 @@ async function runApprovedNavigationDispatch(exec, sentinel) {
     check("SEC-08 history delivery failure cannot erase a newer reentrant navigation",
       probe.newerPreserved, JSON.stringify(probe));
   } finally { await sentinel.unmute(); }
+}
+
+async function runNativeAuthorityBoundary(win, exec) {
+  const source = path.join(dir, "Native-Authority-Cased.md");
+  const unapproved = path.join(dir, "native-authority-unapproved.md");
+  const initial = "# Native authority\n\nNATIVE_AUTHORITY_V1\n";
+  write(source, initial);
+  write(unapproved, "# Unapproved authority\n\nKEEP_UNAPPROVED_BYTES\n");
+  const restoreChooser = replaceMethod(dialog, "showOpenDialog", async () => ({
+    canceled: false, filePaths: [source],
+  }));
+  const restores = [];
+  try {
+    await exec("window.folia.openFileDialog(); null;");
+    const painted = await waitForCondition(exec,
+      `window.currentFilePath === ${JSON.stringify(source)} &&
+       document.getElementById('viewer').textContent.includes('NATIVE_AUTHORITY_V1') &&
+       !!window.CustomTabs.getDocumentDescriptor()?.ref`, 8000);
+    const identity = await exec(`window.CustomTabs.getActiveDocumentIdentity(
+      ${JSON.stringify(source)}, window.getReloadRequestSession())`);
+    const selectionGeneration = await exec("activeFileSelectionGeneration");
+    check("SEC-08 native authority starts from a real painted admitted owner",
+      painted && typeof identity.documentRef === "string" &&
+        __shutdown.documentSessionState().owners.some(owner => owner.documentRef === identity.documentRef),
+      JSON.stringify({ painted, identity }));
+    if (!painted) throw new Error("Native authority fixture was not admitted");
+    const probes = [];
+    const observe = (target, method) => {
+      if (target === unapproved) probes.push(method);
+    };
+    for (const method of ["existsSync", "statSync", "readFileSync", "open"]) {
+      const original = fs[method];
+      restores.push(replaceMethod(fs, method, function (target) {
+        observe(target, method);
+        return original.apply(this, arguments);
+      }));
+    }
+    const nativeRealpath = fs.realpathSync.native;
+    restores.push(replaceMethod(fs.realpathSync, "native", function (target) {
+      observe(target, "realpath");
+      return nativeRealpath.apply(this, arguments);
+    }));
+    const originalOpen = fs.promises.open;
+    restores.push(replaceMethod(fs.promises, "open", function (target) {
+      observe(target, "descriptor");
+      return originalOpen.apply(this, arguments);
+    }));
+    const baseline = fs.statSync(unapproved);
+    const version = { dev: baseline.dev, ino: baseline.ino, size: baseline.size,
+      mtimeMs: baseline.mtimeMs, ctimeMs: baseline.ctimeMs };
+    probes.length = 0;
+    const fake = { ...identity, tabId: identity.tabId + 1000,
+      documentGeneration: 1, pathKey: process.platform === "win32"
+        ? unapproved.toLowerCase() : unapproved };
+    delete fake.documentRef;
+    const ownerCount = __shutdown.documentSessionState().owners.length;
+    await exec(`window.ipcRenderer.send('register-document-owner', {
+      filePath: ${JSON.stringify(unapproved)}, pageSession: ${JSON.stringify(identity.pageSession)},
+      rendererGeneration: ${identity.rendererGeneration}, owner: ${JSON.stringify(fake)},
+      diskVersion: ${JSON.stringify(version)}, modifiedTime: ${baseline.mtimeMs},
+    }); null;`);
+    await exec("window.folia.getVersion()");
+    check("SEC-08 fabricated same-page owner without native reference is refused before path probing or registration",
+      probes.length === 0 && __shutdown.documentSessionState().owners.length === ownerCount,
+      JSON.stringify({ probes, ownerCount, after: __shutdown.documentSessionState().owners.length }));
+    probes.length = 0;
+    const invalidSource = await exec(`(async () => {
+      const identity = ${JSON.stringify(identity)};
+      const filePath = ${JSON.stringify(unapproved)};
+      const diskVersion = ${JSON.stringify(version)};
+      const query = window.folia.queryDocumentDiskAdoptionState({
+        filePath, ownerFilePath: ${JSON.stringify(source)},
+        pageSession: identity.pageSession, rendererGeneration: identity.rendererGeneration,
+        tabId: null, documentGeneration: null, pathKey: null,
+        modifiedTime: diskVersion.mtimeMs, diskVersion,
+      });
+      const prepared = await window.folia.prepareDocumentDiskAdoption({
+        filePath, ownerFilePath: ${JSON.stringify(source)},
+        pageSession: identity.pageSession, rendererGeneration: identity.rendererGeneration,
+        tabId: identity.tabId, documentGeneration: identity.documentGeneration,
+        pathKey: identity.pathKey, documentRef: identity.documentRef,
+        proposedOwner: identity, modifiedTime: diskVersion.mtimeMs, diskVersion,
+        contentDigest: 'a'.repeat(64), replaceDocument: false,
+      });
+      return { query, prepared };
+    })()`);
+    check("SEC-08 native owner cannot authorize an unapproved independent query or adoption source",
+      probes.length === 0 && invalidSource.query.known === false &&
+        invalidSource.prepared.known === false, JSON.stringify({ probes, invalidSource }));
+    const foreign = new BrowserWindow({
+      show: false, webPreferences: {
+        preload: path.join(__dirname, "../src/main-preload.js"),
+        nodeIntegration: false, contextIsolation: true, sandbox: true,
+      },
+    });
+    const originalSourceOpen = fs.promises.open;
+    let foreignReads = 0, foreignCloses = 0;
+    const restoreForeignRead = replaceMethod(fs.promises, "open", async function (target) {
+      if (target !== source) return originalSourceOpen.apply(this, arguments);
+      foreignReads++;
+      const handle = await originalSourceOpen.apply(this, arguments);
+      const close = handle.close.bind(handle);
+      handle.close = async function () {
+        try { return await close(); } finally { foreignCloses++; }
+      };
+      return handle;
+    });
+    try {
+      await foreign.loadURL("data:text/html,<p>Native reference foreign sender</p>");
+      const foreignResult = await foreign.webContents.executeJavaScript(`(async () => {
+        const identity = ${JSON.stringify(identity)};
+        window.folia.requestReload({
+          filePath: ${JSON.stringify(source)}, reloadRequestSequence: 1,
+          reloadRequestPath: identity.pathKey, reloadRequestSnapshot: ${JSON.stringify(initial)},
+          reloadRequestSession: identity.pageSession, reloadRequestTabId: identity.tabId,
+          reloadRequestDocumentGeneration: identity.documentGeneration,
+          reloadRequestDocumentPathKey: identity.pathKey,
+          reloadRequestRendererGeneration: identity.rendererGeneration,
+          reloadRequestSelectionGeneration: ${selectionGeneration},
+          reloadRequestDocumentRef: identity.documentRef,
+        });
+        const query = window.folia.queryDocumentDiskAdoptionState({
+          ...identity, filePath: ${JSON.stringify(source)}, ownerFilePath: ${JSON.stringify(source)},
+          modifiedTime: ${JSON.stringify(version.mtimeMs)}, diskVersion: ${JSON.stringify(version)},
+        });
+        await window.folia.getVersion();
+        return { query, isolated: typeof require === 'undefined' };
+      })()`, true);
+      const drained = await waitUntil(() => foreignCloses === foreignReads, 5000);
+      check("SEC-08 genuine foreign sender cannot use the Main owner's native reference for reload or adoption",
+        drained && foreignResult.isolated && foreignResult.query.known === false && foreignReads === 0,
+        JSON.stringify({ foreignResult, foreignReads, foreignCloses, drained }));
+    } finally {
+      restoreForeignRead();
+      foreign.destroy();
+    }
+    for (const restore of restores.reverse()) restore();
+    restores.length = 0;
+    const saved = "# Native authority saved\n\nNATIVE_AUTHORITY_V2\n";
+    await exec(`(() => {
+      if (!isEditMode) toggleEditBtn.click();
+      markdownEditor.value = ${JSON.stringify(saved)};
+      markdownEditor.dispatchEvent(new Event('input'));
+      saveButton.click(); return true;
+    })()`);
+    const written = await waitUntil(() => fs.readFileSync(source, "utf8").includes("NATIVE_AUTHORITY_V2"), 8000);
+    const settled = await waitForCondition(exec,
+      `!window.getPendingSaveStatus(${JSON.stringify(source)}).pending && !hasUnsavedWork()`, 8000);
+    check("SEC-08 admitted native Save writes and settles through the actual editor and fixed port",
+      written && settled, JSON.stringify({ written, settled }));
+    await exec("if (isEditMode) toggleEditBtn.click(); null;");
+    write(source, "# Native authority reloaded\n\nNATIVE_AUTHORITY_V3\n");
+    const dispatched = await exec("window.reloadCurrentFile()");
+    const reloaded = await waitForCondition(exec,
+      "document.getElementById('viewer').textContent.includes('NATIVE_AUTHORITY_V3')", 8000);
+    check("SEC-08 admitted manual reload preserves real Save baseline and paints fresh disk bytes",
+      written && settled && dispatched && reloaded,
+      JSON.stringify({ written, settled, dispatched, reloaded }));
+    const current = await exec(`window.CustomTabs.getActiveDocumentIdentity(
+      ${JSON.stringify(source)}, window.getReloadRequestSession())`);
+    const missingReference = await exec(`(() => {
+      const request = { ...${JSON.stringify(current)}, filePath: ${JSON.stringify(source)} };
+      delete request.documentRef;
+      const query = window.folia.queryDocumentDeletionState(request);
+      const retirement = window.folia.retireDeletedDocumentOwner({
+        ...request, acknowledgedDeletion: false,
+      });
+      return { query, retirement };
+    })()`);
+    check("SEC-08 removing a live native reference cannot query or retire its Main owner",
+      missingReference.query.known === false && missingReference.retirement.retired === false &&
+        __shutdown.documentSessionState().owners.some(owner => owner.documentRef === current.documentRef),
+      JSON.stringify(missingReference));
+    const stats = fs.statSync(source);
+    const currentVersion = { dev: stats.dev, ino: stats.ino, size: stats.size,
+      mtimeMs: stats.mtimeMs, ctimeMs: stats.ctimeMs };
+    const crypto = require("crypto");
+    const digest = crypto.createHash("sha256").update(fs.readFileSync(source, "utf8")).digest("hex");
+    const independent = await exec(`(async () => {
+      const request = {
+        filePath: ${JSON.stringify(source)}, ownerFilePath: ${JSON.stringify(source)},
+        pageSession: ${JSON.stringify(current.pageSession)}, rendererGeneration: ${current.rendererGeneration},
+        tabId: null, documentGeneration: null, pathKey: null,
+        modifiedTime: ${stats.mtimeMs}, diskVersion: ${JSON.stringify(currentVersion)},
+      };
+      const query = window.folia.queryDocumentDiskAdoptionState(request);
+      const prepared = await window.folia.prepareDocumentDiskAdoption({
+        ...request, proposedOwner: ${JSON.stringify(current)},
+        contentDigest: ${JSON.stringify(digest)}, replaceDocument: false,
+      });
+      if (prepared.capability) window.folia.abandonDocumentDiskAdoption({
+        capability: prepared.capability, pageSession: request.pageSession,
+        rendererGeneration: request.rendererGeneration,
+      });
+      return { query, prepared };
+    })()`);
+    check("SEC-08 approved nullable-owner query and ref-bearing independent preparation remain usable",
+      independent.query.known === true && independent.query.versionMatches === true &&
+        independent.prepared.known === true && !!independent.prepared.capability,
+      JSON.stringify(independent));
+  } finally {
+    for (const restore of restores.reverse()) restore();
+    restoreChooser();
+  }
+}
+
+async function runNativeAuthorityHeldRead(win, exec, operation) {
+  const source = path.join(dir, `native-held-${operation}.md`);
+  const body = `# Native held ${operation}\n\nNATIVE_HELD_${operation.toUpperCase()}\n`;
+  write(source, body);
+  const previous = await exec("window.CustomTabs.getActiveTabId()");
+  const chooser = replaceMethod(dialog, "showOpenDialog", async () => ({
+    canceled: false, filePaths: [source],
+  }));
+  try {
+    await exec("window.folia.openFileDialog(); null;");
+    const opened = await waitForCondition(exec,
+      `window.currentFilePath === ${JSON.stringify(source)} &&
+       document.getElementById('viewer').textContent.includes(${JSON.stringify(`NATIVE_HELD_${operation.toUpperCase()}`)}) &&
+       !!window.CustomTabs.getDocumentDescriptor()?.ref`, 8000);
+    if (!opened) throw new Error(`Native held ${operation} source was not painted`);
+  } finally { chooser(); }
+  const identity = await exec(`window.CustomTabs.getActiveDocumentIdentity(
+    ${JSON.stringify(source)}, window.getReloadRequestSession())`);
+  const stats = fs.statSync(source), version = { dev: stats.dev, ino: stats.ino,
+    size: stats.size, mtimeMs: stats.mtimeMs, ctimeMs: stats.ctimeMs };
+  const originalOpen = fs.promises.open;
+  let release = null, claimed = false, closed = false, pending = null;
+  const restore = replaceMethod(fs.promises, "open", async function (target) {
+    const handle = await originalOpen.apply(this, arguments);
+    if (target !== source || claimed) return handle;
+    claimed = true;
+    const read = handle.readFile.bind(handle), close = handle.close.bind(handle);
+    handle.readFile = async function () {
+      const content = await read(...arguments);
+      await new Promise(resolve => { release = resolve; });
+      return content;
+    };
+    handle.close = async function () {
+      try { return await close(); } finally { closed = true; }
+    };
+    return handle;
+  });
+  try {
+    if (operation === "adoption") {
+      const digest = require("crypto").createHash("sha256").update(body).digest("hex");
+      pending = exec(`window.folia.prepareDocumentDiskAdoption({
+        filePath: ${JSON.stringify(source)}, ownerFilePath: ${JSON.stringify(source)},
+        pageSession: ${JSON.stringify(identity.pageSession)}, rendererGeneration: ${identity.rendererGeneration},
+        tabId: null, documentGeneration: null, pathKey: null,
+        proposedOwner: ${JSON.stringify(identity)}, modifiedTime: ${stats.mtimeMs},
+        diskVersion: ${JSON.stringify(version)}, contentDigest: ${JSON.stringify(digest)},
+        replaceDocument: false,
+      })`);
+    } else {
+      await exec(`window.__nativeHeldReload = null;
+        window.__nativeHeldUnsubscribe = window.folia.onFileReloadResult(data => {
+          if (data.reloadRequest?.documentRef === ${JSON.stringify(identity.documentRef)})
+            window.__nativeHeldReload = data;
+        });
+        window.reloadCurrentFile(); null;`);
+    }
+    const held = await waitUntil(() => release !== null, 8000);
+    check(`SEC-08 native ${operation} revocation control holds a successful body from a real admitted source`,
+      held && claimed && !closed && /^[a-f0-9]{64}$/.test(identity.documentRef));
+    if (!held) throw new Error(`Native ${operation} body did not hold`);
+    const tabClosed = await exec(`window.CustomTabs.closeTab(${identity.tabId})`);
+    const restored = await waitForCondition(exec,
+      `window.CustomTabs.getActiveTabId() === ${previous} &&
+       document.getElementById('viewer').textContent.includes('NATIVE_AUTHORITY_V3')`, 8000);
+    const retired = !__shutdown.documentSessionState().owners.some(owner =>
+      owner.documentRef === identity.documentRef);
+    check(`SEC-08 native ${operation} revocation closes the actual owner and restores the previous document`,
+      restored && retired && !(await exec(`window.CustomTabs.getTabs().some(tab => tab.id === ${identity.tabId})`)),
+      JSON.stringify({ tabClosed, restored, retired }));
+    release(); release = null;
+    let result;
+    if (operation === "adoption") {
+      result = await pending;
+      if (result.capability) await exec(`window.folia.abandonDocumentDiskAdoption({
+        capability: ${JSON.stringify(result.capability)}, pageSession: ${JSON.stringify(identity.pageSession)},
+        rendererGeneration: ${identity.rendererGeneration},
+      }); null;`);
+    } else {
+      const received = await waitForCondition(exec, "window.__nativeHeldReload !== null", 8000);
+      if (!received) throw new Error("Native retired-owner reload did not return its correlated refusal");
+      result = await exec("window.__nativeHeldReload");
+    }
+    const drained = await waitUntil(() => closed, 5000);
+    check(`SEC-08 held native ${operation} cannot return content or grant authority after reference retirement`,
+      drained && (operation === "adoption"
+        ? result.known === false && !result.capability
+        : result.success === false && result.content === undefined),
+      JSON.stringify({ drained, result }));
+  } finally {
+    if (release) release();
+    if (pending) await pending;
+    restore();
+    if (operation === "reload") await exec("window.__nativeHeldUnsubscribe?.(); null;");
+  }
+}
+
+async function runNativeReloadRetarget(exec, duringOpen = false) {
+  const stage = duringOpen ? "open-handoff" : "before-dispatch";
+  const first = path.join(dir, `native-reload-${stage}-a`);
+  const second = path.join(dir, `native-reload-${stage}-b`);
+  const link = path.join(dir, `native-reload-${stage}-link`);
+  fs.mkdirSync(first);
+  fs.mkdirSync(second);
+  const original = "# Native reload target\n\nRETAINED_NATIVE_BODY\n";
+  write(path.join(first, "source.md"), original);
+  write(path.join(second, "source.md"), "# Other target\n\nUNAPPROVED_RELOAD_BODY\n");
+  const setTarget = (target) => {
+    if (fs.existsSync(link)) {
+      if (process.platform === "win32") fs.rmdirSync(link);
+      else fs.unlinkSync(link);
+    }
+    fs.symlinkSync(target, link, process.platform === "win32" ? "junction" : "dir");
+  };
+  setTarget(first);
+  const source = path.join(link, "source.md");
+  const previous = await exec("window.CustomTabs.getActiveTabId()");
+  const chooser = replaceMethod(dialog, "showOpenDialog", async () => ({
+    canceled: false, filePaths: [source],
+  }));
+  let identity;
+  try {
+    await exec("window.folia.openFileDialog(); null;");
+    const opened = await waitForCondition(exec,
+      `window.currentFilePath === ${JSON.stringify(source)} &&
+       document.getElementById('viewer').textContent.includes('RETAINED_NATIVE_BODY') &&
+       !!window.CustomTabs.getDocumentDescriptor()?.ref`, 8000);
+    if (!opened) throw new Error("Native retarget fixture did not paint its admitted body");
+    identity = await exec(`({
+      ...window.CustomTabs.getActiveDocumentIdentity(${JSON.stringify(source)}, window.getReloadRequestSession()),
+      selectionGeneration: activeFileSelectionGeneration,
+    })`);
+  } finally { chooser(); }
+  const readTarget = await exec("window.CustomTabs.getDocumentDescriptor().readTarget");
+  if (!duringOpen) setTarget(second);
+  check(`SEC-08 manual reload ${stage} control starts with the real retained target and a distinct existing destination`,
+    /^[a-f0-9]{64}$/.test(identity.documentRef) &&
+      readTarget === path.join(first, "source.md") &&
+      fs.realpathSync.native(source) === path.join(duringOpen ? first : second, "source.md"));
+  let bodyReads = 0, retargeted = false;
+  const openedPaths = [];
+  const open = fs.promises.open;
+  const restore = replaceMethod(fs.promises, "open", async function (target) {
+    if (target === source || target === readTarget) {
+      openedPaths.push(target);
+      if (duringOpen && !retargeted) {
+        setTarget(second);
+        retargeted = true;
+      }
+    }
+    const handle = await open.apply(this, arguments);
+    if (target === source || target === readTarget) {
+      const read = handle.readFile.bind(handle);
+      handle.readFile = async function () {
+        bodyReads++;
+        return read(...arguments);
+      };
+    }
+    return handle;
+  });
+  try {
+    await exec(`window.__nativeRetargetResult = null;
+      window.__nativeRetargetUnsubscribe = window.folia.onFileReloadResult(data => {
+        if (data.reloadRequest?.sequence === 987) window.__nativeRetargetResult = data;
+      });
+      window.folia.requestReload({
+        filePath: ${JSON.stringify(source)}, reloadRequestSequence: 987,
+        reloadRequestPath: ${JSON.stringify(identity.pathKey)}, reloadRequestSnapshot: ${JSON.stringify(original)},
+        reloadRequestSession: ${JSON.stringify(identity.pageSession)}, reloadRequestTabId: ${identity.tabId},
+        reloadRequestDocumentGeneration: ${identity.documentGeneration},
+        reloadRequestDocumentPathKey: ${JSON.stringify(identity.pathKey)},
+        reloadRequestRendererGeneration: ${identity.rendererGeneration},
+        reloadRequestSelectionGeneration: ${identity.selectionGeneration},
+        reloadRequestDocumentRef: ${JSON.stringify(identity.documentRef)},
+      }); null;`);
+    const received = await waitForCondition(exec, "window.__nativeRetargetResult !== null", 8000);
+    const result = await exec("window.__nativeRetargetResult");
+    check(duringOpen
+      ? "SEC-08 queued reload open remains physically bound and refuses the retarget before any body read"
+      : "SEC-08 manual reload rejects a retargeted logical path before opening or reading a body",
+      received && bodyReads === 0 && result.success === false && result.content === undefined &&
+        (duringOpen ? retargeted && openedPaths[0] === readTarget : openedPaths.length === 0),
+      JSON.stringify({ received, bodyReads, retargeted, openedPaths, result }));
+  } finally {
+    restore();
+    setTarget(first);
+    await exec("window.__nativeRetargetUnsubscribe?.(); null;");
+    await exec(`window.CustomTabs.closeTab(${identity.tabId})`);
+    // Remove the junction before the temp sweep deletes its in-tree target.
+    if (process.platform === "win32") fs.rmdirSync(link);
+    else fs.unlinkSync(link);
+  }
+  const restored = await waitForCondition(exec,
+    `window.CustomTabs.getActiveTabId() === ${previous} &&
+     document.getElementById('viewer').textContent.includes('NATIVE_AUTHORITY_V3')`, 8000);
+  check(`SEC-08 ${stage} control closes its actual native tab and restores the previous document`, restored);
+}
+
+async function runNativeDanglingReload(exec, stage = "before-dispatch") {
+  const target = path.join(dir, `native-dangling-${stage}-target.md`);
+  const link = path.join(dir, `native-dangling-${stage}-link.md`);
+  const replacement = path.join(dir, `native-dangling-${stage}-replacement.md`);
+  const body = "# Native dangling target\n\nNATIVE_DANGLING_BODY\n";
+  write(target, body);
+  write(replacement, "# Replacement target\n\nKEEP_NATIVE_REPLACEMENT\n");
+  fs.symlinkSync(target, link, "file");
+  const previous = await exec("window.CustomTabs.getActiveTabId()");
+  let watcherClosed = false;
+  const watch = fs.watch;
+  const restoreWatch = replaceMethod(fs, "watch", function (filePath) {
+    const watcher = watch.apply(this, arguments);
+    if (filePath === link) {
+      const close = watcher.close.bind(watcher);
+      watcher.close = function () { watcherClosed = true; return close(...arguments); };
+    }
+    return watcher;
+  });
+  const chooser = replaceMethod(dialog, "showOpenDialog", async () => ({
+    canceled: false, filePaths: [link],
+  }));
+  let identity;
+  try {
+    await exec("window.folia.openFileDialog(); null;");
+    const opened = await waitForCondition(exec,
+      `window.currentFilePath === ${JSON.stringify(link)} &&
+       document.getElementById('viewer').textContent.includes('NATIVE_DANGLING_BODY') &&
+       window.CustomTabs.getDocumentDescriptor()?.readTarget === ${JSON.stringify(target)}`, 8000);
+    if (!opened) throw new Error("Native dangling link was not actually admitted");
+    identity = await exec(`({
+      ...window.CustomTabs.getActiveDocumentIdentity(${JSON.stringify(link)}, window.getReloadRequestSession()),
+      selectionGeneration: activeFileSelectionGeneration,
+    })`);
+    await exec(`window.folia.pauseFileWatching({
+      filePath: ${JSON.stringify(link)}, pageSession: ${JSON.stringify(identity.pageSession)},
+      rendererGeneration: ${identity.rendererGeneration}, owner: ${JSON.stringify(identity)},
+    }); window.folia.getVersion();`);
+    const paused = await waitUntil(() => watcherClosed, 5000);
+    if (!paused) throw new Error("Dangling link control did not stop the actual watcher");
+  } finally { chooser(); restoreWatch(); }
+  const before = __shutdown.state().deletionTombstoneCount;
+  const deleteAndRetarget = () => {
+    fs.unlinkSync(target);
+    fs.unlinkSync(link);
+    fs.symlinkSync(replacement, link, "file");
+  };
+  if (stage === "before-dispatch") {
+    fs.unlinkSync(target);
+    check("SEC-08 dangling reload control retains a real symbolic link after deleting its admitted target with the watcher stopped",
+      watcherClosed && fs.lstatSync(link).isSymbolicLink() && !fs.existsSync(target));
+  } else if (stage === "close-retarget") {
+    deleteAndRetarget();
+    check("SEC-08 retargeted close control has a missing retained target and a live replacement with its actual watcher stopped",
+      watcherClosed && !fs.existsSync(target) && fs.realpathSync.native(link) === replacement);
+  }
+  let bodyReads = 0;
+  let retargetedAfterOpen = false, queriedDeletion = false;
+  let closePrompts = [];
+  const open = fs.promises.open;
+  const restore = replaceMethod(fs.promises, "open", async function () {
+    const handle = await open.apply(this, arguments);
+    if (stage === "open-handoff" &&
+        (arguments[0] === target || arguments[0] === link) && !retargetedAfterOpen) {
+      deleteAndRetarget();
+      retargetedAfterOpen = true;
+    }
+    const read = handle.readFile.bind(handle);
+    handle.readFile = async function () { bodyReads++; return read(...arguments); };
+    return handle;
+  });
+  try {
+    if (stage === "close-retarget") {
+      const state = await exec(`window.folia.queryDocumentDeletionState({
+        ...${JSON.stringify(identity)}, filePath: ${JSON.stringify(link)},
+      })`);
+      queriedDeletion = state?.ownDeletion === true && state.unresolved === true &&
+        __shutdown.state().deletionTombstoneCount === before + 1;
+    } else {
+    await exec(`window.__nativeDanglingResult = null;
+      window.__nativeDanglingUnsubscribe = window.folia.onFileReloadResult(data => {
+        if (data.reloadRequest?.sequence === 988) window.__nativeDanglingResult = data;
+      });
+      window.folia.requestReload({
+        filePath: ${JSON.stringify(link)}, reloadRequestSequence: 988,
+        reloadRequestPath: ${JSON.stringify(identity.pathKey)}, reloadRequestSnapshot: ${JSON.stringify(body)},
+        reloadRequestSession: ${JSON.stringify(identity.pageSession)}, reloadRequestTabId: ${identity.tabId},
+        reloadRequestDocumentGeneration: ${identity.documentGeneration},
+        reloadRequestDocumentPathKey: ${JSON.stringify(identity.pathKey)},
+        reloadRequestRendererGeneration: ${identity.rendererGeneration},
+        reloadRequestSelectionGeneration: ${identity.selectionGeneration},
+        reloadRequestDocumentRef: ${JSON.stringify(identity.documentRef)},
+      }); null;`);
+    const received = await waitForCondition(exec, "window.__nativeDanglingResult !== null", 8000);
+    const result = await exec("window.__nativeDanglingResult");
+    if (stage === "open-handoff") {
+      check("SEC-08 deleted queued-open control actually retargets its live alias after descriptor acquisition with its watcher stopped",
+        watcherClosed && retargetedAfterOpen && !fs.existsSync(target) &&
+          fs.realpathSync.native(link) === replacement);
+    }
+    check(stage === "open-handoff"
+      ? "SEC-08 post-open retarget refusal records the missing retained target without body I/O"
+      : "SEC-08 admitted dangling reload reports the missing retained target and records deletion without body I/O",
+      received && result.success === false && result.error === "File not found" &&
+        bodyReads === 0 && __shutdown.state().deletionTombstoneCount === before + 1,
+      JSON.stringify({ received, result, bodyReads, before, after: __shutdown.state().deletionTombstoneCount }));
+    }
+  } finally {
+    restore();
+    await exec("window.__nativeDanglingUnsubscribe?.(); null;");
+    closePrompts = await exec(`(async () => {
+      const confirm = window.confirm, prompts = [];
+      window.confirm = message => { prompts.push(String(message)); return true; };
+      try { await window.CustomTabs.closeTab(${identity.tabId}); return prompts; }
+      finally { window.confirm = confirm; }
+    })()`);
+    fs.unlinkSync(link);
+  }
+  const restored = await waitForCondition(exec,
+    `window.CustomTabs.getActiveTabId() === ${previous} &&
+     document.getElementById('viewer').textContent.includes('NATIVE_AUTHORITY_V3')`, 8000);
+  check(stage === "before-dispatch"
+    ? "SEC-08 dangling reload control retires its deleted native owner and restores the previous document"
+    : `SEC-08 ${stage} deleted-target control restores the previous admitted document`, restored);
+  if (stage === "close-retarget") {
+    check("SEC-08 retargeted close queries the deleted retained target and actually warns before retirement",
+      queriedDeletion && closePrompts.length > 0 && bodyReads === 0 && restored,
+      JSON.stringify({ queriedDeletion, closePrompts, bodyReads, restored }));
+  }
 }
 
 async function runApprovedOpenScopeFence(win, exec) {
@@ -10568,59 +11104,28 @@ async function runAdmissionCorrectionScenarios(win, exec, clearFixtureTabs,
   check("SEC-08 a completed Save to another admitted target does not invalidate the ticket read",
     unrelated.triggered && unrelated.queueCompletedInClose && unrelated.opens === 1 &&
       unrelated.result?.content.includes("ADMISSION_ABA_SAVE"), JSON.stringify(unrelated));
-  await clearFixtureTabs("provisional retirement fence setup");
-  const provisionalPath = path.join(dir, "admission-provisional.md");
-  write(provisionalPath, "# Live provisional\n\nPROVISIONAL_FENCE_BASE\n");
-  await exec(`window.ipcRenderer.send('open-file-path', {
-    filePath: ${JSON.stringify(provisionalPath)},
-  }); null`);
-  await waitForCondition(exec,
-    "document.getElementById('viewer').textContent.includes('PROVISIONAL_FENCE_BASE')", 8000);
-  const provisional = await capture();
-  selectNativePath(linked);
-  await exec("window.ipcRenderer.send('open-file-dialog'); null");
-  await waitForCondition(exec, `window.currentFilePath === ${JSON.stringify(linked)}`, 8000);
-  await exec("window.CustomTabs.closeTab(window.CustomTabs.getActiveTabId())");
+  await clearFixtureTabs("native reference authority setup");
   selectNativePath(source);
   await exec("window.ipcRenderer.send('open-file-dialog'); null");
-  await waitForCondition(exec, `window.currentFilePath === ${JSON.stringify(source)}`, 8000);
-  const provisionalCompanion = await capture();
-  const retainedProvisional = __shutdown.documentSessionState().owners.find(owner =>
-    owner.tabId === provisional.owner.tabId);
-  const provisionalGuards = __shutdown.documentOwnerGuards({
-    ...provisional.owner, spelling: "caller-spelling-must-be-ignored",
-  }, provisionalPath);
-  check("SEC-08 retirement fence setup retains a real older provisional owner without a page-supplied spelling",
-    !provisional.document && provisional.owner.spelling === undefined &&
-      !!retainedProvisional && !retainedProvisional.documentRef &&
-      provisionalGuards.retirementFloor >= provisional.owner.tabId,
-    JSON.stringify({ provisional, retainedProvisional, provisionalGuards }));
-  let provisionalClose = null;
-  if (provisionalGuards.identity && provisionalGuards.closing) {
-    await exec(`window.CustomTabs.switchToTab(${provisional.owner.tabId})`);
-    await exec(`(async () => {
-      window.originalMarkdown = '# Live provisional\\n\\nPROVISIONAL_FENCE_SAVED\\n';
-      window.CustomTabs.updateTabContent(window.originalMarkdown, true);
-      await saveMarkdownFile();
-    })()`);
-    provisionalClose = await exec(`window.folia.queryDocumentDeletionState(${JSON.stringify({
-      ...provisional.owner, filePath: provisionalPath,
-    })})`);
-  }
-  check("SEC-08 a retained provisional tab keeps selection Save and close authority after native retirement pruning",
-    provisionalGuards.identity && provisionalGuards.closing &&
-    fs.readFileSync(provisionalPath, "utf8").includes("PROVISIONAL_FENCE_SAVED") &&
-      provisionalClose?.known === true,
-    JSON.stringify({ provisionalGuards, provisionalClose }));
-  const provisionalLayoutSettled = await exec(`(async () => {
+  await waitForCondition(exec, `window.currentFilePath === ${JSON.stringify(source)} &&
+    !!window.CustomTabs.getDocumentDescriptor()`, 8000);
+  const nativeCompanion = await capture();
+  const missingReferenceGuards = __shutdown.documentOwnerGuards({
+    ...nativeCompanion.owner, documentRef: undefined,
+    spelling: "caller-spelling-must-be-ignored",
+  }, source);
+  check("SEC-08 removing the actual native reference leaves no provisional identity or closing fallback",
+    !!nativeCompanion.document && !missingReferenceGuards.identity && !missingReferenceGuards.closing,
+    JSON.stringify({ nativeCompanion, missingReferenceGuards }));
+  const nativeLayoutSettled = await exec(`(async () => {
     try { await window.CustomTabs.settleSessionLayout(); return true; }
     catch { return false; }
   })()`);
-  const provisionalLayout = __shutdown.documentSessionState().entries;
-  check("SEC-08 provisional tabs do not suppress the admitted companion's durable layout",
-    provisionalLayoutSettled && provisionalLayout.length === 1 &&
-      provisionalLayout[0].id === provisionalCompanion.document.entryId,
-    JSON.stringify({ provisionalLayoutSettled, provisionalLayout }));
+  const nativeLayout = __shutdown.documentSessionState().entries;
+  check("SEC-08 mandatory references preserve the admitted document's durable layout",
+    nativeLayoutSettled && nativeLayout.length === 1 &&
+      nativeLayout[0].id === nativeCompanion.document.entryId,
+    JSON.stringify({ nativeLayoutSettled, nativeLayout }));
   const fenceGeneration = __shutdown.state().rendererGeneration;
   win.webContents.reload();
   await waitUntil(async () => __shutdown.state().rendererGeneration > fenceGeneration &&
@@ -11457,6 +11962,27 @@ async function run(win) {
       report.hits.length === 0, JSON.stringify(report.hits));
     return;
   }
+  if (nativeAuthorityFocusedHarness) {
+    await runDocumentTransportValidation(exec);
+    await runNativeAuthorityBoundary(win, exec);
+    await runNativeAuthorityHeldRead(win, exec, "adoption");
+    await runNativeAuthorityHeldRead(win, exec, "reload");
+    await runNativeReloadRetarget(exec);
+    await runNativeReloadRetarget(exec, true);
+    await runNativeDanglingReload(exec);
+    await runNativeDanglingReload(exec, "open-handoff");
+    await runNativeDanglingReload(exec, "close-retarget");
+    await runDocumentControlCloseJourney(exec);
+    console.log("Native authority rendered control:", await captureScreenshot(win, "tabs-native-authority-final"));
+    const alive = await proveSentinelAlive(win, sentinel);
+    check("the error sentinel was demonstrably watching both channels",
+      alive.console === true && alive.dom === true, JSON.stringify(alive));
+    const report = await sentinel.stop();
+    consoleAttribution.stop(report);
+    check("nothing rendered a visible error at any point during the suite",
+      report.hits.length === 0, JSON.stringify(report.hits));
+    return;
+  }
   const isolatedBridgeWindow = new BrowserWindow({
     show: false,
     webPreferences: {
@@ -11547,14 +12073,23 @@ async function run(win) {
     null;
   `);
 
-  const ids = await exec(`
-    (() => {
-      const a = window.CustomTabs.createTab(${jsA}, window.fs.readFileSync(${jsA}, 'utf8'));
-      const b = window.CustomTabs.createTab(${jsB}, window.fs.readFileSync(${jsB}, 'utf8'));
-      return { a: a.id, b: b.id };
-    })()
-  `);
-  await sleep(500);
+  const ids = {};
+  for (const [key, filePath, marker] of [
+    ["a", fileA, "ALPHA_V1"], ["b", fileB, "BETA_V1"],
+  ]) {
+    const restoreChooser = replaceMethod(dialog, "showOpenDialog", async () => ({
+      canceled: false, filePaths: [filePath],
+    }));
+    try {
+      await exec("window.folia.openFileDialog(); null;");
+      const painted = await waitForCondition(exec,
+        `window.currentFilePath === ${JSON.stringify(filePath)} &&
+         document.getElementById('viewer').textContent.includes(${JSON.stringify(marker)}) &&
+         !!window.CustomTabs.getDocumentDescriptor()?.ref`, 8000);
+      if (!painted) throw new Error(`Initial native ${key} fixture did not paint`);
+      ids[key] = await exec("window.CustomTabs.getActiveTabId()");
+    } finally { restoreChooser(); }
+  }
 
   const viewerText = () =>
     exec(`document.getElementById('viewer').textContent`);
@@ -11946,7 +12481,7 @@ async function run(win) {
       bridgeValidation.forwarding.requestKeys.join(",") ===
         "filePath,owner,pageSession,rendererGeneration" &&
       bridgeValidation.forwarding.ownerKeys.join(",") ===
-        "documentGeneration,pageSession,pathKey,rendererGeneration,tabId" &&
+        "documentGeneration,documentRef,pageSession,pathKey,rendererGeneration,tabId" &&
       bridgeValidation.forwarding.content.includes("SEC08_MAIN_OWNED_READ"),
     JSON.stringify(bridgeValidation),
   );
@@ -11976,6 +12511,7 @@ async function run(win) {
   let casePreservedRead = null;
   let casePreservedOpenPaths = [];
   let casePreservedTargetStatCalls = 0;
+  let caseTabId;
   if (
     casePreservedLogicalPath &&
     casePreservedLogicalPath !== fileB &&
@@ -11992,6 +12528,25 @@ async function run(win) {
     const originalCasePreservedOpen = fs.promises.open;
     const originalCasePreservedStat = fs.promises.stat;
     const caseTargetWitness = "SEC08_CASE_PRESERVED_TARGET_STAT";
+    const restoreCaseChooser = replaceMethod(dialog, "showOpenDialog", async () => ({
+      canceled: false, filePaths: [casePreservedLogicalPath],
+    }));
+    let casePayload;
+    try {
+      await exec("window.folia.openFileDialog(); null;");
+      const painted = await waitForCondition(exec,
+        `window.currentFilePath === ${JSON.stringify(casePreservedLogicalPath)} &&
+         document.getElementById('viewer').textContent.includes('SEC08_MAIN_OWNED_READ') &&
+         !!window.CustomTabs.getDocumentDescriptor()?.ref`, 8000);
+      if (!painted) throw new Error("Native case-spelling fixture did not paint");
+      caseTabId = await exec("window.CustomTabs.getActiveTabId()");
+      casePayload = await exec(`(() => {
+        const owner = window.CustomTabs.getActiveDocumentIdentity(
+          ${JSON.stringify(casePreservedLogicalPath)}, window.getReloadRequestSession());
+        return { filePath: ${JSON.stringify(casePreservedLogicalPath)},
+          pageSession: owner.pageSession, rendererGeneration: owner.rendererGeneration, owner };
+      })()`);
+    } finally { restoreCaseChooser(); }
     const restoreCasePreservedOpen = replaceMethod(
       fs.promises,
       "open",
@@ -12016,8 +12571,7 @@ async function run(win) {
         (async () => {
           try {
             const snapshot = await window.folia.readOwnedTabDiskSnapshot({
-                ...${JSON.stringify(mainOwnedRefresh.validPayload)},
-                filePath: ${JSON.stringify(casePreservedLogicalPath)},
+                ...${JSON.stringify(casePayload)},
               });
             return { status: "fulfilled", snapshot };
           } catch (error) {
@@ -12030,12 +12584,12 @@ async function run(win) {
       restoreCasePreservedOpen();
     }
     check(
-      "SEC-08 case-preserved owned reads open the logical spelling and compare its registered physical target",
+      "SEC-08 case-preserved owned reads open and attest the registered physical target of a native logical spelling",
       casePreservedRead &&
         casePreservedRead.status === "rejected" &&
         casePreservedRead.message.includes(caseTargetWitness) &&
         casePreservedOpenPaths.length === 1 &&
-        casePreservedOpenPaths[0] === casePreservedLogicalPath &&
+        casePreservedOpenPaths[0] === casePreservedTarget &&
         casePreservedTargetStatCalls === 1,
       JSON.stringify({
         casePreservedTarget,
@@ -12045,6 +12599,9 @@ async function run(win) {
         casePreservedTargetStatCalls,
       }),
     );
+    if (caseTabId !== ids.b) {
+      await exec(`window.CustomTabs.closeTab(${caseTabId}, { skipConfirmation: true }); null;`);
+    }
   } else {
     unavailable(
       "SEC-08 case-preserved owned-read target comparison is unavailable on this filesystem",
@@ -12420,7 +12977,7 @@ async function run(win) {
   await runDocumentControlCloseJourney(exec);
   await runReloadTransportFailure(exec, sentinel);
   if (ownedReadFocusedHarness || dialogExtraFocusedHarness) {
-    if (ownedReadFocusedHarness) {
+    if (ownedReadFocusedHarness && process.env.SEC08_OWNED_READ_CORE_ONLY !== "1") {
       await runShutdownResponseCacheScenario(win, exec);
       await runTabPathCopyScenario(exec, await exec("window.currentFilePath"));
       await runBrowserClipboardConsumers(exec, sentinel);
@@ -37225,7 +37782,7 @@ app.whenReady().then(async () => {
       process.env.SEC08_ADMISSION_LIFECYCLE_ONLY !== "1"
     ? 120000
     : newlineFocusedHarness || focusedCommitHarness || queueFocusedHarness ||
-      ownedReadFocusedHarness || dialogExtraFocusedHarness || approvedRequestFocusedHarness
+      ownedReadFocusedHarness || dialogExtraFocusedHarness || approvedRequestFocusedHarness || nativeAuthorityFocusedHarness
     ? 90000
     : portableHarness
       ? COMPANION_WATCHDOG_MS.portable
@@ -37340,7 +37897,7 @@ app.whenReady().then(async () => {
     } else if (queueFocusedHarness) {
       await runF22QueueFocusedScenario((code) =>
         win.webContents.executeJavaScript(code, true));
-    } else if (ownedReadFocusedHarness || dialogExtraFocusedHarness || approvedRequestFocusedHarness) {
+    } else if (ownedReadFocusedHarness || dialogExtraFocusedHarness || approvedRequestFocusedHarness || nativeAuthorityFocusedHarness) {
       await run(win);
     } else if (companionSelfcheck) {
       await runCompanionSettlementScenarios();

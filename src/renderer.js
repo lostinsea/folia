@@ -1503,6 +1503,8 @@ function validateReloadResultForCurrentPage(data, checkSnapshot = true) {
     request.documentGeneration <= 0 ||
     typeof request.pathKey !== 'string' ||
     request.pathKey.length === 0 ||
+    typeof request.documentRef !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(request.documentRef) ||
     typeof request.path !== 'string' ||
     typeof request.snapshot !== 'string' ||
     request.session !== reloadRequestSession ||
@@ -1528,6 +1530,7 @@ function validateReloadResultForCurrentPage(data, checkSnapshot = true) {
     if (
       !identity ||
       request.documentGeneration !== identity.documentGeneration ||
+      request.documentRef !== identity.documentRef ||
       request.pathKey !== identity.pathKey
     ) {
       return 'foreign';
@@ -3824,7 +3827,9 @@ function reloadCurrentFile() {
     !Number.isSafeInteger(activeFileSelectionGeneration) ||
     activeFileSelectionGeneration <= 0 ||
     typeof identity.pathKey !== 'string' ||
-    identity.pathKey.length === 0
+    identity.pathKey.length === 0 ||
+    typeof identity.documentRef !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(identity.documentRef)
   ) {
     return false;
   }
@@ -3846,6 +3851,7 @@ function reloadCurrentFile() {
       reloadRequestTabId: tabId,
       reloadRequestDocumentGeneration: documentGeneration,
       reloadRequestDocumentPathKey: documentPathKey,
+      reloadRequestDocumentRef: identity.documentRef,
       reloadRequestRendererGeneration: identity.rendererGeneration,
       reloadRequestSelectionGeneration: activeFileSelectionGeneration,
     });
