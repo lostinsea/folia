@@ -7519,10 +7519,8 @@ function setFileTrackingIntent(active, send = true) {
       isFileTrackingActive = false;
       return false;
     }
-    ipcRenderer.send(
-      isFileTrackingActive ? 'resume-file-watching' : 'pause-file-watching',
-      envelope
-    );
+    if (isFileTrackingActive) window.folia.resumeFileWatching(envelope);
+    else window.folia.pauseFileWatching(envelope);
   }
   return isFileTrackingActive;
 }
@@ -7606,7 +7604,7 @@ function registerDocumentOwner(filePath, identity, diskVersion, modifiedTime) {
     diskVersion.mtimeMs !== modifiedTime
   ) return false;
   try {
-    ipcRenderer.send('register-document-owner', {
+    window.folia.registerDocumentOwner({
       filePath,
       pageSession: identity.pageSession,
       rendererGeneration: identity.rendererGeneration,
@@ -7795,9 +7793,7 @@ function assertFileTrackingOwnership(
     : fileTrackingPathKey(filePath);
   if (returnDecision) {
     try {
-      const decision = ipcRenderer.sendSync(
-        'select-file-tracking', selection,
-      );
+      const decision = window.folia.selectFileTracking(selection);
       if (!decision || decision.accepted !== true) {
         console.error('File tracking selection refused:', decision);
         return refused(decision && decision.mayHaveMoved === true);
@@ -7863,19 +7859,19 @@ function assertFileTrackingOwnership(
     // A clean document may be selected while the previous dirty document left
     // main paused. Name the new owner before resuming so no watcher is ever
     // armed against the old path.
-    ipcRenderer.send('set-active-file', selection);
+    window.folia.setActiveFile(selection);
     sentAny = true;
-    ipcRenderer.send('resume-file-watching', envelope);
+    window.folia.resumeFileWatching(envelope);
     sentAny = true;
   } else {
     // A dirty document must be paused before selection. Otherwise selecting it
     // can transiently arm a watcher and adopt current disk state before the
     // renderer has asserted that its in-memory bytes own the document.
     if (wasTrackingActive) {
-      ipcRenderer.send('pause-file-watching', envelope);
+      window.folia.pauseFileWatching(envelope);
       sentAny = true;
     }
-    ipcRenderer.send('set-active-file', selection);
+    window.folia.setActiveFile(selection);
     sentAny = true;
   }
   } catch (error) {
@@ -7946,7 +7942,7 @@ function quarantineSelectedFileReload(data, ownerFilePath, selection) {
   ) return false;
   let reply;
   try {
-    reply = ipcRenderer.sendSync('quarantine-selected-file-tracking', {
+    reply = window.folia.quarantineSelectedFileTracking({
       filePath: ownerFilePath,
       pageSession: reloadRequestSession,
       rendererGeneration: owner.rendererGeneration,
@@ -7996,7 +7992,7 @@ function quarantineBackgroundDocumentOwner(filePath, identity, diskVersion) {
   ) return false;
   const owner = { ...identity, selectionGeneration: 1 };
   try {
-    const reply = ipcRenderer.sendSync('quarantine-selected-file-tracking', {
+    const reply = window.folia.quarantineSelectedFileTracking({
       filePath,
       pageSession: reloadRequestSession,
       rendererGeneration: identity.rendererGeneration,
@@ -8031,7 +8027,7 @@ function stopFileTrackingIntent() {
   isFileTrackingActive = false;
   fileTrackingPauseOwner = null;
   if (!envelope) return false;
-  ipcRenderer.send('stop-file-watching', envelope);
+  window.folia.stopFileWatching(envelope);
   return true;
 }
 
@@ -8514,7 +8510,7 @@ function queryDocumentDeletionState(filePath, identity) {
     return null;
   }
   try {
-    const state = ipcRenderer.sendSync('query-document-deletion-state', {
+    const state = window.folia.queryDocumentDeletionState({
       filePath,
       ...identity,
     });
@@ -8540,7 +8536,7 @@ function queryDocumentDiskAdoptionState(
     identity.pageSession !== reloadRequestSession
   ) return null;
   try {
-    const state = ipcRenderer.sendSync('query-document-disk-adoption-state', {
+    const state = window.folia.queryDocumentDiskAdoptionState({
       filePath,
       ownerFilePath,
       pageSession: reloadRequestSession,
@@ -8619,7 +8615,7 @@ function reportAdoptionTrackingConflict(filePath, identity) {
     return false;
   }
   try {
-    ipcRenderer.send('report-adoption-tracking-conflict', {
+    window.folia.reportAdoptionTrackingConflict({
       filePath,
       pageSession: reloadRequestSession,
       rendererGeneration: identity.rendererGeneration,
@@ -8676,7 +8672,7 @@ function retireDeletionTombstone(
     return refused('invalid-tombstone');
   }
   try {
-    const outcome = ipcRenderer.sendSync('retire-deleted-document-owner', {
+    const outcome = window.folia.retireDeletedDocumentOwner({
       filePath,
       ...identity,
       ...(tombstone || {}),

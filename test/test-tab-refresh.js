@@ -7334,6 +7334,292 @@ async function runAdoptionBridgeValidation(exec) {
   );
 }
 
+async function runDocumentControlBridgeValidation(exec) {
+  const probe = await exec(`(() => {
+    const api = window.folia, ipc = window.ipcRenderer;
+    const originals = { send: ipc.send, sendSync: ipc.sendSync };
+    const owner = {
+      pageSession: 'document-control-probe', rendererGeneration: 1, tabId: 2,
+      documentGeneration: 3, pathKey: 'physical-owner', selectionGeneration: 4,
+    };
+    const version = { dev: 1, ino: 2, size: 17, mtimeMs: 123, ctimeMs: 124 };
+    const envelope = { pageSession: owner.pageSession, rendererGeneration: 1,
+      filePath: 'logical-owner', owner: { ...owner, ignored: true } };
+    const identity = { filePath: envelope.filePath, ...owner };
+    const selection = { ...envelope, adoptBaseline: false, adoptPathIdentity: false,
+      trackingActive: false, modifiedTime: null, diskVersion: null };
+    const requests = {
+      registerDocumentOwner: { ...envelope, diskVersion: version, modifiedTime: 123 },
+      setActiveFile: selection, selectFileTracking: selection,
+      pauseFileWatching: envelope, resumeFileWatching: envelope, stopFileWatching: envelope,
+      quarantineSelectedFileTracking: { ...envelope,
+        approvedPathKey: owner.pathKey, approvedDiskVersion: version },
+      queryDocumentDeletionState: identity,
+      queryDocumentDiskAdoptionState: { ...identity, ownerFilePath: 'other-spelling',
+        modifiedTime: 123, diskVersion: version },
+      reportAdoptionTrackingConflict: envelope,
+      retireDeletedDocumentOwner: { ...identity, acknowledgedDeletion: true,
+        eventId: 999, watcherGeneration: 998, attempt: 997 },
+    };
+    const replies = {
+      'select-file-tracking': { accepted: true, trackingActive: false },
+      'quarantine-selected-file-tracking': { quarantined: true,
+        owner: { ...owner, spelling: 'main-spelling' }, pathKey: owner.pathKey, diskVersion: version },
+      'query-document-deletion-state': { known: true, revision: 1, ownDeletion: true,
+        orphaned: false, pathOnly: false, unreadable: false, unresolved: true },
+      'query-document-disk-adoption-state': { known: true, revision: 2,
+        ownDeletion: false, orphaned: false, pathOnly: false, overflow: true,
+        pathKey: null, versionMatches: false },
+      'retire-deleted-document-owner': { retired: true, why: 'retired', revision: 3,
+        retiredEvidence: true, unresolved: true },
+    };
+    const calls = [];
+    let failure = null;
+    const record = (channel, payload) => {
+      calls.push({ channel, payload });
+      if (failure) throw new Error(failure);
+      return replies[channel];
+    };
+    ipc.send = record;
+    ipc.sendSync = record;
+    try {
+      const malformed = [];
+      for (const [method, input] of Object.entries(requests)) {
+        const cases = [null, [], { ...input, pageSession: '' },
+          { ...input, rendererGeneration: 0 }, { ...input, filePath: 'bad\\0path' }];
+        if (input.owner) cases.push(
+          { ...input, owner: { ...owner, pageSession: 'foreign' } },
+          { ...input, owner: { ...owner, tabId: 0 } });
+        else cases.push({ ...input, tabId: 0 });
+        if (['registerDocumentOwner', 'setActiveFile', 'selectFileTracking',
+          'pauseFileWatching', 'resumeFileWatching', 'stopFileWatching',
+          'quarantineSelectedFileTracking'].includes(method)) cases.push(
+            { ...input, owner: { ...owner, selectionGeneration: undefined } });
+        if (method === 'registerDocumentOwner') cases.push({ ...input, modifiedTime: 124 });
+        if (method === 'setActiveFile' || method === 'selectFileTracking') cases.push(
+          { ...input, adoptBaseline: true }, { ...input, trackingActive: 1 },
+          { ...input, adoption: { capability: 'bad' } });
+        if (method === 'quarantineSelectedFileTracking') cases.push(
+          { ...input, background: 'true' }, { ...input, approvedPathKey: '' });
+        if (method === 'queryDocumentDiskAdoptionState') cases.push(
+          { ...input, ownerFilePath: '' }, { ...input, diskVersion: { ...version, size: Infinity } });
+        if (method === 'retireDeletedDocumentOwner') cases.push(
+          { ...input, acknowledgedDeletion: 1 }, { ...input, eventId: 0 });
+        for (const bad of cases) {
+          try { api[method](bad); malformed.push(false); }
+          catch (error) { malformed.push(error.message.includes('Invalid')); }
+        }
+      }
+      const malformedCalls = calls.length;
+      calls.length = 0;
+      const positive = {}, synchronous = [];
+      for (const [method, input] of Object.entries(requests)) {
+        positive[method] = api[method]({ ...input, ignored: true });
+        synchronous.push(!positive[method] || typeof positive[method].then !== 'function');
+      }
+      const forwarding = calls.splice(0);
+      api.setActiveFile({ ...selection, trackingActive: true });
+      api.resumeFileWatching(envelope);
+      api.pauseFileWatching(envelope);
+      api.setActiveFile(selection);
+      const ordering = calls.splice(0).map(call => call.channel);
+      const adoption = { capability: 'b'.repeat(32), revision: 5, contentDigest: 'a'.repeat(64),
+        sourceFilePath: 'incoming-spelling', ownerFilePath: 'logical-owner' };
+      replies['select-file-tracking'] = { accepted: true, trackingActive: false,
+        completedAdoption: adoption.capability, approvedOwner: { ...owner, spelling: 'main-spelling' },
+        approvedPathKey: owner.pathKey, approvedDiskVersion: version,
+        approvedSourceFilePath: adoption.sourceFilePath, approvedOwnerFilePath: adoption.ownerFilePath,
+        unresolvedEvidence: true, trackingConflict: true };
+      const adopted = api.selectFileTracking({ ...selection, adoptBaseline: true,
+        adoptPathIdentity: true, modifiedTime: 123, diskVersion: version,
+        adoption: { ...adoption, ignored: true } });
+      const adoptedPayload = calls.pop().payload;
+      const backgrounds = [];
+      for (const background of [false, true]) {
+        api.quarantineSelectedFileTracking({ ...requests.quarantineSelectedFileTracking, background });
+        backgrounds.push(calls.pop().payload.background);
+      }
+      const newIdentity = api.queryDocumentDiskAdoptionState({
+        ...requests.queryDocumentDiskAdoptionState, tabId: null,
+      });
+      const newIdentityPayload = calls.pop().payload;
+      const unknown = [];
+      for (const [method, channel] of [
+        ['queryDocumentDeletionState', 'query-document-deletion-state'],
+        ['queryDocumentDiskAdoptionState', 'query-document-disk-adoption-state'],
+      ]) {
+        replies[channel] = { known: false };
+        unknown.push(api[method](requests[method]));
+      }
+      replies['retire-deleted-document-owner'] = {
+        retired: false, why: 'invalid-identity', revision: 4, unresolved: null };
+      const retirementRefusal = api.retireDeletedDocumentOwner(requests.retireDeletedDocumentOwner);
+      replies['select-file-tracking'] = {
+        accepted: false, mayHaveMoved: true, why: 'disk-moved' };
+      const selectionRefusal = api.selectFileTracking(selection);
+      replies['quarantine-selected-file-tracking'] = {
+        quarantined: false, why: 'selected-owner-moved' };
+      const quarantineRefusal = api.quarantineSelectedFileTracking(requests.quarantineSelectedFileTracking);
+      const badReplies = [];
+      for (const [method, channel, bad] of [
+        ['selectFileTracking', 'select-file-tracking', { accepted: false, why: 'refused' }],
+        ['selectFileTracking', 'select-file-tracking', { ...adopted, approvedDiskVersion: { ...version, ino: NaN } }],
+        ['quarantineSelectedFileTracking', 'quarantine-selected-file-tracking', { quarantined: true }],
+        ['queryDocumentDeletionState', 'query-document-deletion-state', { known: true }],
+        ['queryDocumentDiskAdoptionState', 'query-document-disk-adoption-state', { ...newIdentity, pathKey: 0 }],
+        ['retireDeletedDocumentOwner', 'retire-deleted-document-owner', {
+          retired: true, why: 'retired', revision: 0, unresolved: null, retiredEvidence: true }],
+      ]) {
+        replies[channel] = bad;
+        try { api[method](requests[method]); badReplies.push(false); }
+        catch (error) { badReplies.push(error.message.includes('Invalid')); }
+      }
+      failure = 'controlled document transport failure';
+      const failures = [];
+      for (const [method, input] of Object.entries(requests)) {
+        try { api[method](input); failures.push(null); }
+        catch (error) { failures.push(error.message); }
+      }
+      return { malformed, malformedCalls, positive, synchronous, forwarding, ordering,
+        adopted, adoptedPayload, backgrounds, newIdentity, newIdentityPayload,
+        unknown, retirementRefusal, selectionRefusal, quarantineRefusal, badReplies, failures };
+    } finally { Object.assign(ipc, originals); }
+  })()`);
+  check(
+    "SEC-08 document control bridge rejects malformed requests before IPC",
+    probe.malformed.length === 94 && probe.malformed.every(Boolean) && probe.malformedCalls === 0,
+    JSON.stringify(probe),
+  );
+  check(
+    "SEC-08 document control bridge copies fixed fields and retains synchronous clean-dirty ordering",
+    probe.forwarding.length === 11 && probe.synchronous.every(Boolean) &&
+      probe.forwarding.every(call => !("ignored" in call.payload) &&
+        (!call.payload.owner || !("ignored" in call.payload.owner))) &&
+      probe.forwarding[1].payload.diskVersion === null &&
+      probe.forwarding[1].payload.modifiedTime === null &&
+      probe.forwarding[10].payload.eventId === 999 &&
+      probe.forwarding[10].payload.attempt === 997 &&
+      probe.ordering.join(",") === "set-active-file,resume-file-watching,pause-file-watching,set-active-file",
+    JSON.stringify(probe),
+  );
+  check(
+    "SEC-08 document control bridge retains adoption evidence and foreground-background quarantine",
+    probe.adopted.approvedOwner.spelling === "main-spelling" &&
+      probe.adopted.approvedOwner.selectionGeneration === 4 &&
+      probe.adopted.approvedSourceFilePath === "incoming-spelling" &&
+      probe.adopted.approvedOwnerFilePath === "logical-owner" &&
+      probe.adopted.approvedDiskVersion.ino === 2 &&
+      probe.adopted.unresolvedEvidence === true && probe.adopted.trackingConflict === true &&
+      !("ignored" in probe.adoptedPayload.adoption) &&
+      probe.backgrounds.join(",") === "false,true" &&
+      !("background" in probe.forwarding[6].payload) &&
+      probe.positive.quarantineSelectedFileTracking.owner.spelling === "main-spelling",
+    JSON.stringify(probe),
+  );
+  check(
+    "SEC-08 document control bridge preserves unknown, missing-path and live retirement results",
+    probe.newIdentity.known === true && probe.newIdentity.pathKey === null &&
+      probe.newIdentityPayload.tabId === null &&
+      !("documentGeneration" in probe.newIdentityPayload) &&
+      probe.unknown.length === 2 &&
+      probe.unknown.every(value => Object.keys(value).join(",") === "known" && value.known === false) &&
+      probe.positive.queryDocumentDeletionState.unresolved === true &&
+      probe.positive.retireDeletedDocumentOwner.retiredEvidence === true &&
+      probe.positive.retireDeletedDocumentOwner.unresolved === true &&
+      probe.retirementRefusal.unresolved === null && probe.retirementRefusal.revision === 4 &&
+      probe.selectionRefusal.mayHaveMoved === true &&
+      probe.quarantineRefusal.why === "selected-owner-moved",
+    JSON.stringify(probe),
+  );
+  check(
+    "SEC-08 document control bridge rejects malformed replies and exposes transport errors",
+    probe.badReplies.length === 6 && probe.badReplies.every(Boolean) &&
+      probe.failures.length === 11 &&
+      probe.failures.every(message => message === "controlled document transport failure"),
+    JSON.stringify(probe),
+  );
+}
+
+async function runDocumentControlCloseJourney(exec) {
+  const file = path.join(dir, "document-control-close.md");
+  const jsFile = JSON.stringify(file);
+  write(file, "# Document control close\n\nCONTROL_CLOSE_FIXTURE\n");
+  const before = await exec(`({
+    id: window.CustomTabs.getActiveTabId(),
+    heading: document.getElementById('viewer').querySelector('h1')?.textContent,
+  })`);
+  await exec(`window.ipcRenderer.send('open-file-path', { filePath: ${jsFile} }); null;`);
+  const opened = await waitForCondition(exec, `
+    window.currentFilePath === ${jsFile} &&
+    document.getElementById('viewer').textContent.includes('CONTROL_CLOSE_FIXTURE')
+  `);
+  const request = await exec(`({
+    filePath: ${jsFile},
+    ...window.CustomTabs.getActiveDocumentIdentity(${jsFile}, window.getReloadRequestSession()),
+  })`);
+  const initial = await exec(`window.folia.queryDocumentDeletionState(${JSON.stringify(request)})`);
+  check(
+    "SEC-08 document close journey starts with an actual registered clean disk owner",
+    opened && Number.isSafeInteger(request.tabId) &&
+      initial.known === true && initial.unresolved === false,
+    JSON.stringify({ opened, request, initial }),
+  );
+  if (!opened || !request.tabId) throw new Error("Document close fixture did not open");
+  fs.unlinkSync(file);
+  const deleted = await exec(`(() => {
+    const request = ${JSON.stringify(request)};
+    const state = window.folia.queryDocumentDeletionState(request);
+    const refusal = window.folia.retireDeletedDocumentOwner({
+      ...request, acknowledgedDeletion: false,
+    });
+    const retained = window.folia.queryDocumentDeletionState(request);
+    return { state, refusal, retained };
+  })()`);
+  check(
+    "SEC-08 actual deletion remains unresolved when retirement lacks reader acknowledgement",
+    deleted.state.known === true && deleted.state.ownDeletion === true &&
+      deleted.state.unresolved === true &&
+      deleted.refusal.retired === false && deleted.refusal.why === "deletion-unacknowledged" &&
+      deleted.refusal.unresolved === true &&
+      deleted.retained.ownDeletion === true && deleted.retained.unresolved === true,
+    JSON.stringify(deleted),
+  );
+  const closed = await exec(`(async () => {
+    const original = window.folia, realConfirm = window.confirm;
+    const confirmations = [], retirements = [];
+    window.confirm = message => { confirmations.push(message); return true; };
+    window.folia = { ...original, retireDeletedDocumentOwner(request) {
+      const result = original.retireDeletedDocumentOwner(request);
+      retirements.push({ request, result });
+      return result;
+    }};
+    try {
+      await window.CustomTabs.closeTab(${request.tabId});
+      return {
+        confirmations, retirements,
+        remains: window.CustomTabs.getTabs().some(tab => tab.id === ${request.tabId}),
+      };
+    } finally { window.folia = original; window.confirm = realConfirm; }
+  })()`);
+  check(
+    "SEC-08 actual close warns, acknowledges and retires only the deleted fixture owner",
+    closed.remains === false && closed.confirmations.length === 1 &&
+      closed.confirmations[0].includes("deleted outside Folia") &&
+      closed.retirements.length === 1 &&
+      closed.retirements[0].request.tabId === request.tabId &&
+      closed.retirements[0].request.acknowledgedDeletion === true &&
+      closed.retirements[0].result.retired === true &&
+      closed.retirements[0].result.unresolved === false,
+    JSON.stringify(closed),
+  );
+  await exec(`window.CustomTabs.switchToTab(${before.id}); null;`);
+  const restored = await waitForCondition(exec, `
+    window.CustomTabs.getActiveTabId() === ${before.id} &&
+    document.getElementById('viewer').querySelector('h1')?.textContent === ${JSON.stringify(before.heading)}
+  `);
+  check("SEC-08 actual deletion close restores the previous rendered document", restored);
+}
+
 async function runDialogBatchScenarios(exec, sentinel, closeFixtureTabsSource, clearFixtureTabs) {
   // ---- Scenario 12: batch paths must not interrogate the reader ----------
   // Two defects, both MEASURED on the pre-fix tree before anything was
@@ -8271,6 +8557,11 @@ async function run(win) {
   const expectsPdfSignal =
     !app.isPackaged && process.argv.includes("--folia-test-preload");
   const productionBridgeMethods = [
+    "registerDocumentOwner", "setActiveFile", "selectFileTracking",
+    "pauseFileWatching", "resumeFileWatching", "stopFileWatching",
+    "quarantineSelectedFileTracking", "queryDocumentDeletionState",
+    "queryDocumentDiskAdoptionState", "reportAdoptionTrackingConflict",
+    "retireDeletedDocumentOwner",
     "prepareDocumentDiskAdoption", "commitDocumentDiskAdoption",
     "completeDocumentDiskAdoption", "abandonDocumentDiskAdoption",
     "readOwnedTabDiskSnapshot", "readDialogExtra",
@@ -8670,6 +8961,7 @@ async function run(win) {
     JSON.stringify(mainOwnedRefresh),
   );
   await runAdoptionBridgeValidation(exec);
+  await runDocumentControlBridgeValidation(exec);
   const bridgeValidation = await exec(`
     (async () => {
       const request = ${JSON.stringify(mainOwnedRefresh.validPayload)};
@@ -9214,6 +9506,7 @@ async function run(win) {
     await viewerText(),
   );
 
+  await runDocumentControlCloseJourney(exec);
   if (ownedReadFocusedHarness || dialogExtraFocusedHarness) {
     if (dialogExtraFocusedHarness) {
       await clearFixtureTabs("dialog bridge preflight");

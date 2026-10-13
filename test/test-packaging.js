@@ -884,6 +884,23 @@ async function main() {
         `ipcRenderer\\.(?:invoke|sendSync|send)\\s*\\(\\s*['"]${phase}-document-disk-adoption['"]`,
       ).test(rendererSource)),
   );
+  check(
+    "document control consumers use fixed production bridge methods instead of raw control IPC",
+    [
+      ["registerDocumentOwner", "register-document-owner"],
+      ["setActiveFile", "set-active-file"], ["selectFileTracking", "select-file-tracking"],
+      ["pauseFileWatching", "pause-file-watching"], ["resumeFileWatching", "resume-file-watching"],
+      ["stopFileWatching", "stop-file-watching"],
+      ["quarantineSelectedFileTracking", "quarantine-selected-file-tracking"],
+      ["queryDocumentDeletionState", "query-document-deletion-state"],
+      ["queryDocumentDiskAdoptionState", "query-document-disk-adoption-state"],
+      ["reportAdoptionTrackingConflict", "report-adoption-tracking-conflict"],
+      ["retireDeletedDocumentOwner", "retire-deleted-document-owner"],
+    ].every(([method, channel]) =>
+      rendererSource.includes(`window.folia.${method}(`) &&
+      !new RegExp(`ipcRenderer\\.(?:sendSync|send)\\s*\\(\\s*['"]${channel}['"]`).test(rendererSource)) &&
+      !rendererSource.includes("isFileTrackingActive ? 'resume-file-watching' : 'pause-file-watching'"),
+  );
   const customTabsContextMenuBinding =
     /const\s*\{\s*positionContextMenu\s*:\s*positionTabMenu\s*,\s*hideContextMenu\s*:\s*hideTabMenuEl\s*,?\s*\}\s*=\s*window\.FoliaContextMenu\s*;/.test(
       customTabsSource,

@@ -524,6 +524,14 @@ evidence after completion. The real owned/dialog route is 63/63; R746-R748 and
 shared-response R736 are exact PROVEN (`adoption-context-exact-proofs-r1-20261012.log`;
 R748's complete compound rollback: `adoption-context-compound-proofs-r3-20261012.log`).
 This is a port migration, not new path authority or a performance verdict.
+Selection/watcher controls, quarantine, deletion queries and retirement now
+also cross fixed validated preload methods, retaining ordinary nullable
+baselines, main's refusal/evidence variants and live-state retirement.
+The focused real deletion/reader-confirmed close and boundary route is 72/72;
+R753-R755 and affected R736/R746/R747 are individually exact PROVEN in
+`document-control-exact-proofs-r1-20261013.log`. Fresh independent Sol/Luna
+implementation reviews agree on no blockers. This adds no read, digest or IPC
+to those existing control operations. It does not close path authority:
 Renderer registration remains provisional authority; remaining callers,
 main-owned authority and the test harness must migrate before the final
 Node-off/isolation/sandbox transition. That transition and its user-visible

@@ -117,6 +117,28 @@ an empty-window teardown. The focused route now also verifies an ordinary
 authenticated open after the refusals; no transcript rule was relaxed for it.
 Main-window security flags and performance qualification are still pending.
 
+**Document control-plane transition — IMPLEMENTED / PROVEN, unintegrated.**
+Actual selection, watcher, quarantine, deletion-query and retirement consumers
+now use fixed validated preload methods, including the dynamic tracking-intent
+branch. Main authority and send/synchronous ordering are unchanged; this adds
+no IPC, content read or digest. Both independent Sol/Luna design reviews
+requested nullable query/retirement results, ordinary versus adopted selection,
+background quarantine and live-state retirement controls; Sol additionally
+identified the dynamic caller outside the original read ranges. Registration
+is still provisional: this port tranche does not justify changing production
+security flags or claiming qualified responsiveness. Focused boundary and
+actual deletion/close evidence is 72/72, including main's live unacknowledged
+retirement refusal and the actual reader-confirmed close. Source packaging is
+364/0. R753-R755 and affected shared R736/R746/R747 are individually exact
+PROVEN in `document-control-exact-proofs-r1-20261013.log`; source restored.
+Fresh independent implementation reviews both found no blockers or
+disagreement. Boundary spies and the temporary bridge observer remain
+transitional Node-enabled test instrumentation, not final isolated-production
+evidence. Next is main-issued admission and restore authority: moving these
+calls alone does not authorize renderer-chosen paths. Legacy session
+compatibility and the hot-path metadata IPC must be preserved and measured,
+not renamed into an authority or performance certificate.
+
 **Browser primitive transition — IMPLEMENTED / PROVEN, unintegrated.** Removed
 renderer Node crypto and Buffer dependencies using native Web Crypto/TextEncoder for the existing
 attestation and an allocation-free shared UTF-8 byte counter for explicitly

@@ -18628,14 +18628,17 @@ const REVERTS = [
           from: "      !positiveInteger(identity.tabId) ||",
           to: "",
           suite: "test:sec08-owned-read-evidence",
-          expect: [/^SEC-08 adoption bridge rejects malformed requests before any protocol IPC$/],
+          expect: [
+            /^SEC-08 adoption bridge rejects malformed requests before any protocol IPC$/,
+            /^SEC-08 document control bridge rejects malformed requests before IPC$/,
+          ],
           mustPass: [
             /^SEC-08 adoption bridge preserves fixed fields, nullable owners, protocol order and completion evidence$/,
             /^SEC-08 adoption bridge preserves historical resolution and explicit refusals$/,
             /^SEC-08 changed clean-tab refresh reads through main without renderer content reads or a modal$/,
           ],
           requireMustPassAssertions: true, requireExactFailures: true,
-          expectedFailureCount: 1,
+          expectedFailureCount: 2,
         },
         {
           id: "R747",
@@ -18807,6 +18810,103 @@ const REVERTS = [
             /^context-viewport: oversized height is a bounded vertical scrollport$/,
             /^context-viewport: actual menu scrolling keeps the final command hit-testable$/,
             /^context-viewport: Escape still dismisses the menu \(control\)$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R753",
+          what: "send watcher controls without a positive selection generation",
+          file: path.join(SRC, "main-preload.js"),
+          from: "      !positiveInteger(request.owner?.selectionGeneration)) {",
+          to: "      false) {",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [/^SEC-08 document control bridge rejects malformed requests before IPC$/],
+          mustPass: [
+            /^SEC-08 document control bridge copies fixed fields and retains synchronous clean-dirty ordering$/,
+            /^SEC-08 document close journey starts with an actual registered clean disk owner$/,
+            /^SEC-08 actual close warns, acknowledges and retires only the deleted fixture owner$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R754",
+          what: "turn unresolved or unauthenticated retirement evidence into a false clean result",
+          file: path.join(SRC, "main-preload.js"),
+          from: "      unresolved: result.unresolved,",
+          to: "      unresolved: false,",
+          suite: "test:sec08-owned-read-evidence",
+          expect: [
+            /^SEC-08 document control bridge preserves unknown, missing-path and live retirement results$/,
+            /^SEC-08 actual deletion remains unresolved when retirement lacks reader acknowledgement$/,
+          ],
+          mustPass: [
+            /^SEC-08 document control bridge rejects malformed requests before IPC$/,
+            /^SEC-08 document control bridge rejects malformed replies and exposes transport errors$/,
+            /^SEC-08 actual close warns, acknowledges and retires only the deleted fixture owner$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 2,
+        },
+        {
+          id: "R755",
+          what: "bypass the fixed bridge throughout the renderer document control plane",
+          file: RENDERER,
+          from: "    window.folia.registerDocumentOwner({",
+          to: "    ipcRenderer.send('register-document-owner', {",
+          also: [
+            {
+              from: "      const decision = window.folia.selectFileTracking(selection);",
+              to: "      const decision = ipcRenderer.sendSync('select-file-tracking', selection);",
+            },
+            {
+              from: "    window.folia.setActiveFile(selection);\n    sentAny = true;\n    window.folia.resumeFileWatching(envelope);",
+              to: "    ipcRenderer.send('set-active-file', selection);\n    sentAny = true;\n    ipcRenderer.send('resume-file-watching', envelope);",
+            },
+            {
+              from: "      window.folia.pauseFileWatching(envelope);\n      sentAny = true;\n    }\n    window.folia.setActiveFile(selection);",
+              to: "      ipcRenderer.send('pause-file-watching', envelope);\n      sentAny = true;\n    }\n    ipcRenderer.send('set-active-file', selection);",
+            },
+            {
+              from: "    if (isFileTrackingActive) window.folia.resumeFileWatching(envelope);\n    else window.folia.pauseFileWatching(envelope);",
+              to: "    ipcRenderer.send(isFileTrackingActive ? 'resume-file-watching' : 'pause-file-watching', envelope);",
+            },
+            {
+              from: "    reply = window.folia.quarantineSelectedFileTracking({",
+              to: "    reply = ipcRenderer.sendSync('quarantine-selected-file-tracking', {",
+            },
+            {
+              from: "    const reply = window.folia.quarantineSelectedFileTracking({",
+              to: "    const reply = ipcRenderer.sendSync('quarantine-selected-file-tracking', {",
+            },
+            {
+              from: "  window.folia.stopFileWatching(envelope);",
+              to: "  ipcRenderer.send('stop-file-watching', envelope);",
+            },
+            {
+              from: "    const state = window.folia.queryDocumentDeletionState({",
+              to: "    const state = ipcRenderer.sendSync('query-document-deletion-state', {",
+            },
+            {
+              from: "    const state = window.folia.queryDocumentDiskAdoptionState({",
+              to: "    const state = ipcRenderer.sendSync('query-document-disk-adoption-state', {",
+            },
+            {
+              from: "    window.folia.reportAdoptionTrackingConflict({",
+              to: "    ipcRenderer.send('report-adoption-tracking-conflict', {",
+            },
+            {
+              from: "    const outcome = window.folia.retireDeletedDocumentOwner({",
+              to: "    const outcome = ipcRenderer.sendSync('retire-deleted-document-owner', {",
+            },
+          ],
+          suite: "test:packaging",
+          expect: [/^document control consumers use fixed production bridge methods instead of raw control IPC$/],
+          mustPass: [
+            /^disk adoption consumers use fixed production bridge methods instead of raw protocol IPC$/,
+            /^changed clean-tab reads use the fixed production bridge instead of renderer raw IPC$/,
+            /^dialog extras use the grant-only production bridge instead of renderer raw IPC$/,
           ],
           requireMustPassAssertions: true, requireExactFailures: true,
           expectedFailureCount: 1,
@@ -19890,7 +19990,7 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752";
+      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755";
   const toolbarAllowanceIsRecordScoped =
     REVERTS.filter((r) =>
       exactShutdownTailForMutation(r) === TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL,

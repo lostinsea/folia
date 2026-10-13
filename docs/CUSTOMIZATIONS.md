@@ -127,6 +127,18 @@ the controlled move-aside/install fixture exercises that boundary without
 claiming OS-level atomicity. R714-R718 individually protect this slice;
 broader Wave 2 and release gates remain separate.
 
+**Document control bridge (2026-10-13, unintegrated).** Registration,
+selection/watcher control, quarantine, deletion-state queries and retirement
+use fixed validated production preload methods, not renderer raw IPC. Keep the
+clean select-before-resume and dirty pause-before-select order and the
+synchronous query/retirement boundaries. Ordinary selection may have no disk
+baseline; an unavailable disk query may have no physical key. A retirement
+refusal with unknown state carries `null`, not a false clean result, and
+mutable delivery tokens remain evidence rather than close authority.
+The actual deleted-file close still warns before retiring its owner.
+R753-R755 and affected shared guards are exact PROVEN; this remains a
+preparatory port migration, not completed renderer path authority/isolation.
+
 **Production preload consumers (2026-10-12, unintegrated).** Main windows
 always load `main-preload.js`; marked unpackaged test preloads augment rather
 than replace it. Clean-tab snapshots and one-use multi-select extras use fixed,
