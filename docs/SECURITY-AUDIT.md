@@ -678,6 +678,28 @@ fixture remains nongreen, not certified by the native-backed core selector.
 Browser physical helpers, production flags and
 measured responsiveness are subsequent gates, not covered by this unit.
 
+**Conditional clean-tab metadata gate — IMPLEMENTED / PROVEN, unintegrated.**
+The refresh gate now sends one fixed native-owner/cached-version request.
+Main authenticates retained ownership in memory before async physical-binding/
+metadata probes. A matching version returns no body; a changed version uses
+the existing pinned stable reader. Missing/binding-unavailable receipts remain
+distinct from authority/read refusal. Renderer witnesses now span metadata as
+well as the body, including background edit-undo, current native ref and cached
+version. Refresh-local stat/realpath and canonical-identity fallback are removed;
+the later adoption/browser physical helpers are not yet migrated. The old
+synchronous zero-IPC gate is deliberately superseded; finite ctime-only policy
+is unchanged. Both independent design reviews agree on this contract.
+Final restored native-backed core/private-session/source packaging controls are
+99/99, 61/61 and 380/0 (`conditional-refresh-*-final-*` logs).
+R714-R718, R735-R737 and R844-R851 are individually exact PROVEN in
+`conditional-refresh-exact-proofs-r2.log`, with source restored.
+The rendered control capture was viewed. Independent fresh Sol/Luna reviews
+and correction feedback converge without blockers; the roadmap retains their
+distinct nonblocking oracle/descriptor findings and failed initial campaigns.
+The unchanged raw receipt's exact keys are checked before preload filtering,
+and changed receipts reject even valid native descriptors. These are
+functional/source results, not responsiveness qualification or final isolation.
+
 The **production main window still has Node enabled and isolation disabled**.
 Preparation, commit, completion and abandonment of disk-adoption capabilities
 now use fixed copied/validated preload methods; main's actual authority,

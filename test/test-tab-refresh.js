@@ -7083,6 +7083,377 @@ function startConsoleAttributionSidecar(win, sentinel) {
   };
 }
 
+async function runConditionalRefreshValidation(win, exec, dir, filePath) {
+  const request = await exec(`(() => {
+    const tab = window.CustomTabs.findTabByPath(${JSON.stringify(filePath)});
+    const owner = window.CustomTabs.getDocumentIdentityForTab(
+      tab.id, tab.filePath, window.getReloadRequestSession());
+    return { filePath: tab.filePath, pageSession: owner.pageSession,
+      rendererGeneration: owner.rendererGeneration, owner, diskVersion: tab.diskVersion };
+  })()`);
+  const validation = await exec(`(async () => {
+    const request = ${JSON.stringify(request)};
+    const invoke = window.ipcRenderer.invoke;
+    let calls = 0;
+    let forwarded;
+    window.ipcRenderer.invoke = function (channel, payload) {
+      if (channel === 'refresh-owned-tab-disk-snapshot') { calls += 1; forwarded = payload; }
+      return invoke.apply(this, arguments);
+    };
+    try {
+      const invalid = [
+        { ...request, filePath: 'bad\\0path' },
+        { ...request, owner: { ...request.owner, documentRef: undefined } },
+        { ...request, diskVersion: undefined },
+        { ...request, diskVersion: { ...request.diskVersion, size: Infinity } },
+        { ...request, diskVersion: [] },
+      ];
+      const rejected = [];
+      for (const input of invalid) {
+        try { await window.folia.refreshOwnedTabDiskSnapshot(input); rejected.push(false); }
+        catch (error) { rejected.push(error.message.includes('Invalid')); }
+      }
+      const invalidCalls = calls;
+      calls = 0;
+      const positive = await window.folia.refreshOwnedTabDiskSnapshot({
+        ...request, ignored: true, owner: { ...request.owner, ignored: true },
+        diskVersion: { ...request.diskVersion, ignored: true },
+      });
+      const fields = { calls, request: Object.keys(forwarded).sort(),
+        owner: Object.keys(forwarded.owner).sort(),
+        version: Object.keys(forwarded.diskVersion).sort(),
+        response: Object.keys(positive).sort(), status: positive.status };
+      const badResponses = [];
+      for (const response of [
+        undefined, { ...positive, status: 'unknown' },
+        { ...positive, pathKey: 'another-file' },
+        { ...positive, content: 'must-not-cross-metadata' },
+        { ...positive, modifiedTime: positive.diskVersion.mtimeMs },
+        { ...positive, diskVersion: { ...positive.diskVersion, mtimeMs: positive.diskVersion.mtimeMs + 1 } },
+        { status: 'changed', pathKey: request.owner.pathKey, content: 3,
+          modifiedTime: request.diskVersion.mtimeMs, diskVersion: request.diskVersion },
+        { status: 'changed', pathKey: request.owner.pathKey, content: 'text',
+          modifiedTime: request.diskVersion.mtimeMs + 1, diskVersion: request.diskVersion },
+        { status: 'changed', pathKey: request.owner.pathKey, content: 'text',
+          modifiedTime: request.diskVersion.mtimeMs, diskVersion: request.diskVersion,
+          document: window.CustomTabs.getDocumentDescriptor() },
+        { status: 'unavailable', pathKey: request.owner.pathKey, reason: 'unknown' },
+        { status: 'unavailable', pathKey: request.owner.pathKey, reason: 'missing',
+          diskVersion: request.diskVersion },
+      ]) {
+        window.ipcRenderer.invoke = () => Promise.resolve(response);
+        try { await window.folia.refreshOwnedTabDiskSnapshot(request); badResponses.push(false); }
+        catch (error) { badResponses.push(error.message.includes('Invalid conditional tab disk refresh response')); }
+      }
+      window.ipcRenderer.invoke = () => Promise.resolve({
+        ...positive, diskVersion: { ...positive.diskVersion, ctimeMs: positive.diskVersion.ctimeMs + 1 },
+      });
+      const ctime = await window.folia.refreshOwnedTabDiskSnapshot(request);
+      return { rejected, invalidCalls, fields, badResponses, ctime: ctime.status };
+    } finally { window.ipcRenderer.invoke = invoke; }
+  })()`);
+  check("SEC-08 conditional bridge rejects invalid cached versions and missing native refs before IPC",
+    validation.rejected.length === 5 && validation.rejected.every(Boolean) &&
+      validation.invalidCalls === 0, JSON.stringify(validation));
+  check("SEC-08 conditional bridge copies only fixed metadata fields and retains finite ctime-only policy",
+    validation.fields.calls === 1 && validation.fields.status === "unchanged" &&
+      validation.fields.request.join(",") === "diskVersion,filePath,owner,pageSession,rendererGeneration" &&
+      validation.fields.owner.join(",") === "documentGeneration,documentRef,pageSession,pathKey,rendererGeneration,tabId" &&
+      validation.fields.version.join(",") === "ctimeMs,dev,ino,mtimeMs,size" &&
+      validation.fields.response.join(",") === "diskVersion,pathKey,status" &&
+      validation.ctime === "unchanged", JSON.stringify(validation));
+  check("SEC-08 conditional bridge rejects malformed discriminants versions paths and metadata body leakage",
+    validation.badResponses.length === 11 && validation.badResponses.every(Boolean),
+    JSON.stringify(validation));
+
+  // Hold a real native delivery: its valid but unregistered ref is not a tab owner.
+  const pendingPath = path.join(dir, "conditional-unregistered.md");
+  write(pendingPath, "# Pending conditional owner\n");
+  let delivery;
+  const send = win.webContents.send;
+  const restoreSend = replaceMethod(win.webContents, "send", function (channel, data) {
+    if (channel === "file-opened" && data?.path === pendingPath) {
+      delivery = data;
+      return;
+    }
+    return send.apply(this, arguments);
+  });
+  const restoreChooser = replaceMethod(dialog, "showOpenDialog", async () => ({
+    canceled: false, filePaths: [pendingPath],
+  }));
+  try {
+    await exec("window.folia.openFileDialog(); null;");
+    if (!await waitUntil(() => !!delivery?.document?.ref, 5000)) {
+      throw new Error("Conditional unregistered native delivery did not arrive");
+    }
+  } finally { restoreChooser(); restoreSend(); }
+  const unregistered = {
+    filePath: pendingPath, pageSession: request.pageSession,
+    rendererGeneration: request.rendererGeneration,
+    owner: { ...request.owner, tabId: request.owner.tabId + 10000,
+      pathKey: delivery.document.pathKey, documentRef: delivery.document.ref },
+    diskVersion: delivery.diskVersion,
+  };
+  check("SEC-08 conditional unregistered-owner setup retains a genuine undelivered native reference and finite version",
+    delivery.document.logicalPath === pendingPath &&
+      typeof unregistered.owner.pathKey === "string" &&
+      /^[a-f0-9]{64}$/.test(unregistered.owner.documentRef) &&
+      unregistered.owner.documentRef !== request.owner.documentRef &&
+      ["dev", "ino", "size", "mtimeMs", "ctimeMs"].every(
+        key => Number.isFinite(unregistered.diskVersion?.[key])),
+    JSON.stringify(unregistered));
+  let probes = 0;
+  let opens = 0;
+  const realpath = fs.promises.realpath;
+  const stat = fs.promises.stat;
+  const open = fs.promises.open;
+  const restoreRealpath = replaceMethod(fs.promises, "realpath", function (file) {
+    if ([filePath, pendingPath].includes(file)) probes += 1;
+    return realpath.apply(this, arguments);
+  });
+  const restoreStat = replaceMethod(fs.promises, "stat", function (file) {
+    if ([filePath, pendingPath].includes(file)) probes += 1;
+    return stat.apply(this, arguments);
+  });
+  const restoreOpen = replaceMethod(fs.promises, "open", function (file) {
+    if ([filePath, pendingPath].includes(file)) opens += 1;
+    return open.apply(this, arguments);
+  });
+  let authority;
+  try {
+    authority = await exec(`(async () => {
+      const request = ${JSON.stringify(request)};
+      const refused = [];
+      for (const input of [
+        { ...request, owner: { ...request.owner, tabId: request.owner.tabId + 1000 } },
+        { ...request, owner: { ...request.owner, documentRef: undefined } },
+        ${JSON.stringify(unregistered)},
+      ]) refused.push(await window.ipcRenderer.invoke('refresh-owned-tab-disk-snapshot', input));
+      return { refused };
+    })()`);
+    authority.refusedProbes = probes;
+    authority.refusedOpens = opens;
+    authority.positive = await exec(`window.folia.refreshOwnedTabDiskSnapshot(${JSON.stringify(request)})`);
+    authority.positiveProbes = probes - authority.refusedProbes;
+    authority.positiveOpens = opens - authority.refusedOpens;
+  } finally { restoreOpen(); restoreStat(); restoreRealpath(); }
+  check("SEC-08 conditional authority rejects unknown ref-less and unregistered owners before filesystem probes",
+    authority.refused.length === 3 && authority.refused.every(value => value === null) &&
+      authority.refusedProbes === 0 && authority.refusedOpens === 0,
+    JSON.stringify(authority));
+  check("SEC-08 conditional authority positive control observes fresh metadata without opening a descriptor",
+    authority.positive?.status === "unchanged" &&
+      authority.positiveProbes > 0 && authority.positiveOpens === 0,
+    JSON.stringify(authority));
+}
+
+async function runConditionalMetadataJourneys(win, exec, dir, otherTabId, sentinel) {
+  for (const mode of ["missing", "retargeted", "background-undo", "active-undo", "superseded", "closed", "frozen"]) {
+    const filePath = path.join(dir, `conditional-${mode}.md`);
+    const baseline = `# Conditional ${mode}\n\nEARLIER_COPY\n`;
+    write(filePath, baseline);
+    const restoreChooser = replaceMethod(dialog, "showOpenDialog", async () => ({
+      canceled: false, filePaths: [filePath],
+    }));
+    let id;
+    try {
+      await exec("window.folia.openFileDialog(); null;");
+      if (!await waitForCondition(exec,
+        `window.currentFilePath === ${JSON.stringify(filePath)} &&
+         document.getElementById('viewer').textContent.includes('EARLIER_COPY') &&
+         !!window.CustomTabs.getDocumentDescriptor()?.ref`, 8000)) {
+        throw new Error(`Conditional ${mode} fixture did not reach native adoption`);
+      }
+      id = await exec("window.CustomTabs.getActiveTabId()");
+    } finally { restoreChooser(); }
+    if (mode !== "active-undo") await exec(`window.CustomTabs.switchToTab(${otherTabId})`);
+    const target = fs.realpathSync.native(filePath);
+    if (mode === "missing" || mode === "retargeted") {
+      const parked = `${filePath}.parked`;
+      const replacement = `${filePath}.replacement.md`;
+      const open = fs.promises.open;
+      let opens = 0;
+      const restoreOpen = replaceMethod(fs.promises, "open", function (file) {
+        if ([target, replacement].includes(file)) opens += 1;
+        return open.apply(this, arguments);
+      });
+      let outcome;
+      fs.renameSync(filePath, parked);
+      try {
+        if (mode === "retargeted") {
+          write(replacement, "# Not the retained target\n");
+          fs.symlinkSync(replacement, filePath, "file");
+        }
+        outcome = await exec(`(async () => {
+          const tab = window.CustomTabs.getTabs().find(tab => tab.id === ${id});
+          const owner = window.CustomTabs.getDocumentIdentityForTab(
+            tab.id, tab.filePath, window.getReloadRequestSession());
+          const before = window.CustomTabs.__documentState(tab);
+          const result = await window.folia.refreshOwnedTabDiskSnapshot({
+            filePath: tab.filePath, pageSession: owner.pageSession,
+            rendererGeneration: owner.rendererGeneration, owner, diskVersion: tab.diskVersion,
+          });
+          return { result, before, after: window.CustomTabs.__documentState(tab), content: tab.content };
+        })()`);
+      } finally {
+        restoreOpen();
+        if (mode === "retargeted" && fs.existsSync(filePath)) fs.unlinkSync(filePath);
+        fs.renameSync(parked, filePath);
+      }
+      check(`SEC-08 conditional ${mode} reports unavailable without body or cached document mutation`,
+        outcome.result?.status === "unavailable" &&
+          outcome.result.reason === (mode === "missing" ? "missing" : "binding") &&
+          Object.keys(outcome.result).sort().join(",") === "pathKey,reason,status" &&
+          opens === 0 && outcome.content === baseline &&
+          JSON.stringify(outcome.before) === JSON.stringify(outcome.after),
+        JSON.stringify({ ...outcome, opens }));
+      await exec(`window.CustomTabs.closeTab(${id})`);
+      continue;
+    }
+    write(filePath, `# Conditional ${mode}\n\nNEWER_DISK_COPY\n`);
+    const stat = fs.promises.stat;
+    const open = fs.promises.open;
+    let release;
+    let armed = true;
+    let opens = 0;
+    const restoreStat = replaceMethod(fs.promises, "stat", async function (file) {
+      const metadataCall = String(new Error().stack).includes("at refreshOwnedTabDiskSnapshot ");
+      const result = await stat.apply(this, arguments);
+      if (file === target && metadataCall && armed) {
+        armed = false;
+        await new Promise(resolve => { release = resolve; });
+      }
+      return result;
+    });
+    const restoreOpen = replaceMethod(fs.promises, "open", function (file) {
+      if (file === target) opens += 1;
+      return open.apply(this, arguments);
+    });
+    let outcome;
+    if (mode.endsWith("undo")) await sentinel.mute(`controlled conditional ${mode} stale-baseline selection`);
+    try {
+      await exec(`(() => {
+        const tab = window.CustomTabs.getTabs().find(tab => tab.id === ${id});
+        const probe = window.__conditionalMetadata = {
+          before: window.CustomTabs.__documentState(tab),
+          content: tab.content, preparations: 0, receipt: null,
+          prepare: window.prepareDocumentDiskAdoption, invoke: window.ipcRenderer.invoke,
+          error: console.error, errors: [],
+        };
+        console.error = function (message, detail) {
+          probe.errors.push({ message: String(message), why: detail?.why });
+          return probe.error.apply(this, arguments);
+        };
+        window.prepareDocumentDiskAdoption = function () {
+          probe.preparations += 1; return probe.prepare.apply(this, arguments);
+        };
+        window.ipcRenderer.invoke = function (channel, data) {
+          const result = probe.invoke.apply(this, arguments);
+          if (channel !== 'refresh-owned-tab-disk-snapshot' || data.filePath !== ${JSON.stringify(filePath)}) return result;
+          return Promise.resolve(result).then(receipt => { probe.receipt = receipt; return receipt; });
+        };
+        probe.done = window.CustomTabs.switchToTab(${id});
+        return null;
+      })()`);
+      const held = await waitUntil(() => !!release, 5000);
+      armed = false;
+      if (!held) throw new Error(`Conditional ${mode} metadata hold did not start`);
+      const setup = await exec(`(() => {
+        const tab = window.CustomTabs.getTabs().find(tab => tab.id === ${id});
+        const probe = window.__conditionalMetadata;
+        return { receipt: probe.receipt, preparations: probe.preparations,
+          active: window.CustomTabs.getActiveTabId(),
+          content: tab.content, revision: window.CustomTabs.__documentState(tab).mutationRevision };
+      })()`);
+      if (mode === "background-undo") {
+        await exec(`(() => {
+          const tab = window.CustomTabs.getTabs().find(tab => tab.id === ${id});
+          const original = tab.content; tab.content += '\\nEDIT'; tab.content = original;
+          return null;
+        })()`);
+      } else if (mode === "active-undo") {
+        await exec(`(() => {
+          const text = window.originalMarkdown;
+          window.originalMarkdown += '\\nEDIT'; window.CustomTabs.noteActiveContentMutation();
+          window.originalMarkdown = text; window.CustomTabs.noteActiveContentMutation();
+          return null;
+        })()`);
+      } else if (mode === "superseded") {
+        await exec(`window.CustomTabs.switchToTab(${otherTabId})`);
+      } else if (mode === "closed") {
+        await exec(`window.CustomTabs.closeTab(${id})`);
+      } else {
+        await exec(`(() => {
+          const probe = window.__conditionalMetadata;
+          probe.send = window.ipcRenderer.send;
+          window.ipcRenderer.send = function (channel, data) {
+            if (channel === 'quit-approval-committed') { probe.commit = data; return; }
+            return probe.send.apply(this, arguments);
+          };
+          return null;
+        })()`);
+        app.emit("before-quit", { preventDefault() {} });
+        if (!await waitForCondition(exec,
+          "window.CustomTabs.isDocumentFrozen()", 1000)) {
+          throw new Error("Conditional metadata journey did not reach actual phase-two freeze");
+        }
+      }
+      release();
+      outcome = await exec(`(async () => {
+        const probe = window.__conditionalMetadata; await probe.done;
+        const tab = window.CustomTabs.getTabs().find(tab => tab.id === ${id});
+        return { content: tab?.content, state: tab && window.CustomTabs.__documentState(tab),
+          before: probe.before, preparations: probe.preparations, receipt: probe.receipt,
+          errors: probe.errors,
+          frozen: window.CustomTabs.isDocumentFrozen(),
+          active: window.CustomTabs.getActiveTabId() };
+      })()`);
+      outcome.setup = setup;
+      outcome.opens = opens;
+      check(`SEC-08 conditional ${mode} setup holds real changed metadata before body and approval`,
+        setup.receipt === null && setup.preparations === 0 && setup.content === baseline &&
+          (mode === "active-undo" ? setup.active === id : setup.active === otherTabId),
+        JSON.stringify(outcome));
+      check(`SEC-08 conditional ${mode} refuses stale metadata-window adoption`,
+        outcome.preparations === 0 &&
+          (mode === "closed"
+            ? outcome.content === undefined && outcome.receipt === null && opens === 0
+            : outcome.content === baseline && outcome.receipt?.status === "changed" &&
+              outcome.state.dirty === false &&
+              (!mode.endsWith("undo") ||
+                (outcome.state.mutationRevision > outcome.before.mutationRevision &&
+                  outcome.errors.length === 1 &&
+                  outcome.errors[0].message === "File tracking selection refused:" &&
+                  outcome.errors[0].why === "disk-or-deletion-moved-before-selection"))) &&
+          (mode !== "superseded" || outcome.active === otherTabId) &&
+          (mode !== "frozen" || outcome.frozen === true),
+        JSON.stringify(outcome));
+    } finally {
+      armed = false;
+      if (release) release();
+      if (mode === "frozen") __shutdown.reset();
+      await exec(`(async () => {
+        const probe = window.__conditionalMetadata;
+        if (probe) {
+          await probe.done;
+          window.prepareDocumentDiskAdoption = probe.prepare;
+          window.ipcRenderer.invoke = probe.invoke;
+          console.error = probe.error;
+          if (probe.send) window.ipcRenderer.send = probe.send;
+          delete window.__conditionalMetadata;
+        }
+      })()`);
+      restoreOpen(); restoreStat();
+      if (mode.endsWith("undo")) await sentinel.unmute();
+      if (mode === "frozen" && !await waitForCondition(exec,
+        "!window.CustomTabs.isDocumentFrozen()", 5000)) {
+        throw new Error("Conditional freeze journey did not thaw after its cancelled commit");
+      }
+    }
+    if (mode !== "closed") await exec(`window.CustomTabs.closeTab(${id})`);
+  }
+}
+
 async function runAdoptionBridgeValidation(exec) {
   const probe = await exec(`
     (async () => {
@@ -11923,7 +12294,7 @@ async function run(win) {
     "retireDeletedDocumentOwner",
     "prepareDocumentDiskAdoption", "commitDocumentDiskAdoption",
     "completeDocumentDiskAdoption", "abandonDocumentDiskAdoption",
-    "readOwnedTabDiskSnapshot", "readDialogExtra",
+    "readOwnedTabDiskSnapshot", "refreshOwnedTabDiskSnapshot", "readDialogExtra",
     "restoreSession", "saveSessionLayout", "readOpenTicketSnapshot",
     "acceptDocumentOpenTicket", "cancelDocumentOpenTicket", "openReadme",
     "saveMarkdown", "requestReload", "acknowledgeSaveResult",
@@ -12236,23 +12607,47 @@ async function run(win) {
   );
 
   // ---- Scenario 2a: clean-tab reads stay main-owned ---------------------
-  // Start from the ordinary clean-tab path. The unchanged case must not even
-  // start an IPC request; otherwise every tab switch pays an avoidable async
-  // round trip. The changed case then captures the real owner envelope at the
-  // IPC boundary, so forged variants are judged by the real main handler.
-  const cleanRefreshFastPath = await exec(`
+  // Unchanged switches inspect metadata in Main, never the body or adoption.
+  const cleanTargetPaths = [fileA, fileB].map(file => fs.realpathSync.native(file));
+  let cleanMainOpens = 0;
+  let cleanMainStats = 0;
+  const cleanOpen = fs.promises.open;
+  const cleanStat = fs.promises.stat;
+  const restoreCleanOpen = replaceMethod(fs.promises, "open", function (filePath) {
+    if (cleanTargetPaths.includes(filePath)) cleanMainOpens += 1;
+    return cleanOpen.apply(this, arguments);
+  });
+  const restoreCleanStat = replaceMethod(fs.promises, "stat", function (filePath) {
+    if (cleanTargetPaths.includes(filePath)) cleanMainStats += 1;
+    return cleanStat.apply(this, arguments);
+  });
+  let cleanRefreshFastPath;
+  try { cleanRefreshFastPath = await exec(`
     (async () => {
       const ipc = window.ipcRenderer;
       const realInvoke = ipc.invoke;
       let ownedReads = 0;
+      const receipts = [];
+      let preparations = 0;
+      const realPrepare = window.prepareDocumentDiskAdoption;
+      window.prepareDocumentDiskAdoption = function () {
+        preparations += 1;
+        return realPrepare.apply(this, arguments);
+      };
       ipc.invoke = function (channel) {
         if (channel === 'read-owned-tab-disk-snapshot') ownedReads += 1;
-        return realInvoke.apply(this, arguments);
+        const result = realInvoke.apply(this, arguments);
+        if (channel !== 'refresh-owned-tab-disk-snapshot') return result;
+        return Promise.resolve(result).then(receipt => {
+          receipts.push({ status: receipt?.status,
+            keys: Object.keys(receipt || {}).sort(),
+            content: Object.prototype.hasOwnProperty.call(receipt || {}, 'content') });
+          return receipt;
+        });
       };
       try {
-        window.CustomTabs.switchToTab(${ids.a});
-        await new Promise(resolve => setTimeout(resolve, 250));
-        window.CustomTabs.switchToTab(${ids.b});
+        await window.CustomTabs.switchToTab(${ids.a});
+        await window.CustomTabs.switchToTab(${ids.b});
         const deadline = Date.now() + 5000;
         while (Date.now() < deadline &&
           window.CustomTabs.getActiveTabId() !== ${ids.b}) {
@@ -12261,20 +12656,28 @@ async function run(win) {
         return {
           active: window.CustomTabs.getActiveTabId(),
           ownedReads,
+          receipts, preparations,
           beta: (window.CustomTabs.getTabs().find(t => t.id === ${ids.b}) || {}).content,
         };
       } finally {
         ipc.invoke = realInvoke;
+        window.prepareDocumentDiskAdoption = realPrepare;
       }
     })()
-  `);
+  `); } finally { restoreCleanStat(); restoreCleanOpen(); }
   check(
-    "SEC-08 unchanged clean-tab refresh remains synchronous with zero main IPC",
+    "SEC-08 unchanged clean-tab refresh uses metadata-only main IPC without body reads or adoption",
     cleanRefreshFastPath &&
       cleanRefreshFastPath.active === ids.b &&
       cleanRefreshFastPath.ownedReads === 0 &&
+      cleanRefreshFastPath.receipts.length === 2 &&
+      cleanRefreshFastPath.receipts.every(receipt =>
+        receipt.status === "unchanged" && !receipt.content &&
+        receipt.keys.join(",") === "diskVersion,pathKey,status") &&
+      cleanRefreshFastPath.preparations === 0 &&
+      cleanMainOpens === 0 && cleanMainStats === 2 &&
       String(cleanRefreshFastPath.beta).includes("BETA_V3"),
-    JSON.stringify(cleanRefreshFastPath),
+    JSON.stringify({ ...cleanRefreshFastPath, cleanMainOpens, cleanMainStats }),
   );
 
   write(fileB, "# Beta\n\nSEC08_MAIN_OWNED_READ\n\ncaf\u00e9 \u6f22\u5b57 \ud83d\ude80\n");
@@ -12309,7 +12712,7 @@ async function run(win) {
         return realSendSync.apply(this, arguments);
       };
       ipc.invoke = function (channel, data) {
-        if (channel !== 'read-owned-tab-disk-snapshot' || !data ||
+        if (channel !== 'refresh-owned-tab-disk-snapshot' || !data ||
             data.filePath !== target) {
           return realInvoke.apply(this, arguments);
         }
@@ -12318,9 +12721,8 @@ async function run(win) {
         return realInvoke.apply(this, arguments);
       };
       try {
-        window.CustomTabs.switchToTab(${ids.a});
-        await new Promise(resolve => setTimeout(resolve, 250));
-        window.CustomTabs.switchToTab(${ids.b});
+        await window.CustomTabs.switchToTab(${ids.a});
+        await window.CustomTabs.switchToTab(${ids.b});
         const deadline = Date.now() + 8000;
         while (Date.now() < deadline) {
           const tab = window.CustomTabs.getTabs().find(t => t.id === ${ids.b});
@@ -12491,6 +12893,7 @@ async function run(win) {
       bridgeValidation.badResponses.every(Boolean),
     JSON.stringify(bridgeValidation),
   );
+  await runConditionalRefreshValidation(win, exec, dir, fileB);
 
   const casePreservedTarget = fs.realpathSync.native(fileB);
   const casePreservedLogicalPath = process.platform === "win32"
@@ -12659,7 +13062,7 @@ async function run(win) {
         };
         ipc.invoke = function (channel, data) {
           const result = realInvoke.apply(this, arguments);
-          if (channel !== 'read-owned-tab-disk-snapshot' ||
+          if (channel !== 'refresh-owned-tab-disk-snapshot' ||
               !data || data.filePath !== ${jsB}) return result;
           return Promise.resolve(result).then((snapshot) => {
             window.__sec08SupersededPreparation.snapshot = snapshot && {
@@ -12977,6 +13380,18 @@ async function run(win) {
   await runDocumentControlCloseJourney(exec);
   await runReloadTransportFailure(exec, sentinel);
   if (ownedReadFocusedHarness || dialogExtraFocusedHarness) {
+    if (ownedReadFocusedHarness) {
+      await runConditionalMetadataJourneys(win, exec, dir, ids.a, sentinel);
+      if (!await waitForCondition(exec,
+        `window.CustomTabs.getActiveTabId() === ${ids.a} &&
+         document.getElementById('viewer').textContent.includes('ALPHA_V2')`, 5000)) {
+        throw new Error("Conditional metadata teardown did not restore the real rendered control");
+      }
+      const capture = await win.webContents.capturePage();
+      const destination = path.join(__dirname, "..", ".context-viewport-evidence", "screenshots", "conditional-refresh-final.png");
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      fs.writeFileSync(destination, capture.toPNG());
+    }
     if (ownedReadFocusedHarness && process.env.SEC08_OWNED_READ_CORE_ONLY !== "1") {
       await runShutdownResponseCacheScenario(win, exec);
       await runTabPathCopyScenario(exec, await exec("window.currentFilePath"));

@@ -1116,6 +1116,28 @@ remain unchanged. Product-correctness evidence is retained, the seven
 historical gates remain **FAILED/OPEN**, and SEC08 remains **INCOMPLETE**.
 No delivery or release is authorized.
 
+### SEC-08 conditional clean-tab version gate — performance still unqualified
+
+The 2026-10-13 continuation replaces the renderer's synchronous version/physical
+gate with one fixed conditional Main request. On the unchanged branch Main
+performs asynchronous binding checks around one retained-target metadata stat,
+then returns only status, path key and finite disk-version fields. No descriptor,
+body, adoption or document-sized string crosses that branch. Changed content
+uses the existing pinned stable reader through the same conditional request,
+not a second metadata-plus-body round trip. Functional counters and exact raw
+receipt shape are pinned in `conditional-refresh-exact-proofs-r2.log`; they
+measure operation/receipt behavior, not latency.
+
+This intentionally supersedes the former synchronous, zero-IPC fast-path claim.
+The new IPC and asynchronous probes have **not** been qualified against the
+user's no-visible-regression requirement or the existing numerical contracts.
+Neither functional passes nor the earlier frozen/skipped comparison certifies
+these bytes, much less future final isolated sources. Comparable startup/open/
+reload/tab-switch/Save/scroll/Mermaid measurements remain a release gate.
+The later user direction authorized continuing release work while retaining
+isolation responsiveness as mandatory; it does not waive thresholds or erase
+the historical failed/open observations above.
+
 ## Measured and found already fast
 - **Custom tab sync I/O is not the current bottleneck.**
   - `custom-tabs.js:69-111,640`

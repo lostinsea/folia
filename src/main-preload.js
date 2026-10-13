@@ -130,6 +130,89 @@ function copyDiskSnapshot(snapshot, kind) {
   });
 }
 
+function copyOwnedTabDiskRequest(request) {
+  if (!request || typeof request !== "object" || Array.isArray(request)) {
+    throw new TypeError("Invalid owned tab disk snapshot request");
+  }
+  const owner = request.owner;
+  if (!owner || typeof owner !== "object" || Array.isArray(owner)) {
+    throw new TypeError("Invalid owned tab disk snapshot request");
+  }
+  const payload = {
+    filePath: request.filePath,
+    pageSession: request.pageSession,
+    rendererGeneration: request.rendererGeneration,
+    owner: {
+      pageSession: owner.pageSession,
+      rendererGeneration: owner.rendererGeneration,
+      tabId: owner.tabId,
+      documentGeneration: owner.documentGeneration,
+      pathKey: owner.pathKey,
+      ...copyOptionalDocumentRef(owner.documentRef),
+    },
+  };
+  const identity = payload.owner;
+  if (typeof payload.filePath !== "string" || !payload.filePath ||
+      payload.filePath.includes("\0") ||
+      typeof payload.pageSession !== "string" || !payload.pageSession ||
+      payload.pageSession.length > 128 ||
+      !Number.isSafeInteger(payload.rendererGeneration) ||
+      payload.rendererGeneration <= 0 ||
+      identity.pageSession !== payload.pageSession ||
+      identity.rendererGeneration !== payload.rendererGeneration ||
+      !Number.isSafeInteger(identity.tabId) || identity.tabId <= 0 ||
+      !Number.isSafeInteger(identity.documentGeneration) ||
+      identity.documentGeneration <= 0 ||
+      typeof identity.pathKey !== "string" || !identity.pathKey ||
+      identity.pathKey.includes("\0")) {
+    throw new TypeError("Invalid owned tab disk snapshot request");
+  }
+  return payload;
+}
+
+function copyConditionalTabSnapshot(result, payload) {
+  const kind = "conditional tab disk refresh";
+  if (result === null) return null;
+  if (!result || typeof result !== "object" || Array.isArray(result) ||
+      result.pathKey !== payload.owner.pathKey) {
+    throw new TypeError(`Invalid ${kind} response`);
+  }
+  if (result.status === "changed") {
+    if (Object.prototype.hasOwnProperty.call(result, "document")) {
+      throw new TypeError(`Invalid ${kind} response`);
+    }
+    const snapshot = copyDiskSnapshot(result, kind);
+    if (snapshot.modifiedTime !== snapshot.diskVersion.mtimeMs) {
+      throw new TypeError(`Invalid ${kind} response`);
+    }
+    return Object.freeze({ status: "changed", pathKey: result.pathKey, ...snapshot });
+  }
+  if (Object.prototype.hasOwnProperty.call(result, "content") ||
+      Object.prototype.hasOwnProperty.call(result, "modifiedTime") ||
+      Object.prototype.hasOwnProperty.call(result, "document")) {
+    throw new TypeError(`Invalid ${kind} response`);
+  }
+  if (result.status === "unchanged") {
+    const diskVersion = copyDiskVersion(result.diskVersion, kind);
+    // The content version deliberately ignores finite ctime-only drift.
+    if (["dev", "ino", "size", "mtimeMs"].some(
+      key => diskVersion[key] !== payload.diskVersion[key],
+    )) throw new TypeError(`Invalid ${kind} response`);
+    return Object.freeze({
+      status: "unchanged", pathKey: result.pathKey,
+      diskVersion,
+    });
+  }
+  if (result.status === "unavailable" &&
+      (result.reason === "missing" || result.reason === "binding") &&
+      !Object.prototype.hasOwnProperty.call(result, "diskVersion")) {
+    return Object.freeze({
+      status: "unavailable", pathKey: result.pathKey, reason: result.reason,
+    });
+  }
+  throw new TypeError(`Invalid ${kind} response`);
+}
+
 function isPath(value) {
   return typeof value === "string" && !!value && !value.includes("\0");
 }
@@ -1017,47 +1100,21 @@ const api = Object.freeze({
     ipcRenderer.send("abandon-document-disk-adoption", copyAdoptionCapability(request));
   },
   async readOwnedTabDiskSnapshot(request) {
-    if (!request || typeof request !== "object" || Array.isArray(request)) {
-      throw new TypeError("Invalid owned tab disk snapshot request");
-    }
-    const owner = request.owner;
-    if (!owner || typeof owner !== "object" || Array.isArray(owner)) {
-      throw new TypeError("Invalid owned tab disk snapshot request");
-    }
-    const payload = {
-      filePath: request.filePath,
-      pageSession: request.pageSession,
-      rendererGeneration: request.rendererGeneration,
-      owner: {
-        pageSession: owner.pageSession,
-        rendererGeneration: owner.rendererGeneration,
-        tabId: owner.tabId,
-        documentGeneration: owner.documentGeneration,
-        pathKey: owner.pathKey,
-        ...copyOptionalDocumentRef(owner.documentRef),
-      },
-    };
-    const identity = payload.owner;
-    if (typeof payload.filePath !== "string" || !payload.filePath ||
-        payload.filePath.includes("\0") ||
-        typeof payload.pageSession !== "string" || !payload.pageSession ||
-        payload.pageSession.length > 128 ||
-        !Number.isSafeInteger(payload.rendererGeneration) ||
-        payload.rendererGeneration <= 0 ||
-        identity.pageSession !== payload.pageSession ||
-        identity.rendererGeneration !== payload.rendererGeneration ||
-        !Number.isSafeInteger(identity.tabId) || identity.tabId <= 0 ||
-        !Number.isSafeInteger(identity.documentGeneration) ||
-        identity.documentGeneration <= 0 ||
-        typeof identity.pathKey !== "string" || !identity.pathKey ||
-        identity.pathKey.includes("\0")) {
-      throw new TypeError("Invalid owned tab disk snapshot request");
-    }
+    const payload = copyOwnedTabDiskRequest(request);
     const snapshot = await ipcRenderer.invoke(
       "read-owned-tab-disk-snapshot", payload,
     );
     if (snapshot === null) return null;
     return copyDiskSnapshot(snapshot, "owned tab disk snapshot");
+  },
+  async refreshOwnedTabDiskSnapshot(request) {
+    const payload = copyOwnedTabDiskRequest(request);
+    if (!payload.owner.documentRef) {
+      throw new TypeError("Invalid conditional tab disk refresh request");
+    }
+    payload.diskVersion = copyDiskVersion(request.diskVersion, "conditional tab disk refresh request");
+    const result = await ipcRenderer.invoke("refresh-owned-tab-disk-snapshot", payload);
+    return copyConditionalTabSnapshot(result, payload);
   },
   async readDialogExtra(request) {
     if (!request || typeof request !== "object" || Array.isArray(request)) {

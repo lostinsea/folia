@@ -17954,26 +17954,28 @@ const REVERTS = [
           what: "read a changed clean-tab refresh in the renderer before its owner-bound main request",
           file: TABS,
           from:
-            '      snapshot = await window.folia.readOwnedTabDiskSnapshot({\n' +
+            '      snapshot = await window.folia.refreshOwnedTabDiskSnapshot({\n' +
             "        filePath,\n" +
             "        pageSession: session,\n" +
             "        rendererGeneration: identity.rendererGeneration,\n" +
             "        owner: identity,\n" +
+            "        diskVersion: startingVersion,\n" +
             "      });",
           to:
             '      void window.fs.readFileSync(filePath, "utf8");\n' +
-            '      snapshot = await window.folia.readOwnedTabDiskSnapshot({\n' +
+            '      snapshot = await window.folia.refreshOwnedTabDiskSnapshot({\n' +
             "        filePath,\n" +
             "        pageSession: session,\n" +
             "        rendererGeneration: identity.rendererGeneration,\n" +
             "        owner: identity,\n" +
+            "        diskVersion: startingVersion,\n" +
             "      });",
           suite: "test:sec08-owned-read-core-evidence",
           expect: [
             /^SEC-08 changed clean-tab refresh reads through main without renderer content reads or a modal$/,
           ],
           mustPass: [
-            /^SEC-08 unchanged clean-tab refresh remains synchronous with zero main IPC$/,
+            /^SEC-08 unchanged clean-tab refresh uses metadata-only main IPC without body reads or adoption$/,
             /^SEC-08 main-owned tab reads refuse forged paths and foreign owners without denying the valid owner$/,
             /^SEC-08 main snapshot retries a disk version that changes between read and second stat$/,
           ],
@@ -18020,7 +18022,7 @@ const REVERTS = [
           ],
           mustPass: [
             /^SEC-08 changed clean-tab refresh reads through main without renderer content reads or a modal$/,
-            /^SEC-08 unchanged clean-tab refresh remains synchronous with zero main IPC$/,
+            /^SEC-08 unchanged clean-tab refresh uses metadata-only main IPC without body reads or adoption$/,
             /^SEC-08 main snapshot retries a disk version that changes between read and second stat$/,
             /^nothing rendered a visible error at any point during the suite$/,
           ],
@@ -18030,13 +18032,17 @@ const REVERTS = [
         },
         {
           id: "R716",
-          what: "continue a superseded clean-tab refresh after its post-main-read currentness refusal",
+          what: "prepare stale clean-tab adoption after its conditional currentness refusal",
           file: TABS,
           from: "      if (!current) return null;",
           to: "      if (false) return null;",
           suite: "test:sec08-owned-read-core-evidence",
           expect: [
             /^SEC-08 a tab switch superseded during the held main read keeps its prior cache and refuses disk adoption$/,
+            /^SEC-08 conditional background-undo refuses stale metadata-window adoption$/,
+            /^SEC-08 conditional active-undo refuses stale metadata-window adoption$/,
+            /^SEC-08 conditional superseded refuses stale metadata-window adoption$/,
+            /^SEC-08 conditional frozen refuses stale metadata-window adoption$/,
           ],
           mustPass: [
             /^SEC-08 main snapshot retries a disk version that changes between read and second stat$/,
@@ -18045,7 +18051,7 @@ const REVERTS = [
           ],
           requireMustPassAssertions: true,
           requireExactFailures: true,
-          expectedFailureCount: 1,
+          expectedFailureCount: 5,
         },
         {
           id: "R717",
@@ -18427,16 +18433,16 @@ const REVERTS = [
           id: "R735",
           what: "forward an owned-read request whose copied owner generation disagrees with its envelope",
           file: path.join(SRC, "main-preload.js"),
-          from: "        identity.rendererGeneration !== payload.rendererGeneration ||",
+          from: "      identity.rendererGeneration !== payload.rendererGeneration ||",
           to: "        // Mismatched envelope and owner generations are forwarded.",
-          suite: "test:sec08-owned-read-evidence",
+          suite: "test:sec08-owned-read-core-evidence",
           expect: [
             /^SEC-08 owned bridge rejects malformed request identities before main IPC$/,
           ],
           mustPass: [
             /^SEC-08 owned bridge forwards only its fixed request fields and preserves the valid main snapshot$/,
             /^SEC-08 main-owned tab reads refuse forged paths and foreign owners without denying the valid owner$/,
-            /^SEC-08 unchanged clean-tab refresh remains synchronous with zero main IPC$/,
+            /^SEC-08 unchanged clean-tab refresh uses metadata-only main IPC without body reads or adoption$/,
           ],
           requireMustPassAssertions: true,
           requireExactFailures: true,
@@ -18448,9 +18454,10 @@ const REVERTS = [
           file: path.join(SRC, "main-preload.js"),
           from: '  if (!snapshot || typeof snapshot.content !== "string" ||',
           to: "  if (!snapshot ||",
-          suite: "test:sec08-owned-read-evidence",
+          suite: "test:sec08-owned-read-core-evidence",
           expect: [
             /^SEC-08 owned bridge rejects undefined and malformed main responses instead of returning success-shaped data$/,
+            /^SEC-08 conditional bridge rejects malformed discriminants versions paths and metadata body leakage$/,
           ],
           mustPass: [
             /^SEC-08 owned bridge rejects malformed request identities before main IPC$/,
@@ -18459,14 +18466,14 @@ const REVERTS = [
           ],
           requireMustPassAssertions: true,
           requireExactFailures: true,
-          expectedFailureCount: 1,
+          expectedFailureCount: 2,
         },
         {
           id: "R737",
           what: "bypass the production bridge in the changed clean-tab read caller",
           file: TABS,
-          from: "      snapshot = await window.folia.readOwnedTabDiskSnapshot({",
-          to: '      snapshot = await tabIpc.invoke("read-owned-tab-disk-snapshot", {',
+          from: "      snapshot = await window.folia.refreshOwnedTabDiskSnapshot({",
+          to: '      snapshot = await tabIpc.invoke("refresh-owned-tab-disk-snapshot", {',
           suite: "test:packaging",
           expect: [
             /^changed clean-tab reads use the fixed production bridge instead of renderer raw IPC$/,
@@ -20420,6 +20427,158 @@ const REVERTS = [
           ],
           requireMustPassAssertions: true, requireExactFailures: true,
         },
+        {
+          id: "R844",
+          what: "probe a conditional refresh path before memory-only native owner authorization",
+          file: MAIN,
+          from: "  const owner = retainedTabDiskOwnerFromEnvelope(event, data);",
+          to: "  await fs.promises.realpath(data.filePath).catch(error => {\n" +
+            '    if (error.code !== "ENOENT" && error.code !== "ENOTDIR") throw error;\n' +
+            "  });\n" +
+            "  const owner = retainedTabDiskOwnerFromEnvelope(event, data);",
+          suite: "test:sec08-owned-read-core-evidence",
+          expect: [/^SEC-08 conditional authority rejects unknown ref-less and unregistered owners before filesystem probes$/],
+          mustPass: [
+            /^SEC-08 conditional unregistered-owner setup retains a genuine undelivered native reference and finite version$/,
+            /^SEC-08 conditional authority positive control observes fresh metadata without opening a descriptor$/,
+            /^SEC-08 changed clean-tab refresh reads through main without renderer content reads or a modal$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R845",
+          what: "open an unchanged tab body before returning its metadata-only receipt",
+          file: MAIN,
+          from: "    if (sameDiskVersion(cachedVersion, diskVersion)) {\n" +
+            '      return Object.freeze({ status: "unchanged", pathKey: owner.pathKey, diskVersion });',
+          to: "    if (sameDiskVersion(cachedVersion, diskVersion)) {\n" +
+            "      await readOwnedTabDiskSnapshot(owner, data.filePath, event, data);\n" +
+            '      return Object.freeze({ status: "unchanged", pathKey: owner.pathKey, diskVersion });',
+          suite: "test:sec08-owned-read-core-evidence",
+          expect: [
+            /^SEC-08 unchanged clean-tab refresh uses metadata-only main IPC without body reads or adoption$/,
+            /^SEC-08 conditional authority positive control observes fresh metadata without opening a descriptor$/,
+          ],
+          mustPass: [
+            /^SEC-08 conditional authority rejects unknown ref-less and unregistered owners before filesystem probes$/,
+            /^SEC-08 changed clean-tab refresh reads through main without renderer content reads or a modal$/,
+            /^SEC-08 conditional closed refuses stale metadata-window adoption$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 2,
+        },
+        {
+          id: "R846",
+          what: "accept a body or changed-read fields in a supposedly metadata-only bridge receipt",
+          file: path.join(SRC, "main-preload.js"),
+          from: '  if (Object.prototype.hasOwnProperty.call(result, "content") ||\n' +
+            '      Object.prototype.hasOwnProperty.call(result, "modifiedTime") ||\n' +
+            '      Object.prototype.hasOwnProperty.call(result, "document")) {\n' +
+            '    throw new TypeError(`Invalid ${kind} response`);\n  }\n',
+          to: "",
+          suite: "test:sec08-owned-read-core-evidence",
+          expect: [/^SEC-08 conditional bridge rejects malformed discriminants versions paths and metadata body leakage$/],
+          mustPass: [
+            /^SEC-08 conditional bridge rejects invalid cached versions and missing native refs before IPC$/,
+            /^SEC-08 conditional bridge copies only fixed metadata fields and retains finite ctime-only policy$/,
+            /^SEC-08 unchanged clean-tab refresh uses metadata-only main IPC without body reads or adoption$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R847",
+          what: "ignore a background tab edit-undo during the conditional metadata window",
+          file: TABS,
+          from: "        state.mutationRevision !== startingMutationRevision ||",
+          to: "        false ||",
+          suite: "test:sec08-owned-read-core-evidence",
+          expect: [/^SEC-08 conditional background-undo refuses stale metadata-window adoption$/],
+          mustPass: [
+            /^SEC-08 conditional background-undo setup holds real changed metadata before body and approval$/,
+            /^SEC-08 conditional active-undo refuses stale metadata-window adoption$/,
+            /^SEC-08 conditional superseded refuses stale metadata-window adoption$/,
+            /^SEC-08 changed clean-tab refresh reads through main without renderer content reads or a modal$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R848",
+          what: "continue conditional metadata after its owner retires before descriptor acquisition",
+          file: MAIN,
+          from: "    const binding = await fs.promises.realpath(data.filePath);\n" +
+            "    if (!current()) return null;",
+          to: "    const binding = await fs.promises.realpath(data.filePath);",
+          also: [{
+            file: MAIN,
+            from: "    const stats = await fs.promises.stat(owner.readTarget);\n" +
+              "    if (!current()) return null;",
+            to: "    const stats = await fs.promises.stat(owner.readTarget);",
+          }, {
+            file: MAIN,
+            from: "    const afterBinding = await fs.promises.realpath(data.filePath);\n" +
+              "    if (!current()) return null;",
+            to: "    const afterBinding = await fs.promises.realpath(data.filePath);",
+          }],
+          suite: "test:sec08-owned-read-core-evidence",
+          expect: [/^SEC-08 conditional closed refuses stale metadata-window adoption$/],
+          mustPass: [
+            /^SEC-08 conditional closed setup holds real changed metadata before body and approval$/,
+            /^SEC-08 conditional authority rejects unknown ref-less and unregistered owners before filesystem probes$/,
+            /^SEC-08 conditional superseded refuses stale metadata-window adoption$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R849",
+          what: "describe missing or retargeted files as an unchanged metadata success",
+          file: MAIN,
+          from: '    status: "unavailable", pathKey: owner.pathKey, reason,',
+          to: '    status: "unchanged", pathKey: owner.pathKey, diskVersion: cachedVersion,',
+          suite: "test:sec08-owned-read-core-evidence",
+          expect: [
+            /^SEC-08 conditional missing reports unavailable without body or cached document mutation$/,
+            /^SEC-08 conditional retargeted reports unavailable without body or cached document mutation$/,
+          ],
+          mustPass: [
+            /^SEC-08 conditional authority positive control observes fresh metadata without opening a descriptor$/,
+            /^SEC-08 changed clean-tab refresh reads through main without renderer content reads or a modal$/,
+            /^SEC-08 conditional closed refuses stale metadata-window adoption$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 2,
+        },
+        {
+          id: "R850",
+          what: "serialize an unexpected body field in an unchanged raw Main receipt before preload filtering",
+          file: MAIN,
+          from: '      return Object.freeze({ status: "unchanged", pathKey: owner.pathKey, diskVersion });',
+          to: '      return Object.freeze({ status: "unchanged", pathKey: owner.pathKey, diskVersion,\n' +
+            '        unexpectedBody: "unexpected-body".repeat(1024) });',
+          suite: "test:sec08-owned-read-core-evidence",
+          expect: [/^SEC-08 unchanged clean-tab refresh uses metadata-only main IPC without body reads or adoption$/],
+          mustPass: [
+            /^SEC-08 conditional authority positive control observes fresh metadata without opening a descriptor$/,
+            /^SEC-08 conditional bridge copies only fixed metadata fields and retains finite ctime-only policy$/,
+            /^SEC-08 changed clean-tab refresh reads through main without renderer content reads or a modal$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
+        {
+          id: "R851",
+          what: "forward a native document descriptor through the conditional body receipt",
+          file: path.join(SRC, "main-preload.js"),
+          from: '    if (Object.prototype.hasOwnProperty.call(result, "document")) {\n' +
+            '      throw new TypeError(`Invalid ${kind} response`);\n    }\n',
+          to: "",
+          suite: "test:sec08-owned-read-core-evidence",
+          expect: [/^SEC-08 conditional bridge rejects malformed discriminants versions paths and metadata body leakage$/],
+          mustPass: [
+            /^SEC-08 conditional bridge rejects invalid cached versions and missing native refs before IPC$/,
+            /^SEC-08 conditional bridge copies only fixed metadata fields and retains finite ctime-only policy$/,
+            /^SEC-08 changed clean-tab refresh reads through main without renderer content reads or a modal$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+        },
       ];
 
 // These are release exceptions, not passing or withdrawn proofs. An explicit
@@ -21499,7 +21658,7 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760,R840,R841";
+      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760,R840,R841,R845,R849";
   const toolbarAllowanceIsRecordScoped =
     REVERTS.filter((r) =>
       exactShutdownTailForMutation(r) === TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL,

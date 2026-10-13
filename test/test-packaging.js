@@ -628,10 +628,10 @@ async function main() {
   check(
     "changed clean-tab reads use the fixed production bridge instead of renderer raw IPC",
     read("src/custom-tabs.js").includes(
-      "snapshot = await window.folia.readOwnedTabDiskSnapshot({",
+      "snapshot = await window.folia.refreshOwnedTabDiskSnapshot({",
     ) &&
       !read("src/custom-tabs.js").includes(
-        'tabIpc.invoke("read-owned-tab-disk-snapshot"',
+        'tabIpc.invoke("refresh-owned-tab-disk-snapshot"',
       ),
   );
   check(

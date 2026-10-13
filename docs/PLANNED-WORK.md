@@ -606,7 +606,7 @@ and 90-second bound. Final narrow positive is 21/21
 This does not close the
 subsequent provisional document-owner or renderer physical-metadata routes.
 
-**Native-reference authority closure — IMPLEMENTED / PROVEN, unintegrated.**
+**Native-reference authority closure — IMPLEMENTED / PROVEN, unintegrated (`f9ca5c0`).**
 This is the prerequisite for exposing fresh physical metadata without granting
 arbitrary filesystem probes. Production native/startup/restore opens already
 issue Main references; remove the remaining missing-reference owner route,
@@ -704,6 +704,36 @@ adoption and poisoned its later layout; that experiment was restored, not
 integrated, and its 99/105 log is retained separately from the earlier 100/105.
 The remaining isolated-production harness must replace such provisional
 fixtures rather than restore provisional authority.
+
+**Conditional clean-tab version gate — IMPLEMENTED / PROVEN, unintegrated.**
+Both independent Sol/Luna design reviews accept one fixed conditional Main RPC:
+metadata-only when the freshly inspected version is unchanged, otherwise the
+existing owned stable body reader, without a metadata-plus-body round trip.
+Both require explicit unavailable/refused outcomes, memory-only live-owner
+authorization before probes, preserved ctime policy, and local mutation/ref/
+generation witnesses spanning the entire new asynchronous window. The renderer
+version/physical gate is removed, not replaced by cached physical success.
+The unchanged branch now necessarily crosses IPC; no synchronous/zero-overhead
+or responsiveness qualification is claimed. Remaining browser/adoption helpers,
+real isolated harness, production flags and final measurements stay open.
+Final restored controls are 99/99 native-backed core, 61/61 private document
+session and 380/0 source packaging (`conditional-refresh-*-final-*` logs).
+R714-R718, R735-R737 and R844-R851 are individually exact PROVEN in
+`conditional-refresh-exact-proofs-r2.log`, with source restored; final anchors
+resolve and the actual restored-Alpha capture was viewed.
+Fresh independent Sol/Luna implementation reviews agree on no blockers.
+Their distinct nonblocking findings were corrected: Sol's async switch-oracle
+timing and changed-receipt descriptor forwarding; Luna's raw-receipt field-set
+gap before preload filtering. Both correction reviews converge without blockers.
+The earlier 79/81 inventory mismatch, 93/94 intentional refusal/sentinel mismatch
+and failed freeze fixture remain retained, not passing evidence. That freeze
+fixture had coupled its wait to an acknowledgement held by layout persistence;
+the current hook identifies the actual named conditional metadata stat, and
+the real phase-two freeze/thaw is independently observed.
+The first exact campaign retains R716 COLLATERAL (four newly covered currentness
+legs also failed) and R844 UNUSABLE (the unsafe probe mutant aborted a legitimate
+missing-file case). Their corrected exact contracts, not a success-shaped rerun,
+are what the final campaign proves. Broader provisional fixtures remain nongreen.
 
 The capability-protocol unit is IMPLEMENTED / PROVEN, unintegrated: preparation, commit, completion and abandonment
 of existing disk-adoption capabilities to four fixed preload methods. It

@@ -6806,6 +6806,63 @@ async function readOwnedTabDiskSnapshot(owner, filePath, event, data) {
   throw new Error(`File changed repeatedly while being read: ${filePath}`);
 }
 
+// This parser authenticates only retained memory; unknown refs cannot probe a path.
+function retainedTabDiskOwnerFromEnvelope(event, data) {
+  if (!data || typeof data !== "object" || !data.owner ||
+      data.owner.pageSession !== data.pageSession ||
+      data.owner.rendererGeneration !== data.rendererGeneration) return null;
+  const identity = closingDocumentOwnerFromEnvelope(event, {
+    ...data.owner, filePath: data.filePath,
+  });
+  const owner = identity && knownDocumentOwners.get(documentOwnerKey(identity));
+  return sameDocumentOwner(owner, identity) &&
+    owner.documentRef === identity.documentRef &&
+    isKnownDocumentOwner(owner) && owner.readTarget ? owner : null;
+}
+
+ipcMain.handle("refresh-owned-tab-disk-snapshot", async function refreshOwnedTabDiskSnapshot(event, data) {
+  const owner = retainedTabDiskOwnerFromEnvelope(event, data);
+  const cachedVersion = data && normaliseDiskVersion(data.diskVersion);
+  if (!owner || !cachedVersion) return null;
+  const current = () => {
+    const retained = retainedTabDiskOwnerFromEnvelope(event, data);
+    return sameDocumentOwner(owner, retained) &&
+      retained.documentRef === owner.documentRef &&
+      retained.readTarget === owner.readTarget;
+  };
+  const unavailable = reason => Object.freeze({
+    status: "unavailable", pathKey: owner.pathKey, reason,
+  });
+  let readingBody = false;
+  try {
+    const binding = await fs.promises.realpath(data.filePath);
+    if (!current()) return null;
+    if (binding !== owner.readTarget) return unavailable("binding");
+    const stats = await fs.promises.stat(owner.readTarget);
+    if (!current()) return null;
+    const afterBinding = await fs.promises.realpath(data.filePath);
+    if (!current()) return null;
+    if (afterBinding !== owner.readTarget) return unavailable("binding");
+    if (!stats.isFile()) throw new Error(`Owned tab target is not a file: ${data.filePath}`);
+    const diskVersion = diskVersionFromStats(stats);
+    if (sameDiskVersion(cachedVersion, diskVersion)) {
+      return Object.freeze({ status: "unchanged", pathKey: owner.pathKey, diskVersion });
+    }
+    readingBody = true;
+    const snapshot = await readOwnedTabDiskSnapshot(owner, data.filePath, event, data);
+    if (!snapshot || !current()) return null;
+    const afterRead = await fs.promises.realpath(data.filePath);
+    if (!current() || afterRead !== owner.readTarget) return null;
+    return Object.freeze({ status: "changed", pathKey: owner.pathKey, ...snapshot });
+  } catch (error) {
+    if (!current()) return null;
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") {
+      return readingBody ? null : unavailable("missing");
+    }
+    throw error;
+  }
+});
+
 ipcMain.handle("read-owned-tab-disk-snapshot", async (event, data) => {
   const owner = authorisedTabDiskRead(event, data);
   if (!owner) return null;

@@ -1966,31 +1966,23 @@
   function refreshTabFromDisk(
     tab, stillCurrent = null, { deferCompletion = false } = {},
   ) {
-    if (!tab || !window.fs) return false;
+    if (!tab) return false;
     // Never discard edits the user has not saved yet.
     if (isDirty(tab)) return false;
     const state = documentState.get(tab);
     const startingGeneration = state && state.generation;
     if (state && state.deletionTombstone) return false;
-    const adoptedPath = tabPathKey(tab);
-    const currentPath = resolveTabPath(tab.filePath);
-    if (adoptedPath && currentPath && adoptedPath !== currentPath) {
-      // A symlink spelling still belongs to the physical document this tab
-      // adopted. Only an accepted reload/reopen may move that binding.
-      return false;
-    }
-
-    const observedVersion = getDiskVersion(tab.filePath);
-    if (!observedVersion) return false; // missing or unreadable - keep the cache
-    if (sameDiskVersion(tab.diskVersion, observedVersion)) return false;
-
     const filePath = tab.filePath;
     const session = window.getReloadRequestSession?.();
-    const identity = getDocumentIdentityForTab(tab.id, filePath, session);
-    if (!identity) {
+    const identity = state && state.pathKey && state.admission &&
+      documentIdentity(tab, session);
+    const startingVersion = normaliseDiskVersion(tab.diskVersion);
+    if (!identity || !startingVersion) {
       console.error("[CustomTabs] Cannot refresh a tab without document ownership");
       return false;
     }
+    const startingMutationRevision = state.mutationRevision;
+    const startingContent = tab.content;
     // The renderer remains live while the owned read crosses IPC. The tab
     // cache was folded before this refresh began, so neither its dirty bit nor
     // its generation can witness an edit made in that gap. Keep both the live
@@ -2003,18 +1995,19 @@
         })
       : null;
     const refreshRequestStillCurrent = () => {
-      const stillOwned =
-        getDocumentIdentityForTab(tab.id, filePath, session);
+      const stillOwned = state.pathKey && documentIdentity(tab, session);
       return !(
         isDocumentFrozen() ||
         (stillCurrent && !stillCurrent()) ||
         !tabs.includes(tab) ||
         tab.filePath !== filePath ||
-        !state ||
+        documentState.get(tab) !== state ||
         state.generation !== startingGeneration ||
+        state.mutationRevision !== startingMutationRevision ||
+        tab.content !== startingContent ||
+        !sameDiskVersion(tab.diskVersion, startingVersion) ||
         state.deletionTombstone ||
         isDirty(tab) ||
-        (adoptedPath && resolveTabPath(filePath) !== adoptedPath) ||
         (activeReadWitness && (
           activeTabId !== tab.id ||
           liveDocument() !== activeReadWitness.live ||
@@ -2024,17 +2017,19 @@
         stillOwned.pageSession !== identity.pageSession ||
         stillOwned.rendererGeneration !== identity.rendererGeneration ||
         stillOwned.documentGeneration !== identity.documentGeneration ||
-        stillOwned.pathKey !== identity.pathKey
+        stillOwned.pathKey !== identity.pathKey ||
+        stillOwned.documentRef !== identity.documentRef
       );
     };
     let snapshot;
     let reservation;
     const readAndVerify = async () => {
-      snapshot = await window.folia.readOwnedTabDiskSnapshot({
+      snapshot = await window.folia.refreshOwnedTabDiskSnapshot({
         filePath,
         pageSession: session,
         rendererGeneration: identity.rendererGeneration,
         owner: identity,
+        diskVersion: startingVersion,
       });
       const current = refreshRequestStillCurrent();
       if (!snapshot) {
@@ -2045,7 +2040,7 @@
           if (typeof window.markReloadConflict === "function") {
             window.markReloadConflict(filePath);
           }
-          console.error("[CustomTabs] Owned read refused for current changed tab:", filePath);
+          console.error("[CustomTabs] Owned refresh refused for current tab:", filePath);
           renderTabs();
           saveTabs();
           notify("The disk refresh was refused. The earlier copy is protected; retry the reload.", 8000);
@@ -2053,6 +2048,7 @@
         return null;
       }
       if (!current) return null;
+      if (snapshot.status !== "changed") return null;
       reservation = reserveDocumentIdentity(tab);
       if (!reservation) return null;
       return verifyDiskAdoption(
