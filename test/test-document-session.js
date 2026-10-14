@@ -141,6 +141,25 @@ if (typeof electron === "string") {
       initialBootstraps.set(event.sender, data.nonce);
     };
     ipcMain.on("bootstrap-legacy-document-session", observeInitialBootstrap);
+    const replayPreload = path.join(profile, "bootstrap-replay-preload.js");
+    fs.writeFileSync(replayPreload, `
+      const { contextBridge, ipcRenderer } = require("electron");
+      const argument = process.argv.find(value =>
+        value.startsWith("--folia-session-bootstrap="));
+      if (process.isMainFrame && argument) {
+        const payload = Object.freeze({
+          nonce: argument.slice("--folia-session-bootstrap=".length),
+          openTabs: ${JSON.stringify(JSON.stringify([{ filePath: forged, scrollPosition: 0, anchor: null }]))},
+          activeTabPath: ${JSON.stringify(forged)},
+        });
+        contextBridge.exposeInMainWorld("__foliaBootstrapReplayTest", Object.freeze({
+          replay() {
+            return ipcRenderer.sendSync("bootstrap-legacy-document-session", payload);
+          },
+        }));
+      }
+    `, "utf8");
+    session.defaultSession.registerPreloadScript({ type: "frame", filePath: replayPreload });
     const { __shutdown } = require("../src/main.js");
     let win;
     const until = async predicate => {
@@ -163,6 +182,13 @@ if (typeof electron === "string") {
     seed.destroy();
     if (!ready) return finish();
     const exec = code => win.webContents.executeJavaScript(code, true);
+    const preferences = win.webContents.getLastWebPreferences();
+    check("the bootstrap replay uses an isolated fixed test capability without page Node access",
+      preferences.nodeIntegration === false && preferences.contextIsolation === true &&
+        preferences.sandbox === true && await exec(
+          "typeof process === 'undefined' && typeof require === 'undefined' && " +
+          "typeof window.ipcRenderer === 'undefined' && " +
+          "typeof window.__foliaBootstrapReplayTest?.replay === 'function'"));
     await exec("window.CustomTabs.__loadSavedTabs()");
     let layoutRefused = false;
     try {
@@ -207,9 +233,8 @@ if (typeof electron === "string") {
           typeof result.error === "string",
         JSON.stringify({ marker, result }));
     }
-    const nonce = await exec(`process.argv.find(argument =>
-      argument.startsWith("--folia-session-bootstrap="))
-      .slice("--folia-session-bootstrap=".length)`);
+    const nonce = initialBootstraps.get(win.webContents);
+    if (typeof nonce !== "string" || !nonce) throw new Error("Initial native bootstrap was not observed");
     ipcMain.removeListener("bootstrap-legacy-document-session", observeInitialBootstrap);
     const bootstrapHandler = ipcMain.listeners("bootstrap-legacy-document-session")[0];
     let replayTrace = null;
@@ -226,11 +251,7 @@ if (typeof electron === "string") {
     ipcMain.on("bootstrap-legacy-document-session", observedBootstrap);
     let replay;
     try {
-      replay = await exec(`window.ipcRenderer.sendSync('bootstrap-legacy-document-session', {
-        nonce: ${JSON.stringify(nonce)},
-        openTabs: ${JSON.stringify(JSON.stringify([{ filePath: forged, scrollPosition: 0, anchor: null }]))},
-        activeTabPath: ${JSON.stringify(forged)},
-      })`);
+      replay = await exec("window.__foliaBootstrapReplayTest.replay()");
     } finally {
       ipcMain.removeListener("bootstrap-legacy-document-session", observedBootstrap);
       ipcMain.on("bootstrap-legacy-document-session", bootstrapHandler);

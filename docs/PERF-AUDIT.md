@@ -1352,6 +1352,56 @@ Main/preload source identities therefore advance beyond profiled R2. Neither
 the older partial comparison nor either fast singleton is acceptance for
 these changed final bytes; no additional performance run is dispatched.
 
+## 2026-10-14 retained Save evidence and corrected proposal
+
+- Read-only investigation uses every completed launch and Save sample from
+  the stopped comparison; no replacement run or profiler was launched.
+- Historical `f87aa779` and current setup do not schedule work identically.
+  `bench/native-actions.js:500-517` uses bare `crypto.subtle.digest` after
+  editor input. Historical classic-script `crypto` resolves to Node crypto;
+  current resolves to browser crypto. The normal 400 ms preview and 800 ms
+  history callbacks are not explicitly awaited before the Save clock.
+- Large Save 371.18 -> 814.26 ms remains a real observed interval difference,
+  but is **not an isolated Save, durability or bridge-cost delta**.
+  Different excluded setup intervals may move preview work across its
+  boundary. Do not subtract those intervals or estimate an explained share.
+- Every completed large pair has a worse candidate median. Long
+  ingress-to-ACK stalls remain unexplained; unchanged dispatch cost does not
+  exclude other isolation overhead. Low CPU or overlapping pauses do not
+  establish an environmental cause. Fast singleton diagnostics clear neither.
+- Both sources already write, fsync and verify the saved body. Current adds
+  a synchronous metadata request; its individual cost was not measured.
+  Keep that guard. ACK, renderer tab/store adoption, visible preview and
+  asynchronous session-layout durability are different endpoints.
+
+**One proposed correction to the existing harness; not authorized execution**
+
+- Use identical `window.crypto.subtle.digest` calls, input bytes and encoding
+  in both apps. Do not let historical lexical globals select another API.
+- Preserve the same real tab selection and changed/unchanged Reload setup.
+  Those actions perform adoption, ownership/tracking and layout work;
+  retain their whole intervals and any failures, not just Save samples.
+- For **settled-editor -> Save**, dispatch normal input; observe the natural
+  preview of those exact draft bytes in the DOM, completed rendering/frames
+  and that edit's history update. Settle prior layout work separately using
+  the existing current layout promise; historical layout writes are
+  synchronous. Require the same owner/editor/dirty/nonpending state.
+  Then use the unchanged native Save-to-usable endpoint.
+- Separately preserve **immediate input -> Save** on an equivalently prepared
+  clean document: start before input and click Save with no digest or preview
+  wait between them. Report both the existing usable endpoint and the edit's
+  eventual preview/history/Save settlement, so waiting cannot hide a stall.
+- Retain Main ingress, write/fsync/verification, ACK and renderer/store/view
+  timings separately. Keep the metadata guard inside Save; distinguish its
+  cost if a future authorized measurement can observe it. Report final layout
+  settlement separately from ACK, which does not certify that async tail.
+- No new statistical framework, historical-results replacement, uncertainty
+  waiver or promise of performance qualification follows from this proposal.
+
+Evidence: `final-verification-20261014/retained-save-analysis.json` beneath
+`.context-viewport-evidence/`. No source-supported isolation root fix was
+established. Actual no-visible-slowdown acceptance remains unmet.
+
 ## Measured and found already fast
 - **Custom tab sync I/O is not the current bottleneck.**
   - `custom-tabs.js:69-111,640`

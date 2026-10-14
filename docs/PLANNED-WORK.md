@@ -5384,6 +5384,50 @@ is not complete. Other non-blocking/post-wave roadmap items are not absorbed.
 performance samples retain their original identities; this changed `main.js`
 is **not** the packaged/profiled R3 source. No replacement build was made.
 
+**2026-10-14 bounded final-verification outcome**
+
+- Shipping implementation remains `668d17f3`; this phase changes test actors,
+  not production guards, preload capabilities or renderer flags.
+- The document-session replay actor now uses an isolated fixed replay
+  capability and an actual Main-frame nonce witness, not page Node/raw IPC.
+  Its ordinary suite passes 68/68; R760 produces its exact replay-refusal
+  failures and restores Main byte-for-byte.
+- The theme popup probe now observes the actual native Main IPC delivery.
+  It clicks the same real table control in all six states, preserves the
+  payload/content checks, and restores the production listener. Theme passes
+  398/398. R346 detects the runtime mode leak plus its structural violation;
+  R359 detects missing content while its declared parser controls pass.
+  Renderer restoration is byte-exact. Independent Sol/Luna reviews converge
+  after correcting a duplicate test-local declaration.
+- Source packaging 407/407, privacy 52/52, corpus 322/322, startup 11/11 and
+  native browser 32/32 pass. The latest native reload selector is **33/34**:
+  before-version/owner/source forwarding and refusal pass; preparing the
+  after-version owner fails to paint. This is retained setup failure, not
+  proof of a new product defect or a reason to relaunch R886.
+- One private portable/NSIS 0.4.0 build matches current shipping sources.
+  Strict actual-asar checks pass 407/407; all shipped source/assets/libs/font
+  identities match. Private/test evidence roots are absent. Archive SHA-256:
+  `0b456d97df3163b277d3992605fbe52721bcb500f42dea8be2c48e725bdf48c8`.
+  Retained R3 stays `d3299fe015f1f8d16446c802157212a3846fd96205b1f35e56bb19a669660c2e`.
+- Current unpacked smoke passes actual open, dirty edit, normal Save,
+  correlated Reload, zoomed Mermaid, toolbar/menu, six scheme selections
+  and full clipboard readback. It uses production Node-off/sandbox/preload.
+  All captures were viewed; normal exit is 0 with no owned survivors.
+  Normal Save waits for its natural edited preview first: it does **not**
+  clear the retained historical rapid Save/Exit failure or measure latency.
+- Zoomed capture shows the complete decision label; the answer extends below
+  that viewport. At 100% both labels are visible. Menu and six-scheme views
+  are scoped evidence, not full wave-wide visual certification.
+- First fixture failures, the syntax-failed theme launch and private oracle
+  scheduling failure remain separate. The latter adapter now finishes its
+  synchronous archive census before starting the unchanged async suite;
+  no assertion, expected outcome or deadline was weakened.
+- Evidence: `.context-viewport-evidence/final-verification-20261014/`.
+  Full ordinary-suite/full historical-proof completion, remaining wave-wide
+  scenes, installed verification and coordinated integration/delivery are
+  not claimed. P2 Save/shutdown/hosted-CI exceptions and R886 sensitivity
+  remain as recorded. No-visible-slowdown still blocks merge/tag/publication.
+
 ### `w2-upstream` — classify the outstanding upstream commits · CLASSIFIED; dispositions complete, integration pending
 
 Folia is a hard fork, not a branch: upstream commits are taken as deliberate

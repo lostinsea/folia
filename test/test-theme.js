@@ -7203,75 +7203,71 @@ app.whenReady().then(async () => {
 
     /* AND THE SAME CLAIM AT RUNTIME, because the parse above reads what is
        WRITTEN and this reads what is SENT. Driven through the real
-       .table-maximize-btn on the real rendered table, with ipcRenderer.send
-       intercepted and swallowed so no BrowserWindow is opened. The table is the
+       .table-maximize-btn on the real rendered table, with the Main listener
+       intercepted so no BrowserWindow is opened. The table is the
        only popup surface the census fixture reaches - it has no diagram and no
        image - which is why the structural half above exists to cover the other
        four sites. */
     const popupSent = {};
     let popupProbeErr = "";
+    const popupChannel = "open-table-popup";
+    const popupOriginalHandlers = ipcMain.listeners(popupChannel);
+    let pendingPopup = null;
+    const observePopup = (event, payload) => {
+      if (event.sender !== win.webContents || !pendingPopup) return;
+      pendingPopup({
+        payload,
+        mainFrame: event.senderFrame === win.webContents.mainFrame,
+      });
+      pendingPopup = null;
+    };
     try {
-      await exec(`(() => {
-        const { ipcRenderer } = require('electron');
-        window.__popupSends = [];
-        /* THE RAW METHOD, not a bound copy. Restoring a bound wrapper would
-           leave ipcRenderer.send a DIFFERENT function object than the one this
-           probe found, which is invisible today and breaks the moment anything
-           compares the method by identity. */
-        window.__popupRealSend = ipcRenderer.send;
-        const realSend = window.__popupRealSend;
-        ipcRenderer.send = (channel, ...args) => {
-          if (typeof channel === 'string' && /^open-.*-popup$/.test(channel)) {
-            window.__popupSends.push([channel, args[0]]);
-            return;
-          }
-          return realSend.call(ipcRenderer, channel, ...args);
-        };
-        return 'ok';
-      })()`);
+      if (popupOriginalHandlers.length !== 1) throw new Error("Expected the real table-popup listener");
+      ipcMain.removeListener(popupChannel, popupOriginalHandlers[0]);
+      ipcMain.on(popupChannel, observePopup);
       for (const [mode, scheme, label] of PRINT_STATES) {
         await applySettled(mode, scheme, `10i popup ${label}`);
-        popupSent[label] = JSON.parse(
-          await exec(`(() => {
-            window.__popupSends.length = 0;
+        let popupTimer;
+        const delivery = new Promise(resolve => {
+          pendingPopup = resolve;
+          popupTimer = setTimeout(() => {
+            pendingPopup = null;
+            resolve(null);
+          }, 3000);
+        });
+        let pageState, observed;
+        try {
+          pageState = await exec(`(() => {
             const btn = document.querySelector('.table-maximize-btn');
             if (btn) btn.click();
-            const [channel, payload] = window.__popupSends[0] || [null, null];
-            return JSON.stringify({
+            return {
               clicked: !!btn,
-              channel,
-              keys: payload ? Object.keys(payload).sort() : null,
-              isDarkMode: payload ? payload.isDarkMode : null,
-              /* SPELLED OUT RATHER THAN LEFT TO JSON.stringify's undefined
-                 BEHAVIOUR. NOTE FOR EDITORS: this comment lives inside an
-                 exec() template literal, so it must never contain a backtick.
-                 JSON.stringify(undefined) returns the VALUE undefined, not a
-                 string, so a payload that had lost its tableData entirely
-                 produced 'content: undefined', which the outer stringify then
-                 DROPPED from the object - and every state read back
-                 identically absent, so "the content is the same in every
-                 scheme" passed on a payload carrying no content at all. An
-                 empty string is a value the assertion below can see. */
-              content:
-                payload && payload.tableData !== undefined
-                  ? JSON.stringify(payload.tableData)
-                  : '',
+              noNode: typeof require === 'undefined' && typeof window.ipcRenderer === 'undefined',
               bodyDark: document.body.classList.contains('dark-mode'),
               scheme: document.body.getAttribute('data-theme') || '',
-            });
-          })()`),
-        );
+            };
+          })()`);
+          observed = await delivery;
+        } finally { clearTimeout(popupTimer); pendingPopup = null; }
+        const payload = observed?.payload;
+        popupSent[label] = {
+          ...pageState,
+          channel: observed ? popupChannel : null,
+          mainFrame: observed?.mainFrame === true,
+          keys: payload ? Object.keys(payload).sort() : null,
+          isDarkMode: payload ? payload.isDarkMode : null,
+          // Missing content must not become identical undefined in every state.
+          content: payload && payload.tableData !== undefined
+            ? JSON.stringify(payload.tableData) : "",
+        };
       }
     } catch (e) {
       popupProbeErr = String((e && e.message) || e);
     } finally {
-      await exec(`(() => {
-        const { ipcRenderer } = require('electron');
-        if (window.__popupRealSend) ipcRenderer.send = window.__popupRealSend;
-        delete window.__popupRealSend;
-        delete window.__popupSends;
-        return 'ok';
-      })()`).catch(() => {});
+      ipcMain.removeListener(popupChannel, observePopup);
+      for (const handler of popupOriginalHandlers) {
+        if (!ipcMain.listeners(popupChannel).includes(handler)) ipcMain.on(popupChannel, handler);
+      }
     }
     const popupStates = Object.keys(popupSent);
     const popupContents = new Set(popupStates.map((l) => popupSent[l].content));
@@ -7292,6 +7288,7 @@ app.whenReady().then(async () => {
       const p = popupSent[l];
       return (
         !p.clicked ||
+        !p.noNode || !p.mainFrame ||
         p.channel !== "open-table-popup" ||
         !p.keys ||
         p.keys.join(",") !== POPUP_PAYLOAD_KEYS["open-table-popup"].slice().sort().join(",") ||
