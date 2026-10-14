@@ -713,6 +713,61 @@ async function main() {
       preloadSource.includes('if (!event.isTrusted || !event.dataTransfer?.files?.length ||') &&
       preloadSource.includes("webUtils.getPathForFile(file)") &&
       !pageSources.some(source => /\bDROPPABLE_EXTENSIONS\b|openFilePath\s*\(/.test(source)));
+  const extensionHelpers = require("../src/file-helpers");
+  const helperImport = mainJs.match(/const \{([^{}]*)\} = require\("\.\/file-helpers"\);/);
+  const extensionDeclarations = mainJs.match(/const TRUSTED_(?:LINK_MARKDOWN|DROP)_EXTS = new Set\([\s\S]*?\);/g) || [];
+  const extensionPolicies = require("vm").runInNewContext(
+    extensionDeclarations.join("\n") +
+      "\n({ drop: TRUSTED_DROP_EXTS, link: TRUSTED_LINK_MARKDOWN_EXTS })",
+    { SUPPORTED_EXTENSIONS: extensionHelpers.SUPPORTED_EXTENSIONS },
+  );
+  check("HYGIENE Main reuses canonical document groups without broadening link policy",
+    helperImport && /\bSUPPORTED_EXTENSIONS\b/.test(helperImport[1]) &&
+      /\bisMarkdownFile\b/.test(helperImport[1]) &&
+      extensionDeclarations.length === 2 &&
+      extensionDeclarations.some(source => source.includes("...SUPPORTED_EXTENSIONS.markdown") &&
+        source.includes("...SUPPORTED_EXTENSIONS.mermaid")));
+  const standardExtensions = [".md", ".markdown", ".mdown", ".mkd", ".mkdn", ".mmd", ".mermaid"];
+  const extensionCases = [...standardExtensions, ".ow", ".txt", ".json", ".md.txt", ""];
+  check("HYGIENE trusted drop accepts exactly canonical document extensions and not legacy ow",
+    extensionCases.every(ext =>
+      extensionPolicies.drop.has(path.extname("document" + ext).toLowerCase()) === standardExtensions.includes(ext) &&
+      extensionPolicies.drop.has(path.extname("DOCUMENT" + ext.toUpperCase()).toLowerCase()) === standardExtensions.includes(ext)));
+  check("HYGIENE resolved-link routing keeps its distinct narrower legacy extension set",
+    extensionPolicies.link.size === 5 &&
+      extensionCases.every(ext =>
+        extensionPolicies.link.has(ext) === [".md", ".markdown", ".mmd", ".mermaid", ".ow"].includes(ext)) &&
+      /const readTarget = fs\.realpathSync\.native\(logicalPath\);[\s\S]*?const ext = path\.extname\(readTarget\)\.toLowerCase\(\);[\s\S]*?TRUSTED_LINK_MARKDOWN_EXTS\.has\(ext\)/.test(mainJs));
+  const dialogSource = mainJs.slice(mainJs.indexOf("function openFileDialog() {"),
+    mainJs.indexOf('ipcMain.on("open-file-dialog"'));
+  let nativeOpenOptions;
+  require("vm").runInNewContext(dialogSource + "\nopenFileDialog();", {
+    mainWindow: { webContents: {} }, approvalRendererGeneration: 1,
+    SUPPORTED_EXTENSIONS: extensionHelpers.SUPPORTED_EXTENSIONS,
+    dialog: { showOpenDialog(_window, options) {
+      nativeOpenOptions = options;
+      return Promise.resolve({ canceled: true });
+    } },
+  });
+  check("HYGIENE native dialog retains canonical filters All Files and unrestricted selection",
+    JSON.stringify(nativeOpenOptions.filters) === JSON.stringify([
+      { name: "Markdown Files", extensions: ["md", "markdown", "mdown", "mkd", "mkdn"] },
+      { name: "Mermaid Files", extensions: ["mmd", "mermaid"] },
+      { name: "All Files", extensions: ["*"] },
+    ]) && nativeOpenOptions.properties.join(",") === "openFile,multiSelections" &&
+      !/\b(?:SUPPORTED_EXTENSIONS|isMarkdownFile|TRUSTED_DROP_EXTS)\b/.test(dialogSource.slice(dialogSource.indexOf(".then("))));
+  const cliSource = mainJs.match(/function handleFileArgument\(argv\) \{[\s\S]*?(?=\r?\n\/\/ Check for file argument on first launch)/);
+  let checkedNativePath = false;
+  const cliPolicy = require("vm").runInNewContext(cliSource[0] + "\nhandleFileArgument;", {
+    app: { isPackaged: false }, log() {}, path,
+    fs: { existsSync() { checkedNativePath = true; return true; } },
+    isMarkdownFile: extensionHelpers.isMarkdownFile, fileToOpen: null,
+  });
+  check("HYGIENE actual CLI selection preserves aliases case and CLI-only legacy ow",
+    [...extensionCases, ".MD", ".MKDN", ".MERMAID", ".OW"].every(ext =>
+      cliPolicy(["folia", "document" + ext]) ===
+        [...standardExtensions, ".ow"].includes(ext.toLowerCase())) &&
+      checkedNativePath && !cliPolicy(["folia", ".md"]));
   const testSignals = [], testCapabilities = {};
   require("vm").runInNewContext(read("test/test-preload.js"), {
     process: { isMainFrame: true, contextIsolated: true, argv: ["--folia-test-pdf-restore"] },

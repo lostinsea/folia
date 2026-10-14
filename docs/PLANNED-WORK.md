@@ -5322,7 +5322,7 @@ and the age-based removal behaviour included — has its own revert record**,
 proven individually rather than as a batch. No change to the packaged default,
 which `w2-privacy` already settled.
 
-### `w2-hygiene` — dead code and one file-extension policy · PENDING
+### `w2-hygiene` — dead code and one file-extension policy · IMPLEMENTED / SOURCE-REVIEWED; integration pending
 
 Remove handlers and code paths that nothing reaches, and consolidate the
 file-extension policy into a single source of truth. Extension handling is
@@ -5335,7 +5335,56 @@ divergence waiting to happen.
 needed; every removal proven unreachable before deletion, not after; suites and
 `--anchors` clean.
 
-### `w2-upstream` — classify the outstanding upstream commits · CLASSIFIED; narrow correctness evaluations pending
+**2026-10-14 bounded implementation.** Main now imports the existing browser/Node
+core's canonical Markdown/Mermaid groups for trusted drop and native-dialog
+filters, and its existing `isMarkdownFile` predicate for CLI selection.
+The ordinary and uppercase extension matrices are unchanged. Native dialogs
+retain **All Files** and do not apply the drop/CLI allowlist to selected files.
+`.ow` remains an explicit CLI/link-only legacy exception. The narrower
+resolved-target link policy and the intentionally smaller OS associations
+remain distinct; sharing a broader list would change their policies.
+Main's unused `isMermaidFile` and `readMarkdownFile` import bindings were
+removed only after the pre-edit identifier census found each solely in that
+destructuring import. Their shared implementations remain available; no
+possibly reachable handler or compatibility path was deleted.
+
+Plain-Node packaging/source controls pass 407/407, including the actual CLI
+function, native-dialog options and separate drop/link policy matrices. The
+first new link-source assertion used the wrong local variable name; that failed
+log is retained separately, and the corrected assertion follows actual
+`realpathSync.native(logicalPath)` / `readTarget` classification. These are
+source-level invariance controls for a refactor, not new native runtime or
+mutation-sensitivity claims. No new proof campaign or app launch was run.
+Private evidence is `.context-viewport-evidence/wave2-hygiene-r1/`.
+The dry anchor audit resolves; it proves no runtime behavior. Fresh independent
+GPT-6.1 Sol and GPT-6 Luna source reviews found no behavioral/test blockers.
+Sol had no findings; Luna identified the stale pending-audit status, now
+corrected. Neither reviewer launched tests or an app. No behavioral disagreement
+or new performance, package, integration or release qualification is claimed.
+
+**One current Wave-2 reconciliation.** The milestone preamble, not an item's
+prefix or an old todo, defines release scope. The finite inventory is:
+
+| Item | Current disposition |
+|---|---|
+| `w2-f22` | Original shutdown/clean-refresh implementation is present; explicitly user-deferred Save-alias/shutdown/ordinary hosted-CI campaigns stay P2, not passed. |
+| `w2-sec08` | Production isolation/authority implementation is provisionally committed; responsiveness remains unqualified. R886 remains an open sensitivity-harness follow-up, with accepted same-guard native behavior coverage, not an established product defect or a completed proof. |
+| `w2-privacy` | Implementation/proof closed; final integrated checks are not implied. |
+| `w2-hygiene` | Bounded shared-group refactor and focused source review/anchor closure complete; integration pending. |
+| `w2-upstream` | Classification complete with the narrow paragraph-wrapper disposition below; optional features remain deferred/rejected as recorded. |
+| `w2-f03`, `w2-kbscroll` | Genuinely unimplemented backlog, explicitly **non-blocking** in the milestone preamble. Main still has unguarded ordinary IPC callbacks; the viewer still lacks keyboard-scroller focus/key handling. They are not silently marked done or added as new release blockers. |
+| Remaining release gates | Actual no-visible-slowdown acceptance; final clean-tree ordinary suite/full proof inventory, regenerated-and-viewed wave-wide surfaces, final cleanup, final source-matched package/installed verification, coordinated integration and version/lock/tag/publication. None is supplied by this source-only unit. |
+
+After this unit closes, no other unimplemented mandatory product unit is
+identified within the canonical release dependency set. That is **not**
+implementation-readiness or release acceptance: the verification/performance
+and delivery gates above remain open, and the full historical proof register
+is not complete. Other non-blocking/post-wave roadmap items are not absorbed.
+`93150df8` remains the preserved provisional base. Its R3 package and all prior
+performance samples retain their original identities; this changed `main.js`
+is **not** the packaged/profiled R3 source. No replacement build was made.
+
+### `w2-upstream` — classify the outstanding upstream commits · CLASSIFIED; dispositions complete, integration pending
 
 Folia is a hard fork, not a branch: upstream commits are taken as deliberate
 individual cherry-picks, never merged wholesale
@@ -5371,7 +5420,7 @@ coordinator decision, not a new user quotation; neither feature is implemented.
 | `397a7a8` | Decline upstream README/identity/feature advertising; Folia maintains its own. |
 | `03b5423` | Batch-error/popout adaptations taken in `67d04bf`; obsolete Mermaid-10 lifeline workaround declined. The completed `8e075ad` geometry fix is separate. |
 | `a5f2b00` | Decline upstream-only version bump. |
-| `6089305` | Offline libraries/fonts adapted by vendoring; CommonMark soft-break change declined in `774cdd8`; HTML export deferred; Mermaid paragraph-wrapper spacing/patch effect still needs narrow evaluation. |
+| `6089305` | Offline libraries/fonts adapted by vendoring; CommonMark soft-break change declined in `774cdd8`; HTML export deferred; Mermaid paragraph-wrapper shape/spacing cleanup deferred after the narrow compatibility disposition below. |
 | `550017f` | Decline upstream-only version bump; remaining manifest delta is line-ending churn. |
 | `ef81474` | Dialog/drag-drop/splitter/view lookup adapted in `7088418`; fork save handling retained and non-note view-mode autosave superseded by `584ae4a` policy. |
 | `80646de` | Zoom-correct scrolling adapted in `dee261b`; temporary diagnostics declined; blinking deferred; right-click-menu viewport fit adapted in this continuation (proof below). |
@@ -5410,8 +5459,19 @@ full name inventory is exact PROVEN in
 `adoption-context-compound-proofs-r4-20261012.log`. Partial and COLLATERAL
 histories are retained, not promoted. Final anchor audit also resolves the
 compound parts (`adoption-context-final-anchors-20261012.log`).
-Mermaid placeholder paragraph cleanup still needs only a narrow spacing/patch
-disposition; the completed clipping/compactness unit is not reopened.
+**2026-10-14 paragraph-wrapper disposition.** The actual upstream diff changes
+both Mermaid placeholder restorations from replacing the bare token to
+replacing either `<p>token</p>` or the token. Folia already has the secure shared
+nonce/function-replacer implementation, with explicit `unwrapParagraph=false`
+at both Mermaid call sites and `true` at both raw-HTML iframe sites.
+Upstream's Mermaid-only adaptation would change the empty-paragraph/spacing
+and top-level patch input shape; it is not the zoomed-label clipping fix.
+`test-render-security.js` separately records that the HTML parser already moves
+`pre` out of paragraphs, and does not claim its Mermaid-parent observation
+proves the flag or spacing. No required current spacing/patch failure was
+established in the retained evidence. Therefore defer this compatibility/cosmetic
+change rather than speculate or reopen completed Mermaid geometry work.
+This is a complete classification, not implementation of the upstream change.
 
 ### `w2-kbscroll` — keyboard scrolling of the document · PENDING
 

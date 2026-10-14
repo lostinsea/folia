@@ -27,6 +27,25 @@ This approach means after an upstream merge, you only need to ensure these files
 
 ## Custom Features
 
+### File-extension policies
+
+`src/file-helpers-core.js` owns the Markdown/Mermaid extension groups used by
+both processes. Main reuses them for dialog filters, trusted drop and CLI
+selection; those consumers must not maintain independent copies of the groups.
+This does not make every admission surface interchangeable: native Open keeps
+All Files and arbitrary selected documents, trusted drop excludes `.ow`, CLI
+retains `.ow`, and resolved local links retain their narrower legacy in-app
+allowlist after realpath/executable checks. OS associations intentionally list
+only the selected registered formats in `package.json`.
+
+Upstream `6089305`'s Mermaid paragraph-wrapper cleanup remains deferred.
+Folia preserves the full/light render paths' existing paragraph/patch shape;
+raw-HTML iframe placeholders already unwrap paragraphs separately. No current
+required spacing failure was established, and this is not part of the completed
+Mermaid label-sizing/zoom fix. HTML export and persistent refresh blinking
+remain deferred; the existing D2/tscircuit/CommonMark/per-block HTML zoom
+rejections are unchanged.
+
 ### 1. Compact Header (custom-styles.css)
 - Reduced header padding from `12px 20px` to `6px 16px`
 - Logo reduced from 32px to 24px height

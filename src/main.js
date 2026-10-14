@@ -433,10 +433,10 @@ const { execFile } = require("child_process");
 
 // Helper modules
 const {
-  isMermaidFile,
+  SUPPORTED_EXTENSIONS,
+  isMarkdownFile,
   wrapMermaidContent,
   removeBOM,
-  readMarkdownFile,
   isLargeDocument,
   sendIPCResult,
 } = require("./file-helpers");
@@ -2491,8 +2491,13 @@ const TRUSTED_LINK_SAFE_EXTS = new Set([
   ".tiff", ".ico", ".avif", ".heic", ".mp3", ".wav", ".flac", ".ogg", ".m4a",
   ".mp4", ".webm", ".mov", ".mkv",
 ]);
+// Link routing deliberately keeps its narrower legacy policy; dialog/drop
+// aliases must not silently broaden which resolved link targets open in-app.
 const TRUSTED_LINK_MARKDOWN_EXTS = new Set([".md", ".markdown", ".mmd", ".mermaid", ".ow"]);
-const TRUSTED_DROP_EXTS = new Set([".md", ".markdown", ".mdown", ".mkd", ".mkdn", ".mmd", ".mermaid"]);
+const TRUSTED_DROP_EXTS = new Set([
+  ...SUPPORTED_EXTENSIONS.markdown,
+  ...SUPPORTED_EXTENSIONS.mermaid,
+]);
 const isTrustedNetworkPath = value => /^(\\\\|\/\/)/.test(value);
 
 ipcMain.handle("private-trusted-document-gesture", async (event, data) => {
@@ -4578,9 +4583,9 @@ function openFileDialog() {
       filters: [
         {
           name: "Markdown Files",
-          extensions: ["md", "markdown", "mdown", "mkd", "mkdn"],
+          extensions: SUPPORTED_EXTENSIONS.markdown.map(ext => ext.slice(1)),
         },
-        { name: "Mermaid Files", extensions: ["mmd", "mermaid"] },
+        { name: "Mermaid Files", extensions: SUPPORTED_EXTENSIONS.mermaid.map(ext => ext.slice(1)) },
         { name: "All Files", extensions: ["*"] },
       ],
     })
@@ -10428,18 +10433,8 @@ function handleFileArgument(argv) {
     // Check if it's a file path
     if (fs.existsSync(arg)) {
       const ext = path.extname(arg).toLowerCase();
-      if (
-        [
-          ".md",
-          ".markdown",
-          ".mdown",
-          ".mkd",
-          ".mkdn",
-          ".mmd",
-          ".mermaid",
-          ".ow",
-        ].includes(ext)
-      ) {
+      // .ow remains a CLI/link-only legacy format, not a trusted-drop format.
+      if (isMarkdownFile(arg) || ext === ".ow") {
         filePath = arg;
         break;
       }
