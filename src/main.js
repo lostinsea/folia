@@ -3143,14 +3143,15 @@ function createWindow() {
     title: "Folia",
     backgroundColor: "#f5f5f5",
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true,
       preload: path.join(__dirname, "main-preload.js"),
       additionalArguments: [
         `--folia-session-bootstrap=${privateBootstrapNonce}`,
         ...(testPreloadPreferences.preload ? ["--folia-test-pdf-restore"] : []),
+        ...(!app.isPackaged ? ["--folia-newline-alignment-diagnostics"] : []),
       ],
-      enableRemoteModule: true,
       backgroundThrottling: true, // Throttle background renderers to save CPU
     },
     icon: path.join(__dirname, "..", "assets", "app-icon.png"),
@@ -4423,6 +4424,11 @@ ipcMain.handle("read-dialog-extra", (event, data) => {
 });
 
 function openFile(filePath, options = {}) {
+  // Native CLI paths may be relative. Only Main resolves from its CWD; the
+  // event spelling must match the absolute logical admission in the browser.
+  if (typeof filePath === "string" && filePath.length > 0) {
+    filePath = path.resolve(filePath);
+  }
   const deliveryEpoch = ++fileOpenDeliveryEpoch;
   const openRequest = options.openRequest || null;
   const requestedSender = options.sender || null;

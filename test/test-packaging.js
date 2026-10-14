@@ -625,6 +625,129 @@ async function main() {
       /filePath: testPreloadPreferences\.preload/.test(mainJs) &&
       /additionalArguments:\s*\[\s*`--folia-session-bootstrap=\$\{privateBootstrapNonce\}`,\s*\.\.\.\(testPreloadPreferences\.preload \? \["--folia-test-pdf-restore"\] : \[\]\)/.test(mainJs),
   );
+  const mainWindowPreferences = mainJs.split("mainWindow = new BrowserWindow({")[1]
+    ?.split("additionalArguments:")[0] || "";
+  check("SEC-08 production main window pins Node off context isolation and sandbox together",
+    /nodeIntegration:\s*false/.test(mainWindowPreferences) &&
+      /contextIsolation:\s*true/.test(mainWindowPreferences) &&
+      /sandbox:\s*true/.test(mainWindowPreferences));
+  const nativeArguments = mainJs.split("mainWindow = new BrowserWindow({")[1]
+    ?.match(/additionalArguments:\s*(\[[\s\S]*?\]),\s*backgroundThrottling/);
+  const diagnosticArguments = [false, true].map(isPackaged => nativeArguments
+    ? require("vm").runInNewContext(`(${nativeArguments[1]})`, {
+      app: { isPackaged }, privateBootstrapNonce: "a".repeat(64), testPreloadPreferences: {},
+    }) : null);
+  check("SEC-08 native window advertises newline diagnostics only in development",
+    diagnosticArguments[0]?.includes("--folia-newline-alignment-diagnostics") === true &&
+      diagnosticArguments[1]?.includes("--folia-newline-alignment-diagnostics") === false);
+  const diagnosticBridges = [];
+  for (const [argv, reply] of [[[], true],
+    [["--folia-newline-alignment-diagnostics"], true],
+    [["--folia-newline-alignment-diagnostics"], false],
+    [["--folia-newline-alignment-diagnostics"], "invalid"]]) {
+    const calls = [];
+    let api;
+    require("vm").runInNewContext(read("src/main-preload.js"), {
+      process: { isMainFrame: true, argv },
+      require(name) {
+        if (name !== "electron") throw new Error(`Unexpected preload import: ${name}`);
+        return { contextBridge: { exposeInMainWorld(_name, value) { api = value; } },
+          ipcRenderer: { async invoke(channel) { calls.push(channel); return reply; } } };
+      },
+    });
+    let enabled, error;
+    try { enabled = await api.getNewlineAlignmentDiagnosticsEnabled(); }
+    catch (failure) { error = failure.message; }
+    diagnosticBridges.push({ enabled, error, calls });
+  }
+  check("SEC-08 packaged diagnostics capability returns false without invoking absent development IPC",
+    diagnosticBridges[0].enabled === false && diagnosticBridges[0].calls.length === 0);
+  check("SEC-08 development diagnostics capability preserves approved and refused boolean replies",
+    diagnosticBridges[1].enabled === true && diagnosticBridges[2].enabled === false &&
+      diagnosticBridges.slice(1, 3).every(value =>
+        value.calls.join(",") === "newline-alignment-diagnostics-enabled" && !value.error));
+  check("SEC-08 development diagnostics capability rejects malformed replies",
+    /Invalid diagnostics response/.test(diagnosticBridges[3].error) &&
+      diagnosticBridges[3].calls.join(",") === "newline-alignment-diagnostics-enabled");
+  const preloadSource = stripJsComments(read("src/main-preload.js"));
+  check("SEC-08 production preload publishes only contextBridge and imports only Electron",
+    preloadSource.includes('contextBridge.exposeInMainWorld("folia", api);') &&
+      !preloadSource.includes("globalThis.folia") &&
+      (preloadSource.match(/\brequire\s*\(/g) || []).length === 1 &&
+      /require\("electron"\)/.test(preloadSource));
+  const pageSources = ["renderer.js", "custom-tabs.js", "custom-performance.js"]
+    .map(file => stripJsComments(read("src/" + file)));
+  check("SEC-08 browser product scripts have no Node imports exports raw IPC or filesystem fallback",
+    pageSources.every(source => !/\brequire\s*\(|\bmodule\.exports\b|\bwindow\.(?:fs|ipcRenderer)\b|\b(?:ipcRenderer|tabIpc)\.(?:send|sendSync|invoke)\s*\(/.test(source)));
+  const visibilityEvents = new EventEmitter();
+  let published;
+  require("vm").runInNewContext(read("src/main-preload.js"), {
+    process: { isMainFrame: true, argv: [] },
+    require(name) {
+      if (name !== "electron") throw new Error(`Unexpected preload import: ${name}`);
+      return { contextBridge: { exposeInMainWorld(_name, api) { published = api; } },
+        ipcRenderer: visibilityEvents };
+    },
+  });
+  const visibilityValues = [];
+  let invalidCallback = false, invalidEvent = false;
+  try { published.onWindowVisibilityChanged(null); } catch (error) { invalidCallback = /Invalid/.test(error.message); }
+  const unsubscribeVisibility = published.onWindowVisibilityChanged(value => visibilityValues.push(value));
+  try { visibilityEvents.emit("window-visibility-changed", {}, { visible: "true" }); }
+  catch (error) { invalidEvent = /Invalid window visibility event/.test(error.message); }
+  visibilityEvents.emit("window-visibility-changed", {}, { visible: true, secret: "excluded" });
+  visibilityEvents.emit("window-visibility-changed", {}, { visible: false });
+  unsubscribeVisibility(); unsubscribeVisibility();
+  visibilityEvents.emit("window-visibility-changed", {}, { visible: true });
+  check("SEC-08 fixed visibility subscription rejects malformed input projects booleans and unsubscribes",
+    invalidCallback && invalidEvent && visibilityValues.length === 2 &&
+      visibilityValues[0].visible === true && visibilityValues[1].visible === false &&
+      visibilityValues.every(value => Object.isFrozen(value) && Object.keys(value).join(",") === "visible") &&
+      visibilityEvents.listenerCount("window-visibility-changed") === 0);
+  check("SEC-08 browser link delegation retains total cancellation independently of private gesture admission",
+    read("src/renderer.js").includes(
+      "    // Genuine non-anchor links were handled by the private preload.\n    e.preventDefault();".replace(/\n/g,
+        read("src/renderer.js").includes("\r\n") ? "\r\n" : "\n")));
+  check("SEC-08 private trusted drop admission retains Main allowlist and trusted preload file capture",
+    mainJs.includes("if (!TRUSTED_DROP_EXTS.has(path.extname(data.filePath).toLowerCase())) {") &&
+      preloadSource.includes('if (!event.isTrusted || !event.dataTransfer?.files?.length ||') &&
+      preloadSource.includes("webUtils.getPathForFile(file)") &&
+      !pageSources.some(source => /\bDROPPABLE_EXTENSIONS\b|openFilePath\s*\(/.test(source)));
+  const testSignals = [], testCapabilities = {};
+  require("vm").runInNewContext(read("test/test-preload.js"), {
+    process: { isMainFrame: true, contextIsolated: true, argv: ["--folia-test-pdf-restore"] },
+    require(name) {
+      if (name !== "electron") throw new Error(`Unexpected test preload import: ${name}`);
+      return { contextBridge: { exposeInMainWorld(name, api) { testCapabilities[name] = api; } },
+        ipcRenderer: { send(channel, data) { testSignals.push({ channel, data }); } } };
+    },
+  });
+  const phaseMarker = testCapabilities.__foliaTestDocumentControl;
+  check("SEC-08 isolated test diagnostic accepts only fixed phases and finite generation metadata without raw transport",
+    Object.keys(phaseMarker).join(",") === "mark" &&
+      phaseMarker.mark("raw-channel") === false &&
+      phaseMarker.mark("reload-start", Infinity) === false &&
+      phaseMarker.mark("reload-start", 1) === true &&
+      testSignals.length === 1 && testSignals[0].channel === "test-document-control-phase" &&
+      Object.keys(testSignals[0].data).sort().join(",") === "localGeneration,phase" &&
+      !isPackaged(files, "test/test-preload.js"));
+  const lexicalCases = [
+    ["Win32", "C:\\Root\\sub\\..\\file.md", "C:\\Root\\file.md", "c:\\root\\file.md"],
+    ["Win32", "C:/Root//file.md", "C:\\Root\\file.md", "c:\\root\\file.md"],
+    ["Win32", "\\\\server\\share\\..\\file.md", "\\\\server\\share\\file.md", "\\\\server\\share\\file.md"],
+    ["Win32", "C:relative.md", null], ["Win32", "\\root-relative.md", null],
+    ["Linux", "/root/sub/../../file.md", "/file.md", "/file.md"],
+    ["Linux", "relative.md", null], ["Linux", "C:\\Root\\file.md", null],
+  ];
+  const lexicalResults = lexicalCases.map(([platform, input, resolved, spelling]) => {
+    const context = { window: {}, navigator: { platform } };
+    require("vm").runInNewContext(read("src/utils.js"), context);
+    const value = context.window.FoliaUtils.normaliseDocumentPath(input);
+    return { input, value, valid: resolved === null ? value === null :
+      value?.resolved === resolved && value.spelling === spelling && Object.isFrozen(value) };
+  });
+  check("SEC-08 browser lexical path helper preserves Windows drive UNC and POSIX roots without ambient resolution",
+    lexicalResults.every(result => result.valid), JSON.stringify(lexicalResults));
   check(
     "changed clean-tab reads use the fixed production bridge instead of renderer raw IPC",
     read("src/custom-tabs.js").includes(
@@ -1097,7 +1220,7 @@ async function main() {
     JSON.stringify({ packaged: isPackaged(files, "src/utils.js") }),
   );
   const utilsBinding =
-    /const\s*\{\s*removeBOM\s*,\s*getFileName\s*,\s*getDirectory\s*,\s*escapeRegex\s*,\s*formatBytes\s*\}\s*=\s*window\.FoliaUtils\s*;/.test(
+    /const\s*\{\s*removeBOM\s*,\s*getFileName\s*,\s*getDirectory\s*,\s*normaliseDocumentPath\s*,\s*escapeRegex\s*,\s*formatBytes\s*\}\s*=\s*window\.FoliaUtils\s*;/.test(
       rendererSource,
     );
   const utilsRequire = /require\s*\(\s*["'](?:\.\/)?utils(?:\.js)?["']\s*\)/.test(

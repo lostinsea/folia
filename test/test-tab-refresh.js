@@ -146,7 +146,12 @@ const ownedReadFocusedHarness = process.env.SEC08_OWNED_READ_FOCUSED_HARNESS ===
 const approvedRequestFocusedHarness = process.env.SEC08_APPROVED_REQUEST_FOCUSED_HARNESS === "1";
 const nativeAuthorityFocusedHarness = process.env.SEC08_NATIVE_AUTHORITY_FOCUSED_HARNESS === "1";
 const ownedMetadataFocusedHarness = process.env.SEC08_OWNED_METADATA_FOCUSED_HARNESS === "1";
+const browserIsolationHarness = process.env.SEC08_BROWSER_ISOLATION_HARNESS === "1";
+if (browserIsolationHarness && !ownedMetadataFocusedHarness) {
+  throw new Error("Browser isolation controls require the owned metadata native route");
+}
 let ownedMetadataNativeReads = null;
+const nativeAttestationObservers = [];
 const tabAuthorityCreateHarness = process.env.SEC08_TAB_AUTHORITY_CREATE_HARNESS === "1";
 const tabAuthorityBackgroundHarness = process.env.SEC08_TAB_AUTHORITY_BACKGROUND_HARNESS === "1";
 const tabAuthorityReceiptHarness = process.env.SEC08_TAB_AUTHORITY_RECEIPT_HARNESS === "1";
@@ -227,7 +232,7 @@ if (portableHarness) {
 
 const {
   inspectVisual,
-  captureScreenshot,
+  captureScreenshot: captureDefaultScreenshot,
   startErrorSentinel,
   proveSentinelAlive,
   trapExternalOpens,
@@ -236,6 +241,14 @@ const {
   REGISTERED_TEMP_DIRS,
   sweepTempDirs,
 } = require("./test-visual-utils");
+
+async function captureScreenshot(win, name) {
+  if (!ownedMetadataFocusedHarness) return captureDefaultScreenshot(win, name);
+  const destination = path.join(__dirname, "..", ".context-viewport-evidence",
+    "browser-isolation-controls-r1", `${name}-${process.pid}-${Date.now()}.png`);
+  fs.writeFileSync(destination, (await win.webContents.capturePage()).toPNG());
+  return destination;
+}
 
 // Isolate this suite's userData profile before main.js exists and before the
 // app is ready. See test-userdata-isolation.js.
@@ -1415,6 +1428,25 @@ process.on("uncaughtException", (error) => {
 // between scenarios - the authorization it grants is one-way within a session
 // because a real shutdown ends with the process gone, and this suite has to
 // drive a dozen of them in one process with the window still standing.
+const browserCliFixture = browserIsolationHarness ? path.join(process.cwd(),
+  ".context-viewport-evidence", "browser-isolation-controls-r1",
+  `relative-cli-${process.pid}.md`) : null;
+let browserCliDelivery = null;
+let restoreBrowserCliDelivery = null;
+if (browserCliFixture) {
+  fs.writeFileSync(browserCliFixture, "# Relative native CLI\n\nBROWSER_RELATIVE_CLI\n");
+  process.argv.push(path.relative(process.cwd(), browserCliFixture));
+  app.once("web-contents-created", (_event, webContents) => {
+    const send = webContents.send;
+    const restore = replaceMethod(webContents, "send", function(channel, data) {
+      if (channel === "file-opened" && data?.content?.includes("BROWSER_RELATIVE_CLI")) {
+        browserCliDelivery = data;
+      }
+      return send.apply(this, arguments);
+    });
+    restoreBrowserCliDelivery = restore;
+  });
+}
 const { __shutdown } = require("../src/main.js");
 ipcMain.handle("test-seed-approved-session-layout", (_event, layout) =>
   __shutdown.seedDocumentSessionLayout(layout));
@@ -7285,7 +7317,16 @@ async function runOwnedMetadataScenarios(win, exec, dir, sentinel) {
          window.__ownedMetadataNativeOpen.completed === true &&
          !!window.CustomTabs.getDocumentDescriptor()?.ref &&
          document.getElementById('viewer').textContent.includes(${JSON.stringify(marker)})`, 8000)) {
-        throw new Error(`Owned metadata native fixture did not paint: ${filePath}`);
+        const state = await exec(`({
+          path: window.currentFilePath, active: window.CustomTabs.getActiveTabId(),
+          diagnostics: window.getFileOpenDiagnostics(),
+          notification: document.getElementById('notificationMessage').textContent,
+          completed: window.__ownedMetadataNativeOpen.completed,
+          tabs: window.CustomTabs.getTabs().map(tab => ({ id: tab.id, path: tab.filePath })),
+        })`);
+        throw new Error(`Owned metadata native fixture did not paint: ${filePath}; ${JSON.stringify({
+          state, native: __shutdown.documentSessionState(), shutdown: __shutdown.state(),
+        })}`);
       }
       const completed = await exec(`({
         id: window.CustomTabs.getActiveTabId(),
@@ -7320,6 +7361,10 @@ async function runOwnedMetadataScenarios(win, exec, dir, sentinel) {
     ? await openPausedNativeMetadata(exec, controlPath, openNative, "METADATA_CONTROL",
       "SEC-08 receipt callers pause the actual selected watcher before controlled inactive disk writes")
     : await openNative(controlPath, "METADATA_CONTROL");
+  if (browserIsolationHarness) {
+    await runBrowserIsolationControls(win, exec, dir, controlId, openNative);
+    return;
+  }
   if (tabAuthorityReceiptHarness) {
     await runTabAuthorityReceiptScenarios(win, exec, dir, controlId, openNative);
     return;
@@ -7333,6 +7378,14 @@ async function runOwnedMetadataScenarios(win, exec, dir, sentinel) {
   }
   if (tabAuthorityBackgroundHarness) {
     await runTabAuthorityBackgroundScenarios(win, exec, dir, controlId, openNative);
+    return;
+  }
+  if (rendererBoundaryUnit === "reload") {
+    const body = "# Owned metadata\n\nMETADATA_APPROVED_RAM\n\n" +
+      Array.from({ length: 90 }, (_, index) => `Paragraph ${index} stays in the approved copy.\n`).join("\n");
+    await runRendererReloadBoundaryScenarios(win, exec, dir, sentinel, openNative, controlId, body);
+    await runTabAuthorityRollbackScenarios(win, exec, dir, sentinel, openNative, controlId, body);
+    await runIsolatedOrdinaryMetadataControls(win, exec, dir, controlId, controlPath, body, openNative);
     return;
   }
   const targetDir = path.join(dir, "owned-metadata-target");
@@ -8226,6 +8279,541 @@ async function runOwnedMetadataScenarios(win, exec, dir, sentinel) {
   }
 }
 
+// Observe only named document ports in Main. The genuine Electron event reaches
+// the original listener, and its terminal reply is forwarded before observation;
+// neither the isolated page nor this observer acquires private bootstrap traffic.
+function observeNativeDocumentPorts(win, channels, afterReply = () => {}, beforeRequest = () => {}) {
+  const records = [];
+  const restores = [];
+  let restored = false;
+  for (const channel of channels) {
+    const listeners = ipcMain.listeners(channel);
+    if (listeners.length !== 1) throw new Error(`Expected one native listener for ${channel}`);
+    const original = listeners[0];
+    const wrapped = function(event, data) {
+      if (event.sender !== win.webContents) return original.apply(this, arguments);
+      beforeRequest(channel, data);
+      let reply, replies = 0;
+      const observed = new Proxy(event, {
+        set(target, key, value) {
+          if (key === "returnValue") { reply = value; replies += 1; }
+          return Reflect.set(target, key, value, target);
+        },
+      });
+      const result = original.call(this, observed, data);
+      const record = { channel, data, reply, replies };
+      records.push(record);
+      afterReply(record);
+      return result;
+    };
+    ipcMain.removeListener(channel, original);
+    ipcMain.on(channel, wrapped);
+    restores.push(() => {
+      ipcMain.removeListener(channel, wrapped);
+      ipcMain.on(channel, original);
+    });
+  }
+  return { records, restore() {
+    if (restored) return;
+    restored = true;
+    for (const restore of restores.reverse()) restore();
+  } };
+}
+
+async function runIsolatedOrdinaryMetadataControls(win, exec, dir, controlId, controlPath, body, openNative) {
+  const restoredPath = path.join(dir, "owned-metadata-restored.md");
+  const driftPath = path.join(dir, "owned-metadata-save-drift.md");
+  write(restoredPath, body); write(driftPath, body);
+  let phase = "setup-open", earlierSaveReceipt;
+  const trace = [], reads = [], saves = [];
+  const observer = observeNativeDocumentPorts(win, [
+    "query-document-disk-adoption-state", "check-owned-tab-disk-snapshot", "check-committed-disk-adoption",
+  ], record => {
+    record.phase = phase;
+    if (phase === "save") trace.push({ kind: "query", data: record.data, state: __shutdown.state() });
+  });
+  const observeSave = (event, data) => {
+    if (event.sender === win.webContents) saves.push({ data, phase });
+  };
+  ipcMain.on("save-markdown-file", observeSave);
+  const nativeOpen = fs.promises.open;
+  const restoreRead = replaceMethod(fs.promises, "open", function(file) {
+    if ([controlPath, restoredPath].includes(file)) reads.push({ file, phase });
+    return nativeOpen.apply(this, arguments);
+  });
+  const send = win.webContents.send;
+  const restoreDelivery = replaceMethod(win.webContents, "send", function(channel, data) {
+    if (channel === "file-opened" && data?.path === restoredPath && phase === "setup-open") {
+      earlierSaveReceipt = data.document;
+    }
+    return send.apply(this, arguments);
+  });
+  const realAck = ipcMain._invokeHandlers.get("save-markdown-result-ack");
+  let drifted = false;
+  ipcMain.removeHandler("save-markdown-result-ack");
+  ipcMain.handle("save-markdown-result-ack", function(event, data) {
+    const before = __shutdown.state();
+    const accepted = realAck.apply(this, arguments);
+    if (phase === "save") trace.push({
+      kind: "ack", data, accepted, before, after: __shutdown.state(),
+    });
+    if (phase === "save-drift" && accepted === true && data?.path === driftPath) {
+      write(driftPath, body + "\nSAVE_NATIVE_DRIFT\n"); drifted = true;
+    }
+    return accepted;
+  });
+  await exec(`(() => {
+    const probe = window.__isolatedOrdinaryMetadata = {
+      begin: window.beginFileOpen, begins: [], replies: [], phase: 'setup-open',
+    };
+    window.beginFileOpen = function(data, options) {
+      probe.begins.push({ path: data.path, approved: !!options.deletionAdoptionApproval, phase: probe.phase });
+      return probe.begin.apply(this, arguments);
+    };
+    probe.unsubscribe = window.folia.onSaveMarkdownResult(data => probe.replies.push(data));
+    return null;
+  })()`);
+  try {
+    const restoredId = await openNative(restoredPath, "METADATA_APPROVED_RAM");
+    phase = "clean-switch";
+    await exec(`(async () => {
+      window.__isolatedOrdinaryMetadata.phase = 'clean-switch';
+      await window.CustomTabs.switchToTab(${controlId});
+      await window.CustomTabs.switchToTab(${restoredId});
+    })()`);
+    const begins = await exec("window.__isolatedOrdinaryMetadata.begins.filter(item => item.phase === 'clean-switch')");
+    const clean = observer.records.filter(record => record.phase === "clean-switch");
+    check("SEC-08 renderer ordinary unapproved clean unchanged switches avoid both new approval metadata ports",
+      clean.length === 0 && begins.length === 2 && begins.every(item => !item.approved) &&
+        await exec("document.getElementById('viewer').textContent.includes('METADATA_APPROVED_RAM')"),
+      JSON.stringify({ clean, begins }));
+    check("SEC-08 tab authority unchanged conditional refresh adds no adoption query approval RPC or renderer body read",
+      clean.length === 0 && reads.some(read => read.phase === "setup-open") &&
+        !reads.some(read => read.phase === "clean-switch") &&
+        await exec("typeof window.fs === 'undefined'"),
+      JSON.stringify({ clean, reads }));
+    phase = "save";
+    const saved = await exec("saveMarkdownFile()");
+    const ordinary = await exec(`({
+      replies: window.__isolatedOrdinaryMetadata.replies,
+      version: window.CustomTabs.getActiveTab().diskVersion,
+      pending: window.getPendingSaveStatus(${JSON.stringify(restoredPath)}).pending,
+      dirty: hasUnsavedChanges,
+    })`);
+    const saveQueries = observer.records.filter(record => record.phase === "save" &&
+      record.channel === "query-document-disk-adoption-state");
+    const actualSaves = saves.filter(item => item.phase === "save");
+    check("SEC-08 renderer ordinary authenticated Save still settles once without new metadata checks",
+      saved === true && actualSaves.length === 1 && ordinary.replies.length === 1 &&
+        ordinary.replies[0].success === true && !ordinary.pending && !ordinary.dirty &&
+        !observer.records.some(record => record.phase === "save" &&
+          record.channel !== "query-document-disk-adoption-state") &&
+        fs.readFileSync(restoredPath, "utf8") === body, JSON.stringify({ saved, ordinary, actualSaves }));
+    check("SEC-08 tab authority ordinary Save adopts its version through the same actual ref-bound native query and matched identity",
+      saveQueries.length === 1 && saveQueries[0].replies === 1 &&
+        saveQueries[0].reply.known === true && saveQueries[0].reply.versionMatches === true &&
+        ["documentRef", "tabId", "documentGeneration"].every(key =>
+          saveQueries[0].data[key] === ordinary.replies[0].saveRequest[key]) &&
+        saveQueries[0].data.modifiedTime === ordinary.version?.mtimeMs,
+      JSON.stringify({ saveQueries, ordinary }));
+    const ack = trace.find(item => item.kind === "ack");
+    check("SEC-08 tab authority accepted native Save ACK releases delivery and correlation pins before any matched bookkeeping query",
+      ack?.accepted === true && ack.before.saveOutcomeDeliveryCount === 1 &&
+        ack.before.saveCorrelationCount === 1 && ack.after.saveOutcomeDeliveryCount === 0 &&
+        ack.after.saveCorrelationCount === 0 && trace.filter(item => item.kind === "query").every(item =>
+          trace.indexOf(item) > trace.indexOf(ack) && item.state.saveOutcomeDeliveryCount === 0 &&
+          item.state.saveCorrelationCount === 0 && item.data.documentRef === ack.data.saveRequest.documentRef),
+      JSON.stringify(trace));
+    phase = "receipt-witness";
+    const witness = await exec(`(() => {
+      const owner = window.CustomTabs.getActiveDocumentIdentity(
+        window.currentFilePath, window.getReloadRequestSession());
+      const request = { filePath: window.currentFilePath, sourcePath: window.currentFilePath,
+        owner, pageSession: owner.pageSession, rendererGeneration: owner.rendererGeneration };
+      return {
+        current: window.folia.checkOwnedTabDiskSnapshot({ ...request,
+          diskVersion: ${JSON.stringify(ordinary.version)} }),
+        earlier: window.folia.checkOwnedTabDiskSnapshot({ ...request,
+          diskVersion: ${JSON.stringify(earlierSaveReceipt.diskVersion)} }),
+      };
+    })()`);
+    check("SEC-08 tab authority verified Save advances actual Main bookkeeping without relabeling its earlier issued body receipt",
+      Object.isFrozen(earlierSaveReceipt) && Object.isFrozen(earlierSaveReceipt.diskVersion) &&
+        witness.current.matches === true && witness.earlier.matches === false &&
+        earlierSaveReceipt.ref === ordinary.replies[0].saveRequest.documentRef,
+      JSON.stringify({ earlierSaveReceipt, witness }));
+    phase = "save-drift-setup";
+    const driftId = await openPausedNativeMetadata(exec, driftPath, openNative, "METADATA_APPROVED_RAM",
+      "SEC-08 tab authority Save drift setup pauses the actual selected native watcher before the controlled post-Save disk write");
+    phase = "save-drift";
+    const driftSaved = await exec("saveMarkdownFile()");
+    const drift = await exec(`({
+      reply: window.__isolatedOrdinaryMetadata.replies.at(-1),
+      version: window.CustomTabs.getActiveTab().diskVersion,
+      content: window.CustomTabs.getActiveTab().content,
+      original: window.CustomTabs.getActiveTab().originalContent,
+      live: window.originalMarkdown, dirty: hasUnsavedChanges,
+      pending: window.getPendingSaveStatus(${JSON.stringify(driftPath)}).pending,
+    })`);
+    const driftQueries = observer.records.filter(record => record.phase === "save-drift" &&
+      record.channel === "query-document-disk-adoption-state");
+    check("SEC-08 tab authority post-Save native version drift clears only metadata while authenticated Save RAM success and cleanliness survive",
+      driftSaved === true && drifted && drift.reply.success === true &&
+        driftQueries.length === 1 && driftQueries[0].reply.known === true &&
+        driftQueries[0].reply.versionMatches === false &&
+        driftQueries[0].data.documentRef === drift.reply.saveRequest.documentRef &&
+        drift.version === null && !drift.dirty && !drift.pending &&
+        drift.content === body && drift.original === body && drift.live === body &&
+        fs.readFileSync(driftPath, "utf8") === body + "\nSAVE_NATIVE_DRIFT\n",
+      JSON.stringify({ driftSaved, drifted, drift, driftQueries }));
+    phase = "cleanup";
+    await closeOwnedMetadataFixtureTabs(exec, [driftId],
+      "SEC-08 tab authority post-Save drift cleanup closes the exact native tab and retires its admission without a baseline repair");
+    await openNative(restoredPath, "METADATA_APPROVED_RAM");
+    check("SEC-08 owned metadata restored native document is actually painted after all refusal controls",
+      await exec(`document.getElementById('viewer').textContent.includes('METADATA_APPROVED_RAM') &&
+        window.originalMarkdown === ${JSON.stringify(body)}`));
+  } finally {
+    observer.restore(); restoreRead(); restoreDelivery();
+    ipcMain.removeListener("save-markdown-file", observeSave);
+    ipcMain.removeHandler("save-markdown-result-ack");
+    ipcMain.handle("save-markdown-result-ack", realAck);
+    await exec(`(() => {
+      const probe = window.__isolatedOrdinaryMetadata;
+      probe.unsubscribe(); window.beginFileOpen = probe.begin;
+      delete window.__isolatedOrdinaryMetadata;
+      return null;
+    })()`);
+  }
+}
+
+function observeDocumentControlPhase(win, callback) {
+  const listener = (event, data) => {
+    if (event.sender === win.webContents && event.senderFrame === win.webContents.mainFrame) callback(data);
+  };
+  ipcMain.on("test-document-control-phase", listener);
+  return () => ipcMain.removeListener("test-document-control-phase", listener);
+}
+
+function observeNativeDiskAttestation(win, filePath, mode) {
+  const records = [];
+  const destination = path.join(__dirname, "..", ".context-viewport-evidence",
+    "browser-isolation-controls-r1", `attestation-normal-${mode}-${process.pid}.json`);
+  const original = ipcMain._invokeHandlers.get("prepare-document-disk-adoption");
+  if (!original) throw new Error("Missing genuine native disk preparation handler");
+  ipcMain.removeHandler("prepare-document-disk-adoption");
+  ipcMain.handle("prepare-document-disk-adoption", async function(event, data) {
+    if (event.sender !== win.webContents || data?.ownerFilePath !== filePath)
+      return original.apply(this, arguments);
+    const record = { kind: "prepare", request: data, startedAt: Date.now(),
+      genuineMainFrame: event.senderFrame === win.webContents.mainFrame, finishedAt: null };
+    records.push(record);
+    try {
+      const reply = await original.apply(this, arguments);
+      record.reply = reply;
+      return reply;
+    } catch (error) {
+      record.error = error.message;
+      throw error;
+    } finally {
+      record.finishedAt = Date.now();
+      record.elapsedMs = record.finishedAt - record.startedAt;
+      fs.writeFileSync(destination, JSON.stringify(records, null, 2));
+    }
+  });
+  let commitStart;
+  const commit = observeNativeDocumentPorts(win, ["commit-document-disk-adoption"], record => {
+    if (record.data?.filePath !== filePath) return;
+    records.push({ kind: "commit", request: record.data, reply: record.reply,
+      replies: record.replies, startedAt: commitStart, finishedAt: Date.now(),
+      elapsedMs: Date.now() - commitStart });
+    fs.writeFileSync(destination, JSON.stringify(records, null, 2));
+  }, (_channel, data) => { if (data?.filePath === filePath) commitStart = Date.now(); });
+  return { records, destination, restore() {
+    commit.restore();
+    ipcMain.removeHandler("prepare-document-disk-adoption");
+    ipcMain.handle("prepare-document-disk-adoption", original);
+  } };
+}
+
+function holdNativeFixtureCommit(win) {
+  const original = ipcMain.listeners("quit-approval-committed");
+  if (original.length !== 1) throw new Error("Expected one native quit commit listener");
+  let commit = null;
+  const listener = function(event, data) {
+    if (event.sender === win.webContents) { commit = data; return; }
+    return original[0].apply(this, arguments);
+  };
+  ipcMain.removeListener("quit-approval-committed", original[0]);
+  ipcMain.on("quit-approval-committed", listener);
+  return { get commit() { return commit; }, restore() {
+    ipcMain.removeListener("quit-approval-committed", listener);
+    ipcMain.on("quit-approval-committed", original[0]);
+  } };
+}
+
+async function runBrowserIsolationControls(win, exec, dir, controlId, openNative) {
+  const preferences = win.webContents.getLastWebPreferences();
+  check("SEC-08 browser isolation actual production window disables Node and enables isolation and sandbox",
+    preferences.nodeIntegration === false && preferences.contextIsolation === true &&
+      preferences.sandbox === true,
+    JSON.stringify(preferences));
+  const globals = await exec(`({
+    require: typeof require, process: typeof process, Buffer: typeof Buffer,
+    fs: typeof window.fs, ipc: typeof window.ipcRenderer,
+    exports: typeof module, bridge: typeof window.folia.openFileDialog,
+  })`);
+  check("SEC-08 browser isolation actual page has no Node raw IPC filesystem or module globals",
+    ["require", "process", "Buffer", "fs", "ipc", "exports"].every(key => globals[key] === "undefined") &&
+      globals.bridge === "function", JSON.stringify(globals));
+  const lexical = await exec(`(() => {
+    const normalise = window.FoliaUtils.normaliseDocumentPath;
+    return { absolute: normalise(${JSON.stringify(path.join(dir, "nested", "..", "lexical.md"))}),
+      relative: normalise('relative.md'), driveRelative: normalise('C:relative.md'),
+      nul: normalise('bad\\0path'), empty: normalise('') };
+  })()`);
+  check("SEC-08 browser isolation lexical correlation normalizes absolute paths without resolving relative authority",
+    lexical.absolute?.resolved === path.join(dir, "lexical.md") &&
+      ["relative", "driveRelative", "nul", "empty"].every(key => lexical[key] === null),
+    JSON.stringify(lexical));
+  await exec(`(() => {
+    window.__browserVisibility = { values: [], unsubscribe:
+      window.folia.onWindowVisibilityChanged(value => window.__browserVisibility.values.push(value)) };
+    return null;
+  })()`);
+  try {
+    win.webContents.send("window-visibility-changed", { visible: true, private: "not-public" });
+    win.webContents.send("window-visibility-changed", { visible: false });
+    await exec("window.folia.getVersion()");
+    const values = await exec("window.__browserVisibility.values");
+    check("SEC-08 browser isolation visibility delivers only boolean fields from actual Main events",
+      values.length === 2 && values[0].visible === true && values[1].visible === false &&
+        values.every(value => Object.keys(value).join(",") === "visible"), JSON.stringify(values));
+    await exec("window.__browserVisibility.unsubscribe(); window.__browserVisibility.unsubscribe(); null;");
+    win.webContents.send("window-visibility-changed", { visible: true });
+    await exec("window.folia.getVersion()");
+    check("SEC-08 browser isolation visibility unsubscribe prevents subsequent actual Main delivery",
+      await exec("window.__browserVisibility.values.length === 2"));
+  } finally { await exec("delete window.__browserVisibility; null;"); }
+
+  const filePath = path.join(dir, "browser-isolation-native.md");
+  const imagePath = path.join(dir, "browser-isolation-image.png");
+  fs.writeFileSync(imagePath, Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aD2kAAAAASUVORK5CYII=", "base64"));
+  const body = "# Browser isolation native\n\nBROWSER_ISOLATION_NATIVE\n\n" +
+    "![admitted image](browser-isolation-image.png)\n\n" +
+    "[web](HTTPS://example.invalid/browser-isolation)\n\n" +
+    "[web lower](https://example.invalid/browser-lower)\n\n" +
+    '<svg xmlns="http://www.w3.org/2000/svg" width="260" height="40">' +
+    '<a href="https://example.invalid/browser-svg-href"><text x="4" y="24">SVG href</text></a></svg>\n\n' +
+    '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="260" height="40">' +
+    '<a xlink:href="https://example.invalid/browser-svg-xlink"><text x="4" y="24">SVG xlink</text></a></svg>\n\n' +
+    "[local prefix](https-notes.txt)\n\n[markdown prefix](httpd.md)\n\n" +
+    "[anchor](#browser-target)\n\n" +
+    Array.from({ length: 70 }, (_, index) => `Paragraph ${index} fills the viewport.\n\n`).join("") +
+    "## Browser target\n\nBROWSER_TARGET\n";
+  write(filePath, body);
+  write(path.join(dir, "https-notes.txt"), "Safe local prefix link\n");
+  write(path.join(dir, "httpd.md"), "# Native prefix document\n\nBROWSER_PREFIX_NATIVE\n");
+  const id = await openNative(filePath, "BROWSER_ISOLATION_NATIVE");
+  if (!await waitForCondition(exec,
+    "document.querySelector('#viewer img')?.complete === true", 3000)) {
+    throw new Error("Admitted relative image did not finish loading");
+  }
+  const image = await exec(`(() => {
+    const image = document.querySelector('#viewer img');
+    return { src: image.src, width: image.naturalWidth,
+      documentUrl: window.CustomTabs.getDocumentDescriptor()?.documentUrl };
+  })()`);
+  check("SEC-08 browser isolation relative image loads against the actual admitted document URL",
+    image.width === 1 && image.src === new URL("browser-isolation-image.png", image.documentUrl).href,
+    JSON.stringify(image));
+  const navigation = [];
+  const observeNavigation = (_event, details) => navigation.push(details.url);
+  win.webContents.on("will-frame-navigate", observeNavigation);
+  try {
+    const synthetic = await exec(`(() => {
+      const links = Array.from(document.querySelectorAll('#viewer a'));
+      const web = links.find(link => link.getAttribute('href').startsWith('HTTPS:'));
+      const event = new MouseEvent('click', { bubbles: true, cancelable: true });
+      const returned = web.dispatchEvent(event);
+      const anchor = links.find(link => link.getAttribute('href') === '#browser-target');
+      const anchorEvent = new MouseEvent('click', { bubbles: true, cancelable: true });
+      anchor.dispatchEvent(anchorEvent);
+      return { returned, canceled: event.defaultPrevented, anchorCanceled: anchorEvent.defaultPrevented,
+        target: !!document.getElementById('browser-target'), url: location.href };
+    })()`);
+    check("SEC-08 browser isolation synthetic web and anchor activation stays totally canceled without replacing the document",
+      synthetic.returned === false && synthetic.canceled && synthetic.anchorCanceled &&
+        synthetic.target && !synthetic.url.includes("about:blank") && navigation.length === 0,
+      JSON.stringify({ synthetic, navigation }));
+  } finally { win.webContents.removeListener("will-frame-navigate", observeNavigation); }
+  const external = [], openedPaths = [], fileStats = [];
+  const restoreExternal = replaceMethod(shell, "openExternal", async url => { external.push(url); });
+  const restoreOpenPath = replaceMethod(shell, "openPath", async file => { openedPaths.push(file); return ""; });
+  const statSync = fs.statSync;
+  const restoreStats = replaceMethod(fs, "statSync", function(file) {
+    fileStats.push(String(file));
+    return statSync.apply(this, arguments);
+  });
+  const clickTrustedLink = async href => {
+    const point = await exec(`(() => {
+      const link = Array.from(document.querySelectorAll('#viewer a'))
+        .find(link => (link.getAttribute('href') ?? link.getAttribute('xlink:href')) === ${JSON.stringify(href)});
+      link.scrollIntoView({ block: 'center' });
+      const rect = link.getBoundingClientRect();
+      return { x: Math.round(rect.left + rect.width / 2), y: Math.round(rect.top + rect.height / 2) };
+    })()`);
+    win.webContents.sendInputEvent({ type: "mouseDown", ...point, button: "left", clickCount: 1 });
+    win.webContents.sendInputEvent({ type: "mouseUp", ...point, button: "left", clickCount: 1 });
+  };
+  try {
+    for (const href of ["HTTPS://example.invalid/browser-isolation", "https://example.invalid/browser-lower"]) {
+      await clickTrustedLink(href);
+      const reached = await waitUntil(() => external.includes(href), 2000);
+      check(`SEC-08 browser isolation trusted ${href.startsWith("HTTPS") ? "uppercase" : "lowercase"} web link routes through Main without local filesystem interpretation`,
+        reached && !fileStats.some(file => /example\.invalid/.test(file)) &&
+          await exec("!!document.getElementById('viewer') && !location.href.includes('about:blank')"),
+        JSON.stringify({ external, fileStats }));
+    }
+    const svgSetup = await exec(`Array.from(document.querySelectorAll('#viewer svg a')).map(link => ({
+      svg: link instanceof SVGAElement, animated: typeof link.href === 'object',
+      href: link.getAttribute('href'), xlink: link.getAttribute('xlink:href'),
+      width: link.getBoundingClientRect().width,
+    }))`);
+    const svgReady = svgSetup.length === 2 && svgSetup.every(link =>
+      link.svg && link.animated && link.width > 0) &&
+      svgSetup.some(link => link.href === "https://example.invalid/browser-svg-href") &&
+      svgSetup.some(link => link.xlink === "https://example.invalid/browser-svg-xlink");
+    check("SEC-08 browser isolation both SVG anchor spellings survive sanitization as visible SVGAElements",
+      svgReady, JSON.stringify(svgSetup));
+    if (!svgReady) throw new Error("Trusted SVG fixtures did not survive actual native rendering");
+    for (const spelling of ["href", "xlink"]) {
+      const href = `https://example.invalid/browser-svg-${spelling}`;
+      await clickTrustedLink(href);
+      const reached = await waitUntil(() => external.includes(href), 2000);
+      check(`SEC-08 browser isolation trusted SVG ${spelling} routes its attribute string through private Main`,
+        reached && !fileStats.some(file => /example\.invalid/.test(file)) &&
+          await exec("!!document.getElementById('viewer') && !location.href.includes('about:blank')"),
+        JSON.stringify({ external, fileStats }));
+    }
+    await clickTrustedLink("https-notes.txt");
+    const localOpened = await waitUntil(() => openedPaths.length === 1, 2000);
+    check("SEC-08 browser isolation trusted http-prefix local filename reaches Main safe file policy",
+      localOpened && openedPaths[0] === fs.realpathSync.native(path.join(dir, "https-notes.txt")) &&
+        fileStats.includes(openedPaths[0]), JSON.stringify({ openedPaths, fileStats }));
+  } finally { restoreStats(); restoreOpenPath(); restoreExternal(); }
+  const observer = observeNativeDocumentPorts(win, ["query-document-disk-adoption-state"]);
+  try {
+    const unknown = await exec(`window.folia.queryDocumentDiskAdoptionState({
+      pageSession: window.getReloadRequestSession(),
+      rendererGeneration: ${__shutdown.state().rendererGeneration},
+      filePath: ${JSON.stringify(filePath)}, documentRef: 'f'.repeat(64),
+      ownerFilePath: ${JSON.stringify(filePath)},
+      pathKey: window.CustomTabs.getActiveDocumentIdentity(
+        ${JSON.stringify(filePath)}, window.getReloadRequestSession()).pathKey,
+      tabId: ${id}, documentGeneration: 1,
+      diskVersion: window.CustomTabs.getActiveTab().diskVersion,
+      modifiedTime: window.CustomTabs.getActiveTab().mtimeMs,
+    })`);
+    check("SEC-08 browser isolation actual synchronous metadata query refuses an unknown native reference with one terminal reply",
+      unknown.known === false && observer.records.length === 1 &&
+        observer.records[0].replies === 1 && observer.records[0].reply.known === false,
+      JSON.stringify({ unknown, records: observer.records }));
+  } finally { observer.restore(); }
+  const saved = await exec("saveMarkdownFile()");
+  check("SEC-08 browser isolation ordinary Save persists the actual native selected body",
+    saved === true && fs.readFileSync(filePath, "utf8") === body, JSON.stringify(saved));
+  await clickTrustedLink("httpd.md");
+  const prefixOpened = await waitForCondition(exec,
+    "document.getElementById('viewer').textContent.includes('BROWSER_PREFIX_NATIVE')", 5000);
+  const prefixId = await exec("window.CustomTabs.getActiveTabId()");
+  check("SEC-08 browser isolation trusted http-prefix markdown filename opens a genuinely admitted native tab",
+    prefixOpened && prefixId !== id && await exec(`!!window.CustomTabs.getDocumentDescriptor()?.ref &&
+      window.currentFilePath === ${JSON.stringify(path.join(dir, "httpd.md"))}`));
+  const relativeNativePath = path.join(dir, "relative-native-event.md");
+  write(relativeNativePath, "# Relative native event\n\nBROWSER_RELATIVE_NATIVE_EVENT\n");
+  const relativeSpelling = path.relative(process.cwd(), relativeNativePath);
+  let nativeEventPrevented = false;
+  app.emit("open-file", { preventDefault() { nativeEventPrevented = true; } }, relativeSpelling);
+  const relativeEventPainted = await waitForCondition(exec,
+    "document.getElementById('viewer').textContent.includes('BROWSER_RELATIVE_NATIVE_EVENT')", 5000);
+  const relativeEvent = await exec(`({
+    id: window.CustomTabs.getActiveTabId(), current: window.currentFilePath,
+    descriptor: window.CustomTabs.getDocumentDescriptor(),
+  })`);
+  check("SEC-08 browser isolation relative native open-file event paints an absolute admitted path without page path repair",
+    nativeEventPrevented && !path.isAbsolute(relativeSpelling) && relativeEventPainted &&
+      relativeEvent.current === relativeNativePath &&
+      relativeEvent.descriptor?.logicalPath === relativeNativePath,
+    JSON.stringify(relativeEvent));
+  const droppedPath = path.join(dir, "browser-trusted-drop.md");
+  const refusedDropPath = path.join(dir, "browser-refused-drop.exe");
+  write(droppedPath, "# Trusted native drop\n\nBROWSER_TRUSTED_DROP\n");
+  write(refusedDropPath, "This is an inert refused-drop fixture, not a program.\n");
+  await exec(`(() => {
+    window.__browserDrop = [];
+    window.__browserDropListener = event => window.__browserDrop.push({
+      trusted: event.isTrusted, count: event.dataTransfer?.files?.length,
+      name: event.dataTransfer?.files?.[0]?.name, canceled: event.defaultPrevented,
+    });
+    window.addEventListener('drop', window.__browserDropListener);
+    return null;
+  })()`);
+  const ownedDebugger = !win.webContents.debugger.isAttached();
+  if (ownedDebugger) win.webContents.debugger.attach("1.3");
+  let droppedId;
+  try {
+    const dropNative = async file => {
+      const data = { items: [], files: [file], dragOperationsMask: 1 };
+      await win.webContents.debugger.sendCommand("Input.dispatchDragEvent", {
+        type: "dragEnter", x: 160, y: 160, data,
+      });
+      await win.webContents.debugger.sendCommand("Input.dispatchDragEvent", {
+        type: "dragOver", x: 160, y: 160, data,
+      });
+      await win.webContents.debugger.sendCommand("Input.dispatchDragEvent", {
+        type: "drop", x: 160, y: 160, data,
+      });
+    };
+    await dropNative(droppedPath);
+    const dropPainted = await waitForCondition(exec,
+      "document.getElementById('viewer').textContent.includes('BROWSER_TRUSTED_DROP')", 5000);
+    const dropState = await exec(`({
+      events: window.__browserDrop, id: window.CustomTabs.getActiveTabId(),
+      current: window.currentFilePath, descriptor: window.CustomTabs.getDocumentDescriptor(),
+      overlay: document.body.classList.contains('drop-active'),
+    })`);
+    droppedId = dropState.id;
+    check("SEC-08 browser isolation trusted native file drop proves Chromium Files setup and paints a Main admitted tab",
+      dropPainted && dropState.events.length === 1 && dropState.events[0].trusted &&
+        dropState.events[0].count === 1 && dropState.events[0].canceled &&
+        dropState.current === droppedPath && dropState.descriptor?.logicalPath === droppedPath &&
+        !dropState.overlay, JSON.stringify(dropState));
+    await exec("document.getElementById('notificationMessage').textContent = ''; null;");
+    await dropNative(refusedDropPath);
+    const dropRefused = await waitForCondition(exec,
+      "document.getElementById('notificationMessage').textContent.includes('Dropped file type is not supported')", 3000);
+    const refusal = await exec(`({
+      events: window.__browserDrop, id: window.CustomTabs.getActiveTabId(),
+      current: window.currentFilePath, overlay: document.body.classList.contains('drop-active'),
+    })`);
+    check("SEC-08 browser isolation trusted unsupported drop is refused by Main with an explicit error and unchanged native tab",
+      dropRefused && refusal.events.length === 2 && refusal.events[1].trusted &&
+        refusal.events[1].count === 1 && refusal.events[1].canceled &&
+        refusal.id === droppedId && refusal.current === droppedPath && !refusal.overlay &&
+        !__shutdown.documentSessionState().history.some(entry => entry.filePath === refusedDropPath),
+      JSON.stringify(refusal));
+  } finally {
+    if (ownedDebugger) win.webContents.debugger.detach();
+    await exec(`window.removeEventListener('drop', window.__browserDropListener);
+      delete window.__browserDropListener; delete window.__browserDrop; null;`);
+  }
+  await exec(`window.CustomTabs.switchToTab(${controlId})`);
+  await closeOwnedMetadataFixtureTabs(exec, [...new Set([id, prefixId, relativeEvent.id, droppedId])],
+    "SEC-08 browser isolation closes the exact native tab and retires its admitted reference");
+}
+
 async function runTabAuthorityReceiptScenarios(win, exec, dir, controlId, openNative) {
   const primaryPath = path.join(dir, "receipt-primary.md");
   const extraPath = path.join(dir, "receipt-extra.md");
@@ -8273,33 +8861,30 @@ async function runTabAuthorityReceiptScenarios(win, exec, dir, controlId, openNa
   const createInactive = async (entry, label, stale) => {
     const filePath = entry.path || entry.filePath;
     const before = await exec("window.CustomTabs.getTabs().map(tab => tab.id)");
-    const outcome = await exec(`(() => {
+    const observer = observeNativeDocumentPorts(win, [
+      "query-document-disk-adoption-state", "select-file-tracking",
+    ]);
+    let outcome;
+    try { outcome = await exec(`(() => {
       const entry = ${JSON.stringify(entry)}, filePath = ${JSON.stringify(filePath)};
-      const sync = window.ipcRenderer.sendSync, queries = [], selections = [];
-      window.ipcRenderer.sendSync = function(channel, data) {
-        const reply = sync.apply(this, arguments);
-        if (channel === 'query-document-disk-adoption-state') queries.push({ data, reply });
-        if (channel === 'select-file-tracking') selections.push({ data, reply });
-        return reply;
-      };
-      try {
         const tab = window.CustomTabs.createTab(filePath, entry.content, {
           activate: false, confirmed: true, documentAdmission: entry.document,
         });
-        return { queries, selections, tab: tab && { id: tab.id, content: tab.content,
+        return { tab: tab && { id: tab.id, content: tab.content,
           version: tab.diskVersion, mtimeMs: tab.mtimeMs,
           identity: window.CustomTabs.getDocumentIdentityForTab(
             tab.id, tab.filePath, window.getReloadRequestSession()) },
           active: window.CustomTabs.getActiveTabId(), current: window.currentFilePath,
           viewer: document.getElementById('viewer').textContent,
           ids: window.CustomTabs.getTabs().map(tab => tab.id) };
-      } finally { window.ipcRenderer.sendSync = sync; }
-    })()`);
+    })()`); } finally { observer.restore(); }
+    outcome.queries = observer.records.filter(record => record.channel === "query-document-disk-adoption-state");
+    outcome.selections = observer.records.filter(record => record.channel === "select-file-tracking");
     await exec("window.folia.getVersion(); null;");
     const owner = __shutdown.documentSessionState().owners.find(candidate =>
       candidate.documentRef === entry.document.ref);
     check(`SEC-08 receipt ${label} uses one ref-bound native query and preserves the same inactive creation identity`,
-      outcome.queries.length === 1 &&
+      outcome.queries.length === 1 && outcome.queries[0].replies === 1 &&
         outcome.queries[0].data.tabId > 0 && outcome.queries[0].data.documentGeneration > 0 &&
         outcome.queries[0].data.documentRef === entry.document.ref &&
         outcome.queries[0].data.modifiedTime === entry.diskVersion.mtimeMs &&
@@ -8362,7 +8947,7 @@ async function runTabAuthorityReceiptScenarios(win, exec, dir, controlId, openNa
       ref, current: __shutdown.documentAdmissionIsCurrent(ref),
     }))));
   const receiptCapture = path.join(process.cwd(), ".context-viewport-evidence",
-    "tab-authority-controls-r1", `r4-receipt-native-${process.pid}.png`);
+    "browser-isolation-controls-r1", `receipt-native-${process.pid}.png`);
   fs.writeFileSync(receiptCapture, (await win.webContents.capturePage()).toPNG());
   console.log("receipt native capture: " + receiptCapture);
   const realRestore = ipcMain._invokeHandlers.get("restore-document-session");
@@ -8438,7 +9023,7 @@ async function runTabAuthorityCreateScenarios(win, exec, dir, controlId, openNat
       if (!await waitUntil(() => !!delivery?.document?.openTicket, 5000)) {
         const nativeReadsAtTimeout = JSON.parse(JSON.stringify(ownedMetadataNativeReads.records));
         fs.writeFileSync(path.join(process.cwd(), ".context-viewport-evidence",
-          "tab-authority-controls-r1", `native-create-delivery-failure-${process.pid}.json`),
+          "browser-isolation-controls-r1", `native-create-delivery-failure-${process.pid}.json`),
         JSON.stringify({ mode, filePath, deliveryTrace, shutdown: __shutdown.state(),
           native: __shutdown.documentSessionState(),
           nativeReads: ownedMetadataNativeReads.records,
@@ -8492,6 +9077,7 @@ async function runTabAuthorityCreateScenarios(win, exec, dir, controlId, openNat
     if (mode === "disk-drift") write(filePath, content + "\nLATE_NATIVE_DISK_DRIFT\n");
     const refused = ["malformed-version", "finite-time-mismatch", "missing-receipt-version", "disk-drift"].includes(mode);
     let outcome;
+    const observer = observeNativeDocumentPorts(win, ["query-document-disk-adoption-state"]);
     try {
       outcome = await exec(`(async () => {
         const delivery = ${JSON.stringify(delivery)}, mode = ${JSON.stringify(mode)};
@@ -8509,25 +9095,19 @@ async function runTabAuthorityCreateScenarios(win, exec, dir, controlId, openNat
           options.documentAdmission = { ...delivery.document };
           delete options.documentAdmission.diskVersion;
         }
-        const sync = window.ipcRenderer.sendSync, queries = [];
-        window.ipcRenderer.sendSync = function(channel, data) {
-          const reply = sync.apply(this, arguments);
-          if (channel === 'query-document-disk-adoption-state') queries.push({ data, reply });
-          return reply;
-        };
-        try {
           const tab = window.CustomTabs.createTab(delivery.path, delivery.content, options);
           const created = tab && { id: tab.id, diskVersion: tab.diskVersion, mtimeMs: tab.mtimeMs,
             content: tab.content, identity: window.CustomTabs.getDocumentIdentityForTab(
               tab.id, tab.filePath, window.getReloadRequestSession()) };
           const switched = tab ? await window.CustomTabs.switchToTab(tab.id) : false;
           await new Promise(resolve => setTimeout(resolve, 75));
-          return { created, switched, queries, active: window.CustomTabs.getActiveTabId(),
+          return { created, switched, active: window.CustomTabs.getActiveTabId(),
             current: window.currentFilePath, heading: document.getElementById('viewer').textContent,
             tabIds: window.CustomTabs.getTabs().map(tab => tab.id),
             notification: document.getElementById('notificationMessage').textContent };
-        } finally { window.ipcRenderer.sendSync = sync; }
       })()`);
+      observer.restore();
+      outcome.queries = observer.records;
       const retained = __shutdown.documentSessionState().owners.find(owner =>
         owner.documentRef === delivery.document.ref);
       console.log("TAB_AUTHORITY_CREATE_NATIVE " + JSON.stringify({ mode, delivery, outcome, retained }));
@@ -8552,12 +9132,14 @@ async function runTabAuthorityCreateScenarios(win, exec, dir, controlId, openNat
           outcome.heading.includes(`TAB_AUTHORITY_CREATE_${mode}`) &&
           retained?.tabId === outcome.created.id &&
           retained.documentGeneration === outcome.created.identity.documentGeneration &&
-          outcome.queries.length === 1 && outcome.queries[0].reply.known === true &&
+          outcome.queries.length === 1 && outcome.queries[0].replies === 1 &&
+          outcome.queries[0].reply.known === true &&
           outcome.queries[0].reply.versionMatches === true &&
           outcome.queries[0].data.tabId === outcome.created.id &&
           outcome.queries[0].data.documentRef === delivery.document.ref,
         JSON.stringify({ delivery, outcome, retained }));
     } finally {
+      observer.restore();
       if (!outcome?.created) {
         const recoveryId = await openNative(filePath, `TAB_AUTHORITY_CREATE_${mode}`);
         const recovery = await exec(`({
@@ -8797,6 +9379,15 @@ async function runTabAuthorityBackgroundScenarios(win, exec, dir, controlId, ope
       return send.apply(this, arguments);
     });
     const completedOwners = [];
+    const observer = observeNativeDocumentPorts(win, [
+      "complete-document-disk-adoption", "check-owned-tab-disk-snapshot",
+    ], record => {
+      if (record.channel === "complete-document-disk-adoption" &&
+          record.data?.filePath === filePath && mode === "completion-drift" &&
+          record.reply?.completed === true) {
+        write(filePath, "# Later background disk\n\nBACKGROUND_LATE_DISK\n");
+      }
+    });
     const observeCompletion = (_event, data) => {
       if (data?.filePath !== filePath) return;
       completedOwners.push({
@@ -8827,51 +9418,31 @@ async function runTabAuthorityBackgroundScenarios(win, exec, dir, controlId, ope
           before.active === foregroundId && before.markdown === foregroundBody &&
           before.overflows && before.scroll > 0,
         JSON.stringify({ nativeDelivery, oldOwner, before }));
-      await exec(`(() => {
-        const probe = window.__tabAuthorityBackground = {
-          sync: window.ipcRenderer.sendSync, send: window.ipcRenderer.send,
-          checks: [], completions: [], registrations: [],
-        };
-        window.ipcRenderer.sendSync = function(channel, data) {
-          const reply = probe.sync.apply(this, arguments);
-          if (data?.filePath === ${JSON.stringify(filePath)} &&
-              channel === 'complete-document-disk-adoption') {
-            probe.completions.push({ data, reply });
-            if (${mode === "completion-drift"} && reply?.completed === true)
-              window.fs.writeFileSync(${JSON.stringify(filePath)}, '# Later background disk\\n\\nBACKGROUND_LATE_DISK\\n');
-          }
-          if (channel === 'check-owned-tab-disk-snapshot' && data?.filePath === ${JSON.stringify(filePath)})
-            probe.checks.push({ data, reply, registrationsSent: probe.registrations.length });
-          return reply;
-        };
-        window.ipcRenderer.send = function(channel, data) {
-          if (channel === 'register-document-owner' && data?.filePath === ${JSON.stringify(filePath)})
-            probe.registrations.push(data);
-          return probe.send.apply(this, arguments);
-        };
-        return null;
-      })()`);
       send.call(win.webContents, "file-reload-result", nativeDelivery);
-      if (!await waitForCondition(exec, "window.__tabAuthorityBackground.checks.length > 0", 5000)) {
+      if (!await waitUntil(() => observer.records.some(record =>
+        record.channel === "check-owned-tab-disk-snapshot" && record.data?.filePath === filePath), 5000)) {
         throw new Error("Completed background adoption never reached its actual retained-owner check");
       }
       const outcome = await exec(`(() => {
         const tab = window.CustomTabs.getTabs().find(tab => tab.id === ${id});
-        return { checks: window.__tabAuthorityBackground.checks,
-          completions: window.__tabAuthorityBackground.completions,
-          content: tab.content, original: tab.originalContent, state: window.CustomTabs.__documentState(tab),
+        return { content: tab.content, original: tab.originalContent, state: window.CustomTabs.__documentState(tab),
           identity: window.CustomTabs.getDocumentIdentityForTab(tab.id, tab.filePath, window.getReloadRequestSession()),
           active: window.CustomTabs.getActiveTabId(), markdown: window.originalMarkdown,
           scroll: window.CustomTabs.__getScroller().scrollTop };
       })()`);
+      outcome.checks = observer.records.filter(record =>
+        record.channel === "check-owned-tab-disk-snapshot" && record.data?.filePath === filePath);
+      outcome.completions = observer.records.filter(record =>
+        record.channel === "complete-document-disk-adoption" && record.data?.filePath === filePath);
       check(`SEC-08 tab authority background ${mode} completion retains the real Main owner before fire-and-forget registration is treated as evidence`,
         completedOwners.length === 1 &&
           completedOwners[0].owner?.documentRef === oldOwner.documentRef &&
           completedOwners[0].owner.documentGeneration === outcome.identity.documentGeneration &&
           completedOwners[0].owner.documentGeneration !== oldOwner.documentGeneration &&
-          outcome.completions.length === 1 && outcome.completions[0].reply.completed === true &&
+          outcome.completions.length === 1 && outcome.completions[0].replies === 1 &&
+          outcome.completions[0].reply.completed === true &&
           outcome.checks.length === (mode === "unchanged" ? 2 : 1) &&
-          outcome.checks.every(check =>
+          outcome.checks.every(check => check.replies === 1 &&
             check.data.owner.documentRef === completedOwners[0].owner.documentRef &&
             check.data.owner.documentGeneration === completedOwners[0].owner.documentGeneration),
         JSON.stringify({ completedOwners, oldOwner, outcome }));
@@ -8884,18 +9455,11 @@ async function runTabAuthorityBackgroundScenarios(win, exec, dir, controlId, ope
         JSON.stringify({ before, outcome }));
       const backgroundCapture = await win.webContents.capturePage();
       fs.writeFileSync(path.join(__dirname, "..", ".context-viewport-evidence",
-        "tab-authority-controls-r1", `r2-background-${mode}.png`), backgroundCapture.toPNG());
+        "browser-isolation-controls-r1", `background-${mode}-${process.pid}.png`), backgroundCapture.toPNG());
     } finally {
       restoreDelivery();
+      observer.restore();
       ipcMain.removeListener("complete-document-disk-adoption", observeCompletion);
-      await exec(`(() => {
-        const probe = window.__tabAuthorityBackground;
-        if (probe) {
-          window.ipcRenderer.sendSync = probe.sync; window.ipcRenderer.send = probe.send;
-          delete window.__tabAuthorityBackground;
-        }
-        return null;
-      })()`);
       await exec(`window.CustomTabs.switchToTab(${controlId})`);
       await closeOwnedMetadataFixtureTabs(exec, [id, foregroundId],
         `SEC-08 tab authority background ${mode} cleanup removes both exact native tabs and references`);
@@ -9003,13 +9567,54 @@ async function runRendererReloadBoundaryScenarios(win, exec, dir, sentinel, open
     const held = frozenCase || supersededCase || mode === "local-selection";
     const refused = mode.startsWith("before-") || mode.startsWith("after-");
     let freezeRequestStarted = false;
+    let commitHold = null;
+    const nativePhase = { phase: "other", helperCalls: 0, released: false, localGeneration: null };
+    let mutated = false;
+    const restorePhase = observeDocumentControlPhase(win, data => {
+      nativePhase.phase = data.phase;
+      if (data.localGeneration !== null) nativePhase.localGeneration = data.localGeneration;
+      if (data.phase === "reload-helper-enter") nativePhase.helperCalls += 1;
+      if (data.phase === "reload-release") nativePhase.released = true;
+    });
+    const moveNative = () => {
+      mutated = true;
+      if (mode.endsWith("version")) write(target, "# Late reload target\n\nLATE_RELOAD_NOT_RAM\n");
+      else {
+        const alias = mode.endsWith("source") ? sourceAlias : ownerAlias;
+        fs.unlinkSync(alias);
+        fs.symlinkSync(otherDir, alias, process.platform === "win32" ? "junction" : "dir");
+      }
+    };
+    const observer = observeNativeDocumentPorts(win, [
+      "check-committed-disk-adoption", "check-owned-tab-disk-snapshot", "select-file-tracking",
+    ], record => Object.assign(record, {
+      phase: nativePhase.phase, released: nativePhase.released,
+      localGeneration: nativePhase.localGeneration,
+    }), (channel, data) => {
+      if (channel === "check-owned-tab-disk-snapshot" && data?.filePath === ownerPath &&
+          nativePhase.phase === "reload-helper-enter" && !mutated &&
+          ((mode.startsWith("before-") && nativePhase.helperCalls === 1) ||
+            (mode.startsWith("after-") && nativePhase.helperCalls === 2))) moveNative();
+    });
+    const projectNativeTrace = () => {
+      const records = observer.records.filter(record => record.data?.filePath === ownerPath);
+      return {
+        calls: records.filter(record => record.channel === "check-owned-tab-disk-snapshot" &&
+          record.phase === "reload-helper-enter"),
+        tabChecks: records.filter(record => ["check-owned-tab-disk-snapshot", "check-committed-disk-adoption"]
+          .includes(record.channel) && !["reload-helper-enter", "reload-source-positive"].includes(record.phase)),
+        selections: records.filter(record => record.channel === "select-file-tracking"),
+      };
+    };
+    const attestation = observeNativeDiskAttestation(win, ownerPath, mode);
+    nativeAttestationObservers.push(attestation);
     await sentinel.mute(`controlled renderer delegated reload ${mode}`);
     try {
       await exec(`(() => {
         const mode = ${JSON.stringify(mode)}, ownerPath = ${JSON.stringify(ownerPath)};
         const probe = window.__rendererReloadBoundary = {
           helper: window.approvedOwnedReloadSnapshotMatches, render: window.renderMarkdown,
-          sync: window.ipcRenderer.sendSync, report: window.reportAdoptionTrackingConflict,
+          report: window.reportAdoptionTrackingConflict,
           quarantine: window.quarantineSelectedFileReload, error: console.error,
           mayMutate: window.CustomTabs.mayMutateDocument, log: console.log,
           calls: [], tabChecks: [], selections: [], reports: [], quarantines: [], errors: [], renders: 0,
@@ -9022,17 +9627,8 @@ async function runRendererReloadBoundaryScenarios(win, exec, dir, sentinel, open
         scroller.scrollTop = 140;
         probe.scroll = scroller.scrollTop;
         probe.overflows = scroller.scrollHeight > scroller.clientHeight;
-        const move = () => {
-          probe.mutated = true;
-          if (mode.endsWith('version')) {
-            window.fs.writeFileSync(${JSON.stringify(target)}, '# Late reload target\\n\\nLATE_RELOAD_NOT_RAM\\n');
-          } else {
-            const alias = mode.endsWith('source') ? ${JSON.stringify(sourceAlias)} : ${JSON.stringify(ownerAlias)};
-            window.fs.unlinkSync(alias);
-            window.fs.symlinkSync(${JSON.stringify(otherDir)}, alias,
-              ${JSON.stringify(process.platform === "win32" ? "junction" : "dir")});
-          }
-        };
+        window.__foliaTestDocumentControl.mark('reload-start',
+          window.CustomTabs.getActiveDocumentIdentity(ownerPath, window.getReloadRequestSession()).documentGeneration);
         window.approvedOwnedReloadSnapshotMatches = function() {
           if (arguments[0] !== ownerPath) return probe.helper.apply(this, arguments);
           const args = Array.from(arguments);
@@ -9043,6 +9639,7 @@ async function runRendererReloadBoundaryScenarios(win, exec, dir, sentinel, open
             // inventing a second native selection or changing its owner.
             args[1] = ${JSON.stringify(sourcePath)};
             if (!probe.sourcePositive) {
+              window.__foliaTestDocumentControl.mark('reload-source-positive');
               probe.sourcePositive = window.folia.checkOwnedTabDiskSnapshot({
                 filePath: args[0], sourcePath: args[1], owner: args[2],
                 pageSession: args[2].pageSession, rendererGeneration: args[2].rendererGeneration,
@@ -9050,25 +9647,10 @@ async function runRendererReloadBoundaryScenarios(win, exec, dir, sentinel, open
               });
             }
           }
-          const number = ++probe.helperCalls;
-          if ((mode.startsWith('before-') && number === 1) ||
-              (mode.startsWith('after-') && number === 2)) move();
-          probe.inCheck = true;
+          probe.helperCalls += 1;
+          window.__foliaTestDocumentControl.mark('reload-helper-enter');
           try { return probe.helper.apply(this, args); }
-          finally { probe.inCheck = false; }
-        };
-        window.ipcRenderer.sendSync = function(channel, data) {
-          const reply = probe.sync.apply(this, arguments);
-          if (probe.inCheck && channel === 'check-owned-tab-disk-snapshot')
-            probe.calls.push({ data, reply });
-          else if (['check-committed-disk-adoption', 'check-owned-tab-disk-snapshot'].includes(channel)) {
-            const tab = window.CustomTabs.getTabs().find(tab => tab.id === ${id});
-            probe.tabChecks.push({ channel, data, reply, released: probe.released === true,
-              localGeneration: tab && window.CustomTabs.getDocumentIdentityForTab(
-                tab.id, tab.filePath, window.getReloadRequestSession())?.documentGeneration });
-          }
-          if (channel === 'select-file-tracking') probe.selections.push({ data, reply });
-          return reply;
+          finally { window.__foliaTestDocumentControl.mark('reload-helper-exit'); }
         };
         window.reportAdoptionTrackingConflict = function(file, owner) {
           probe.reports.push({ file, owner });
@@ -9116,14 +9698,22 @@ async function runRendererReloadBoundaryScenarios(win, exec, dir, sentinel, open
         ? "window.__rendererReloadBoundary.ready === true"
         : refused
           ? "window.__rendererReloadBoundary.quarantines.length > 0 || (window.__rendererReloadBoundary.helperCalls === 2 && document.getElementById('notificationMessage').textContent.includes('reloaded'))"
-          : "window.__rendererReloadBoundary.calls.length === 2 && document.getElementById('notificationMessage').textContent.includes('reloaded')",
+          : "window.__rendererReloadBoundary.helperCalls === 2 && document.getElementById('notificationMessage').textContent.includes('reloaded')",
       8000);
       if (!ready) {
-        const failed = await exec(`JSON.stringify({ calls: window.__rendererReloadBoundary.calls,
-          selections: window.__rendererReloadBoundary.selections.map(selection => selection.reply),
+        const failed = await exec(`({ helperCalls: window.__rendererReloadBoundary.helperCalls,
           errors: window.__rendererReloadBoundary.errors,
           notification: document.getElementById('notificationMessage').textContent })`);
-        throw new Error(`Delegated renderer reload ${mode} did not settle: ${failed}; native=${JSON.stringify({
+        const diagnosticPath = path.join(__dirname, "..", ".context-viewport-evidence",
+          "browser-isolation-controls-r1", `reload-${mode}-${process.pid}-before-cleanup.json`);
+        fs.writeFileSync(diagnosticPath, JSON.stringify({
+          at: Date.now(), mode, mutated, phase: nativePhase, renderer: failed,
+          metadata: projectNativeTrace(), attestation: attestation.records, nativeDelivery,
+          reads: JSON.parse(JSON.stringify(ownedMetadataNativeReads.records)),
+          native: __shutdown.documentSessionState(), shutdown: __shutdown.state(),
+        }, null, 2));
+        console.log("NATIVE_RELOAD_BEFORE_CLEANUP " + diagnosticPath);
+        throw new Error(`Delegated renderer reload ${mode} did not settle: ${JSON.stringify(failed)}; native=${JSON.stringify({
           delivery: nativeDelivery, reads: ownedMetadataNativeReads.records,
           shutdown: __shutdown.state(),
         })}`);
@@ -9136,6 +9726,7 @@ async function runRendererReloadBoundaryScenarios(win, exec, dir, sentinel, open
           sequence: fileOpenSequence, generation: activeFileSelectionGeneration,
           heading: document.getElementById('viewer').textContent };
       })()`);
+      Object.assign(setup, projectNativeTrace(), { mutated });
       const selectedNativeOwner = __shutdown.documentSessionState().owners.find(owner =>
         owner.tabId === id && owner.documentGeneration === setup.acceptedOwner?.documentGeneration);
       check(`SEC-08 renderer reload ${mode} setup uses a genuine native delivery and actual selected retained owner`,
@@ -9170,20 +9761,13 @@ async function runRendererReloadBoundaryScenarios(win, exec, dir, sentinel, open
               window.CustomTabs.getActiveTabId() === ${id}`),
             JSON.stringify(reselected));
         } else {
-          await exec(`(() => {
-            const probe = window.__rendererReloadBoundary; probe.send = window.ipcRenderer.send;
-            window.ipcRenderer.send = function(channel, data) {
-              if (channel === 'quit-approval-committed') { probe.commit = data; return; }
-              return probe.send.apply(this, arguments);
-            };
-            return null;
-          })()`);
+          commitHold = holdNativeFixtureCommit(win);
           freezeRequestStarted = true;
           app.emit("before-quit", { preventDefault() {} });
           if (!await waitUntil(async () => {
             const commitId = __shutdown.state().commitPendingId;
-            return commitId > 0 && await exec(`window.CustomTabs.isDocumentFrozen() &&
-              window.__rendererReloadBoundary.commit?.id === ${commitId}`);
+            return commitId > 0 && commitHold.commit?.id === commitId &&
+              await exec("window.CustomTabs.isDocumentFrozen()");
           }, 5000)) {
             throw new Error("Delegated renderer reload did not reach actual freeze");
           }
@@ -9197,6 +9781,7 @@ async function runRendererReloadBoundaryScenarios(win, exec, dir, sentinel, open
           scroll: window.CustomTabs.__getScroller().scrollTop };
           document.getElementById('notificationMessage').textContent = ${JSON.stringify(`HELD_RELOAD_BOUNDARY_${mode}`)};
           window.__rendererReloadBoundary.released = true;
+          window.__foliaTestDocumentControl.mark('reload-release');
           window.__rendererReloadBoundary.release(); null;`);
         const completed = await waitForCondition(exec, mode === "local-selection"
           ? "document.getElementById('notificationMessage').textContent.includes('reloaded')"
@@ -9226,6 +9811,7 @@ async function runRendererReloadBoundaryScenarios(win, exec, dir, sentinel, open
           completionWitnesses: probe.completionWitnesses,
           heading: document.getElementById('viewer').textContent };
       })()`);
+      Object.assign(outcome, projectNativeTrace());
       check(`SEC-08 renderer reload ${mode} consumer forwards the actual retained native owner and approved source version`,
         outcome.calls.length === (held || mode.startsWith("before-") ? 1 : 2) &&
           outcome.calls.every(call =>
@@ -9304,16 +9890,16 @@ async function runRendererReloadBoundaryScenarios(win, exec, dir, sentinel, open
       }
     } finally {
       restoreDelivery();
+      observer.restore(); restorePhase(); commitHold?.restore();
       if (frozenCase && freezeRequestStarted) await abortOwnedMetadataFixtureFreeze(exec,
         "SEC-08 renderer reload frozen teardown aborts the exact live commit without clearing native owners or baselines");
       await exec(`(() => {
         const probe = window.__rendererReloadBoundary;
         probe.release?.();
         window.approvedOwnedReloadSnapshotMatches = probe.helper; window.renderMarkdown = probe.render;
-        window.ipcRenderer.sendSync = probe.sync; window.reportAdoptionTrackingConflict = probe.report;
+        window.reportAdoptionTrackingConflict = probe.report;
         window.quarantineSelectedFileReload = probe.quarantine; console.error = probe.error;
         console.log = probe.log; window.CustomTabs.mayMutateDocument = probe.mayMutate;
-        if (probe.send) window.ipcRenderer.send = probe.send;
         delete window.__rendererReloadBoundary;
         return null;
       })()`);
@@ -9351,24 +9937,29 @@ async function runTabAuthorityRollbackScenarios(win, exec, dir, sentinel, openNa
     const restoreChooser = replaceMethod(dialog, "showOpenDialog", async () => ({
       canceled: false, filePaths: [filePath],
     }));
+    let phase = "consumer";
+    const events = [];
+    const restorePhase = observeDocumentControlPhase(win, data => {
+      phase = data.phase;
+      if (phase === "rollback-throw" && mode === "disk-drift") {
+        write(filePath, "# Late rollback disk\n\nROLLBACK_LATE_DISK\n");
+      }
+    });
+    const observer = observeNativeDocumentPorts(win, ["check-committed-disk-adoption"], record => {
+      events.push({ ...record, kind: "check", rollback: phase === "rollback-throw", phase });
+    });
+    const observeAbandon = (event, data) => {
+      if (event.sender === win.webContents) events.push({
+        kind: "abandon", data, rollback: phase === "rollback-throw", phase,
+      });
+    };
+    ipcMain.on("abandon-document-disk-adoption", observeAbandon);
     await sentinel.mute(`controlled actual native rollback ${mode}`);
     try {
       await exec(`(() => {
         const probe = window.__tabAuthorityRollback = {
-          begin: window.beginFileOpen, sync: window.ipcRenderer.sendSync,
-          send: window.ipcRenderer.send, error: console.error,
+          begin: window.beginFileOpen, error: console.error,
           events: [], thrown: false, settled: false,
-        };
-        window.ipcRenderer.sendSync = function(channel, data) {
-          const reply = probe.sync.apply(this, arguments);
-          if (channel === 'check-committed-disk-adoption')
-            probe.events.push({ kind: 'check', data, reply, rollback: probe.thrown });
-          return reply;
-        };
-        window.ipcRenderer.send = function(channel, data) {
-          if (channel === 'abandon-document-disk-adoption')
-            probe.events.push({ kind: 'abandon', data, rollback: probe.thrown });
-          return probe.send.apply(this, arguments);
         };
         console.error = function(prefix, error) {
           if (String(prefix) === '[CustomTabs] File open failed:' &&
@@ -9379,13 +9970,15 @@ async function runTabAuthorityRollbackScenarios(win, exec, dir, sentinel, openNa
           if (data?.path !== ${JSON.stringify(filePath)} || probe.thrown)
             return probe.begin.apply(this, arguments);
           probe.approval = options.deletionAdoptionApproval;
-          const request = probe.events.filter(item => item.kind === 'check').at(-1)?.data;
-          probe.positive = request && window.folia.checkCommittedDiskAdoption(request);
+          const request = { capability: probe.approval.capability,
+            pageSession: window.getReloadRequestSession(),
+            rendererGeneration: ${__shutdown.state().rendererGeneration} };
+          window.__foliaTestDocumentControl.mark('rollback-replay');
+          probe.positive = window.folia.checkCommittedDiskAdoption(request);
           probe.staged = window.CustomTabs.getActiveTab().content;
           probe.stagedRef = window.CustomTabs.getDocumentDescriptor()?.ref;
-          if (${mode === "disk-drift"})
-            window.fs.writeFileSync(${JSON.stringify(filePath)}, '# Late rollback disk\\n\\nROLLBACK_LATE_DISK\\n');
           probe.thrown = true;
+          window.__foliaTestDocumentControl.mark('rollback-throw');
           throw new Error('CONTROLLED_NATIVE_ROLLBACK');
         };
         window.folia.openFileDialog();
@@ -9395,17 +9988,20 @@ async function runTabAuthorityRollbackScenarios(win, exec, dir, sentinel, openNa
         throw new Error(`Native rollback ${mode} did not reach its actual terminal failure`);
       }
       await exec("window.folia.getVersion()");
+      const consumerEvents = events.filter(item => item.phase !== "rollback-replay");
+      const replay = consumerEvents.find(item => item.kind === "check" && item.rollback)?.data;
       const outcome = await exec(`(() => {
         const probe = window.__tabAuthorityRollback, tab = window.CustomTabs.getActiveTab();
-        const replay = probe.events.find(item => item.kind === 'check' && item.rollback)?.data;
-        const consumerEvents = probe.events.slice();
+        const replay = ${JSON.stringify(replay) || "null"};
+        window.__foliaTestDocumentControl.mark('rollback-replay');
         const afterAbandon = replay && window.folia.checkCommittedDiskAdoption(replay);
-        return { events: consumerEvents, traceIncludingReplay: probe.events,
-          approval: probe.approval, positive: probe.positive,
+        return { approval: probe.approval, positive: probe.positive,
           staged: probe.staged, stagedRef: probe.stagedRef, content: tab.content, original: tab.originalContent,
           state: window.CustomTabs.__documentState(tab), active: tab.id,
           afterAbandon };
       })()`);
+      outcome.events = consumerEvents;
+      outcome.traceIncludingReplay = events;
       check(`SEC-08 rollback ${mode} setup reaches actual Main body admission and a still-live committed capability before the controlled failure`,
         nativePacket?.content === updated && nativePacket.document.ref === outcome.stagedRef &&
           outcome.approval?.committed === true && outcome.positive?.valid === true &&
@@ -9423,11 +10019,12 @@ async function runTabAuthorityRollbackScenarios(win, exec, dir, sentinel, openNa
         JSON.stringify(outcome));
     } finally {
       restoreDelivery(); restoreChooser();
+      observer.restore(); restorePhase();
+      ipcMain.removeListener("abandon-document-disk-adoption", observeAbandon);
       await exec(`(() => {
         const probe = window.__tabAuthorityRollback;
         if (probe) {
-          window.beginFileOpen = probe.begin; window.ipcRenderer.sendSync = probe.sync;
-          window.ipcRenderer.send = probe.send; console.error = probe.error;
+          window.beginFileOpen = probe.begin; console.error = probe.error;
           delete window.__tabAuthorityRollback;
         }
         return null;
@@ -15086,6 +15683,8 @@ async function run(win) {
         methods: Object.keys(window.folia || {}),
         pdfRestore: typeof window.__foliaTestPdfRestore?.signal,
         subframePdfRestore: typeof iframe.contentWindow.__foliaTestPdfRestore,
+        diagnostic: typeof window.__foliaTestDocumentControl?.mark,
+        subframeDiagnostic: typeof iframe.contentWindow.__foliaTestDocumentControl,
       };
     } finally { iframe.remove(); }
   })()`);
@@ -15125,16 +15724,38 @@ async function run(win) {
     "onQuitApprovalVerification", "onQuitApprovalThaw", "acknowledgeFileDeletion",
     "onFileDeleted", "onFileNotFound", "onExternalFileOpenRequest", "onError", "onUpdateStatus",
     "getNewlineAlignmentDiagnosticsEnabled", "reportNewlineAlignmentWitness",
-    "confirmLargeRender", "openApprovedDocument", "revealApprovedDocument",
+    "confirmLargeRender", "openApprovedDocument", "revealApprovedDocument", "onWindowVisibilityChanged",
   ].sort().join(",");
   check(
-    "SEC-08 main launch retains production owned-read and only its explicitly marked PDF test signal",
+    "SEC-08 main launch retains production bridge and only explicitly marked fixed test signals",
     bridgeExposure.methods.slice().sort().join(",") === productionBridgeMethods &&
       bridgeExposure.pdfRestore === (expectsPdfSignal ? "function" : "undefined") &&
-      bridgeExposure.subframePdfRestore === "undefined",
+      bridgeExposure.subframePdfRestore === "undefined" &&
+      bridgeExposure.diagnostic === (expectsPdfSignal ? "function" : "undefined") &&
+      bridgeExposure.subframeDiagnostic === "undefined",
     JSON.stringify(bridgeExposure),
   );
   if (ownedMetadataFocusedHarness) {
+    if (browserIsolationHarness) {
+      try {
+        const painted = await waitForCondition(exec,
+          "document.getElementById('viewer').textContent.includes('BROWSER_RELATIVE_CLI')", 5000);
+        const state = await exec(`({
+          current: window.currentFilePath, descriptor: window.CustomTabs.getDocumentDescriptor(),
+          tabPath: window.CustomTabs.getActiveTab()?.filePath,
+        })`);
+        check("SEC-08 browser isolation relative first-launch CLI setup reaches actual Main file-opened bytes and admission",
+          !!browserCliDelivery && browserCliDelivery.content.includes("BROWSER_RELATIVE_CLI") &&
+            browserCliDelivery.document?.logicalPath === browserCliFixture &&
+            !path.isAbsolute(path.relative(process.cwd(), browserCliFixture)),
+          JSON.stringify({ delivery: browserCliDelivery, state }));
+        check("SEC-08 browser isolation relative first-launch CLI paints the same absolute native path and descriptor without page path repair",
+          painted && browserCliDelivery?.path === browserCliFixture &&
+            state.current === browserCliFixture && state.tabPath === browserCliFixture &&
+            state.descriptor?.logicalPath === browserCliFixture,
+          JSON.stringify({ delivery: browserCliDelivery, state }));
+      } finally { restoreBrowserCliDelivery?.(); }
+    }
     await clearFixtureTabs("owned metadata preflight");
     await runOwnedMetadataScenarios(win, exec, dir, sentinel);
     try {
@@ -41281,10 +41902,15 @@ app.whenReady().then(async () => {
           record.stages.some(stage => stage.name === "close" && stage.phase === "completed")),
         JSON.stringify({ pending: ownedMetadataNativeReads.pending(), observed: records.length }));
       fs.writeFileSync(path.join(process.cwd(), ".context-viewport-evidence",
-        "tab-authority-controls-r1", `native-read-lifecycle-${process.pid}.json`),
+        "browser-isolation-controls-r1", `native-read-lifecycle-${process.pid}.json`),
       JSON.stringify({ settled: ownedNativeReadsSettled, shutdown, records }, null, 2));
       ownedMetadataNativeReads.restore();
     }
+    for (const observer of nativeAttestationObservers.reverse()) {
+      try { fs.writeFileSync(observer.destination, JSON.stringify(observer.records, null, 2)); }
+      finally { observer.restore(); }
+    }
+    if (nativeAttestationObservers.length) console.log("NATIVE_ATTESTATION_OBSERVERS_RESTORED");
   }
 
   // A COMPANION LEAVES ITS SCRATCH TREE STANDING. It does not own it - see

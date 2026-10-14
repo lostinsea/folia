@@ -31,6 +31,16 @@ const {
   DIGEST_SIZES,
 } = require("./corpus");
 
+if (process.argv.includes("--native-actions")) {
+  try {
+    require("./native-actions");
+  } catch (error) {
+    console.error("Native action initialization failed:", error);
+    app.exit(2);
+  }
+  return;
+}
+
 // A HEAP FULL OF THE PREVIOUS DOCUMENT'S GARBAGE IS INHERITED STATE. Measured
 // on tables@1MB with every phase instrumented: marked.parse took 181ms on one
 // repetition and 1932ms on another, from a BYTE-IDENTICAL input string, while

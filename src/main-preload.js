@@ -291,6 +291,7 @@ const DOCUMENT_EVENT_IDENTITY_FIELDS = [
   "documentRef", "selectionGeneration", "sequence", "requestId",
 ];
 const DOCUMENT_EVENT_FIELDS = {
+  "window-visibility-changed": ["visible"],
   "file-opened": ["path", "content", "allPaths", "extraReadGrants", "openRequest",
     "modifiedTime", "diskVersion", "document"],
   "file-open-result": ["success", "path", "openRequest", "reason", "message"],
@@ -590,6 +591,17 @@ function copyDocumentQueryReply(result, fields) {
 }
 
 const api = Object.freeze({
+  onWindowVisibilityChanged(callback) {
+    if (typeof callback !== "function") {
+      throw new TypeError("Invalid window visibility callback");
+    }
+    return subscribeDocumentEvent("window-visibility-changed", data => {
+      if (typeof data?.visible !== "boolean") {
+        throw new TypeError("Invalid window visibility event");
+      }
+      callback(Object.freeze({ visible: data.visible }));
+    });
+  },
   openApprovedDocument(request) {
     ipcRenderer.send("open-file-path", copyApprovedDocumentRequest(request, true));
   },
@@ -670,6 +682,8 @@ const api = Object.freeze({
     return subscribeDocumentEvent("update-status", callback);
   },
   async getNewlineAlignmentDiagnosticsEnabled() {
+    // Main deliberately omits the diagnostic endpoint from packaged builds.
+    if (!process.argv.includes("--folia-newline-alignment-diagnostics")) return false;
     const enabled = await ipcRenderer.invoke("newline-alignment-diagnostics-enabled");
     if (typeof enabled !== "boolean") throw new TypeError("Invalid diagnostics response");
     return enabled;
@@ -1204,9 +1218,4 @@ const api = Object.freeze({
   },
 });
 
-if (process.contextIsolated) {
-  contextBridge.exposeInMainWorld("folia", api);
-} else {
-  // Transitional publication only; renderer Node removal precedes isolation.
-  globalThis.folia = api;
-}
+contextBridge.exposeInMainWorld("folia", api);

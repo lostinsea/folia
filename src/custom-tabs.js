@@ -1295,29 +1295,6 @@
     return result;
   }
 
-  function readFromDisk(filePath) {
-    return normaliseFileContent(
-      window.fs.readFileSync(filePath, "utf8"),
-      filePath,
-    );
-  }
-
-  function readStableDiskSnapshot(filePath) {
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
-      const before = diskVersionFromStats(window.fs.statSync(filePath));
-      const content = readFromDisk(filePath);
-      const after = diskVersionFromStats(window.fs.statSync(filePath));
-      if (sameDiskVersion(before, after)) {
-        return Object.freeze({
-          content,
-          modifiedTime: after.mtimeMs,
-          diskVersion: after,
-        });
-      }
-    }
-    throw new Error(`File changed repeatedly while being read: ${filePath}`);
-  }
-
   // renderer.js owns the toast DOM and the string table. Reuse both when
   // available so overlay messages come from the same source as the toolbar's
   // own labels, and fall back to the inline literal rather than throwing if
@@ -1588,7 +1565,6 @@
           ? reservedIdentity.tabId
           : tabIdCounter + 1) &&
       approval.documentGeneration === expectedGeneration &&
-      approval.pathKey === resolveTabPath(filePath) &&
       sameDiskVersion(approval.version, version) &&
       approval.content === content &&
       (applied
@@ -2205,8 +2181,6 @@
               : nextDocumentGeneration + 1) ||
           opts.verifiedDiskAdoption.incomingSpelling !==
             normaliseTabPath(filePath)?.spelling ||
-          opts.verifiedDiskAdoption.pathKey !==
-            resolveTabPath(filePath) ||
           !sameDiskVersion(
             opts.verifiedDiskAdoption.version,
             diskVersion,
@@ -2243,6 +2217,9 @@
       : opts.verifiedDiskAdoption
       ? opts.verifiedDiskAdoption.pathKey
       : canonicalTabPath(filePath);
+    if (state.admission) {
+      rememberTabPathAlias(state.admission.spellingKey, state.admission.pathKey);
+    }
 
     tabs.push(tab);
     if (!opts.deferOwnerRegistration) registerTabDiskOwner(tab);
@@ -2925,32 +2902,6 @@
       }
     }
 
-    // beginFileOpen normally asserted both document ownership and watcher
-    // intent at the same synchronous boundary. Keep only a compatibility path
-    // here so legacy renderer builds do not send a second, conflicting pair.
-    if (!fileOpenContext && window.ipcRenderer) {
-      if (typeof window.assertFileTrackingOwnership === "function") {
-        window.assertFileTrackingOwnership(
-          tab.filePath,
-          !protectedState,
-          {
-            adoptBaseline: !protectedState,
-            modifiedTime: tab.mtimeMs,
-            diskVersion: tab.diskVersion,
-            ownerTabId: tab.id,
-          },
-        );
-      } else if (protectedState) {
-        console.error(
-          "[CustomTabs] Refusing legacy path-only watcher transition",
-        );
-      } else {
-        console.error(
-          "[CustomTabs] Refusing legacy path-only watcher transition",
-        );
-      }
-    }
-
     saveTabs();
     return true;
     } finally {
@@ -3186,14 +3137,6 @@
           // Nothing is open any more. Leaving the watcher armed on the file we
           // just closed makes an external change raise a "reload?" prompt over
           // the welcome screen, for a document that no longer has a tab.
-          if (
-            window.ipcRenderer &&
-            typeof window.stopFileTrackingIntent !== "function"
-          ) {
-            console.error(
-              "[CustomTabs] Refusing legacy path-only watcher stop",
-            );
-          }
           window.currentFilePath = null;
           if (window.setUnsavedState) {
             window.setUnsavedState(false);
@@ -3424,46 +3367,7 @@
   }
 
   function normaliseTabPath(filePath) {
-    if (typeof filePath !== "string" || filePath.length === 0) return null;
-    let resolved;
-    try {
-      const pathApi = window.path || require("path");
-      resolved = pathApi.normalize(pathApi.resolve(filePath));
-    } catch (error) {
-      console.error("[CustomTabs] Failed to resolve document path:", error);
-      return null;
-    }
-
-    return Object.freeze({
-      resolved,
-      spelling:
-        process.platform === "win32" ? resolved.toLowerCase() : resolved,
-    });
-  }
-
-  function resolveTabPath(filePath) {
-    const normalised = normaliseTabPath(filePath);
-    if (!normalised) return null;
-    let canonical = normalised.resolved;
-    try {
-      const fsApi = window.fs || require("fs");
-      const realpathSync =
-        typeof fsApi.realpathSync.native === "function"
-          ? fsApi.realpathSync.native
-          : fsApi.realpathSync;
-      if (typeof realpathSync === "function") {
-        canonical = realpathSync(normalised.resolved);
-      }
-    } catch (error) {
-      if (error.code !== "ENOENT" && error.code !== "ENOTDIR") {
-        console.error("[CustomTabs] Failed to canonicalize document path:", error);
-      }
-      return null;
-    }
-
-    return process.platform === "win32"
-      ? canonical.toLowerCase()
-      : canonical;
+    return window.FoliaUtils.normaliseDocumentPath(filePath);
   }
 
   function canonicalTabPath(filePath) {
@@ -3472,16 +3376,7 @@
     if (tabPathAliases.has(normalised.spelling)) {
       return tabPathAliases.get(normalised.spelling);
     }
-    const key = resolveTabPath(normalised.resolved) || normalised.spelling;
-    return rememberTabPathAlias(normalised.spelling, key);
-  }
-
-  function rebindTabPath(filePath) {
-    const normalised = normaliseTabPath(filePath);
-    if (!normalised) return null;
-    const key =
-      resolveTabPath(normalised.resolved) || normalised.spelling;
-    return rememberTabPathAlias(normalised.spelling, key);
+    return normalised.spelling;
   }
 
   function tabPathKey(tab) {
@@ -3496,12 +3391,14 @@
     tab, filePath = tab && tab.filePath, approvedPathKey = null,
   ) {
     if (!tab || !filePath) return null;
-    if (approvedPathKey !== null &&
-        resolveTabPath(filePath) !== approvedPathKey) return null;
+    const normalised = normaliseTabPath(filePath);
+    if (!normalised ||
+        (approvedPathKey !== null &&
+          (typeof approvedPathKey !== "string" || !approvedPathKey))) return null;
     const key = approvedPathKey === null
-      ? rebindTabPath(filePath)
+      ? canonicalTabPath(filePath)
       : rememberTabPathAlias(
-          normaliseTabPath(filePath).spelling, approvedPathKey,
+          normalised.spelling, approvedPathKey,
         );
     const state = documentState.get(tab);
     if (state && state.pathKey !== key) {
@@ -3509,12 +3406,6 @@
       bumpDocumentRevision(tab);
     }
     return key;
-  }
-
-  function approvedReloadPathsMatch(pathKey, sourcePath, ownerPath) {
-    return typeof pathKey === "string" &&
-      resolveTabPath(sourcePath) === pathKey &&
-      resolveTabPath(ownerPath) === pathKey;
   }
 
   function approvedReloadSnapshotMatches(
@@ -3557,9 +3448,9 @@
     return normalised ? normalised.spelling : null;
   }
 
-  // Exact spelling still identifies its existing tab when a target vanishes.
-  // Canonical candidates, however, must resolve NOW to their sticky binding;
-  // a retargeted symlink cannot steal an open for its former target.
+  // Aliases correlate historical cache entries, never current filesystem
+  // authority. Admitted opens match their exact logical path below, and Main
+  // freshness/selection checks gate every disk adoption.
   function findTabByPath(filePath, preferredTabId = activeTabId) {
     const normalised = normaliseTabPath(filePath);
     if (!normalised) return undefined;
@@ -3573,12 +3464,12 @@
         exactMatches[0]
       );
     }
-    const canonical = resolveTabPath(filePath);
+    const canonical = canonicalTabPath(filePath);
     if (!canonical) return undefined;
     const canonicalMatches = tabs.filter(
       (tab) =>
         tabPathKey(tab) === canonical &&
-        resolveTabPath(tab.filePath) === canonical,
+        canonicalTabPath(tab.filePath) === canonical,
     );
     return (
       canonicalMatches.find((tab) => tab.id === preferredTabId) ||
@@ -4275,7 +4166,7 @@
             !aliasState ||
             aliasState.known !== true ||
             aliasState.versionMatches !== true ||
-            aliasState.pathKey !== resolveTabPath(filePath)
+            aliasState.pathKey !== tabPathKey(targetTab)
           ) {
             notify("The file alias could not be verified. The open was refused.", 6000);
             return;

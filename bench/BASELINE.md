@@ -12,6 +12,39 @@ same standard of evidence — the marked upgrade, the size guard, and the F22
 shutdown-approval gate at the end. Each says which harness produced it; none of
 them is part of the corpus table above.
 
+## Native action comparison (isolation continuation)
+
+The optional existing-runner mode is separate from the warm corpus render:
+
+    node node_modules\electron\cli.js bench\run.js --native-actions --action-job=C:\absolute\job.json
+
+The job names the actual `appRoot`, `sourceRevision`, frozen
+`expectedMainSha256` and complete `expectedSourceHashes` for the source tree,
+fresh `profile` and `output`, at least two absolute input
+`files` with distinct H1 headings, and `reps` of at least three. Only fresh
+run-owned copies of those inputs are changed. `mermaidFile` and newly added
+`mermaidContent` enable the no-diagram, zoom, repeated reload and return-to-100%
+journey. Unexpected modals fail the run rather than quietly granting permission.
+
+It drives native file-picker delivery and ordinary open, changed and unchanged reload, tab click,
+editor/Save and scroll paths. Painted headings, matched native reload replies,
+actual Save acknowledgement, moved scroll position and rendered zoom scale
+are witnesses, not direct-render substitutes. Output retains raw IPC counts,
+body code units, inclusive send dispatch time, Long Tasks and Main loop delay.
+These are not exact engine serialization costs. Command-to-usable timing
+includes automation injection/observation; renderer settlement is separate.
+Startup begins at Main module entry, not process launch. Captures are explicitly
+unviewed until inspected. A complete action job is not a threshold certificate.
+
+The real pre-isolation reference is `f87aa779b4d402c5c3b398880dd1c2adb313dd26`,
+before the first production reader-authority migration. Its later Mermaid,
+logging, menu and label differences are disclosed in `docs/PERF-AUDIT.md`.
+The bounded paired phase completed 73 of its declared 84 launches, not a full
+comparison. Its observed multi-second tails remain unexplained; subsequent
+fast current-only diagnostics do not clear them. No final-source
+responsiveness acceptance is established.
+Existing acceptance contracts below and in the performance audit are unchanged.
+
 ## How to compare against it
 
     npm run bench

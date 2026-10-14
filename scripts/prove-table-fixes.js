@@ -137,6 +137,13 @@ const TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL = Object.freeze([
   "Shutdown approval renderer unusable: webContents destroyed",
 ]);
 const VIRTUAL_SUITES = Object.freeze({
+  "test:sec08-browser-isolation-evidence": Object.freeze({
+    npmScript: "test:tabs",
+    environment: Object.freeze({
+      SEC08_OWNED_METADATA_FOCUSED_HARNESS: "1",
+      SEC08_BROWSER_ISOLATION_HARNESS: "1",
+    }),
+  }),
   "test:sec08-tab-authority-terminal-evidence": Object.freeze({
     npmScript: "test:tabs",
     environment: Object.freeze({
@@ -2614,6 +2621,7 @@ const REVERTS = [
   },
   {
     id: "R461",
+    skip: "superseded: the Node-enabled page's duplicated local/web arms were removed; current Main routing and page cancellation are protected by R908-R910",
     // N11, the totality half. Restores the guard exactly as it was inherited:
     // a prefix test on the raw href attribute rather than an anchored scheme
     // match. The hole it reopens is shaped like a filename - `httpd.md` and
@@ -2631,13 +2639,13 @@ const REVERTS = [
     // an in-app ipc send for .md) and a revert that only broke one of them
     // would leave the other unproven.
     what: "restore the startsWith('http') guard that made the click delegation non-total",
-    file: RENDERER,
+    file: MAIN,
     // The `hrefAttr &&` conjunct the inherited line carried is deliberately NOT
     // restored. The empty-href early return above made it dead, and dropping it
     // was part of the fix; keeping it here would mean this revert perturbed two
     // things at once and its verdict would name neither. R462 covers that half.
-    from: "    if (!hrefAttr.startsWith('#') && !ABSOLUTE_WEB_URL.test(hrefAttr)) {",
-    to: "    if (!hrefAttr.startsWith('#') && !hrefAttr.startsWith('http')) {",
+    from: "    if (/^https?:\\/\\//i.test(href)) {",
+    to: "    if (false) {",
     suite: "test:security",
     expect: [
       /^N11 a local file whose name begins with http is opened, not silently ignored$/,
@@ -2727,6 +2735,7 @@ const REVERTS = [
   },
   {
     id: "R463",
+    skip: "superseded: the deleted page external arm no longer owns privileged gestures; current private Main routing and unconditional page cancellation are protected by R908-R910",
     // N11, the ordering half - the only revert here that defends the FIX rather
     // than the bug.
     //
@@ -2761,20 +2770,9 @@ const REVERTS = [
     // arm - and deleting the arm is supposed to break it. Left unlisted they
     // would all read as collateral.
     what: "delete the external-link arm, so http(s) URLs reach nothing at all",
-    file: RENDERER,
-    from:
-      "    if (ABSOLUTE_WEB_URL.test(url)) {\n" +
-      "      e.preventDefault();\n" +
-      "      // openExternal returns a promise that REJECTS when the OS has no handler\n" +
-      "      // for the URL. Unhandled, that surfaces as an unhandledrejection in a\n" +
-      "      // Node-privileged renderer and is caught by the test suites' error\n" +
-      "      // sentinel; the reader gets nothing either way, so say something.\n" +
-      "      Promise.resolve(shell.openExternal(url)).catch(() => {\n" +
-      "        showNotification(i18n('notif.sectionNotFound') + url, 3000);\n" +
-      "      });\n" +
-      "      return;\n" +
-      "    }",
-    to: "    // (external-link arm removed)",
+    file: MAIN,
+    from: "      await shell.openExternal(href);",
+    to: "      // External routing removed.",
     suite: "test:security",
     expect: [
       // Every route OUT of the app fails; every route INTO the filesystem is
@@ -2845,6 +2843,7 @@ const REVERTS = [
   },
   {
     id: "R464",
+    skip: "superseded: there is no page filesystem catch-all to widen; current Main case routing and no-filesystem web controls are protected by R909-R910",
     // N11. The two-edit mutation that R463 was wrongly described as being:
     // remove the external arm AND widen the catch-all's guard, so an absolute
     // http(s) URL really is resolved as a path and handed to fs.existsSync.
@@ -2860,24 +2859,9 @@ const REVERTS = [
     // scheme test in it is redundant" is exactly the tidy-up someone would make
     // reading the fixed code without the arm above it in view.
     what: "widen the catch-all and delete the external arm, so http(s) URLs are stat'd as paths",
-    file: RENDERER,
-    from:
-      "    if (ABSOLUTE_WEB_URL.test(url)) {\n" +
-      "      e.preventDefault();\n" +
-      "      // openExternal returns a promise that REJECTS when the OS has no handler\n" +
-      "      // for the URL. Unhandled, that surfaces as an unhandledrejection in a\n" +
-      "      // Node-privileged renderer and is caught by the test suites' error\n" +
-      "      // sentinel; the reader gets nothing either way, so say something.\n" +
-      "      Promise.resolve(shell.openExternal(url)).catch(() => {\n" +
-      "        showNotification(i18n('notif.sectionNotFound') + url, 3000);\n" +
-      "      });\n" +
-      "      return;\n" +
-      "    }",
-    to: "    // (external-link arm removed)",
-    also: {
-      from: "    if (!hrefAttr.startsWith('#') && !ABSOLUTE_WEB_URL.test(hrefAttr)) {",
-      to: "    if (!hrefAttr.startsWith('#')) {",
-    },
+    file: MAIN,
+    from: "    if (/^https?:\\/\\//i.test(href)) {",
+    to: "    if (false) {",
     suite: "test:security",
     expect: [
       /^N11 an absolute http URL is still routed externally$/,
@@ -2924,6 +2908,7 @@ const REVERTS = [
   },
   {
     id: "R465",
+    skip: "superseded: case-insensitive routing moved out of the Node-enabled page; R909 now discriminates actual uppercase and lowercase private Main gestures",
     // N11, the case half - and the one the fix's own comment is about.
     //
     // Chromium lowercases a scheme only when it can PARSE the URL. When parsing
@@ -2950,9 +2935,9 @@ const REVERTS = [
     // `web` CARRIER, which R463 breaks and this revert leaves working; it is
     // already named in mustPass below.
     what: "make the external arm case-sensitive again, losing unparseable uppercase URLs",
-    file: RENDERER,
-    from: "    if (ABSOLUTE_WEB_URL.test(url)) {",
-    to: "    if (url.startsWith('http://') || url.startsWith('https://')) {",
+    file: MAIN,
+    from: "    if (/^https?:\\/\\//i.test(href)) {",
+    to: "    if (/^https?:\\/\\//.test(href)) {",
     suite: "test:security",
     expect: [
       /^N11 an uppercase unparseable http URL is routed externally, not stat'd as a path$/,
@@ -2993,6 +2978,7 @@ const REVERTS = [
   },
   {
     id: "R466",
+    skip: "superseded: the removed privileged renderer SVGAnimatedString conversion no longer owns trusted gestures; current private attribute-string extraction is protected by R917 and the xlink-only discrimination by R467",
     // N11, the SVG-shape half. An <a> inside inline SVG is an SVGAElement and
     // its `href` is an SVGAnimatedString OBJECT, not a string.
     //
@@ -3008,10 +2994,9 @@ const REVERTS = [
     // So this pins the NORMALISATION rather than the crash: an edit that
     // "simplifies" the ternary away leaves no exception behind to notice.
     what: "read link.href directly, so an SVG anchor's href object never becomes a URL string",
-    file: RENDERER,
-    from:
-      "    const url = typeof link.href === 'string' ? link.href : String(link.href.baseVal ?? '');",
-    to: "    const url = link.href;",
+    file: path.join(SRC, "main-preload.js"),
+    from: '    const href = link?.getAttribute("href") ?? link?.getAttribute("xlink:href");',
+    to: '    const href = typeof link?.href === "string" ? link.getAttribute("href") : String(link?.href ?? "");',
     suite: "test:security",
     expect: [
       /^N11 an SVG anchor using href is routed externally instead of throwing$/,
@@ -3053,6 +3038,9 @@ const REVERTS = [
   },
   {
     id: "R467",
+    // The historical renderer mechanism below was removed. This record now
+    // discriminates the same xlink-only omission in the real private preload;
+    // page cancellation must survive independently of privileged routing.
     // N11, the SVG-spelling half, and deliberately separate from R466 because
     // the two failures have different SHAPES.
     //
@@ -3064,13 +3052,12 @@ const REVERTS = [
     // an UNHANDLED click. Only the xlink anchor is affected - the plain `href`
     // spelling still resolves - so exactly one assertion fails.
     what: "drop the xlink:href fallback, so the legacy SVG link spelling is a silent no-op",
-    file: RENDERER,
-    from:
-      "    const hrefAttr = link.getAttribute('href') ?? link.getAttribute('xlink:href');",
-    to: "    const hrefAttr = link.getAttribute('href');",
-    suite: "test:security",
+    file: path.join(SRC, "main-preload.js"),
+    from: '    const href = link?.getAttribute("href") ?? link?.getAttribute("xlink:href");',
+    to: '    const href = link?.getAttribute("href");',
+    suite: "test:sec08-browser-isolation-evidence",
     expect: [
-      /^N11 an SVG anchor using xlink:href is routed externally instead of silently ignored$/,
+      /^SEC-08 browser isolation trusted SVG xlink routes its attribute string through private Main$/,
     ],
     mustPass: [
       // The SVG PREMISE, in mustPass for every revert whose proof depends on
@@ -3079,18 +3066,14 @@ const REVERTS = [
       // an SVGAnimatedString; if that premise broke, the behaviour assertions
       // would fail for a reason having nothing to do with the reverted code
       // and the harness would report the revert PROVEN on a coincidence.
-      /^N11 both SVG anchor spellings survive sanitization as SVGAElements the delegation can see$/,
+      /^SEC-08 browser isolation both SVG anchor spellings survive sanitization as visible SVGAElements$/,
 
-      /^N11 an SVG anchor using href is routed externally instead of throwing$/,
-      /^N11 an absolute http URL is still routed externally$/,
-      /^N11 an absolute http URL is never treated as a local path$/,
+      /^SEC-08 browser isolation trusted SVG href routes its attribute string through private Main$/,
+      /^SEC-08 browser isolation trusted lowercase web link routes through Main without local filesystem interpretation$/,
       // The xlink carrier is CLAIMED by the blank early return here, so
       // preventDefault still runs and nothing reaches Chromium at all. This
       // revert's failure is a SILENT no-op, not an unhandled one - which is
       // exactly what separates it from R466.
-      /^N11 an unhandled link click never navigates the top frame out of the app$/,
-      /^N11 a placeholder link with an empty href is a deliberate no-op, not a fall-through$/,
-      /^N11 a whitespace-only href is a silent no-op, never a path lookup$/,
       // MEASURED: ZERO unlisted failures under this revert. The aggregate is
       // the sharper of the two navigation claims - it reports the ATTEMPT, not
       // the outcome - so its passing is the positive evidence that the blank
@@ -3099,8 +3082,9 @@ const REVERTS = [
       // by a fall-through that main.js happens to cancel (exactly what R466
       // produces). Naming it here is what makes the R466/R467 distinction
       // measurable rather than narrative.
-      /^N11 no link click anywhere in this section started a main-frame navigation$/,
+      /^SEC-08 browser isolation synthetic web and anchor activation stays totally canceled without replacing the document$/,
     ],
+    requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
   },
   {
     id: "R468",
@@ -5421,6 +5405,7 @@ const REVERTS = [
   },
   {
     id: "R181",
+    skip: "superseded: page drop handling now owns only cancellation and overlay, while private Main owns the allowlist; R911 protects that structural boundary",
     suite: "test:security",
     // The one thing this fork ADDS to upstream's drag-and-drop. openFile()
     // (main.js) applies no extension check and no size check - it reads the
@@ -5429,8 +5414,8 @@ const REVERTS = [
     // executable or a video onto the window reads it into memory and paints
     // the mojibake as a document.
     what: "open whatever file is dropped on the window, with no extension check",
-    file: RENDERER,
-    from: "    if (!file.name.includes('.') || DROPPABLE_EXTENSIONS.indexOf(ext) === -1) {",
+    file: MAIN,
+    from: "      if (!TRUSTED_DROP_EXTS.has(path.extname(data.filePath).toLowerCase())) {",
     to: "    if (false) {",
     expect: [
       /dropping an executable is refused rather than opened/,
@@ -17335,12 +17320,13 @@ const REVERTS = [
           what: "restore renderer's CommonJS fallback instead of consuming the FoliaUtils global",
           file: RENDERER,
           from:
-            "const { removeBOM, getFileName, getDirectory, escapeRegex, formatBytes } = window.FoliaUtils;",
+            "const { removeBOM, getFileName, getDirectory, normaliseDocumentPath, escapeRegex, formatBytes } = window.FoliaUtils;",
           to:
-            "const { removeBOM, getFileName, getDirectory, escapeRegex, formatBytes } = require('./utils');",
+            "const { removeBOM, getFileName, getDirectory, normaliseDocumentPath, escapeRegex, formatBytes } = require('./utils');",
           suite: "test:packaging",
           expect: [
             /^SEC-08 renderer consumes window\.FoliaUtils without a CommonJS fallback$/,
+            /^SEC-08 browser product scripts have no Node imports exports raw IPC or filesystem fallback$/,
           ],
           mustPass: [
             /^SEC-08 utils\.js loads exactly once before renderer\.js$/,
@@ -18742,11 +18728,12 @@ const REVERTS = [
           id: "R744",
           what: "restore a Node crypto import in the actual renderer consumer",
           file: RENDERER,
-          from: "const { pathToFileURL } = require('url');",
-          to: "const crypto = require('crypto');\nconst { pathToFileURL } = require('url');",
+          from: "const { removeBOM, getFileName, getDirectory, normaliseDocumentPath, escapeRegex, formatBytes } = window.FoliaUtils;",
+          to: "const crypto = require('crypto');\nconst { removeBOM, getFileName, getDirectory, normaliseDocumentPath, escapeRegex, formatBytes } = window.FoliaUtils;",
           suite: "test:packaging",
           expect: [
             /^SEC-08 renderer crypto and tab byte consumers use browser primitives without Node crypto or Buffer$/,
+            /^SEC-08 browser product scripts have no Node imports exports raw IPC or filesystem fallback$/,
           ],
           mustPass: [
             /^changed clean-tab reads use the fixed production bridge instead of renderer raw IPC$/,
@@ -18755,7 +18742,7 @@ const REVERTS = [
           ],
           requireMustPassAssertions: true,
           requireExactFailures: true,
-          expectedFailureCount: 1,
+          expectedFailureCount: 2,
         },
         {
           id: "R745",
@@ -21729,6 +21716,229 @@ const REVERTS = [
           ],
           requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 2,
         },
+        {
+          id: "R904", what: "restore Node integration in the production main window",
+          file: MAIN,
+          from: "      nodeIntegration: false,\n      contextIsolation: true,\n      sandbox: true,",
+          to: "      nodeIntegration: true,\n      contextIsolation: true,\n      sandbox: true,",
+          suite: "test:packaging",
+          expect: [/^SEC-08 production main window pins Node off context isolation and sandbox together$/],
+          mustPass: [/^SEC-08 production preload publishes only contextBridge and imports only Electron$/,
+            /^SEC-08 browser product scripts have no Node imports exports raw IPC or filesystem fallback$/],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R905", what: "turn off production context isolation while retaining the packaged preload",
+          file: MAIN,
+          from: "      nodeIntegration: false,\n      contextIsolation: true,\n      sandbox: true,",
+          to: "      nodeIntegration: false,\n      contextIsolation: false,\n      sandbox: true,",
+          suite: "test:packaging",
+          expect: [/^SEC-08 production main window pins Node off context isolation and sandbox together$/],
+          mustPass: [/^SEC-08 production preload publishes only contextBridge and imports only Electron$/,
+            /^main windows always load the packaged production bridge, including marked tests$/],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R906", what: "turn off the production main window sandbox",
+          file: MAIN, from: "      sandbox: true,", to: "      sandbox: false,",
+          suite: "test:packaging",
+          expect: [/^SEC-08 production main window pins Node off context isolation and sandbox together$/],
+          mustPass: [/^SEC-08 production preload publishes only contextBridge and imports only Electron$/,
+            /^main windows always load the packaged production bridge, including marked tests$/],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R907", what: "restore a Node dependency in the browser performance consumer",
+          file: path.join(SRC, "custom-performance.js"),
+          from: "(function() {", to: "require('fs');\n(function() {",
+          suite: "test:packaging",
+          expect: [/^SEC-08 browser product scripts have no Node imports exports raw IPC or filesystem fallback$/],
+          mustPass: [/^SEC-08 production main window pins Node off context isolation and sandbox together$/,
+            /^SEC-08 fixed visibility subscription rejects malformed input projects booleans and unsubscribes$/],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R908", what: "remove total page cancellation after private non-anchor link handling",
+          file: RENDERER,
+          from: "    // Genuine non-anchor links were handled by the private preload.\n    e.preventDefault();",
+          to: "    // Genuine non-anchor links were handled by the private preload.",
+          suite: "test:packaging",
+          expect: [/^SEC-08 browser link delegation retains total cancellation independently of private gesture admission$/],
+          mustPass: [/^SEC-08 production main window pins Node off context isolation and sandbox together$/,
+            /^SEC-08 private trusted drop admission retains Main allowlist and trusted preload file capture$/],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R909", what: "make Main private trusted web routing case sensitive",
+          file: MAIN, from: "    if (/^https?:\\/\\//i.test(href)) {", to: "    if (/^https?:\\/\\//.test(href)) {",
+          suite: "test:sec08-browser-isolation-evidence",
+          expect: [/^SEC-08 browser isolation trusted uppercase web link routes through Main without local filesystem interpretation$/],
+          mustPass: [/^SEC-08 browser isolation trusted lowercase web link routes through Main without local filesystem interpretation$/,
+            /^SEC-08 browser isolation synthetic web and anchor activation stays totally canceled without replacing the document$/,
+            /^SEC-08 browser isolation trusted http-prefix local filename reaches Main safe file policy$/,
+            /^SEC-08 browser isolation ordinary Save persists the actual native selected body$/],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R910", what: "drop Main private web opening while retaining total page cancellation",
+          file: MAIN, from: "      await shell.openExternal(href);", to: "      // External opening omitted.",
+          suite: "test:sec08-browser-isolation-evidence",
+          expect: [/^SEC-08 browser isolation trusted uppercase web link routes through Main without local filesystem interpretation$/,
+            /^SEC-08 browser isolation trusted lowercase web link routes through Main without local filesystem interpretation$/,
+            /^SEC-08 browser isolation trusted SVG href routes its attribute string through private Main$/,
+            /^SEC-08 browser isolation trusted SVG xlink routes its attribute string through private Main$/],
+          mustPass: [/^SEC-08 browser isolation synthetic web and anchor activation stays totally canceled without replacing the document$/,
+            /^SEC-08 browser isolation trusted http-prefix local filename reaches Main safe file policy$/,
+            /^SEC-08 browser isolation trusted http-prefix markdown filename opens a genuinely admitted native tab$/],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 4,
+        },
+        {
+          id: "R911", what: "remove Main private trusted drop extension admission",
+          file: MAIN,
+          from: "      if (!TRUSTED_DROP_EXTS.has(path.extname(data.filePath).toLowerCase())) {",
+          to: "      if (false) {",
+          suite: "test:packaging",
+          expect: [/^SEC-08 private trusted drop admission retains Main allowlist and trusted preload file capture$/],
+          mustPass: [/^SEC-08 browser link delegation retains total cancellation independently of private gesture admission$/,
+            /^SEC-08 production main window pins Node off context isolation and sandbox together$/],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R912", what: "permit nonboolean Main visibility events through the fixed subscription",
+          file: path.join(SRC, "main-preload.js"),
+          from: '      if (typeof data?.visible !== "boolean") {', to: "      if (false) {",
+          suite: "test:packaging",
+          expect: [/^SEC-08 fixed visibility subscription rejects malformed input projects booleans and unsubscribes$/],
+          mustPass: [/^SEC-08 production preload publishes only contextBridge and imports only Electron$/,
+            /^SEC-08 production main window pins Node off context isolation and sandbox together$/],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R913", what: "invent an absolute root for a page-relative lexical path",
+          file: path.join(SRC, "utils.js"),
+          from: "    if (!root) return null;", to: "    if (!root) root = separator;",
+          suite: "test:sec08-browser-isolation-evidence",
+          expect: [/^SEC-08 browser isolation lexical correlation normalizes absolute paths without resolving relative authority$/],
+          mustPass: [/^SEC-08 browser isolation actual page has no Node raw IPC filesystem or module globals$/,
+            /^SEC-08 browser isolation relative image loads against the actual admitted document URL$/,
+            /^SEC-08 browser isolation ordinary Save persists the actual native selected body$/],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R914", what: "deliver an unresolved relative native argument beside its absolute admitted descriptor",
+          file: MAIN, from: "    filePath = path.resolve(filePath);", to: "    // Native ingress normalization omitted.",
+          suite: "test:sec08-browser-isolation-evidence",
+          expect: [/^SEC-08 browser isolation relative first-launch CLI paints the same absolute native path and descriptor without page path repair$/,
+            /^SEC-08 browser isolation relative native open-file event paints an absolute admitted path without page path repair$/,
+            /^nothing rendered a visible error at any point during the suite$/],
+          mustPass: [/^SEC-08 browser isolation relative first-launch CLI setup reaches actual Main file-opened bytes and admission$/,
+            /^SEC-08 browser isolation relative image loads against the actual admitted document URL$/,
+            /^SEC-08 browser isolation ordinary Save persists the actual native selected body$/],
+          // The refused relative event also reaches the tab helper's null
+          // lexical correlation. Pin that measured coupled error, not any error.
+          expectedFailureEvidence: {
+            assertion: /^nothing rendered a visible error at any point during the suite$/,
+            min: 1, requireParentAssertionOutcome: true,
+            hits: [{
+              kind: "console-error",
+              detail: /^\[CustomTabs\] File open failed: TypeError: Cannot read properties of null \(reading 'spelling'\) @ file:\/\/\/.*\/src\/custom-tabs\.js:\d+$/,
+            }],
+          },
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 3,
+        },
+        {
+          id: "R915", what: "let the fixed test diagnostic send arbitrary phase names",
+          file: path.join(ROOT, "test", "test-preload.js"),
+          from: "      if (!phases.has(phase) || (localGeneration !== null &&",
+          to: "      if (false || (localGeneration !== null &&",
+          suite: "test:packaging",
+          expect: [/^SEC-08 isolated test diagnostic accepts only fixed phases and finite generation metadata without raw transport$/],
+          mustPass: [/^SEC-08 production preload publishes only contextBridge and imports only Electron$/,
+            /^SEC-08 fixed visibility subscription rejects malformed input projects booleans and unsubscribes$/],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R916", what: "accept infinite diagnostic generation metadata",
+          file: path.join(ROOT, "test", "test-preload.js"),
+          from: "(!Number.isSafeInteger(localGeneration) || localGeneration <= 0)",
+          to: "(localGeneration <= 0)",
+          suite: "test:packaging",
+          expect: [/^SEC-08 isolated test diagnostic accepts only fixed phases and finite generation metadata without raw transport$/],
+          mustPass: [/^SEC-08 production preload publishes only contextBridge and imports only Electron$/,
+            /^SEC-08 browser lexical path helper preserves Windows drive UNC and POSIX roots without ambient resolution$/],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R917", what: "coerce SVGAnimatedString instead of extracting trusted SVG attribute strings",
+          file: path.join(SRC, "main-preload.js"),
+          from: '    const href = link?.getAttribute("href") ?? link?.getAttribute("xlink:href");',
+          to: '    const href = typeof link?.href === "string" ? link.getAttribute("href") : String(link?.href ?? "");',
+          suite: "test:sec08-browser-isolation-evidence",
+          expect: [/^SEC-08 browser isolation trusted SVG href routes its attribute string through private Main$/,
+            /^SEC-08 browser isolation trusted SVG xlink routes its attribute string through private Main$/],
+          mustPass: [/^SEC-08 browser isolation both SVG anchor spellings survive sanitization as visible SVGAElements$/,
+            /^SEC-08 browser isolation trusted lowercase web link routes through Main without local filesystem interpretation$/,
+            /^SEC-08 browser isolation trusted uppercase web link routes through Main without local filesystem interpretation$/,
+            /^SEC-08 browser isolation synthetic web and anchor activation stays totally canceled without replacing the document$/],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 2,
+        },
+        {
+          id: "R918", what: "accept any saved file containing the marker instead of the full editor body",
+          file: path.join(ROOT, "bench", "native-actions.js"),
+          from: '  if (actual !== expected) throw new Error("Native Save did not preserve the complete editor text");',
+          to: '  if (!actual.includes("Native action Save settlement.")) throw new Error("Native Save did not preserve the complete editor text");',
+          suite: "test:corpus",
+          expect: [/^native Save verifier rejects marker-preserving truncation and corruption$/],
+          mustPass: [/^native Save verifier accepts the exact complete edited body$/,
+            /^native watchdog persists the failing in-flight action and its accumulated IPC$/,
+            /^native action source pin rejects changed non-Main bytes before launching$/],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R919", what: "omit the pending action when the global watchdog finishes the job",
+          file: path.join(ROOT, "bench", "native-actions.js"),
+          from: "  if (error) failCurrentSample(error);", to: "  // Pending action omitted.",
+          suite: "test:corpus",
+          expect: [/^native watchdog persists the failing in-flight action and its accumulated IPC$/],
+          mustPass: [/^native failed action recorder appends a pending sample only once$/,
+            /^native Save verifier rejects marker-preserving truncation and corruption$/,
+            /^native action source pin accepts the complete frozen source set$/],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R920", what: "trust the Main hash while accepting changed renderer source bytes",
+          file: path.join(ROOT, "bench", "native-actions.js"),
+          from: "    Object.entries(sourceHashes).some(([file, hash]) => job.expectedSourceHashes[file] !== hash)) {",
+          to: "    false) {",
+          suite: "test:corpus",
+          expect: [/^native action source pin rejects changed non-Main bytes before launching$/],
+          mustPass: [/^native action source pin accepts the complete frozen source set$/,
+            /^native Save verifier accepts the exact complete edited body$/,
+            /^native watchdog persists the failing in-flight action and its accumulated IPC$/],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R921", what: "query development-only diagnostics from the packaged production preload",
+          file: path.join(SRC, "main-preload.js"),
+          from: '    if (!process.argv.includes("--folia-newline-alignment-diagnostics")) return false;\n',
+          to: "",
+          also: [{
+            file: MAIN,
+            from: '        ...(!app.isPackaged ? ["--folia-newline-alignment-diagnostics"] : []),\n',
+            to: "",
+          }],
+          suite: "test:packaging",
+          expect: [
+            /^SEC-08 native window advertises newline diagnostics only in development$/,
+            /^SEC-08 packaged diagnostics capability returns false without invoking absent development IPC$/,
+          ],
+          mustPass: [
+            /^SEC-08 development diagnostics capability preserves approved and refused boolean replies$/,
+            /^SEC-08 development diagnostics capability rejects malformed replies$/,
+            /^SEC-08 production main window pins Node off context isolation and sandbox together$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 2,
+        },
       ];
 
 // These are release exceptions, not passing or withdrawn proofs. An explicit
@@ -22808,7 +23018,7 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760,R840,R841,R845,R849,R853,R858,R860,R871,R876,R877,R878,R879,R880,R881,R882,R883,R884,R885,R886,R887,R888,R889,R890,R891,R892,R893,R894,R895,R896,R897,R898,R899,R900,R901,R902,R903";
+      .join(",") === "R467,R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760,R840,R841,R845,R849,R853,R858,R860,R871,R876,R877,R878,R879,R880,R881,R882,R883,R884,R885,R886,R887,R888,R889,R890,R891,R892,R893,R894,R895,R896,R897,R898,R899,R900,R901,R902,R903,R904,R905,R906,R907,R908,R909,R910,R911,R912,R913,R914,R915,R916,R917,R918,R919,R920,R921";
   const toolbarAllowanceIsRecordScoped =
     REVERTS.filter((r) =>
       exactShutdownTailForMutation(r) === TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL,

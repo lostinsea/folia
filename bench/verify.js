@@ -1945,5 +1945,90 @@ for (const [profile, want] of Object.entries(CORPUS_DIGEST)) {
   }
 }
 
+// Execute the native action runner's real integrity functions without launching Electron.
+{
+  const source = fs.readFileSync(path.join(__dirname, "native-actions.js"), "utf8");
+  const functions = source.slice(source.indexOf("function assertSavedContent("),
+    source.indexOf('app.on("web-contents-created"'));
+  const pending = { kind: "reload", commandStartedAt: 900,
+    ipc: { "reload-file": 1 }, resolveSaveAck() {}, saveRequestedAt: 950 };
+  let persisted;
+  const context = vm.createContext({
+    currentSample: pending, samples: [], performance: { now: () => 1000 },
+    finishing: false, deadline: null, clearTimeout() {},
+    eventLoopDelay: { disable() {} }, job: { output: "oracle-only" },
+    mainSha256: "oracle", errorSentinelObserved: true, inputRoot: "oracle",
+    sourceHashes: {}, process: { platform: "oracle", arch: "oracle", versions: {} },
+    os: { cpus: () => [{ model: "oracle" }] }, viewport: null, window: null,
+    fixtureInputs: [], errors: [],
+    fs: { writeFileSync(_file, text) { persisted = JSON.parse(text); } },
+    app: { exit() {} },
+  });
+  vm.runInContext(functions, context);
+  const expected = "# Original heading\n\nEntire edited body.\nNative action Save settlement.\n";
+  let accepted = false;
+  try { context.assertSavedContent(expected, expected); accepted = true; }
+  catch (error) { accepted = false; }
+  check("native Save verifier accepts the exact complete edited body", accepted);
+  check("native Save verifier rejects marker-preserving truncation and corruption",
+    ["Native action Save settlement.", expected.replace("Entire", "Altered")]
+      .every(corrupted => {
+        try { context.assertSavedContent(corrupted, expected); return false; }
+        catch (error) { return error.message === "Native Save did not preserve the complete editor text"; }
+      }));
+  vm.runInContext(source.slice(source.indexOf("function finish("),
+    source.indexOf("app.whenReady()")), context);
+  context.finish(new Error("oracle watchdog timeout"));
+  check("native watchdog persists the failing in-flight action and its accumulated IPC",
+    persisted?.status === "failed" && persisted.samples.length === 1 &&
+    persisted.samples[0].kind === "reload" && persisted.samples[0].status === "failed" &&
+    persisted.samples[0].elapsedMs === 100 &&
+    persisted.samples[0].ipc["reload-file"] === 1 &&
+    persisted.samples[0].error.includes("oracle watchdog timeout") &&
+    !Object.hasOwn(pending, "resolveSaveAck") && !Object.hasOwn(pending, "saveRequestedAt"));
+  const duplicate = { kind: "scroll", commandStartedAt: 900, ipc: {} };
+  context.samples = [];
+  context.currentSample = duplicate;
+  context.failCurrentSample(new Error("initial action rejection"));
+  context.failCurrentSample(new Error("later action rejection"));
+  context.failCurrentSample(new Error("duplicate later rejection"));
+  check("native failed action recorder appends a pending sample only once",
+    context.samples.length === 1 && context.samples[0] === duplicate &&
+    duplicate.error.includes("initial action rejection"));
+
+  const appRoot = path.join(__dirname, "oracle-source");
+  const main = path.join(appRoot, "src", "main.js");
+  const renderer = path.join(appRoot, "src", "renderer.js");
+  const sourceBytes = { [main]: "main source", [renderer]: "renderer source" };
+  const job = { appRoot, profile: path.join(appRoot, "profile"),
+    output: path.join(appRoot, "output"), files: [main, renderer], reps: 3,
+    sourceRevision: "oracle", expectedMainSha256: digest(sourceBytes[main]),
+    expectedSourceHashes: { "main.js": digest(sourceBytes[main]),
+      "renderer.js": digest(sourceBytes[renderer]) } };
+  const validateSource = source.slice(0, source.indexOf("if (fs.existsSync(job.output))"));
+  function validateNativeSource() {
+    return vm.runInNewContext(validateSource, {
+      process: { argv: ["--action-job=oracle-job.json"] },
+      require(module) {
+        if (module === "electron") return {};
+        if (module === "fs") return {
+          readFileSync(file) { return file === "oracle-job.json" ? JSON.stringify(job) : sourceBytes[file]; },
+          readdirSync() { return ["main.js", "renderer.js"]; },
+        };
+        return require(module);
+      },
+    });
+  }
+  let validSource = false;
+  try { validateNativeSource(); validSource = true; }
+  catch (error) { validSource = false; }
+  check("native action source pin accepts the complete frozen source set", validSource);
+  sourceBytes[renderer] = "changed renderer source";
+  let refusedSource = false;
+  try { validateNativeSource(); }
+  catch (error) { refusedSource = error.message === "Native action source set differs from the frozen job"; }
+  check("native action source pin rejects changed non-Main bytes before launching", refusedSource);
+}
+
 console.log(`\n=== ${passed}/${passed + failed} passed ===`);
 process.exit(failed ? 1 : 0);

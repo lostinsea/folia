@@ -1,10 +1,6 @@
 // ============================================
 // IMPORTS
 // ============================================
-const { ipcRenderer, shell } = require('electron');
-const fs = require('fs');
-const path = require('path');
-const { pathToFileURL } = require('url');
 if (!window.FoliaDocumentEvents) {
   throw new Error('FoliaDocumentEvents must load before renderer.js');
 }
@@ -25,7 +21,7 @@ let lastNavigationRequestResult = null;
 if (!window.FoliaUtils) {
   throw new Error('FoliaUtils must load before renderer.js');
 }
-const { removeBOM, getFileName, getDirectory, escapeRegex, formatBytes } = window.FoliaUtils;
+const { removeBOM, getFileName, getDirectory, normaliseDocumentPath, escapeRegex, formatBytes } = window.FoliaUtils;
 if (!window.FoliaMermaidConfig) {
   throw new Error('FoliaMermaidConfig must load before renderer.js');
 }
@@ -217,15 +213,11 @@ const SANITIZE_CONFIG = {
   // <a download href="https://..."> is not a navigation - so main.js's
   // will-navigate deny never sees it and CSP has no directive for it. Inside
   // #viewer the attribute is already inert, because every arm of the click
-  // delegation calls preventDefault() and routes the link to shell.openExternal
-  // or to the local-file policy instead. That invariant only became true with
-  // N11: the local-file arm used to test `!hrefAttr.startsWith('http')`, so an
-  // href like `httpd.md` matched no arm at all and fell through to Chromium's
-  // native follow. Both arms now share one case-insensitive ABSOLUTE_WEB_URL
-  // test over complementary inputs, blank hrefs return early, and SVG anchors
-  // (whose `href` is an object that used to throw before any preventDefault)
-  // are normalised - so every href a sanitized anchor IN #viewer can carry is
-  // handled here rather than by the browser. Note the scope: this says nothing
+  // delegation calls preventDefault(). Genuine non-anchor gestures are
+  // captured by the isolated preload and checked by Main; the page handles
+  // anchors and consumes every remaining synthetic/invalid link. A missed
+  // cancellation can replace the app with about:blank#blocked without any
+  // cancellable Electron navigation event (N11). Note the scope: this says nothing
   // about anchors outside #viewer, which is exactly why the attribute is
   // stripped at the sanitizer as well.
   // The reachable surface is #tableInsertPreview, which sits OUTSIDE
@@ -321,7 +313,8 @@ function resolveDocumentRelativeImageSrc(src, docPath) {
     const tab = window.CustomTabs?.getTabs().find(candidate =>
       candidate.filePath === docPath);
     const descriptor = tab && window.CustomTabs.getDocumentDescriptor(tab.id);
-    resolved = new URL(value, descriptor?.documentUrl || pathToFileURL(docPath));
+    if (!descriptor?.documentUrl) return null;
+    resolved = new URL(value, descriptor.documentUrl);
   } catch {
     return null;
   }
@@ -900,12 +893,9 @@ const UI_STRINGS = {
   'notif.pathCopied': 'Path copied to clipboard',
   'confirm.unsavedOpen': 'You have unsaved changes. Discard changes and open a new file?',
   'drop.hint': 'Drop file to open',
-  'drop.rejected': '${name} is not a markdown file',  'confirm.unsavedRefresh': 'You have unsaved changes. Discard changes and refresh from disk?',
+  'confirm.unsavedRefresh': 'You have unsaved changes. Discard changes and refresh from disk?',
   'confirm.unsavedExit': 'You have unsaved changes. Exiting edit mode will DISCARD them. Exit anyway?',
   'confirm.unsavedOpenFile': 'You have unsaved changes. Discard changes and open "${name}"?',
-  'confirm.openExternal': 'This link opens a file with an external application:\n\n${name}\n\nOnly continue if you trust this document. Open it?',
-  'notif.blockedExecutable': 'Blocked: this link points to an executable file (${name}). Markdown documents cannot launch programs.',
-  'notif.blockedNetworkPath': 'Blocked: this link points to a network location, which can leak your credentials.',
   'alert.openFirst': 'Please open a markdown file first before exporting to PDF.',
   'alert.noFileOpen': 'No file is currently open.',
   'alert.pdfFailed': 'Failed to export PDF: ',
@@ -1346,54 +1336,12 @@ function frozenForShutdown() {
 const reloadPathAliases = new Map();
 
 function canonicalReloadPath(filePath) {
-  if (typeof filePath !== 'string' || filePath.length === 0) return null;
-  const resolved = path.normalize(path.resolve(filePath));
-  const spelling =
-    process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  const spelling = fileTrackingPathKey(filePath);
+  if (!spelling) return null;
   if (reloadPathAliases.has(spelling)) {
     return reloadPathAliases.get(spelling);
   }
-  return rebindReloadPath(filePath);
-}
-
-function rebindReloadPath(filePath) {
-  if (typeof filePath !== 'string' || filePath.length === 0) return null;
-  const resolved = path.normalize(path.resolve(filePath));
-  const spelling =
-    process.platform === 'win32' ? resolved.toLowerCase() : resolved;
-  let canonical = spelling;
-  try {
-    const real = fs.realpathSync.native(resolved);
-    canonical =
-      process.platform === 'win32' ? real.toLowerCase() : real;
-  } catch (error) {
-    if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') {
-      console.error('Failed to canonicalize document path:', error);
-    }
-  }
-  reloadPathAliases.set(spelling, canonical);
-  return canonical;
-}
-
-function currentReloadPhysicalKey(filePath) {
-  if (typeof filePath !== 'string' || filePath.length === 0) return null;
-  try {
-    const real = fs.realpathSync.native(path.normalize(path.resolve(filePath)));
-    return process.platform === 'win32' ? real.toLowerCase() : real;
-  } catch (error) {
-    if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') {
-      console.error('Could not verify the adopted document path:', error);
-    }
-    return null;
-  }
-}
-
-function bindApprovedReloadPath(filePath, approvedPathKey) {
-  const spelling = fileTrackingPathKey(filePath);
-  if (!spelling || typeof approvedPathKey !== 'string' ||
-      currentReloadPhysicalKey(filePath) !== approvedPathKey) return false;
-  reloadPathAliases.set(spelling, approvedPathKey);
-  return true;
+  return spelling;
 }
 
 function validDiskVersion(value) {
@@ -1409,18 +1357,6 @@ function diskVersionsEqual(left, right) {
   return validDiskVersion(left) && validDiskVersion(right) &&
     left.dev === right.dev && left.ino === right.ino &&
     left.size === right.size && left.mtimeMs === right.mtimeMs;
-}
-
-function approvedReloadSnapshotMatches(filePath, pathKey, version) {
-  if (currentReloadPhysicalKey(filePath) !== pathKey) return false;
-  try {
-    return diskVersionsEqual(fs.statSync(filePath), version);
-  } catch (error) {
-    if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') {
-      console.error('Could not verify the adopted disk version:', error);
-    }
-    return false;
-  }
 }
 
 function approvedOwnedReloadSnapshotMatches(
@@ -1454,9 +1390,7 @@ function sameReloadDocument(left, right) {
 }
 
 function fileTrackingPathKey(filePath) {
-  if (typeof filePath !== 'string' || filePath.length === 0) return null;
-  const resolved = path.normalize(path.resolve(filePath));
-  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+  return normaliseDocumentPath(filePath)?.spelling || null;
 }
 
 function setDocumentDirtyState(value) {
@@ -3049,120 +2983,8 @@ function applyNoteStyles() {
 // The logo link was removed with the single-row header redesign; the project
 // URL now lives only in README.md and package.json.
 
-// Extension policy for links that resolve to a local file (SEC-12).
-//
-// Markdown-family extensions are handled separately and open inside the app.
-// Everything else falls into one of three buckets:
-//   - EXECUTABLE_EXTS  refused outright, no prompt
-//   - SAFE_OPEN_EXTS   handed to the system handler directly
-//   - anything else     opened only after an explicit confirmation naming
-//                       the file
-//
-// The default for an UNRECOGNISED extension is deliberately "ask", not
-// "allow": new dangerous types appear over time, and a denylist that fails
-// open is worth very little.
-//
-// The decision is made on the *resolved* path (see resolveLinkTarget below),
-// not on the href, so a `notes.txt` symlink pointing at `payload.ps1` is
-// judged as the PowerShell script it actually is.
-const EXECUTABLE_EXTS = new Set([
-  // Windows
-  '.exe', '.msi', '.msix', '.msixbundle', '.appx', '.appxbundle', '.bat',
-  '.cmd', '.com', '.scr', '.pif', '.hta', '.cpl', '.lnk', '.url', '.reg',
-  '.msc', '.msp', '.gadget', '.inf', '.dll', '.ocx', '.sys', '.chm', '.xll',
-  '.ws', '.sct', '.jnlp', '.website', '.scf',
-  // Formats whose *handler* is the exploit: the shell mounts disk images on
-  // open, and these control-panel/search/theme formats have each been used
-  // in the wild to run a command or leak NTLM credentials.
-  '.iso', '.img', '.vhd', '.vhdx', '.wim', '.diagcab',
-  '.settingcontent-ms', '.library-ms', '.search-ms', '.searchconnector-ms',
-  '.theme', '.themepack', '.deskthemepack',
-  // Script interpreters (cross-platform)
-  '.ps1', '.psm1', '.psd1', '.vbs', '.vbe', '.wsf', '.wsh', '.js', '.jse',
-  '.mjs', '.cjs', '.py', '.pyw', '.rb', '.pl', '.php', '.jar',
-  // Unix / macOS
-  '.sh', '.bash', '.zsh', '.fish', '.ksh', '.csh', '.run', '.bin', '.out',
-  '.command', '.app', '.desktop', '.appimage', '.deb', '.rpm', '.pkg', '.dmg',
-  '.terminal', '.workflow',
-  // Office macro-enabled formats execute code without any further prompt
-  '.docm', '.xlsm', '.pptm', '.dotm', '.xltm', '.potm', '.xlam', '.ppam',
-]);
-
-// Deliberately excluded from this list, and therefore behind a confirmation:
-//   .svg  - script-capable whenever the system handler is a browser
-//   .pdf  - the linked bytes are attacker-controlled in this threat model, and
-//           the reader is a large parser with an embedded scripting engine
-//   .rtf  - repeatedly an in-the-wild RCE vector, and the default handler on
-//           Windows is now Word
-// The rest are formats whose handler is a viewer, not an interpreter.
-const SAFE_OPEN_EXTS = new Set([
-  '.txt', '.text', '.log', '.csv', '.tsv', '.json', '.xml', '.yml', '.yaml',
-  '.ini', '.toml',
-  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tif', '.tiff', '.ico',
-  '.avif', '.heic',
-  '.mp3', '.wav', '.flac', '.ogg', '.m4a', '.mp4', '.webm', '.mov', '.mkv',
-]);
-
-const MARKDOWN_EXTS = new Set(['.md', '.markdown', '.mmd', '.mermaid', '.ow']);
-
-// Resolve what a link will *actually* open, and describe it.
-//
-// Deciding policy from the href's own extension is not enough: a symlink named
-// `diagram.png` pointing at `payload.command` is opened by the shell as the
-// script, not as an image, and symlinks are ordinary on the macOS and Linux
-// release targets. realpathSync collapses symlinks, junctions and `..`
-// segments, so every later decision is made about the file that will really
-// be handed to the OS.
-//
-// Note this does *not* follow a Windows `.lnk` shortcut - that is not a
-// filesystem link and realpath leaves it alone - which is why `.lnk` is itself
-// in EXECUTABLE_EXTS.
-function resolveLinkTarget(targetPath) {
-  let realPath = targetPath;
-  try {
-    realPath = fs.realpathSync.native(targetPath);
-  } catch (e) {
-    // Broken symlink, permission error, or a filesystem that cannot resolve
-    // the name. Fall back to the literal path; the caller still runs the full
-    // policy over it, so the failure mode is "asks the user", not "opens".
-  }
-  let isDirectory = false;
-  let isExecutableBit = false;
-  try {
-    const st = fs.statSync(realPath);
-    isDirectory = st.isDirectory();
-    // Only meaningful off Windows, where NTFS has no execute bit and the
-    // shell decides purely from the extension.
-    isExecutableBit = process.platform !== 'win32' && (st.mode & 0o111) !== 0;
-  } catch (e) {
-    /* treated as a plain file below */
-  }
-  return {
-    realPath,
-    ext: path.extname(realPath).toLowerCase(),
-    isDirectory,
-    isExecutableBit,
-  };
-}
-
-// UNC and protocol-relative paths. On Windows every filesystem call on such a
-// path opens an outbound SMB connection and leaks an NTLMv2 challenge/response
-// - so this has to be checked *before* fs is touched, not after.
-const isNetworkPath = (p) => /^(\\\\|\/\/)/.test(p);
-
-// The single spelling of "this is an absolute web URL", shared by the two arms
-// of the viewer click delegation that partition on it. It is ONE constant on
-// purpose: the arms test complementary halves of the same predicate over two
-// different inputs (the resolved url, then the raw href attribute), and two
-// separate literals are free to drift apart - which is exactly the defect N11
-// fixed, where one arm said `startsWith('http')` and the other `startsWith
-// ('http://') || startsWith('https://')`, leaving `httpd.md` claimed by
-// neither. Case-insensitive because Chromium only lowercases a scheme it can
-// PARSE: `HTTPS://api.example.invalid:PORT/v1` fails to parse, so `.href`
-// hands back the attribute verbatim, uppercase and all (measured). No `g`
-// flag, so `.test()` carries no lastIndex state and one compiled object is
-// reused for every click. (N11)
-const ABSOLUTE_WEB_URL = /^https?:\/\//i;
+// Trusted link policy and physical path resolution live in Main. The
+// private isolated preload captures genuine gestures before page handlers.
 
 // Whitespace that the URL parser strips, i.e. C0 controls and space. Used to
 // decide whether an href is "empty".
@@ -3222,18 +3044,6 @@ viewer.addEventListener('click', (e) => {
   // here it obeys exactly the same rules as every other link. (SEC-11)
   const link = e.target.closest('a, area');
   if (link && link.href) {
-    // An <a> inside inline SVG is an SVGAElement, not an HTMLAnchorElement, and
-    // its `href` is an SVGAnimatedString OBJECT rather than a string. Measured
-    // against this app's own vendored DOMPurify and its real SANITIZE_CONFIG:
-    // `<svg><a href="http://...">` survives sanitization byte-identically,
-    // `closest('a, area')` matches it, and the object is always truthy - so it
-    // reached this handler, and `link.href.startsWith(...)` then threw
-    // "svgA.href.startsWith is not a function", aborting before any
-    // preventDefault and handing the click straight to Chromium's native
-    // follow. Normalising to the baseVal string routes an SVG anchor through
-    // exactly the same three arms as an HTML one. (N11)
-    const url = typeof link.href === 'string' ? link.href : String(link.href.baseVal ?? '');
-
     // Get the href attribute directly to handle relative paths and anchors.
     //
     // SVG spells the same link two ways. Measured: for the legacy
@@ -3319,178 +3129,14 @@ viewer.addEventListener('click', (e) => {
       return;
     }
 
-    // Check if it's an external web link (http or https).
-    //
-    // Matched CASE-INSENSITIVELY, which is not cosmetic. Chromium lowercases a
-    // scheme only when it can PARSE the URL; when parsing fails, the `.href`
-    // getter hands back the attribute verbatim. So `HTTPS://api.example.com:
-    // PORT/v1` arrives here still uppercase (measured), and under the old
-    // `startsWith('http://')` test it matched neither this arm nor the local
-    // -file arm below - the same non-totality N11 fixed one spelling over.
-    if (ABSOLUTE_WEB_URL.test(url)) {
-      e.preventDefault();
-      // openExternal returns a promise that REJECTS when the OS has no handler
-      // for the URL. Unhandled, that surfaces as an unhandledrejection in a
-      // Node-privileged renderer and is caught by the test suites' error
-      // sentinel; the reader gets nothing either way, so say something.
-      Promise.resolve(shell.openExternal(url)).catch(() => {
-        showNotification(i18n('notif.sectionNotFound') + url, 3000);
-      });
-      return;
-    }
-
-    // Everything the arm above did not take is treated as a local file link
-    // (file://, absolute, or relative to the current document).
-    //
-    // The guard is `^https?://` on the ATTRIBUTE, not `startsWith('http')` as
-    // it used to be. That older test made the delegation non-total in a way
-    // shaped like a filename: a sibling called `httpd.md` or `https-notes.txt`
-    // begins with "http", so this arm skipped it, while it resolves to `file:`
-    // so the arm above skipped it too. Nothing called preventDefault, Chromium
-    // followed the link natively, and main.js's will-navigate deny killed the
-    // navigation - so the link silently did nothing, with no notification. Bare
-    // relative hrefs (`httpd.md` rather than `./httpd.md`) are the common
-    // authoring style, which is what made this reachable. (N11)
-    //
-    // The two arms share ONE regex (ABSOLUTE_WEB_URL) applied to two inputs,
-    // and that is what makes them exactly complementary rather than merely
-    // adjacent. Measured: whenever URL parsing fails, `url === hrefAttr`, so
-    // this arm's negation is the precise complement of the arm above; and when
-    // parsing succeeds, a resolved absolute URL was already claimed there.
-    // Non-http schemes DOMPurify permits (mailto:, tel:, ftp:) took this arm
-    // before the change and still do - they are misrouted as file paths, which
-    // is a REAL and separately tracked defect (N14), not something this change
-    // introduced or fixed.
-    //
-    // With the empty-href return above and the SVG normalisation, every href a
-    // sanitized anchor in #viewer can carry now lands in exactly one arm:
-    // blank is a deliberate no-op, `#` is an in-document anchor, absolute
-    // http(s) goes to the external opener, and everything else comes here.
-    //
-    // THAT TOTALITY IS LOAD-BEARING FOR MORE THAN "THE LINK IS DEAD", and the
-    // difference was MEASURED rather than reasoned about. An unhandled click on
-    // an href Chromium cannot PARSE - `HTTPS://api.example.invalid:PORT/v1`, a
-    // real shape once a port is templated wrong - does not merely navigate and
-    // get denied. No cancellable Electron event fires at all (will-navigate,
-    // will-redirect and will-frame-navigate were all observed silent for it),
-    // and Chromium commits its own `about:blank#blocked` page OVER this
-    // document: every open tab and every unsaved edit gone, window blank, no
-    // way back but a restart. main.js's SEC-11 deny is a real second layer for
-    // every href that parses, and no layer at all for one that does not - so
-    // this handler being total is the ONLY thing standing in front of that
-    // case. Pinned by "N11 an unhandled link click never navigates the top
-    // frame out of the app" in test-render-security.js, and by R463, whose
-    // failure IS that page replacing the app. (N11/N15)
-    if (!hrefAttr.startsWith('#') && !ABSOLUTE_WEB_URL.test(hrefAttr)) {
-      e.preventDefault();
-
-      // Resolve the path relative to current file
-      let targetPath = hrefAttr;
-
-      // Handle file:// protocol
-      if (targetPath.startsWith('file://')) {
-        targetPath = targetPath.replace('file://', '');
-        // Handle Windows paths like file:///C:/...
-        if (targetPath.startsWith('/') && targetPath[2] === ':') {
-          targetPath = targetPath.substring(1);
-        }
-      }
-
-      // If it's a relative path, resolve it against current file's directory
-      if (currentFilePath && !path.isAbsolute(targetPath)) {
-        const currentDir = path.dirname(currentFilePath);
-        targetPath = path.resolve(currentDir, targetPath);
-      }
-
-      // Reject network paths BEFORE touching the filesystem. path.isAbsolute()
-      // treats \\attacker\share\x as absolute on Windows, so the existsSync()
-      // below would itself open an outbound SMB connection and leak an NTLMv2
-      // challenge/response - the probe happens even if nothing is ever opened.
-      // DOMPurify permits such an href: its IS_ALLOWED_URI regex accepts any
-      // scheme-less value starting with a non-[a-z] character. (SEC-12)
-      if (isNetworkPath(targetPath)) {
-        showNotification(i18n('notif.blockedNetworkPath'), 5000);
-        return;
-      }
-
-      // Check if the file exists
-      if (fs.existsSync(targetPath)) {
-        // Decide on what will actually open, not on what the href claims -
-        // see resolveLinkTarget(). (SEC-12)
-        const resolved = resolveLinkTarget(targetPath);
-        const ext = resolved.ext;
-        const openPath = resolved.realPath;
-        const displayName = path.basename(openPath);
-
-        // A symlink may point at a network location even when the href did
-        // not, so the same check has to be repeated on the resolved path.
-        if (isNetworkPath(openPath)) {
-          showNotification(i18n('notif.blockedNetworkPath'), 5000);
-          return;
-        }
-
-        if (EXECUTABLE_EXTS.has(ext)) {
-          // The threat model includes documents cloned from untrusted repos or
-          // unpacked from archives - i.e. the markdown arrives alongside
-          // sibling files the same author controls, and hrefs resolve relative
-          // to the document's own directory. A link reading "[architecture
-          // diagram](./setup.exe)" was one click from handing the file to the
-          // shell. No extension in this set is worth a prompt; refuse outright.
-          //
-          // This arm is deliberately ahead of the directory arm below: a macOS
-          // .app bundle *is* a directory, and opening it launches it.
-          showNotification(i18n('notif.blockedExecutable', { name: displayName }), 6000);
-        } else if (MARKDOWN_EXTS.has(ext)) {
-          // Open the markdown file in this app
-          cancelPendingNavigation('superseded-by-document-link');
-          requestApprovedDocumentOpen(openPath);
-        } else if (resolved.isDirectory) {
-          // Opening a folder shows it in the file manager; nothing is executed.
-          shell.openPath(openPath);
-        } else if (ext === '') {
-          // An extensionless file is genuinely ambiguous. On Unix the execute
-          // bit is what makes it dangerous, so consult it; on Windows the
-          // shell cannot run such a file at all, and README / LICENSE /
-          // Makefile / .bashrc are ordinary things to link to - refusing them
-          // outright (as an earlier revision did) broke real documents.
-          if (resolved.isExecutableBit) {
-            showNotification(i18n('notif.blockedExecutable', { name: displayName }), 6000);
-          } else if (confirm(i18n('confirm.openExternal', { name: displayName }))) {
-            shell.openPath(openPath);
-          }
-        } else if (SAFE_OPEN_EXTS.has(ext)) {
-          shell.openPath(openPath);
-        } else {
-          // Everything else - .svg (script-capable when the system handler is
-          // a browser), .pdf, .rtf, archives, unknown types - opens only after
-          // the user is told which file it is.
-          if (confirm(i18n('confirm.openExternal', { name: displayName }))) {
-            shell.openPath(openPath);
-          }
-        }
-      } else {
-        showNotification(i18n('notif.fileNotFound') + path.basename(targetPath), 4000);
-      }
-    }
+    // Also consume synthetic/invalid links: Chromium can replace the app
+    // with about:blank#blocked without firing a cancellable navigation.
+    // Genuine non-anchor links were handled by the private preload.
+    e.preventDefault();
   }
 });
 
-// Drag-and-drop: dropping a file anywhere in the window opens it.
-// Ported from upstream ef81474, with two changes.
-//
-// 1. An extension allowlist, which upstream has not got. open-file-path leads
-//    to openFile(), which reads the whole file into a string and renders it
-//    with no check on type or size. That was already reachable from a markdown
-//    link, so this adds no privilege - the renderer runs with nodeIntegration
-//    and could read any file directly regardless - but a link is something the
-//    document author chose, whereas a drop is a hand movement. Dropping a video
-//    onto the window should say no, not read it into memory as UTF-8.
-//    The list is the one openFileDialog() already offers (main.js).
-// 2. `file.path` is gone: Electron removed it in v32 and this fork is on 43, so
-//    webUtils.getPathForFile() is the only route. Upstream keeps a `file.path`
-//    branch first, which here would be permanently dead.
-const DROPPABLE_EXTENSIONS = ['md', 'markdown', 'mdown', 'mkd', 'mkdn', 'mmd', 'mermaid'];
-
+// The page owns the drag overlay only; private preload/Main own file admission.
 (function setupFileDrop() {
   // enter/leave bubble from every child element, so a plain boolean flickers
   // as the pointer crosses the document. Counting keeps the overlay stable.
@@ -3533,30 +3179,7 @@ const DROPPABLE_EXTENSIONS = ['md', 'markdown', 'mdown', 'mkd', 'mkdn', 'mmd', '
     e.preventDefault();
     clearDropState();
     if (privatelyCaptured) return;
-    if (!mayMutateRendererDocument('drop-open')) return;
 
-    const files = e.dataTransfer && e.dataTransfer.files;
-    if (!files || files.length === 0) return;
-    const file = files[0];
-
-    const ext = (file.name.split('.').pop() || '').toLowerCase();
-    if (!file.name.includes('.') || DROPPABLE_EXTENSIONS.indexOf(ext) === -1) {
-      showNotification(i18n('drop.rejected', { name: file.name }), 3000);
-      return;
-    }
-
-    let filePath = null;
-    try {
-      const { webUtils } = require('electron');
-      if (webUtils) filePath = webUtils.getPathForFile(file);
-    } catch (err) {
-      console.warn('Could not resolve the dropped file path:', err);
-    }
-    if (!filePath) return;
-
-    if (hasUnsavedWork() && !confirm(i18n('confirm.unsavedOpen'))) return;
-    cancelPendingNavigation('superseded-by-drop-open');
-    requestApprovedDocumentOpen(filePath);
   });
 
   // A drag that ends outside the window fires no drop, and on some window
@@ -5012,7 +4635,7 @@ function applyRendererSaveResultDecision(decision) {
     if (!isForCurrent) {
       showNotification(
         i18n('alert.saveFailed') +
-          `${path.basename(decision.path)}: ${decision.error}`,
+          `${getFileName(decision.path)}: ${decision.error}`,
         5000
       );
       return true;
@@ -8148,6 +7771,15 @@ function beginFileOpen(data, options = {}) {
       : null,
   };
   const openSequence = ++fileOpenSequence;
+  // The incoming tab is not active yet. Its Main-issued descriptor seeds
+  // correlation before ownership and captured Save-key lookups.
+  const descriptor = data?.document ||
+    (Number.isSafeInteger(options.ownerTabId)
+      ? window.CustomTabs?.getDocumentDescriptor(options.ownerTabId)
+      : null);
+  if (descriptor) {
+    reloadPathAliases.set(descriptor.spellingKey, descriptor.pathKey);
+  }
   if (options.adoptPathIdentity === true && openedPath) {
     if (options.deletionAdoptionApproval) {
       const approval = options.deletionAdoptionApproval;
@@ -8198,8 +7830,6 @@ function beginFileOpen(data, options = {}) {
         return null;
       }
       reloadPathAliases.set(incomingSpelling, approval.pathKey);
-    } else {
-      rebindReloadPath(openedPath);
     }
   }
   // Clear undo/redo history on new file
@@ -9011,7 +8641,7 @@ window.folia.onFileDeleted(data => {
 // Handle file not found (from recent files or links)
 window.folia.onFileNotFound(data => {
   console.log('File not found:', data.path);
-  showNotification(i18n('notif.fileNotFound') + path.basename(data.path), 4000);
+  showNotification(i18n('notif.fileNotFound') + getFileName(data.path), 4000);
 
   // Remove from recent files if it exists there
   let recentFiles = getRecentFiles();
@@ -12673,7 +12303,7 @@ try {
   exportChannel.onmessage = (event) => {
     if (!event.data) return;
     if (event.data.type === 'request-pdf-export') {
-      const currentFileName = currentFilePath ? path.basename(currentFilePath) : null;
+      const currentFileName = currentFilePath ? getFileName(currentFilePath) : null;
       const unsubscribe = window.folia.oncePdfExportResult((result) => {
         exportChannel.postMessage({ type: 'export-result', ...result });
       });
@@ -12927,9 +12557,9 @@ window.addEventListener('message', function(e) {
 // Custom overlay exports - required by custom-tabs.js and
 // custom-performance.js. Keep these after every upstream merge.
 // ============================================================
-window.fs = fs;
-window.path = path;
-window.ipcRenderer = ipcRenderer;
+
+
+
 window.renderMarkdown = renderMarkdown;
 window.viewer = viewer;
 window.markdownEditor = markdownEditor;

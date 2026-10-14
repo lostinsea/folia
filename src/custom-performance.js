@@ -39,9 +39,9 @@
     });
 
     // ---- IPC events from main process ----
-    if (window.ipcRenderer) {
+    {
       // Window minimised / restored
-      window.ipcRenderer.on('window-visibility-changed', (_event, data) => {
+      window.folia.onWindowVisibilityChanged((data) => {
         console.log('[CustomPerf] Window visibility:', data.visible);
         isWindowFocused = data.visible;
         if (!data.visible) {

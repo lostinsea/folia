@@ -971,6 +971,225 @@ Evidence is retained in `tab-authority-controls-r1`,
 Remaining browser/path helpers, production Node-off/context isolation/sandbox
 and measured responsiveness are still release gates.
 
+**Browser identity / privileged fallback cleanup — IMPLEMENTED, qualification active.**
+The independent Sol/Luna implementation reviews converge on product R2:
+Main-issued descriptor spellings/keys seed correlation before incoming-tab
+ownership, while the committed/retained checks remain the freshness authority.
+Native absolute-path lexical normalization replaces page filesystem resolution,
+without CWD/URL decoding or a general filesystem bridge. Remove unused raw
+readers and link/drop fallbacks; preserve anchor handling and total cancellation
+of synthetic/invalid links. Relative images require the admitted document base,
+and fixed boolean visibility subscription replaces raw IPC. Production Node-off,
+context isolation and sandbox are wired together. Earlier product review:
+Sol initially finds no significant defect; Luna traces
+relative native CLI paths reaching the browser unchanged while admissions are
+absolute. Sol independently confirms and retracts that initial conclusion.
+Main open ingress now resolves the case-preserving absolute logical spelling
+once, without a browser CWD or filesystem bridge. The corrected actual
+relative first-launch/event, genuine private link/drop and ordinary Save route
+is 32/32; creation/background/receipts are 55/55, 20/20 and 24/24. The complete
+reload/rollback/ordinary authenticated Save/ACK/drift route is 106/106,
+terminal controls 48/48 and source packaging 398/0. Evidence:
+`browser-isolation-controls-r1/handoff-r2-phase-complete-paused.json`.
+Both fresh final-unit reviewers find no new significant product defect.
+Current exact proofs protect the isolated flags, browser globals, lexical
+paths, typed visibility and trusted gestures. R886/R887 remain UNUSABLE,
+R891 is now individually exact PROVEN in
+`browser-isolation-controls-r1/r2-r891-final-exact-proof.log`, with renderer
+bytes restored. Corrected R914 is individually exact PROVEN in
+`browser-isolation-controls-r1/r2-r914-final-exact-proof.log`, including its
+three declared failures, constrained error evidence and passing controls;
+Main bytes are restored and Native processes exited. Historical proof evidence
+is not silently renewed. Source is restored and all owned Native processes
+exited. The observed 12,986-ms open and later distinct proof timeouts remain
+unclassified, not attributed to environment or waived.
+Real historical and isolated native-action smokes complete with live error
+sentinels; their before/after Mermaid captures were actually viewed.
+The historical 100% fixture clips labels, while current labels wrap fully and
+the centered diamond is compact at 100% and 150%. This does not assert the
+representative source is the user's unavailable original.
+Final action automation now checks the complete saved editor body, preserves
+watchdog failures and pins the source set; R918-R920 are individually exact
+PROVEN. Paired source/dependency-pinned responsiveness measurements, remaining
+affected proofs, built-asar/installed qualification and integration remain open.
+
+The original paired action phase stopped at its declared 45-minute ceiling:
+73/84 launches completed exit 0, with the exact unexecuted set retained and no
+automatic continuation. Complete small open/tab medians remain close, but the
+partial large Save median is 814 ms current versus 371 ms historical, with
+multi-second Main and renderer stalls on both sources. This is a responsiveness
+blocker/diagnostic concern, not a no-visible-effect certificate or an isolation-
+only attribution. The independently reviewed raw analysis explicitly leaves
+historical FCP/load and conditional clean-tab gates unqualified by the new
+endpoints. See `docs/PERF-AUDIT.md` and
+`native-action-comparison-r1/phase-outcome.json`. At that paired-phase stop,
+shipping source was restored/frozen, Electron had exited and separate bounded
+CPU diagnostics were prepared; no automatic missing-job phase, packaging or
+publication had begun.
+The separate historical CPU diagnostic failed before readiness, with no action
+samples; its actual reviewer executor and timestamps are retained in
+`docs/PERF-AUDIT.md` and `stall-diagnostic-r1/reference`. Candidate diagnostic
+did not run and no stall cause is inferred. The user now authorizes only this
+stream owner to execute one current-only large-Save diagnostic, starting
+profiles after actual did-finish-load and positive normal readiness. Existing
+deadlines, frozen production and the no-visible-slowdown release gate remain.
+Reviewers are explicitly read-only; they may not execute diagnostics.
+The authorized owner-only current diagnostic now completes exit 0 with
+complete disk equality, correlated accepted ACK, both post-readiness profiles
+and no Electron survivors. Save is 152.57 ms in this one profiled observation;
+it does not explain or supersede the earlier 814-ms partial paired median.
+An 11-second control-tab setup stall precedes profiling and remains
+unexplained. No justified new isolation root fix is established, and
+responsiveness remains unqualified. See `docs/PERF-AUDIT.md` and
+`native-action-comparison-r1/current-save-diagnostic-r1`. No automatic
+profiling expansion or replacement comparison is authorized.
+Independent read-only Sol/Luna review confirms the diagnostic's bounded timing
+and correlation interpretation without performance qualification. Both source
+reviews identified completion/cleanup issues in the private driver and these
+were corrected before the sole app launch; their distinct startup/correlation,
+missing-profile evidence and atomic-claim findings were also corrected.
+Both missed the Boolean-literal pre-dispatch error, which the owner corrected
+and retained honestly. The mutation screenshot for R914 was actually viewed.
+Final anchors resolve; this is anchor health, not renewed proof of other units.
+Windows packaging preparation now builds both portable and NSIS artifacts
+without publication or version change. The first default-output build failed
+at an extracted-runtime rename (`EPERM`); its log remains retained and no lock
+cause is asserted. The separate fresh-output build completes, and its exact
+artifacts are mirrored into the owned `dist` for the existing strict oracle.
+Its observed completed tool handle records exit 0 in
+`packaging-preparation-r1/build-exit-record.json`. `PACKAGING_STRICT=1` passes
+398/0; every archived product source matches the
+frozen final-source hashes. Artifacts are still unsigned preparation version
+0.4.0, not a new release. Evidence: `packaging-preparation-r1` beneath the
+continuation artifacts. Performance qualification, R886/R887 disposition,
+viewed packaged/installed smoke, final version, integration and publication
+remain open; no additional performance launch is authorized by this build.
+The subsequent coordinator autonomy decision follows the actual unavailable-
+user reply ("Work autonomously and make good decisions"), not a specific
+user option or waiver. It authorizes only this owner for one separate
+current-only tab diagnostic: normal startup/readiness, then both profilers
+before the previously unprofiled setup-control-tab action, once through its
+normal usable endpoint. Original inner guards and 300-second outer bound
+remain; no historical retry, synthetic Long Task or replacement comparison.
+Independent Sol/Luna source feedback is read-only. Isolation remains in the
+release and no-visible-slowdown remains required.
+
+The authorized tab diagnostic is complete, exactly once, owner
+22:33:23.407-22:33:30.016 -07:00, exit 0/6.609 seconds and no native survivors.
+Both profile starts precede the actual control-tab action. Its usable interval
+is 342.306 ms, Long Task 245 ms and Main-loop maximum 20.283 ms; it did not
+reproduce the earlier 11-second stall or identify a justified NEW isolation
+root fix. Independent read-only Sol/Luna interpretation agrees, with no
+disagreement. Source hashes are unchanged. The partial paired results remain
+unqualified and unexplained; performance is still a release blocker and no
+additional performance launch is dispatched.
+The subsequent authorized correctness slot proves R887 exactly (its declared
+three failures and positive controls), with byte-exact renderer restoration.
+R886 remains UNUSABLE: its after-source setup never reaches the delegated
+helper, emits reloadConflict and times out under the existing eight-second
+guard. This is not proof, a pass, or a timeout waiver. Full transcript is
+`browser-isolation-controls-r1/owner-r886-r887-final-exact-proofs.log`.
+R886 specifically removes renderer.js's predisplay refusal branch after the
+fixed native snapshot check. Its adversarial cases move the approved version,
+owner binding or independently approved source binding before display; the
+required outcome is refusal before RAM replacement/render, conflict reporting,
+quarantine and retained aliases. The unusable run expires later, before the
+after-source control receives a native delivery: no metadata/helper call or
+adversarial mutation has occurred, and its target open is still pending.
+The observer and authenticated watcher-setup source establish no justified
+fixture correction; no speculative wait, guard or expected-failure change is
+made. This is a dedicated mutation-sensitivity proof gap, not an established
+product defect. Valid R887 explicitly requires the SAME predisplay
+before-source exact native refusal as a passing control with that guard
+intact; it supplies behavioral coverage, not R886's missing sensitivity proof.
+The retained unmutated `r2-native-normal-complete.log` additionally records
+PASS for all before-version, before-owner and before-source forwarding and
+exact-refusal assertions (lines 49-50, 64-65 and 79-80), with native setup
+witnesses and a completed 106/106 footer. Its renderer hash and saved test
+source hash equal the current shipping renderer and current test; the later
+R3 diagnostics-capability change does not alter the native metadata guard.
+The unusable mutant summary does not retain its full assertion stdout:
+the harness rejects unhealthy transcripts before enumerating expected
+failures. Reaching the later after-source setup therefore does not establish
+that every intended R886 failure occurred, nor that any were missing.
+The coordinator accepts the scoped native behavior evidence and dispositions
+R886 as an open proof-harness/sensitivity follow-up, not an independently
+evidenced product/security defect or reason for further app launches now.
+The record stays UNUSABLE; the historical proof register is not complete.
+Publication remains held on actual user-visible performance acceptance.
+
+Actual private packaged smoke R1 reached a normal native document with the
+production Node-off/isolation/sandbox flags and separate userData, then its
+harness incorrectly assumed Electron 43 exposed preferences.preload. It
+failed before UI checks; its missing native exit remains null, not zero, and
+no native process remains. Logs/result/tooling are retained, not replaced.
+Its startup stderr independently exposed a real caller/registration mismatch:
+the production preload queried a newline diagnostic endpoint that Main
+intentionally registers only for development. The narrow R3 correction keeps
+that production exclusion: Main advertises availability only in development
+through existing native additionalArguments; preload explicitly returns false
+without IPC when the capability is absent. No production diagnostic endpoint
+is added. Source packaging is 402/0; R921's complete rollback is exact PROVEN
+with its declared failures and positive controls, both product files restored.
+The first packaging-oracle attempt selected the earlier popup argument array;
+its failure is retained and extraction now scopes to the actual Main window.
+The new exact record is also included in the harness's pinned self-check
+inventory; the earlier self-check failure remains retained.
+Changed Main/preload bytes are R3, not the earlier profiled/frozen R2.
+Prior R2 performance evidence is not recertified or called final-source
+acceptance. Distinct private rebuild and separately declared corrected
+ordinary packaged smoke are authorized correctness preparation, not profiler
+expansion, a replacement comparison or a performance waiver.
+The private R3 rebuild completed exit 0 and matches every archived source;
+strict actual-asar packaging is 402/0, artifacts remain unsigned 0.4.0.
+Corrected ordinary smoke R2 verifies packaged source/capability/flags,
+separate userData, no page Node or marked test control, disabled diagnostic
+query and an actually live Electron 43 console observer. Its native-open
+screenshot was viewed and is legible. It then fails before Save because its
+setup oracle inspects immediate tab.hasUnsavedChanges, while the real input
+handler updates renderer dirty state before the later tab fold. The stale
+oracle is being corrected separately; no product change is justified by it.
+Save/reload/Mermaid/menu/clipboard were not executed. Its own synthetic dirty
+document did not close inside the cleanup guard; exact owned PID/creation
+cleanup and actual 4294967295 exit are retained, not treated as a green smoke
+or assigned to the deferred hosted-shutdown cause. All R1/R2 evidence and
+tooling remain separate; no process or proof mutation remains.
+
+Ordinary smoke R3 confirms the live dirty editor, complete exact native Save
+body and settled clean baseline. Immediate Save/Exit then leaves the viewer
+stale: its saved marker never appears under the original guard. Native exit is
+0 with no forced cleanup or survivors; this is not a passed aggregate smoke.
+Exact normalized source comparison with actual pre-isolation
+`f87aa779b4d402c5c3b398880dd1c2adb313dd26` finds the complete clean-exit
+cancellation/discard block and debounced input-preview block unchanged.
+The clean exit cancels pending preview and renders only the discard branch.
+This historical Save limitation is recorded under the coordinator's deferred
+Save disposition, not fixed, hidden by a sleep, or attributed to isolation.
+Remaining independent Mermaid/menu/clipboard checks use an explicitly recorded
+normal reload precondition in a separate ordinary smoke; they cannot convert
+the retained rapid-exit failure into a pass. Evidence and exact source
+comparison are in `packaging-preparation-r1/smoke-r3` and
+`packaging-preparation-r1/rapid-exit-source-comparison.json`.
+
+Separate remaining-action smoke R4 completes normal native open, explicit
+correlated reload, two fresh diagram-bearing manual reloads at higher zoom,
+return to 100% without restart, the top-level toolbar menu and actual complete
+code copy with the original-clipboard restoration API completing. Original
+clipboard formats were not independently read back after restoration.
+Both independent read-only
+Sol/Luna reviews clear that bounded scope without disagreement. All five
+captures were viewed: the representative decision and answer labels fit their
+shapes at 100%; the higher-zoom decision is complete, but the answer extends
+below that capture's viewport and is not fully visually certified there.
+The menu capture verifies its top level, not every nested menu. Native exit is
+0 without forced cleanup or survivors. Current packaged diagnostics startup
+has no missing-handler error and the post-readiness live console sentinel
+reports no other errors. This is private unsigned unpacked 0.4.0 preparation,
+not installed verification, a passed rapid-exit case, or performance acceptance.
+The actual result and viewed limitations are retained separately under
+`packaging-preparation-r1/smoke-r4`. R886's sensitivity follow-up remains open;
+unresolved comparative responsiveness continues to hold publication.
+
 The capability-protocol unit is IMPLEMENTED / PROVEN, unintegrated: preparation, commit, completion and abandonment
 of existing disk-adoption capabilities to four fixed preload methods. It
 preserves async/sync ordering, nonce/digest/version/owner provenance and

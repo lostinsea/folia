@@ -811,7 +811,31 @@ applied. Neither review claims measured responsiveness or Node-off qualification
 This does not close browser physical helpers, privileged fallbacks, production
 security flags or performance acceptance.
 
-The **production main window still has Node enabled and isolation disabled**.
+At the completed tab-authority snapshot, the **production main window still
+had Node enabled and isolation disabled**. The dependent browser cleanup draft
+now configures Node-off/context isolation/sandbox together and removes page
+filesystem/raw IPC exports and privileged link/drop fallbacks. The initial
+creation 12/14 failure was an obsolete raw-IPC observer, not qualified evidence.
+Luna exposed a relative-command-line ingress regression; Sol independently
+agreed. Main ingress now normalizes case-preserving absolute paths once.
+Corrected actual relative CLI/event, link/drop and ordinary Save controls
+pass 32/32; creation/background/receipt routes pass 55/55, 20/20 and 24/24,
+reload/rollback/Save/ACK/drift 106/106 and terminal controls 48/48.
+The later R3 packaged diagnostics caller fix retains development-only
+diagnostic IPC; source and strict actual-asar packaging are 402/0, with all
+archived product sources matching. Fresh final-unit Sol/Luna reviews find no
+new significant product defect. R887, R891, corrected relative-ingress R914
+and R921 are exact PROVEN and restored. R886 remains an unusable dedicated
+mutation-sensitivity proof, not an established product defect or missing
+behavior coverage: the retained unmutated native controls pass every
+before-version/owner/source forwarding and exact-refusal case on the unchanged
+shipping guard. Its missing mutant assertion inventory remains unresolved.
+Actual private unpacked smoke verifies isolation and bounded UI actions, with
+viewed screenshots and recorded visual limitations; installed verification
+and user-visible responsiveness acceptance remain unperformed/unqualified.
+Earlier failures, rapid Save/Exit stale preview and unexplained delays remain
+retained. This is provisional implementation, not release readiness.
+
 Preparation, commit, completion and abandonment of disk-adoption capabilities
 now use fixed copied/validated preload methods; main's actual authority,
 digest/nonce/deletion checks and IPC ordering are unchanged. Explicit refusals

@@ -37,6 +37,39 @@
     return parts.join('/');
   }
 
+  // Lexical correlation only. Main's admitted descriptors and fresh checks
+  // supply physical identity; this never probes a path or resolves from CWD.
+  function normaliseDocumentPath(filePath) {
+    if (typeof filePath !== 'string' || !filePath || filePath.includes('\0')) {
+      return null;
+    }
+    const windows = typeof navigator !== 'undefined' &&
+      /^Win/.test(navigator.platform);
+    const separator = windows ? '\\' : '/';
+    const source = windows ? filePath.replace(/\//g, '\\') : filePath;
+    let root;
+    if (windows) {
+      const drive = /^[a-z]:\\/i.exec(source);
+      const share = /^\\\\[^\\]+\\[^\\]+(?:\\|$)/.exec(source);
+      root = drive ? drive[0] : share ? share[0].replace(/\\?$/, '\\') : null;
+    } else {
+      root = source.startsWith('/') ? '/' : null;
+    }
+    if (!root) return null;
+    const parts = [];
+    for (const part of source.slice(root.length).split(separator)) {
+      if (!part || part === '.') continue;
+      if (part === '..') parts.pop();
+      else parts.push(part);
+    }
+    let resolved = root + parts.join(separator);
+    if (parts.length && source.endsWith(separator)) resolved += separator;
+    return Object.freeze({
+      resolved,
+      spelling: windows ? resolved.toLowerCase() : resolved,
+    });
+  }
+
   /**
    * Escape special regex characters in a string
    * @param {string} string - The string to escape
@@ -63,6 +96,7 @@
     removeBOM,
     getFileName,
     getDirectory,
+    normaliseDocumentPath,
     escapeRegex,
     formatBytes
   };

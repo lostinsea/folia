@@ -1184,7 +1184,8 @@ production dialog-extra reads from renderer stat/read/stat to Main-owned
 one-use grants. It already includes browser-loader preparation, but not that
 production reader-authority migration. Its application source/package/assets
 match the historically exercised `cbe233f8c679d49cf7cd8aa89523ee6fff7d6d3f`
-reference; it has not been freshly launched here. Compare the real historical
+reference; it has now been freshly launched through the native-action harness.
+Compare the real historical
 application rather than disabling flags on the final architecture. Disclose
 later Mermaid rendering/wrapping (`8e075ad`), diagnostic logging (`d553f22`),
 menu layout and label changes: this is not isolation-only causal attribution.
@@ -1229,10 +1230,127 @@ unexplained. Low-ROI retarget/capacity permutations and the explicitly deferred
 Save-alias/shutdown/ordinary-CI campaigns are not timing certificates.
 The real `f87aa77` reference's locked-version-matched vendor bytes and tracked
 fonts are prepared, recorded with hashes/provenance and `RuntimeVerified: false`
-in `.context-viewport-evidence/performance-reference-f87aa77/runtime-preparation.json`;
-it has still not been freshly runtime-verified. Final
-Node-off source needs the agreed native-action comparison and applicable
-contracts; no overhead, threshold or environment waiver is inferred here.
+in `.context-viewport-evidence/performance-reference-f87aa77/runtime-preparation.json`.
+That stopped preparation record remains unchanged. Subsequent successful R6
+historical/current smokes are retained under
+`native-actions-fixtures-r1/small-reference-smoke-r6` and
+`native-actions-fixtures-r1/small-candidate-smoke`: actual open, multi-open,
+tab click, changed reload, editor Save/accepted Main ACK, moved scroll and
+added/repeated Mermaid at 150%, then 100%, complete with a live error sentinel
+and no remaining Electron. Their captures were actually viewed; historical
+100% clips the representative labels, whereas current labels wrap and the
+decision diamond is compact and centered. The first failed sentinel/witness
+attempts remain retained and do not establish product failures.
+The single smoke startup is 905.68 ms historical versus 1283.93 ms current.
+That observed difference is not dismissed or attributed to environment;
+smoke is not the paired p50/p95 comparison. Final source still needs the
+agreed action comparison and applicable contracts. The fixed comparison plan
+uses fresh profiles, alternating AB/BA, identical library/font bytes and
+complete source pins; no retries, trimming, overhead or threshold waiver.
+
+The original `native-action-paired-r1` command survived the reported session
+error and stopped at its declared 45-minute between-launch ceiling. It completed
+73 of 84 planned launches, all exit 0: all 21 small pairs, 15 large pairs and
+the large-16 candidate. The exact 11 unexecuted jobs remain in
+`native-action-comparison-r1/phase-outcome.json`; no continuation or replacement
+comparison was dispatched. Shipping sources remained frozen and owned Electron
+processes exited. A transient diagnostic edit to the unloaded tab test during
+two small candidate launches was byte-exactly restored and disclosed without
+excluding samples.
+
+This partial comparison does **not** qualify responsiveness. Raw small native
+open/tab-switch medians change by +2.64/+0.93 ms; changed Refresh changes by
++8.37 ms at p50 and +20.61 ms at p95. Partial large edited-body Save changes
+from 371.18 to 814.26 ms at p50 and from 749.80 to 8576.12 ms at p95
+(45 historical versus 48 current samples, repeated within launches).
+Current large Save reaches 17,605 ms with Main-loop maximum 16,836 ms;
+historical Save also reaches 12,827 ms with Main-loop maximum 12,709 ms.
+Cold Mermaid reload reaches 10,699 ms historical and 18,689 ms current,
+with renderer Long Tasks 10,509/18,471 ms and Main-loop maxima below 25 ms.
+These distinguish observed blocking channels, not their causes. No
+environmental explanation or isolation-only attribution is established.
+
+Fresh independent Sol/Luna analysis review agrees that module-entry-to-usable
+startup is not the historical FCP/load endpoint, and explicit Native Refresh
+is not conditional clean-tab switching. The analyzer reports raw deltas and
+clearly labeled borrowed-budget diagnostics, not renamed historical gates.
+It also preserves absent Long-Task instrumentation as unknown and counts only
+qualified executed jobs. Existing gates remain unchanged and unqualified by
+these distinct endpoints. Bounded separate Main/renderer CPU profiling of the
+already-observed Save/Mermaid stalls is the next diagnostic step; it is neither
+a retry nor acceptance evidence. Packaging/publication remains blocked on
+actual responsiveness qualification.
+
+The separate historical CPU diagnostic did not reach production readiness:
+2026-10-13 21:35:23.478-07:00 to 21:35:48.581-07:00, exit 1,
+no action samples and no live error-sentinel witness. It was executed by the
+Luna reviewer after an ambiguous owner instruction; this is not owner execution.
+The candidate was not launched. Retained profiles cover pre-readiness work,
+not Save or Mermaid, and do not establish environmental or profiler causation.
+Evidence remains unchanged under `stall-diagnostic-r1/reference`.
+The user subsequently authorized only the owner to execute one distinct
+current-only 1MiB Save diagnostic: normal startup and readiness before either
+profiler attaches, one actual Save through correlated accepted Main ACK and
+complete disk-body equality, then stop. Existing action guards and the
+300-second outer launch bound remain. Readiness failures retain component and
+resource state; no reference retry or acceptance claim is authorized.
+
+That owner-only current diagnostic completed 2026-10-13
+21:57:21.891-07:00 to 21:57:39.634-07:00, exit 0, with the live sentinel,
+exact complete saved disk body, matching accepted Main ACK and no remaining
+Electron. A PowerShell Boolean-literal error before any process dispatch was
+corrected and separately retained; it was not another app launch.
+The single Save was 152.57 ms command-to-usable, 116.80 ms renderer-to-usable
+and 68.67 ms Main receipt-to-accepted ACK. Selected truncate/write/fsync
+durations were 0.334/1.065/14.965 ms; inclusive outgoing dispatch was 2.01 ms.
+The Main queued-Save callback's inclusive sampled stack was about 37 ms;
+the custom-tabs `handleSaveResult` inclusive stack about 28 ms and the UTF-8
+scan sampled self-time about 7.7 ms. Inclusive stacks overlap and cannot be
+summed into a wall-time decomposition. These are sampled stack
+durations, not isolated CPU utilization or independently measured bridge,
+serialization or async-queue cost. Both profiles begin after observed
+did-finish-load and positive production readiness, and include post-ACK
+full-body verification. Evidence: `current-save-diagnostic-r1` beneath
+`native-action-comparison-r1`.
+
+This fast singleton does not reproduce or explain the paired large-Save
+median/tail. A separate setup-control-tab stall in the same launch was
+11,047.88 ms, renderer Long Task 10,661 ms and Main-loop maximum 10,670 ms,
+before CPU collection; its cause remains unknown. The current and actual
+historical source both retain truncate/write/fsync and stable post-write
+readback. No newly dominant isolation bottleneck or justified product
+correction is established by these profiles. The earlier unqualified
+comparison and user-visible stalls remain release blockers. No further
+profiling, historical retry or missing-job continuation is automatically
+dispatched; a distinct next diagnostic or changed acceptance needs an
+explicit decision.
+
+The subsequent coordinator-authorized current-only tab diagnostic executed
+once, owner 22:33:23.407-22:33:30.016 -07:00, native exit 0 with no Electron
+survivors. Both CPU collections started after normal readiness but before the
+same setup-control-tab action and stopped after its usable endpoint. The
+observed command-to-usable interval was 342.306 ms, renderer interval 341.2 ms,
+renderer Long Task 245 ms and Main-loop maximum 20.283 ms. Main sampled mostly
+idle; renderer renderMarkdownFull was 242.834 ms inclusive / 132.556 ms self.
+Marked (~47.195 ms) and sanitization (~27.18 ms) are overlapping nested sampled
+stacks, not additional elapsed costs. Selected stat calls were 0.062-0.140 ms.
+No multi-second stall or concrete costly NEW isolation implementation was
+captured, so these observations justify no product correction. Independent
+read-only Sol/Luna evidence checks agree with this limited conclusion, with no
+disagreement. Frozen product hashes match after cleanup.
+
+Evidence: `current-tab-diagnostic-r1` beneath `native-action-comparison-r1`.
+The faster singleton does not clear the original partial paired comparison
+or explain the earlier 11-second setup stall. No-visible-slowdown remains
+unqualified; no further performance launch or publication follows automatically.
+
+The first ordinary packaged correctness smoke subsequently found a genuine
+startup diagnostics caller/registration mismatch, separate from performance.
+The narrow R3 fix keeps diagnostic IPC development-only and makes the
+production preload return explicit false without invoking an absent handler.
+Main/preload source identities therefore advance beyond profiled R2. Neither
+the older partial comparison nor either fast singleton is acceptance for
+these changed final bytes; no additional performance run is dispatched.
 
 ## Measured and found already fast
 - **Custom tab sync I/O is not the current bottleneck.**
