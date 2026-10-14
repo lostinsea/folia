@@ -6451,7 +6451,7 @@ ipcMain.on("save-markdown-file", (event, data) => {
           return;
         }
         // THE LAST LOOK AT THE LIFECYCLE TOO, for the same reason and in the
-        // same place: after this line the file is truncated.
+        // same place: after this line the file is overwritten.
         if (saveScopeLifecycleExpired(saveScope)) {
           sendSaveScopeFailure(
             "lifecycle-reset",
@@ -6469,10 +6469,20 @@ ipcMain.on("save-markdown-file", (event, data) => {
         };
         activeSaveVerifications.set(saveKey, verification);
 
-        // Do not yield after the final owner/path/version check: a quarantine
-        // received between truncation and the write cannot undo lost bytes.
-        fs.ftruncateSync(opened.handle.fd, 0);
-        fs.writeFileSync(opened.handle.fd, content, "utf8");
+        // Keep the checked descriptor and no-yield boundary. Growing and
+        // same-sized saves need no truncation; truncate-to-zero stalled Main
+        // for over ten seconds in the retained Save I/O profiles.
+        const saveBytes = Buffer.from(content, "utf8");
+        let written = 0;
+        while (written < saveBytes.length) {
+          const count = fs.writeSync(opened.handle.fd, saveBytes,
+            written, saveBytes.length - written, written);
+          if (count === 0) throw new Error("Document write made no progress");
+          written += count;
+        }
+        if (saveBytes.length < handleStats.size) {
+          fs.ftruncateSync(opened.handle.fd, saveBytes.length);
+        }
         fs.fsyncSync(opened.handle.fd);
         verification.writtenVersion = diskVersionFromStats(
           await opened.handle.stat(),

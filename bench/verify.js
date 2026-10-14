@@ -1945,6 +1945,58 @@ for (const [profile, want] of Object.entries(CORPUS_DIGEST)) {
   }
 }
 
+// Exercise the real fixture reset without launching either app.
+{
+  const source = fs.readFileSync(path.join(__dirname, "native-actions.js"), "utf8");
+  const start = source.indexOf("function overwriteActionFixture(");
+  const end = source.indexOf("async function correctedSaveJourney(", start);
+  const directory = fs.mkdtempSync(path.join(require("os").tmpdir(), "folia-fixture-reset-"));
+  const file = path.join(directory, "owned.md");
+  const modes = [];
+  const context = vm.createContext({ Buffer, samples: [], performance,
+    fs: { ...fs, openSync(target, mode) {
+      modes.push(mode);
+      return fs.openSync(target, mode);
+    } } });
+  try {
+    check("native fixture reset locates the actual overwrite function", start >= 0 && end > start);
+    vm.runInContext(source.slice(start, end), context);
+    fs.writeFileSync(file, "initial");
+    const identity = fs.statSync(file);
+    const bodies = ["growing é🙂 body", "é", ""];
+    let exact = true;
+    for (const body of bodies) {
+      context.overwriteActionFixture(file, body);
+      exact = exact && fs.readFileSync(file).equals(Buffer.from(body, "utf8")) &&
+        fs.statSync(file).ino === identity.ino;
+    }
+    check("native fixture resets preserve exact UTF-8 growth shrink empty bodies and inode",
+      exact && modes.length === bodies.length && modes.every(mode => mode === "r+"));
+    const nativeOpen = context.fs.openSync;
+    const failure = Object.assign(new Error("Controlled fixture open UNKNOWN"), { code: "UNKNOWN" });
+    context.fs.openSync = () => { throw failure; };
+    let caught;
+    try { context.overwriteActionFixture(file, "unwritten"); }
+    catch (error) { caught = error; }
+    check("native fixture reset preserves an actual open failure and its failed setup interval",
+      caught === failure && context.samples.at(-1).status === "failed" &&
+      context.samples.at(-1).error.includes(failure.message) &&
+      context.samples.at(-1).usableMs >= 0 && fs.readFileSync(file).length === 0);
+    context.fs.openSync = nativeOpen;
+    context.fs.writeSync = () => 0;
+    let closed = false;
+    context.fs.closeSync = fd => { fs.closeSync(fd); closed = true; };
+    caught = null;
+    try { context.overwriteActionFixture(file, "unwritten"); }
+    catch (error) { caught = error; }
+    check("native fixture reset rejects zero progress and closes its real descriptor",
+      caught?.message === "Fixture write made no progress" && closed &&
+      context.samples.at(-1).status === "failed");
+  } finally {
+    fs.rmSync(directory, { recursive: true });
+  }
+}
+
 // Execute the native action runner's real integrity functions without launching Electron.
 {
   const source = fs.readFileSync(path.join(__dirname, "native-actions.js"), "utf8");
@@ -2002,6 +2054,73 @@ for (const [profile, want] of Object.entries(CORPUS_DIGEST)) {
   check("native watchdog preserves the first failure during witness collection",
     persisted.status === "failed" && persisted.error.includes("original native rejection") &&
     !persisted.error.includes("later watchdog deadline"));
+
+  const observeDraft = source.slice(source.indexOf("    async observeDraft()"),
+    source.indexOf("    async tail()")).trim().replace(/^async observeDraft/, "async function observeDraft")
+    .replace(/,$/, "");
+  function draftControl(settled) {
+    const draft = vm.createContext({
+      state: { previewPromiseAt: settled ? 1 : null, historyAt: settled ? 1 : null,
+        generation: 2, error: null, visibleAt: null },
+      renderGeneration: 2, editor: { value: "oracle draft" }, expected: "oracle draft",
+      marker: "oracle draft", historySnapshot: () => ({ undo: ["oracle draft"] }),
+      document: { getElementById: () => ({ textContent: "oracle draft",
+        classList: { contains: () => false } }) },
+      performance: { now: () => 1 }, frameCount: 0, timerDelay: null,
+      cleared: 0, outcome: null,
+    }, { microtaskMode: "afterEvaluate" });
+    vm.runInContext(`
+      function requestAnimationFrame(callback) { frameCount++; ${settled ? "callback();" : ""} }
+      function setTimeout(callback, delay) { timerCallback = callback; timerDelay = delay; return 1; }
+      function clearTimeout(id) { if (id === 1) cleared++; }
+      ${observeDraft}
+      observeDraft().then(() => outcome = "settled", error => outcome = error.message);
+    `, draft);
+    return draft;
+  }
+  const frozenFrames = draftControl(false);
+  check("native natural-draft timeout control really has an unreturned animation frame",
+    frozenFrames.frameCount === 1 && frozenFrames.outcome === null && frozenFrames.timerDelay === 30000);
+  vm.runInContext("timerCallback()", frozenFrames);
+  check("native natural-draft deadline rejects even when animation frames stop",
+    frozenFrames.outcome === "Natural exact-draft preview/history did not complete" &&
+    frozenFrames.cleared === 1);
+  const completedDraft = draftControl(true);
+  check("native natural-draft control retains exact two-frame settlement and clears its deadline",
+    completedDraft.outcome === "settled" && completedDraft.frameCount === 2 &&
+    completedDraft.state.visibleAt === 1 && completedDraft.cleared === 1);
+
+  const visibleWindow = source.slice(source.indexOf("async function visibleActionWindow("),
+    source.indexOf("async function ready("));
+  function visibilityControl(responds) {
+    const actor = vm.createContext({
+      outcome: null, restored: 0, shown: 0, focused: 0, cleared: 0, minimized: true,
+      performance: { now: () => 1 },
+    }, { microtaskMode: "afterEvaluate" });
+    vm.runInContext(`
+      const window = {
+        isMinimized: () => minimized, restore() { minimized = false; restored++; },
+        show() { shown++; }, focus() { focused++; }, isVisible: () => shown > 0,
+        isFocused: () => focused > 0
+      };
+      const exec = () => ${responds ? "Promise.resolve(shown > 0 && focused > 0)" : "new Promise(() => {})"};
+      function setTimeout(callback, delay) { timerCallback = callback; timerDelay = delay; return 1; }
+      function clearTimeout(id) { if (id === 1) cleared++; }
+      const sleep = () => Promise.resolve();
+      ${visibleWindow}
+      visibleActionWindow().then(result => outcome = result, error => outcome = error.message);
+    `, actor);
+    return actor;
+  }
+  const visibleActor = visibilityControl(true);
+  check("native visible-window precondition uses normal restore/show/focus before a visible response",
+    visibleActor.restored === 1 && visibleActor.shown === 1 && visibleActor.focused === 1 &&
+    visibleActor.outcome?.visible && !visibleActor.outcome.minimized && visibleActor.cleared === 1);
+  const unresponsiveActor = visibilityControl(false);
+  vm.runInContext("timerCallback()", unresponsiveActor);
+  check("native visible-window precondition fails within its own bound when renderer does not answer",
+    unresponsiveActor.timerDelay === 5000 && unresponsiveActor.cleared === 1 &&
+    unresponsiveActor.outcome === "Normal visible-window precondition did not settle");
 
   const appRoot = path.join(__dirname, "oracle-source");
   const main = path.join(appRoot, "src", "main.js");

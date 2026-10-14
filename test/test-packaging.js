@@ -3676,6 +3676,74 @@ async function main() {
     );
   }
 
+  {
+    const main = stripJsComments(fs.readFileSync(path.join(SRC, "main.js"), "utf8"));
+    const start = main.indexOf("activeSaveVerifications.set(saveKey, verification);");
+    const end = main.indexOf("verification.writtenVersion =", start);
+    const body = main.slice(start + "activeSaveVerifications.set(saveKey, verification);".length, end);
+    function writeControl(initial, content, noProgress = false) {
+      let bytes = Buffer.from(initial, "utf8");
+      const truncations = [];
+      let synced = 0;
+      let writes = 0;
+      let error = null;
+      const fd = 17;
+      const fakeFs = {
+        writeSync(actualFd, input, offset, length, position) {
+          if (actualFd !== fd) throw new Error("Wrong descriptor");
+          writes++;
+          if (noProgress) return 0;
+          const count = Math.min(2, length);
+          const next = Buffer.alloc(Math.max(bytes.length, position + count));
+          bytes.copy(next);
+          input.copy(next, position, offset, offset + count);
+          bytes = next;
+          return count;
+        },
+        ftruncateSync(actualFd, length) {
+          if (actualFd !== fd) throw new Error("Wrong descriptor");
+          truncations.push(length);
+          const next = Buffer.alloc(length);
+          bytes.copy(next);
+          bytes = next;
+        },
+        writeFileSync(actualFd, text) {
+          if (actualFd !== fd) throw new Error("Wrong descriptor");
+          bytes = Buffer.from(text, "utf8");
+        },
+        fsyncSync(actualFd) {
+          if (actualFd !== fd) throw new Error("Wrong descriptor");
+          synced++;
+        },
+      };
+      try {
+        require("vm").runInNewContext(body, { fs: fakeFs, Buffer, content,
+          opened: { handle: { fd } }, handleStats: { size: Buffer.byteLength(initial, "utf8") } },
+        { timeout: 1000 });
+      } catch (failure) { error = failure.message; }
+      return { exact: bytes.equals(Buffer.from(content, "utf8")), truncations, synced, writes, error };
+    }
+    check("Save write control extracts the actual guarded no-yield descriptor writer",
+      start >= 0 && end > start && body.includes("fs.fsyncSync") && !/\bawait\b/.test(body));
+    const grown = writeControl("old", "longer é🙂");
+    check("growing Save preserves exact UTF-8 bytes and durability", grown.exact && grown.synced === 1 && !grown.error);
+    check("growing Save does not truncate its checked descriptor", grown.truncations.length === 0);
+    const equal = writeControl("abc", "xyz");
+    check("same-sized Save does not truncate its checked descriptor",
+      equal.exact && equal.synced === 1 && !equal.error && equal.truncations.length === 0);
+    const shrunk = writeControl("old trailing bytes", "é");
+    check("shrinking Save removes the old tail using UTF-8 byte length",
+      shrunk.exact && !shrunk.error && shrunk.synced === 1 &&
+      shrunk.truncations.length === 1);
+    const empty = writeControl("old", "");
+    check("empty Save truncates the checked descriptor and remains durable",
+      empty.exact && !empty.error && empty.synced === 1 &&
+      empty.truncations.length === 1 && empty.truncations[0] === 0);
+    const stalled = writeControl("old", "new body", true);
+    check("Save rejects a zero-progress descriptor write without false durability",
+      stalled.writes === 1 && stalled.error === "Document write made no progress" && stalled.synced === 0);
+  }
+
   // F21: DevTools is a Node REPL while the renderer runs nodeIntegration: true,
   // and main.js bound it to F12 in EVERY build with no gate at all. The
   // accelerator half of that surface is asserted behaviourally by

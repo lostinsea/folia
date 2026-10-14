@@ -1454,6 +1454,93 @@ established. Actual no-visible-slowdown acceptance remains unmet.
   relevant. No-visible-slowdown acceptance remains unmet; publication stays
   held. Further comparative execution is not automatic.
 
+## 2026-10-14 Save syscall diagnosis and guarded writer correction
+
+- The user authorized end-to-end completion, including necessary tooling
+  repairs, real product fixes and their revalidation. Earlier no-retry stops
+  do not override that direction; isolation and no-visible-slowdown still apply.
+- Supervisor checkpoints now use exclusive immutable files. Actual app
+  outcomes and reporting failures remain separate. Local controls exercise
+  the real parsing/checkpoint handlers; focused Sol/Luna feedback converged.
+- Corrected R2 stopped at a natural-draft watchdog. A separate candidate
+  diagnostic observed a hidden document after one successful normal Save.
+  The actor now has an independent natural-draft deadline and the same normal
+  visible-window precondition in both apps. Neither correction weakens the
+  exact preview/history/layout predicates or Save deadline.
+- Corrected R3 completed both modes on both actual revisions in one matched
+  pair, then failed on the next candidate's session-manifest rename: `EPERM`.
+  Its 229.54-second outcome leaves 39 jobs unexecuted. The reference's settled
+  median was 11,468.29 ms; candidate partial Saves reached 12,654.16 and
+  16,527.39 ms. One skewed pair cannot qualify responsiveness or isolate
+  architectural overhead. The manifest holder/cause remains unknown.
+- A separate, bounded candidate I/O/CPU diagnostic completed six normal Saves.
+  `ftruncateSync` took 10,627.56 and 12,860.50 ms; corresponding Saves took
+  10,905.57 and 13,093.05 ms. A setup `stdout.write` took 10,750.19 ms.
+  These measured calls blocked Main; their underlying OS causes are unknown.
+  `fsyncSync` reached 14.26 ms and async manifest rename 27.06 ms in that
+  diagnostic, not proof that either is always fast. The earlier instrumentation
+  attempt lost `realpathSync.native` and failed before open; it remains separate.
+- Save now writes UTF-8 bytes at explicit descriptor offsets, handles partial
+  writes, rejects zero progress and truncates only when the new body is shorter.
+  It retains the same checked descriptor/inode, final owner/path/version/lifecycle
+  and deletion guards, no-yield critical section, fsync and stable readback.
+  This removes unnecessary truncate-to-zero calls; it does not make all writes
+  asynchronous or claim multi-writer atomicity.
+- Actual-code controls cover growth, equal size, UTF-8 shrink, empty bodies,
+  partial writes and no progress. Source packaging is 414/0. R922 is individually
+  exact PROVEN, with its three intended failures and semantic controls passing;
+  Main was restored byte-for-byte. Sol caught an overly specific shrink control;
+  the corrected control still requires exact bytes and durability. Both
+  independent final reviews found no product blocker.
+- A twelve-write local probe preserved all exact bodies, but did not reproduce
+  a long truncate stall. It supplies no quantified speedup. Post-fix comparison
+  R4 freezes Main `25DDE236FF113CC398E9410473C86E4D50D4C301DB47BBD7C4C6B18C86153E06`,
+  the original 21-pair large-only schedule and unchanged deadlines. R4 stopped
+  after 109.99 seconds: reference completed, then the harness's fixture reset
+  failed on truncate-on-open with `UNKNOWN`, after three accepted candidate
+  Saves. Zero full pairs and 40 unexecuted jobs remain; this is not a Save failure.
+- The corrected fixture reset uses an existing `r+` descriptor in both arms,
+  positioned exact UTF-8 writes, conditional shrink truncation and fsync.
+  Its inode and complete successful/failed setup intervals are retained;
+  errors are not retried or swallowed. Actual helper controls pass with the
+  corpus at 332/332; independent Sol/Luna feedback found no blocker.
+- R5 stopped after 1,393.67 seconds: 22 launches, 21 normal validated launches,
+  10 complete matched pairs and 20 unexecuted jobs. Both actual apps exercised
+  both normal Save modes. The next candidate's `setup-primary-tab` timed out
+  with a hidden-document witness, after its initial visible precondition.
+  The same launch had a 13,931.73 ms open interval and 13,547.60 ms Main-loop
+  maximum. The failure and pause causes are not attributed to the environment.
+- All observed R5 settled-Save medians are 187.17 -> 217.16 ms; immediate
+  medians are 354.94 -> 406.37 ms. Median completed-pair deltas are +29.96 and
+  +53.81 ms; eight of ten pairs are slower in each mode. Preserve the whole
+  distribution and failures: incomplete/unbalanced data is not acceptance,
+  and removing unnecessary truncation has not cleared responsiveness.
+- The PC-restart pause preserved all source/evidence. Resume verified HEAD
+  and all seven dirty identities. A separate two-launch, ten-minute diagnostic
+  uses the existing CPU/I/O tooling, actual synchronous metadata-handler spans
+  and visibility events. It is not a replacement cohort or performance gate.
+- That diagnostic completed both declared journeys in 67.38 seconds, with six
+  accepted Saves per app and no owned app survivor. Both documents stayed
+  observed visible. Its `qualified` flags cover exact source/runtime and native
+  action controls only, not comparative or performance acceptance.
+- Current metadata guards ran 98 times during open/reload/setup, reaching
+  4.98 ms per callback; none ran within the six measured Save windows. This
+  does not measure full synchronous IPC wait/transport cost or prove guards
+  always fast. Current fsync reached 17.87 ms and manifest rename 7.13 ms.
+- Profiled settled-Save medians were 209.55 -> 216.60 ms; immediate medians
+  were 346.37 -> 332.60 ms. These two singleton journeys do not erase R5's
+  worse paired medians or qualify responsiveness. No multi-second stall was
+  reproduced; its earlier underlying causes remain unresolved. No guard,
+  logging policy, deadline or durability change follows from these samples.
+- Evidence: `.context-viewport-evidence/corrected-large-save-comparison-r2/`,
+  `natural-draft-diagnostic-r1/`, `corrected-large-save-comparison-r3/`,
+  `save-io-diagnostic-r1/`, `save-io-diagnostic-r2/`,
+  `truncate-order-diagnostic-r1/`, `corrected-large-save-comparison-r4/`,
+  `corrected-large-save-comparison-r5/` and `save-postrestart-diagnostic-r2/`.
+  R1's pre-runtime staging/instrumentation defects remain separately retained.
+  The prior private 407-check archive matches the older `668d17f3` Main,
+  not this writer. No final-version package, integration or release is claimed.
+
 ## Measured and found already fast
 - **Custom tab sync I/O is not the current bottleneck.**
   - `custom-tabs.js:69-111,640`

@@ -1190,6 +1190,37 @@ The actual result and viewed limitations are retained separately under
 `packaging-preparation-r1/smoke-r4`. R886's sensitivity follow-up remains open;
 unresolved comparative responsiveness continues to hold publication.
 
+**2026-10-14 end-to-end resumption — measured Save fix implemented, revalidation ACTIVE.**
+
+- The user explicitly authorized continued blocker repair, verification and
+  eventual integration/release. No further generic Continue is required.
+  No-visible-slowdown and isolation remain mandatory; the existing P2,
+  F03/kbscroll and R886 dispositions are unchanged.
+- Corrected R3 obtained one matched pair, then a real manifest-rename `EPERM`;
+  no comparative acceptance follows. The bounded I/O diagnostic located
+  multi-second pauses inside truncate-to-zero and stdout writes. Underlying
+  OS causes and the earlier rename failure remain unresolved.
+- The reviewed Save writer retains every final guard, no-yield boundary,
+  descriptor/inode, UTF-8 bytes, fsync and verified readback. It avoids
+  unnecessary truncation for equal-sized/growing documents and rejects
+  zero-progress writes. Source controls are 414/0; R922 is individually exact
+  PROVEN and Main restored. Independent latest Sol/high and Luna/high feedback
+  converged after correcting one proof-control mismatch.
+- Source-frozen R4 stopped on a harness fixture reset, not an app Save;
+  R5 retained ten complete pairs before a hidden-document setup timeout.
+  Both remain incomplete, with positive median Save deltas, not passed.
+  The user resumed after PC restart; preserved source identities match.
+  The bounded existing-tool diagnostic completed both normal journeys:
+  current metadata callbacks reached 4.98 ms during open/reload/setup, with
+  none in the measured Save windows. Neither its faster immediate singleton
+  nor its absent long stall clears R5's positive paired medians. Retained
+  post-ACK interval attribution continues; no guard or deadline was weakened.
+  This is not selected-sample replacement or a performance certificate. The prior private
+  407-check package is now older than Main. Final stable-source package/usability,
+  performance acceptance and legitimate integration/publication remain open.
+- Evidence and exact limitations: `docs/PERF-AUDIT.md`, section
+  "2026-10-14 Save syscall diagnosis and guarded writer correction".
+
 The capability-protocol unit is IMPLEMENTED / PROVEN, unintegrated: preparation, commit, completion and abandonment
 of existing disk-adoption capabilities to four fixed preload methods. It
 preserves async/sync ordering, nonce/digest/version/owner provenance and

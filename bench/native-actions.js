@@ -186,6 +186,33 @@ const exec = (fn, argument) => window.webContents.executeJavaScript(
   `(${fn.toString()})(${JSON.stringify(argument)})`,
 );
 
+async function visibleActionWindow() {
+  const startedAt = performance.now();
+  if (window.isMinimized()) window.restore();
+  window.show();
+  window.focus();
+  let timer;
+  try {
+    await Promise.race([
+      (async () => {
+        while (performance.now() - startedAt < 5000) {
+          if (await exec(() => document.visibilityState === "visible")) {
+            return;
+          }
+          await sleep(20);
+        }
+        throw new Error("Normal visible-window precondition did not settle");
+      })(),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(
+          "Normal visible-window precondition did not settle")), 5000);
+      }),
+    ]);
+    return { elapsedMs: performance.now() - startedAt, visible: window.isVisible(),
+      minimized: window.isMinimized(), focused: window.isFocused() };
+  } finally { clearTimeout(timer); }
+}
+
 async function ready() {
   for (let attempt = 0; attempt < 600; attempt++) {
     window = BrowserWindow.getAllWindows().find(candidate => !candidate.isDestroyed());
@@ -194,6 +221,7 @@ async function ready() {
         typeof window.CustomTabs?.getTabs === "function" &&
         typeof window.completeFileOpen === "function" &&
         !document.getElementById("loadingScreen").classList.contains("active"))) {
+      if (job.correctedSaveComparison) await visibleActionWindow();
       await exec(() => new Promise(resolve =>
         requestAnimationFrame(() => requestAnimationFrame(resolve))));
       return;
@@ -208,17 +236,21 @@ async function measure(kind, input, action, saveMode = null) {
     outboundIpc: {}, requestContentCodeUnits: 0, replyContentCodeUnits: 0,
     eventContentCodeUnits: 0, sendDispatchMs: 0, saveMode };
   currentSample = sample;
-  const commandStartedAt = performance.now();
+  let commandStartedAt = performance.now();
   sample.commandStartedAt = commandStartedAt;
-  eventLoopDelay.reset();
   let ackTimer;
-  const saveAck = kind === "save" ? new Promise((resolve, reject) => {
-    sample.resolveSaveAck = resolve;
-    ackTimer = setTimeout(() => reject(new Error("Main Save acknowledgement did not settle")), 30000);
-  }) : null;
-  // The acknowledgement may time out while the renderer witness is pending.
-  if (saveAck) saveAck.catch(() => {});
+  let saveAck;
   try {
+    if (job.correctedSaveComparison) sample.visibilitySetup = await visibleActionWindow();
+    commandStartedAt = performance.now();
+    sample.commandStartedAt = commandStartedAt;
+    eventLoopDelay.reset();
+    saveAck = kind === "save" ? new Promise((resolve, reject) => {
+      sample.resolveSaveAck = resolve;
+      ackTimer = setTimeout(() => reject(new Error("Main Save acknowledgement did not settle")), 30000);
+    }) : null;
+    // The acknowledgement may time out while the renderer witness is pending.
+    if (saveAck) saveAck.catch(() => {});
     const result = await exec(async ({ kind, file, heading, action, batchFiles, expectedLength, saveMode }) => {
       const tabs = window.CustomTabs;
       let timer;
@@ -367,6 +399,7 @@ async function saveSetup(kind, input, fn, argument) {
   currentSample = sample;
   eventLoopDelay.reset();
   try {
+    sample.visibilitySetup = await visibleActionWindow();
     Object.assign(sample, await exec(fn, argument));
     sample.usableMs = performance.now() - sample.commandStartedAt;
     sample.mainEventLoopDelayMs = { max: eventLoopDelay.max / 1e6,
@@ -466,15 +499,26 @@ async function armSaveWitness({ file, baselineDigest, expectedDigest, append }) 
         historySnapshot().undo.at(-1) === expected &&
         document.getElementById("viewer").textContent.includes(marker) &&
         !document.getElementById("loadingScreen").classList.contains("active");
-      while (performance.now() < until) {
-        if (state.error) throw new Error(state.error);
-        if (valid()) {
-          await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-          if (valid()) { state.visibleAt = performance.now(); return; }
-        }
-        await new Promise(resolve => requestAnimationFrame(resolve));
-      }
-      throw new Error("Natural exact-draft preview/history did not complete");
+      let timer;
+      try {
+        await Promise.race([
+          (async () => {
+            while (performance.now() < until) {
+              if (state.error) throw new Error(state.error);
+              if (valid()) {
+                await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+                if (valid()) { state.visibleAt = performance.now(); return; }
+              }
+              await new Promise(resolve => requestAnimationFrame(resolve));
+            }
+            throw new Error("Natural exact-draft preview/history did not complete");
+          })(),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(
+              "Natural exact-draft preview/history did not complete")), 30000);
+          }),
+        ]);
+      } finally { clearTimeout(timer); }
     },
     async tail() {
       await this.draftSettled();
@@ -527,6 +571,36 @@ async function armSaveWitness({ file, baselineDigest, expectedDigest, append }) 
       ? tabs.getActiveDocumentIdentity(file, window.getReloadRequestSession()) : null };
 }
 
+function overwriteActionFixture(file, content) {
+  // Reset an existing fixture without truncate-on-open; that open failed with
+  // UNKNOWN after an accepted Save. Retain its inode and surface every failure.
+  const bytes = Buffer.from(content, "utf8");
+  const sample = { kind: "setup-fixture-write", file, commandStartedAt: performance.now() };
+  samples.push(sample);
+  try {
+    const fd = fs.openSync(file, "r+");
+    try {
+      const oldSize = fs.fstatSync(fd).size;
+      let offset = 0;
+      while (offset < bytes.length) {
+        const count = fs.writeSync(fd, bytes, offset, bytes.length - offset, offset);
+        if (!count) throw new Error("Fixture write made no progress");
+        offset += count;
+      }
+      if (bytes.length < oldSize) fs.ftruncateSync(fd, bytes.length);
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (error) {
+    sample.status = "failed";
+    sample.error = String(error.stack || error);
+    throw error;
+  } finally {
+    sample.usableMs = performance.now() - sample.commandStartedAt;
+  }
+}
+
 async function correctedSaveJourney(primary, control) {
   const append = "\nNative action Save settlement.\n";
   for (let repetition = 0; repetition < job.reps; repetition++) {
@@ -539,7 +613,7 @@ async function correctedSaveJourney(primary, control) {
       await measure("setup-primary-tab", primary, "tab");
       const changed = primary.content.replace("# " + primary.heading,
         "# " + primary.heading + " revision " + repetition);
-      fs.writeFileSync(primary.file, changed);
+      overwriteActionFixture(primary.file, changed);
       const input = { ...primary, content: changed, heading: primary.heading + " revision " + repetition };
       await measure("reload", input, "reload");
       await measure("unchanged-reload", input, "reload");
@@ -582,7 +656,7 @@ async function correctedSaveJourney(primary, control) {
         window.__nativeSaveWitness.restore();
         document.getElementById("exitEditBtn").click();
       });
-      fs.writeFileSync(primary.file, primary.content);
+      overwriteActionFixture(primary.file, primary.content);
       await measure("setup-reset-reload", primary, "reload");
     }
   }
@@ -847,6 +921,11 @@ app.whenReady().then(async () => {
     const unavailable = { unavailable: true, reason: "Renderer did not return retained failure witnesses" };
     const capture = exec(() => ({
       historicalLayoutWrites: window.__nativeLayoutWrites || null,
+      documentVisibility: document.visibilityState,
+      editMode: isEditMode,
+      renderGeneration,
+      loading: document.getElementById("loadingScreen").classList.contains("active"),
+      draftMarkerVisible: document.getElementById("viewer").textContent.includes("Native action Save settlement."),
       naturalWitness: window.__nativeSaveWitness
         ? Object.fromEntries(Object.entries(window.__nativeSaveWitness.state)
           .filter(([key]) => key !== "draftPromise")) : null,

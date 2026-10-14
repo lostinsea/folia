@@ -21939,6 +21939,37 @@ const REVERTS = [
           ],
           requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 2,
         },
+        {
+          id: "R922", what: "truncate every checked Save descriptor before writing the complete draft",
+          file: MAIN,
+          from: [
+            '        const saveBytes = Buffer.from(content, "utf8");',
+            '        let written = 0;',
+            '        while (written < saveBytes.length) {',
+            '          const count = fs.writeSync(opened.handle.fd, saveBytes,',
+            '            written, saveBytes.length - written, written);',
+            '          if (count === 0) throw new Error("Document write made no progress");',
+            '          written += count;',
+            '        }',
+            '        if (saveBytes.length < handleStats.size) {',
+            '          fs.ftruncateSync(opened.handle.fd, saveBytes.length);',
+            '        }',
+          ].join("\n"),
+          to: '        fs.ftruncateSync(opened.handle.fd, 0);\n        fs.writeFileSync(opened.handle.fd, content, "utf8");',
+          suite: "test:packaging",
+          expect: [
+            /^growing Save does not truncate its checked descriptor$/,
+            /^same-sized Save does not truncate its checked descriptor$/,
+            /^Save rejects a zero-progress descriptor write without false durability$/,
+          ],
+          mustPass: [
+            /^Save write control extracts the actual guarded no-yield descriptor writer$/,
+            /^growing Save preserves exact UTF-8 bytes and durability$/,
+            /^shrinking Save removes the old tail using UTF-8 byte length$/,
+            /^empty Save truncates the checked descriptor and remains durable$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 3,
+        },
       ];
 
 // These are release exceptions, not passing or withdrawn proofs. An explicit
@@ -23018,7 +23049,7 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R467,R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760,R840,R841,R845,R849,R853,R858,R860,R871,R876,R877,R878,R879,R880,R881,R882,R883,R884,R885,R886,R887,R888,R889,R890,R891,R892,R893,R894,R895,R896,R897,R898,R899,R900,R901,R902,R903,R904,R905,R906,R907,R908,R909,R910,R911,R912,R913,R914,R915,R916,R917,R918,R919,R920,R921";
+      .join(",") === "R467,R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760,R840,R841,R845,R849,R853,R858,R860,R871,R876,R877,R878,R879,R880,R881,R882,R883,R884,R885,R886,R887,R888,R889,R890,R891,R892,R893,R894,R895,R896,R897,R898,R899,R900,R901,R902,R903,R904,R905,R906,R907,R908,R909,R910,R911,R912,R913,R914,R915,R916,R917,R918,R919,R920,R921,R922";
   const toolbarAllowanceIsRecordScoped =
     REVERTS.filter((r) =>
       exactShutdownTailForMutation(r) === TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL,
