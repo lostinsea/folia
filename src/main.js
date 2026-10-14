@@ -1285,6 +1285,7 @@ function rememberDocumentOwner(
       admission.snapshotVersion = normaliseDiskVersion(diskVersion);
       admission.descriptor = Object.freeze({
         ...admission.descriptor, readTarget, pathKey: owner.pathKey,
+        diskVersion: admission.snapshotVersion,
       });
     }
   }
@@ -2865,6 +2866,8 @@ function pinnedAdoptionAdmissionReferences() {
 }
 
 function issueDocumentAdmission(target, filePath, diskVersion, physical, provenance, entryId = null) {
+  const snapshotVersion = normaliseDiskVersion(diskVersion);
+  if (!snapshotVersion) throw new Error("Document admission requires a verified disk version");
   pruneAdmissionScopeFences();
   sweepRevokedAdmissionOwners();
   const pinnedReferences = pinnedAdoptionAdmissionReferences();
@@ -2941,12 +2944,14 @@ function issueDocumentAdmission(target, filePath, diskVersion, physical, provena
     spellingKey: filePathSpellingKey(entry.filePath),
     readTarget: physical.readTarget, pathKey: physical.pathKey,
     documentUrl: pathToFileURL(entry.filePath).href,
+    // This read receipt must not advance with watcher-only metadata.
+    diskVersion: snapshotVersion,
   });
   documentAdmissions.set(ref, {
     sender: target, frameTreeNodeId: frame.frameTreeNodeId,
     rendererGeneration: approvalRendererGeneration,
     pageSession: approvalRendererPageSession, descriptor, provenance: entry.provenance,
-    snapshotVersion: diskVersion, tabId: null, documentGeneration: null,
+    snapshotVersion, tabId: null, documentGeneration: null,
     openEpoch: fileOpenDeliveryEpoch,
     openTicket: crypto.randomBytes(32).toString("hex"),
     ticketUsed: false,
@@ -5713,7 +5718,10 @@ ipcMain.handle("read-open-ticket-snapshot", async (event, data) => {
     if (saveQueues.get(key) || revision !== targetRevision.revision) continue;
     record.snapshotVersion = snapshot.diskVersion;
     return { content: snapshot.content, modifiedTime: snapshot.modifiedTime,
-      diskVersion: snapshot.diskVersion, document: record.descriptor };
+      diskVersion: snapshot.diskVersion,
+      document: Object.freeze({
+        ...record.descriptor, diskVersion: snapshot.diskVersion,
+      }) };
   }
   return null;
   } finally {

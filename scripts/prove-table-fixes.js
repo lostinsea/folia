@@ -137,6 +137,36 @@ const TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL = Object.freeze([
   "Shutdown approval renderer unusable: webContents destroyed",
 ]);
 const VIRTUAL_SUITES = Object.freeze({
+  "test:sec08-tab-authority-terminal-evidence": Object.freeze({
+    npmScript: "test:tabs",
+    environment: Object.freeze({
+      SEC08_OWNED_METADATA_FOCUSED_HARNESS: "1",
+      SEC08_RENDERER_BOUNDARIES_HARNESS: "1",
+      SEC08_RENDERER_BOUNDARIES_UNIT: "reload",
+      SEC08_TAB_AUTHORITY_TERMINAL_HARNESS: "1",
+    }),
+  }),
+  "test:sec08-tab-authority-receipt-evidence": Object.freeze({
+    npmScript: "test:tabs",
+    environment: Object.freeze({
+      SEC08_OWNED_METADATA_FOCUSED_HARNESS: "1",
+      SEC08_TAB_AUTHORITY_RECEIPT_HARNESS: "1",
+    }),
+  }),
+  "test:sec08-tab-authority-background-evidence": Object.freeze({
+    npmScript: "test:tabs",
+    environment: Object.freeze({
+      SEC08_OWNED_METADATA_FOCUSED_HARNESS: "1",
+      SEC08_TAB_AUTHORITY_BACKGROUND_HARNESS: "1",
+    }),
+  }),
+  "test:sec08-tab-authority-create-evidence": Object.freeze({
+    npmScript: "test:tabs",
+    environment: Object.freeze({
+      SEC08_OWNED_METADATA_FOCUSED_HARNESS: "1",
+      SEC08_TAB_AUTHORITY_CREATE_HARNESS: "1",
+    }),
+  }),
   "test:sec08-renderer-open-evidence": Object.freeze({
     npmScript: "test:tabs",
     environment: Object.freeze({
@@ -20782,11 +20812,16 @@ const REVERTS = [
           file: MAIN,
           from: '    record.snapshotVersion = snapshot.diskVersion;\n' +
             '    return { content: snapshot.content, modifiedTime: snapshot.modifiedTime,\n' +
-            '      diskVersion: snapshot.diskVersion, document: record.descriptor };',
+            '      diskVersion: snapshot.diskVersion,\n' +
+            '      document: Object.freeze({\n' +
+            '        ...record.descriptor, diskVersion: snapshot.diskVersion,\n' +
+            '      }) };',
           to: '    record.snapshotVersion = snapshot.diskVersion;\n' +
             '    return { content: snapshot.content, modifiedTime: snapshot.modifiedTime,\n' +
             '      diskVersion: { ...snapshot.diskVersion, ctimeMs: snapshot.diskVersion.ctimeMs + 1000 },\n' +
-            '      document: record.descriptor };',
+            '      document: Object.freeze({\n' +
+            '        ...record.descriptor, diskVersion: snapshot.diskVersion,\n' +
+            '      }) };',
           suite: "test:sec08-admission-consumers-evidence",
           expect: [
             /^SEC-08 pending-Save ticket response itself contains the fresh native bytes descriptor and consistent metadata$/,
@@ -21462,6 +21497,237 @@ const REVERTS = [
             /^owned metadata terminal fixture awaits the actual destroyed producer and checks Main before its definitive footer$/,
           ],
           requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R895",
+          what: "discard the native body receipt when optional creation omits its explicit version",
+          file: TABS,
+          from: "    const suppliedVersion = opts.diskVersion == null\n" +
+            "      ? opts.verifiedDiskAdoption?.version || opts.documentAdmission?.diskVersion\n" +
+            "      : opts.diskVersion;",
+          to: "    const suppliedVersion = opts.diskVersion;",
+          suite: "test:sec08-tab-authority-create-evidence",
+          expect: [
+            /^SEC-08 tab authority create omit-version derives optional metadata from the native attested snapshot and activates the same admitted tab$/,
+            /^SEC-08 tab authority create null-version derives optional metadata from the native attested snapshot and activates the same admitted tab$/,
+            /^SEC-08 tab authority create ticket-reread derives optional metadata from the native attested snapshot and activates the same admitted tab$/,
+          ],
+          mustPass: [
+            /^SEC-08 tab authority create complete derives optional metadata from the native attested snapshot and activates the same admitted tab$/,
+            /^SEC-08 tab authority create omit-mtime derives optional metadata from the native attested snapshot and activates the same admitted tab$/,
+            /^SEC-08 tab authority create ticket-reread actual ticket copies its body version into the strict native descriptor$/,
+            /^SEC-08 tab authority create malformed-version refuses unusable metadata without a tab owner activation or body fallback$/,
+            /^SEC-08 tab authority create disk-drift refuses unusable metadata without a tab owner activation or body fallback$/,
+            /^SEC-08 tab authority create missing-receipt-version recovery uses a fresh actual native open to retire the unused admission$/,
+            /^SEC-08 tab authority optional-create sentinel setup proves both native error channels before the producer controls$/,
+            /^nothing rendered a visible error at any point during the suite$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 3,
+        },
+        {
+          id: "R896",
+          what: "require an explicit timestamp even when the native body receipt provides the version",
+          file: TABS,
+          from: "    return supplied && (!Number.isFinite(modifiedTime) ||\n" +
+            "      supplied.mtimeMs === modifiedTime) ? supplied : null;",
+          to: "    return supplied && Number.isFinite(modifiedTime) &&\n" +
+            "      supplied.mtimeMs === modifiedTime ? supplied : null;",
+          suite: "test:sec08-tab-authority-create-evidence",
+          expect: [
+            /^SEC-08 tab authority create omit-mtime derives optional metadata from the native attested snapshot and activates the same admitted tab$/,
+            /^SEC-08 tab authority create null-mtime derives optional metadata from the native attested snapshot and activates the same admitted tab$/,
+          ],
+          mustPass: [
+            /^SEC-08 tab authority create complete derives optional metadata from the native attested snapshot and activates the same admitted tab$/,
+            /^SEC-08 tab authority create omit-version derives optional metadata from the native attested snapshot and activates the same admitted tab$/,
+            /^SEC-08 tab authority create finite-time-mismatch refuses unusable metadata without a tab owner activation or body fallback$/,
+            /^SEC-08 tab authority create malformed-version refuses unusable metadata without a tab owner activation or body fallback$/,
+            /^SEC-08 tab authority create ticket-reread actual ticket copies its body version into the strict native descriptor$/,
+            /^SEC-08 tab authority optional-create sentinel setup proves both native error channels before the producer controls$/,
+            /^nothing rendered a visible error at any point during the suite$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 2,
+        },
+        {
+          id: "R897",
+          what: "label a native ticket reread with its older issuance body version",
+          file: MAIN,
+          from: "        ...record.descriptor, diskVersion: snapshot.diskVersion,\n",
+          to: "        ...record.descriptor, diskVersion: record.descriptor.diskVersion,\n",
+          suite: "test:sec08-tab-authority-create-evidence",
+          expect: [
+            /^SEC-08 tab authority create ticket-reread actual ticket copies its body version into the strict native descriptor$/,
+            /^SEC-08 tab authority create ticket-reread derives optional metadata from the native attested snapshot and activates the same admitted tab$/,
+          ],
+          mustPass: [
+            /^SEC-08 tab authority create complete actual ticket copies its body version into the strict native descriptor$/,
+            /^SEC-08 tab authority create complete derives optional metadata from the native attested snapshot and activates the same admitted tab$/,
+            /^SEC-08 tab authority create omit-version derives optional metadata from the native attested snapshot and activates the same admitted tab$/,
+            /^SEC-08 tab authority create finite-time-mismatch refuses unusable metadata without a tab owner activation or body fallback$/,
+            /^SEC-08 tab authority create ticket-reread recovery uses a fresh actual native open to retire the unused admission$/,
+            /^SEC-08 tab authority create ticket-reread cleanup removes only its exact local tab and native reference$/,
+            /^SEC-08 tab authority optional-create sentinel setup proves both native error channels before the producer controls$/,
+            /^nothing rendered a visible error at any point during the suite$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 2,
+        },
+        {
+          id: "R898",
+          what: "reuse a background completion freshness check across later local adoption effects",
+          file: TABS,
+          from: "      if (isBackground) {\n" +
+            "        if (!approvedReloadSnapshotMatches(\n" +
+            "          adoptionApproval, data.path, targetTab.filePath,\n" +
+            "          documentIdentity(targetTab, window.getReloadRequestSession()),\n",
+          to: "      if (isBackground) {\n" +
+            "        if (false && !approvedReloadSnapshotMatches(\n" +
+            "          adoptionApproval, data.path, targetTab.filePath,\n" +
+            "          documentIdentity(targetTab, window.getReloadRequestSession()),\n",
+          suite: "test:sec08-tab-authority-background-evidence",
+          expect: [
+            /^SEC-08 tab authority background unchanged completion retains the real Main owner before fire-and-forget registration is treated as evidence$/,
+          ],
+          mustPass: [
+            /^SEC-08 tab authority background unchanged setup holds actual changed Main bytes while another overflowing native tab is selected$/,
+            /^SEC-08 tab authority background unchanged native freshness success or refusal preserves approved RAM and the unrelated viewport$/,
+            /^SEC-08 tab authority background completion-drift completion retains the real Main owner before fire-and-forget registration is treated as evidence$/,
+            /^SEC-08 tab authority background completion-drift native freshness success or refusal preserves approved RAM and the unrelated viewport$/,
+            /^SEC-08 tab authority background completion-drift cleanup removes both exact native tabs and references$/,
+            /^the error sentinel was demonstrably watching both channels$/,
+            /^nothing rendered a visible error at any point during the suite$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R899",
+          what: "trust a Save reply version without the matched identity native disk query",
+          file: TABS,
+          from: "      tab.diskVersion = diskVersionForAdoption(\n" +
+            "        tab.filePath,\n" +
+            "        decision.modifiedTime,\n" +
+            "        decision.diskVersion,\n" +
+            "        decision.identity,\n" +
+            "      );",
+          to: "      tab.diskVersion = normaliseAdoptionDiskVersion(\n" +
+            "        decision.modifiedTime, decision.diskVersion,\n" +
+            "      );",
+          suite: "test:sec08-tab-authority-terminal-evidence",
+          expect: [
+            /^SEC-08 tab authority ordinary Save adopts its version through the same actual ref-bound native query and matched identity$/,
+            /^SEC-08 tab authority post-Save native version drift clears only metadata while authenticated Save RAM success and cleanliness survive$/,
+          ],
+          mustPass: [
+            /^SEC-08 renderer ordinary authenticated Save still settles once without new metadata checks$/,
+            /^SEC-08 tab authority unchanged conditional refresh adds no adoption query approval RPC or renderer body read$/,
+            /^SEC-08 tab authority Save drift setup pauses the actual selected native watcher before the controlled post-Save disk write$/,
+            /^SEC-08 tab authority post-Save drift cleanup closes the exact native tab and retires its admission without a baseline repair$/,
+            /^the error sentinel was demonstrably watching both channels$/,
+            /^nothing rendered a visible error at any point during the suite$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 2,
+        },
+        {
+          id: "R900",
+          what: "let an exit sweep delete native fixtures while a real post-read Main continuation remains queued",
+          file: path.join(ROOT, "test", "test-tab-refresh.js"),
+          from: "      REGISTERED_TEMP_DIRS.delete(candidate);",
+          to: "",
+          suite: "test:sec08-tab-authority-receipt-evidence",
+          expect: [
+            /^SEC-08 owned metadata preserves its private fixture root through actual native process exit$/,
+            /^SEC-08 receipt legitimate delayed native continuation still resolves its actual fixture path after observed reads and window destruction$/,
+          ],
+          mustPass: [
+            /^SEC-08 receipt delayed continuation genuinely holds an actual Main restore after observed handles have closed$/,
+            /^SEC-08 receipt extras actual Main producer and preload preserve the strict body descriptor version$/,
+            /^SEC-08 receipt restoration uses one ref-bound native query and preserves the same inactive creation identity$/,
+            /^SEC-08 receipt stale-restoration uses one ref-bound native query and preserves the same inactive creation identity$/,
+            /^SEC-08 receipt actual page destruction revokes every issued pending native receipt before fixture cleanup$/,
+            /^the error sentinel was demonstrably watching both channels$/,
+            /^nothing rendered a visible error at any point during the suite$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 2,
+        },
+        {
+          id: "R901",
+          what: "acknowledge an authenticated Save outcome without releasing its native delivery and correlation pins",
+          file: MAIN,
+          from: "  releaseSaveOutcomeDelivery(record);\n  return true;\n});\n\n" +
+            "// ============================================\n// IPC HANDLERS - File Watching",
+          to: "  return true;\n});\n\n" +
+            "// ============================================\n// IPC HANDLERS - File Watching",
+          suite: "test:sec08-tab-authority-terminal-evidence",
+          expect: [
+            /^SEC-08 tab authority accepted native Save ACK releases delivery and correlation pins before any matched bookkeeping query$/,
+          ],
+          mustPass: [
+            /^SEC-08 renderer ordinary authenticated Save still settles once without new metadata checks$/,
+            /^SEC-08 tab authority ordinary Save adopts its version through the same actual ref-bound native query and matched identity$/,
+            /^SEC-08 tab authority verified Save advances actual Main bookkeeping without relabeling its earlier issued body receipt$/,
+            /^SEC-08 tab authority unchanged conditional refresh adds no adoption query approval RPC or renderer body read$/,
+            /^the error sentinel was demonstrably watching both channels$/,
+            /^nothing rendered a visible error at any point during the suite$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R902",
+          what: "quarantine a rejected native reload after its render became frozen or superseded",
+          file: TABS,
+          from: "          console.error(\"[CustomTabs] Reload handler failed:\", error);\n" +
+            "          if (generation !== renderGeneration || activeTabId !== reloadTabId ||\n" +
+            "              !tabs.includes(targetTab) || isDocumentFrozen() ||\n" +
+            "              documentState.get(targetTab)?.generation !==\n" +
+            "                reloadReservation.documentGeneration) return;\n" +
+            "          if (!mayMutateDocument(\"ipc:reload-render-failure\")) return;",
+          to: "          console.error(\"[CustomTabs] Reload handler failed:\", error);",
+          suite: "test:sec08-tab-authority-terminal-evidence",
+          expect: [
+            /^SEC-08 tab authority reject-frozen actual rejected render makes zero late native checks quarantine conflict or scroll changes$/,
+            /^SEC-08 tab authority reject-superseded actual rejected render makes zero late native checks quarantine conflict or scroll changes$/,
+          ],
+          mustPass: [
+            /^SEC-08 renderer reload reject-frozen setup uses a genuine native delivery and actual selected retained owner$/,
+            /^SEC-08 renderer reload reject-superseded setup uses a genuine native delivery and actual selected retained owner$/,
+            /^SEC-08 renderer reload unchanged reaches both real Main successes and restores scroll without conflict$/,
+            /^SEC-08 renderer reload frozen teardown aborts the exact live commit without clearing native owners or baselines$/,
+            /^the error sentinel was demonstrably watching both channels$/,
+            /^nothing rendered a visible error at any point during the suite$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 2,
+        },
+        {
+          id: "R903",
+          what: "spend the native capability before deciding whether an existing-tab rollback is still fresh",
+          file: TABS,
+          from: "          // The capability must still be live when rollback freshness is decided.\n" +
+            "          const rollbackDiskMoved =",
+          to: "          if (adoptionApproval && !grantCompleted) {\n" +
+            "            abandonDiskAdoption(adoptionApproval.capability);\n" +
+            "          }\n" +
+            "          // The capability must still be live when rollback freshness is decided.\n" +
+            "          const rollbackDiskMoved =",
+          also: [{
+            file: TABS,
+            from: "            if (adoptionApproval && !grantCompleted) {\n" +
+              "              abandonDiskAdoption(adoptionApproval.capability);\n" +
+              "            }\n",
+            to: "",
+          }],
+          suite: "test:sec08-tab-authority-terminal-evidence",
+          expect: [
+            /^SEC-08 rollback unchanged decides actual native freshness before abandonment and keeps the exact earlier RAM$/,
+            /^SEC-08 rollback disk-drift decides actual native freshness before abandonment and keeps the exact earlier RAM$/,
+          ],
+          mustPass: [
+            /^SEC-08 rollback unchanged setup reaches actual Main body admission and a still-live committed capability before the controlled failure$/,
+            /^SEC-08 rollback disk-drift setup reaches actual Main body admission and a still-live committed capability before the controlled failure$/,
+            /^SEC-08 rollback unchanged cleanup retires its exact native tab without a baseline repair$/,
+            /^SEC-08 rollback disk-drift cleanup retires its exact native tab without a baseline repair$/,
+            /^the error sentinel was demonstrably watching both channels$/,
+            /^nothing rendered a visible error at any point during the suite$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 2,
         },
       ];
 
@@ -22542,7 +22808,7 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760,R840,R841,R845,R849,R853,R858,R860,R871,R876,R877,R878,R879,R880,R881,R882,R883,R884,R885,R886,R887,R888,R889,R890,R891,R892,R893,R894";
+      .join(",") === "R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760,R840,R841,R845,R849,R853,R858,R860,R871,R876,R877,R878,R879,R880,R881,R882,R883,R884,R885,R886,R887,R888,R889,R890,R891,R892,R893,R894,R895,R896,R897,R898,R899,R900,R901,R902,R903";
   const toolbarAllowanceIsRecordScoped =
     REVERTS.filter((r) =>
       exactShutdownTailForMutation(r) === TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL,

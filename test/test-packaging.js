@@ -769,9 +769,9 @@ async function main() {
   const ownedCloseFixture = ownedFixtureSource.split(
     "async function closeOwnedMetadataFixtureTabs(exec, ids, label) {",
   )[1]?.split("async function runOwnedMetadataScenarios")[0] || "";
-  const ownedTerminalFixture = ownedFixtureSource.slice(
-    ownedFixtureSource.lastIndexOf("  if (ownedMetadataFocusedHarness) {"),
-  );
+  const ownedTerminalStart = ownedFixtureSource.lastIndexOf("  let restoreBatchQuit = null;");
+  const ownedPathCleanup = ownedFixtureSource.lastIndexOf("rootReleased = releaseTempDir(dir);");
+  const ownedTerminalFixture = ownedFixtureSource.slice(ownedTerminalStart);
   check(
     "owned metadata freeze fixtures abort the exact native commit without resetting authority and prove refusal thaw and preserved baselines",
     ownedAbortFixture.includes("__shutdown.abortCommit(commitId + 1)") &&
@@ -792,6 +792,20 @@ async function main() {
       ownedTerminalFixture.indexOf("await destroyed;") > ownedTerminalFixture.indexOf("win.destroy();") &&
       ownedTerminalFixture.indexOf("await destroyed;") < ownedTerminalFixture.indexOf("setImmediate(resolve)") &&
       ownedTerminalFixture.includes('shutdown.rendererUnusableReason === "webContents destroyed"') &&
+      ownedTerminalStart < ownedPathCleanup &&
+      ownedTerminalStart + ownedTerminalFixture.indexOf("await destroyed;") < ownedPathCleanup &&
+      ownedTerminalFixture.includes("ownedNativeReadsSettled = await waitUntil") &&
+      ownedTerminalStart + ownedTerminalFixture.indexOf("ownedNativeReadsSettled = await waitUntil") < ownedPathCleanup &&
+      ownedFixtureSource.includes("const focusedFixturePreservation = ownedMetadataFocusedHarness") &&
+      ownedFixtureSource.includes("? preserveFocusedFixtureRoot(dir) : null;") &&
+      ownedFixtureSource.indexOf("? preserveFocusedFixtureRoot(dir) : null;") < ownedTerminalStart &&
+      ownedFixtureSource.indexOf("? preserveFocusedFixtureRoot(dir) : null;") <
+        ownedFixtureSource.indexOf("const fileA = path.join(dir"),
+      ownedFixtureSource.includes('relative !== ".." && !relative.startsWith(".." + path.sep)') &&
+      ownedFixtureSource.includes("REGISTERED_TEMP_DIRS.delete(candidate);") &&
+      ownedTerminalFixture.includes("if (ownedMetadataFocusedHarness)") &&
+      ownedTerminalFixture.includes("fixture paths are retained through actual Electron process exit") &&
+      !ownedTerminalFixture.includes("let rootReleased = ownedNativeReadsSettled") &&
       ownedTerminalFixture.indexOf("failed = results.filter") <
         ownedTerminalFixture.indexOf("=== ${results.length - failed}/${results.length} passed"),
   );

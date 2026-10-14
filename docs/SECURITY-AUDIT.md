@@ -784,6 +784,33 @@ GUI-launch transcript remain retained, not erased by this result; the original
 62/63 timeout cause remains unknown. The roadmap records their distinct
 fixture/launcher corrections. Final responsiveness remains unqualified.
 
+**Custom-tab authority consumers — IMPLEMENTED / PROVEN / REVIEW CONVERGED,
+unintegrated.** Staging uses the actual committed capability; completed and
+selected consumers use the retained native owner, including Main's selected
+owner before local generation advances. Relevance/freeze guards precede late
+metadata checks and quarantine; rollback freshness precedes abandonment.
+Creation/restoration reserves once and uses the existing non-null ref-bound
+query, while successful Save uses its matched decision identity. Main's
+existing body-read version now travels on the immutable admission descriptor
+and nested event projection. Optional null/omitted metadata can use that
+attestation; malformed versions, finite timestamp mismatch and genuinely stale
+disk snapshots refuse. A ticket reread carries its own body version, not a
+later mutable baseline. Actual verified Save/ACK controls preserve the old
+body receipt, basic Save success, and query ordering after delivery-pin release;
+physical owner-row deletion is not asserted.
+Parent reproduces creation 55/55, reload/Save 120/120, background 20/20 and
+extras/restore 24/24 with source packaging 390/0 and matching source hashes,
+and viewed the normal captures. R895-R903 and affected R860/R893/R899 are
+individually exact PROVEN. The private fixture root and registered ancestors
+remain protected through actual process lifetime, not an incomplete observed
+read count; a real delayed native continuation and exact R900 pin that
+distinction. Earlier failures and the unexplained issuance delay remain
+disclosed in the roadmap. Fresh independent full-unit Sol/Luna reviews find no
+significant product defect; closure-doc wording/evidence corrections are
+applied. Neither review claims measured responsiveness or Node-off qualification.
+This does not close browser physical helpers, privileged fallbacks, production
+security flags or performance acceptance.
+
 The **production main window still has Node enabled and isolation disabled**.
 Preparation, commit, completion and abandonment of disk-adoption capabilities
 now use fixed copied/validated preload methods; main's actual authority,

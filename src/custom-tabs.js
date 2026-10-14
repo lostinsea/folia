@@ -1259,35 +1259,26 @@
     );
   }
 
-  function getDiskVersion(filePath) {
-    try {
-      return window.fs
-        ? diskVersionFromStats(window.fs.statSync(filePath))
-        : null;
-    } catch (error) {
-      if (error.code !== "ENOENT" && error.code !== "ENOTDIR") {
-        console.error("[CustomTabs] Could not inspect disk version:", error);
-      }
-      return null;
-    }
-  }
-
-  function getMtime(filePath) {
-    const version = getDiskVersion(filePath);
-    return version ? version.mtimeMs : null;
-  }
-
-  function diskVersionForAdoption(filePath, modifiedTime, suppliedVersion) {
+  function normaliseAdoptionDiskVersion(modifiedTime, suppliedVersion) {
     const supplied = normaliseDiskVersion(suppliedVersion);
-    if (suppliedVersion != null && !supplied) return null;
-    if (supplied && Number.isFinite(modifiedTime) &&
-        supplied.mtimeMs !== modifiedTime) return null;
-    const current = getDiskVersion(filePath);
-    if (!current || (Number.isFinite(modifiedTime) &&
-        current.mtimeMs !== modifiedTime)) return null;
-    return supplied
-      ? sameDiskVersion(supplied, current) ? supplied : null
-      : current;
+    return supplied && (!Number.isFinite(modifiedTime) ||
+      supplied.mtimeMs === modifiedTime) ? supplied : null;
+  }
+
+  function diskVersionForAdoption(
+    filePath, modifiedTime, suppliedVersion, identity,
+  ) {
+    const supplied = normaliseAdoptionDiskVersion(
+      modifiedTime, suppliedVersion,
+    );
+    if (!supplied || !identity) return null;
+    const checked = typeof window.queryDocumentDiskAdoptionState === "function"
+      ? window.queryDocumentDiskAdoptionState(
+          filePath, identity, supplied.mtimeMs, supplied, filePath,
+        )
+      : null;
+    return checked?.known === true && checked.versionMatches === true
+      ? supplied : null;
   }
 
   // Reading a file in the renderer must produce byte-identical text to
@@ -2115,6 +2106,7 @@
       registerTabDiskOwner(tab);
       if (!approvedReloadSnapshotMatches(
         approval, tab.filePath, tab.filePath,
+        documentIdentity(tab, window.getReloadRequestSession()),
       )) {
         const identity = documentIdentity(
           tab, window.getReloadRequestSession(),
@@ -2172,17 +2164,29 @@
   function createTab(filePath, content, options) {
     if (!mayMutateDocument("tab:create")) return null;
     const opts = options || {};
-    const reservation = opts.reservedIdentity || null;
+    const reservation = opts.reservedIdentity ||
+      (!opts.verifiedDiskAdoption ? reserveDocumentIdentity() : null);
+    if (!opts.verifiedDiskAdoption && !reservation) return null;
     const pathParts = filePath.split(/[\\/]/);
     const filename = pathParts[pathParts.length - 1];
 
-    const diskVersion = diskVersionForAdoption(
-      filePath,
-      opts.modifiedTime,
-      opts.diskVersion,
-    );
+    const suppliedVersion = opts.diskVersion == null
+      ? opts.verifiedDiskAdoption?.version || opts.documentAdmission?.diskVersion
+      : opts.diskVersion;
+    const diskVersion = opts.verifiedDiskAdoption
+      ? normaliseAdoptionDiskVersion(opts.modifiedTime, suppliedVersion)
+      : diskVersionForAdoption(
+          filePath, opts.modifiedTime, suppliedVersion, {
+            pageSession: window.getReloadRequestSession(),
+            rendererGeneration: approvalRendererGeneration,
+            tabId: reservation.tabId,
+            documentGeneration: reservation.documentGeneration,
+            pathKey: opts.documentAdmission?.pathKey,
+            documentRef: opts.documentAdmission?.ref,
+          },
+        );
     if (
-      (opts.diskVersion != null && !diskVersion) ||
+      !diskVersion ||
       (reservation &&
         (!Number.isSafeInteger(reservation.tabId) ||
           !Number.isSafeInteger(reservation.documentGeneration) ||
@@ -2813,8 +2817,11 @@
       const position = positionOf(tab);
       const generation = ++renderGeneration;
       window.renderMarkdown(tab.content).then(() => {
+        if (generation !== renderGeneration || activeTabId !== tabId ||
+            !tabs.includes(tab) || isDocumentFrozen()) return;
         if (adoptionApproval && !approvedReloadSnapshotMatches(
           adoptionApproval, sourcePath, tab.filePath,
+          fileOpenContext && fileOpenContext.approvedOwner,
         )) {
           if (!mayMutateDocument("render:approved-open-conflict")) return;
           const state = documentState.get(tab);
@@ -2857,6 +2864,8 @@
         }
       }).catch((error) => {
         console.error("[CustomTabs] Could not render selected document:", error);
+        if (generation !== renderGeneration || activeTabId !== tabId ||
+            !tabs.includes(tab) || isDocumentFrozen()) return;
         const state = documentState.get(tab);
         if (adoptionApproval && state && tabs.includes(tab) &&
             state.generation === adoptionApproval.documentGeneration &&
@@ -2869,6 +2878,7 @@
           }
           if (!approvedReloadSnapshotMatches(
             adoptionApproval, sourcePath, tab.filePath,
+            fileOpenContext && fileOpenContext.approvedOwner,
           ) && typeof window.reportAdoptionTrackingConflict === "function") {
             window.reportAdoptionTrackingConflict(
               tab.filePath,
@@ -3507,13 +3517,39 @@
       resolveTabPath(ownerPath) === pathKey;
   }
 
-  function approvedReloadSnapshotMatches(approval, sourcePath, ownerPath) {
-    return !!approval &&
-      approvedReloadPathsMatch(
-        approval.pathKey, sourcePath, ownerPath,
-      ) &&
-      sameDiskVersion(getDiskVersion(sourcePath), approval.version) &&
-      sameDiskVersion(getDiskVersion(ownerPath), approval.version);
+  function approvedReloadSnapshotMatches(
+    approval, sourcePath, ownerPath, retainedOwner = null,
+  ) {
+    if (!approval ||
+        approval.incomingSpelling !== normaliseTabPath(sourcePath)?.spelling ||
+        approval.ownerSpelling !== normaliseTabPath(ownerPath)?.spelling) {
+      return false;
+    }
+    try {
+      if (retainedOwner) {
+        const checked = window.folia.checkOwnedTabDiskSnapshot({
+          filePath: ownerPath,
+          sourcePath,
+          owner: retainedOwner,
+          pageSession: retainedOwner.pageSession,
+          rendererGeneration: retainedOwner.rendererGeneration,
+          diskVersion: approval.version,
+        });
+        return checked.matches === true &&
+          checked.pathKey === approval.pathKey &&
+          sameDiskVersion(checked.diskVersion, approval.version);
+      }
+      const checked = window.folia.checkCommittedDiskAdoption({
+        capability: approval.capability,
+        pageSession: window.getReloadRequestSession(),
+        rendererGeneration: approval.rendererGeneration,
+      });
+      return checked.valid === true && checked.pathKey === approval.pathKey &&
+        sameDiskVersion(checked.version, approval.version);
+    } catch (error) {
+      console.error("[CustomTabs] Could not verify approved disk snapshot:", error);
+      return false;
+    }
   }
 
   function tabSpellingKey(tab) {
@@ -3615,6 +3651,7 @@
   function markCompletedBackgroundAdoptionConflict(tab, approval, sourcePath) {
     if (approvedReloadSnapshotMatches(
       approval, sourcePath, tab.filePath,
+      documentIdentity(tab, window.getReloadRequestSession()),
     )) return false;
     const state = documentState.get(tab);
     if (!state) {
@@ -3929,6 +3966,7 @@
         tab.filePath,
         decision.modifiedTime,
         decision.diskVersion,
+        decision.identity,
       );
       tab.mtimeMs = Number.isFinite(decision.modifiedTime)
         ? decision.modifiedTime
@@ -4045,11 +4083,14 @@
                 documentAdmission: snapshot.document },
             );
             if (!stillCurrent()) return;
-            const extraVersion = diskVersionForAdoption(
-              extraPath, snapshot.modifiedTime, snapshot.diskVersion,
+            const extraVersion = normaliseAdoptionDiskVersion(
+              snapshot.modifiedTime, snapshot.diskVersion,
             );
             if (
               !extraVersion ||
+              !approvedReloadSnapshotMatches(
+                extraApproval, extraPath, extraPath,
+              ) ||
               !matchesDiskAdoptionApproval(
                 extraApproval, null, extraPath,
                 snapshot.content, extraVersion,
@@ -4319,12 +4360,14 @@
           }
           const verifiedVersion = preserveCachedDocument
             ? null
-            : diskVersionForAdoption(
-                filePath, openData.modifiedTime, openData.diskVersion,
+            : normaliseAdoptionDiskVersion(
+                openData.modifiedTime, openData.diskVersion,
               );
           if (
             !preserveCachedDocument &&
-            (!verifiedVersion || !matchesDiskAdoptionApproval(
+            (!verifiedVersion || !approvedReloadSnapshotMatches(
+              adoptionApproval, filePath, targetTab.filePath,
+            ) || !matchesDiskAdoptionApproval(
               adoptionApproval, targetTab, filePath,
               content, verifiedVersion,
               { reservedIdentity: targetReservation },
@@ -4417,10 +4460,12 @@
           if (overtakenForSameDocument()) {
             return;
           }
-          const verifiedVersion = diskVersionForAdoption(
-            filePath, openData.modifiedTime, openData.diskVersion,
+          const verifiedVersion = normaliseAdoptionDiskVersion(
+            openData.modifiedTime, openData.diskVersion,
           );
-          if (!verifiedVersion || !matchesDiskAdoptionApproval(
+          if (!verifiedVersion || !approvedReloadSnapshotMatches(
+            adoptionApproval, filePath, filePath,
+          ) || !matchesDiskAdoptionApproval(
             adoptionApproval, null, filePath, content, verifiedVersion,
             { reservedIdentity: targetReservation },
           )) {
@@ -4541,6 +4586,16 @@
           () => intent === latestFileOpenIntent,
         );
         } finally {
+          // The capability must still be live when rollback freshness is decided.
+          const rollbackDiskMoved = !!(
+            adoptionApproval && !grantCompleted &&
+            !provisionalTab && !preserveCachedDocument &&
+            tabs.includes(targetTab) &&
+            !refusedExistingOpenSelection &&
+            !approvedReloadSnapshotMatches(
+              adoptionApproval, filePath, targetTab.filePath,
+            )
+          );
           try {
             if (!grantCompleted && adoptionApproval) {
               if (provisionalTab && pendingActivationTabs.has(targetTab)) {
@@ -4576,10 +4631,7 @@
                 (priorAdoption
                   ? priorAdoption.generation
                   : targetGenerationBeforeAdoption)) &&
-            (refusedExistingOpenSelection ||
-              !approvedReloadSnapshotMatches(
-                adoptionApproval, filePath, targetTab.filePath,
-              )) &&
+            (refusedExistingOpenSelection || rollbackDiskMoved) &&
             mayMutateDocument("ipc:file-opened-rollback-conflict")
           ) {
             const state = documentState.get(targetTab);
@@ -5120,10 +5172,12 @@
         }
         return;
       }
-      const verifiedVersion = diskVersionForAdoption(
-        data.path, data.modifiedTime, data.diskVersion,
+      const verifiedVersion = normaliseAdoptionDiskVersion(
+        data.modifiedTime, data.diskVersion,
       );
-      if (!verifiedVersion || !matchesDiskAdoptionApproval(
+      if (!verifiedVersion || !approvedReloadSnapshotMatches(
+        adoptionApproval, data.path, targetTab.filePath,
+      ) || !matchesDiskAdoptionApproval(
         adoptionApproval, targetTab, data.path,
         data.content, verifiedVersion,
         { reservedIdentity: reloadReservation },
@@ -5206,6 +5260,7 @@
 
       if (!approvedReloadSnapshotMatches(
         adoptionApproval, data.path, targetTab.filePath,
+        trackingSelection && trackingSelection.owner,
       )) {
         if (!isBackground) {
           quarantineSelectedReload(
@@ -5228,9 +5283,6 @@
           targetTab, data.path || targetTab.filePath,
           adoptionApproval.pathKey,
         ) !== adoptionApproval.pathKey ||
-          !approvedReloadSnapshotMatches(
-            adoptionApproval, data.path, targetTab.filePath,
-          ) ||
           !adoptCleanDocument(
             targetTab, data.content,
             reloadReservation.documentGeneration,
@@ -5245,23 +5297,6 @@
             appliedDiskAdoptionApprovals.delete(adoptionApproval);
             rejectReloadResult(
               targetTab, activeAfter, "background-cache-refused", data,
-            );
-          }
-          return;
-        }
-        if (!approvedReloadSnapshotMatches(
-          adoptionApproval, data.path, targetTab.filePath,
-        )) {
-          if (!isBackground) {
-            quarantineSelectedReload(
-              targetTab, activeAfter, "disk-moved-during-adoption",
-              data, trackingSelection, adoptionApproval, prior,
-            );
-          } else {
-            restoreTabAdoption(targetTab, prior);
-            appliedDiskAdoptionApprovals.delete(adoptionApproval);
-            rejectReloadResult(
-              targetTab, activeAfter, "background-disk-moved", data,
             );
           }
           return;
@@ -5281,6 +5316,7 @@
           registerTabDiskOwner(targetTab);
           if (!approvedReloadSnapshotMatches(
             adoptionApproval, data.path, targetTab.filePath,
+            documentIdentity(targetTab, window.getReloadRequestSession()),
           )) {
             const identity = documentIdentity(
               targetTab, window.getReloadRequestSession(),
@@ -5339,6 +5375,7 @@
       if (isBackground) {
         if (!approvedReloadSnapshotMatches(
           adoptionApproval, data.path, targetTab.filePath,
+          documentIdentity(targetTab, window.getReloadRequestSession()),
         )) {
           rejectReloadResult(
             targetTab, getActiveTab(), "background-target-moved", data,
@@ -5362,6 +5399,7 @@
 
       if (!approvedReloadSnapshotMatches(
         adoptionApproval, data.path, targetTab.filePath,
+        trackingSelection.owner,
       )) {
         quarantineSelectedReload(
           targetTab, getActiveTab(), "disk-moved-before-render",
@@ -5392,8 +5430,16 @@
 
       reloadPromise
         .then(() => {
+          if (generation !== renderGeneration || activeTabId !== reloadTabId ||
+              !tabs.includes(targetTab) || isDocumentFrozen() ||
+              documentState.get(targetTab)?.generation !==
+                reloadReservation.documentGeneration) {
+            console.log("[CustomTabs] Discarding superseded reload completion");
+            return;
+          }
           if (!approvedReloadSnapshotMatches(
             adoptionApproval, data.path, targetTab.filePath,
+            trackingSelection.owner,
           )) {
             if (!mayMutateDocument("ipc:reload-result-after-render")) return;
             quarantineSelectedReload(
@@ -5402,14 +5448,6 @@
             );
             return;
           }
-          if (generation !== renderGeneration || activeTabId !== reloadTabId) {
-            // Superseded by a tab switch or a newer render. Touching renderer
-            // state now would clear the NEW tab's unsaved flag and scroll it
-            // to this tab's anchor.
-            console.log("[CustomTabs] Discarding superseded reload completion");
-            return;
-          }
-
           // The document may have been edited while the render was in flight.
           // Clearing the unsaved flag then would silently mark those edits
           // saved, and the next refresh would discard them without warning.
@@ -5442,15 +5480,6 @@
             window.setUnsavedState(false);
           }
 
-          if (!approvedReloadSnapshotMatches(
-            adoptionApproval, data.path, targetTab.filePath,
-          )) {
-            quarantineSelectedReload(
-              targetTab, getActiveTab(), "disk-moved-before-reload-notice",
-              data, trackingSelection, adoptionApproval,
-            );
-            return;
-          }
           restorePosition(anchor);
           if (trackingSelection.unresolvedEvidence !== true &&
               trackingSelection.trackingConflict !== true) {
@@ -5459,12 +5488,17 @@
         })
         .catch((error) => {
           console.error("[CustomTabs] Reload handler failed:", error);
+          if (generation !== renderGeneration || activeTabId !== reloadTabId ||
+              !tabs.includes(targetTab) || isDocumentFrozen() ||
+              documentState.get(targetTab)?.generation !==
+                reloadReservation.documentGeneration) return;
           if (!mayMutateDocument("ipc:reload-render-failure")) return;
           if (
             error.code === "RELOAD_PATH_RETARGETED" ||
             error.code === "RELOAD_PATH_MOVED_DURING_RENDER" ||
             !approvedReloadSnapshotMatches(
               adoptionApproval, data.path, targetTab.filePath,
+              trackingSelection.owner,
             )
           ) {
             const preservePrior =

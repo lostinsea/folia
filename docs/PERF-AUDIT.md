@@ -1194,7 +1194,7 @@ journeys. Its render measurements remain useful only within that scope.
 Minimal real-action timing in the existing harness is still required after
 final wiring; no timing, threshold change or synthetic backport is claimed.
 
-The next renderer boundary migration reuses the committed-capability check
+The renderer boundary migration reuses the committed-capability check
 before an approved selection and the retained-owner metadata check afterward
 and on each side of delegated reload rendering. No new endpoint, body read or
 body serialization is added. Other paths are not migrated by this unit and no
@@ -1206,6 +1206,33 @@ actual renderer-destruction barrier do not add shipped RPCs or rendering work.
 The original combined timeout remains unexplained; a diagnostic pass despite
 contaminated cleanup is not timing evidence, and the parent GUI launch with
 lost stdout is retained as unusable rather than a latency sample.
+
+### SEC-08 custom-tab authority consumers — responsiveness still unqualified
+
+The tab migration reuses the existing committed/retained metadata ports around
+staging and completion. Nonapproval creation/restore and successful Save add
+bounded ref-bound metadata queries; receipt version fields travel on existing
+messages, without a new endpoint or body read. The unchanged-switch controls
+prove zero additional approval/adoption queries or body reads, not zero total
+IPC. Rejected frozen/superseded render continuations perform no late native
+metadata/authority checks; their local relevance/freeze guards still run.
+Parent reproduces creation 55/55, reload/Save 120/120, background 20/20 and
+extras/restore 24/24, with source packaging 390/0 and matching source hashes.
+These are functional controls, not latency samples. Exact reverts and viewed
+captures do not establish no visible performance effect.
+
+The corrected fixture retains its private inputs through native process death
+because observed handles do not prove all queued Main continuations ended.
+Its deliberate delayed continuation is a sensitivity control, not observed
+production stall duration. The historical intermittent issuance delay remains
+unexplained. Low-ROI retarget/capacity permutations and the explicitly deferred
+Save-alias/shutdown/ordinary-CI campaigns are not timing certificates.
+The real `f87aa77` reference's locked-version-matched vendor bytes and tracked
+fonts are prepared, recorded with hashes/provenance and `RuntimeVerified: false`
+in `.context-viewport-evidence/performance-reference-f87aa77/runtime-preparation.json`;
+it has still not been freshly runtime-verified. Final
+Node-off source needs the agreed native-action comparison and applicable
+contracts; no overhead, threshold or environment waiver is inferred here.
 
 ## Measured and found already fast
 - **Custom tab sync I/O is not the current bottleneck.**

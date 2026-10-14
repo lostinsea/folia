@@ -902,7 +902,7 @@ Sol6.1/high and Luna6/high R3 reviews both found no significant issues or
 remaining disagreement. Remaining tab/path consumers, Node-off production
 and final measured responsiveness stay open.
 
-**Next tab authority consumers — design converged, implementation pending.**
+**Tab authority consumers — IMPLEMENTED / PROVEN / REVIEW CONVERGED, unintegrated.**
 Independent Sol/Luna agree on one coherent custom-tab migration: committed
 capability before Main completion, actual retained owner afterward, composing
 consecutive synchronous staging checks rather than adding RPC at each former
@@ -918,6 +918,58 @@ admission lifetime. No new path-key gate or alias rebind is added to the old
 nonapproval version gate. Save success/dirty behavior and unchanged refresh
 remain untouched. This adds bounded metadata RPCs whose latency is still
 unqualified, not a new endpoint or deferred Save-alias campaign.
+The renderer boundary unit is committed/pushed as `a0966b46`. Its mutation
+window is closed. This dependent custom-tab unit now has actual native
+creation 55/55, reload/Save 120/120, background 20/20 and extras/restore 24/24
+controls; the bounded terminal selector is 62/62. Parent independently
+reproduces the four full selectors, with the definitive footer last, actual
+child exit and zero Electron processes, on matching final product/test/proof
+bytes. Source packaging is 390/0; syntax, CRLF/diff checks and resolving
+anchors pass (resolution is not proof). Parent viewed its retained normal
+captures. Fresh independent complete-unit Sol/Luna reviews converge with no
+significant product findings. Both distinguish function from performance,
+Node-off and repeated-run stability. Sol clears the closure-doc delta; Luna's
+narrow wording/evidence corrections are applied: rejected continuations still
+run local relevance checks, and historical runtime preparation is cited rather
+than offered as runtime qualification. No remaining product disagreement.
+Both independent product reviewers found the omitted-timestamp creation
+regression; Sol also identified creation without a usable version. Actual
+native controls reproduce both on the initial draft, with a complete-metadata
+positive control. The correction carries the existing body-read version on
+the copied admission descriptor and native-open event projection; a ticket
+reread returns its own body version. Later mutable bookkeeping cannot
+relabel an older body receipt; ordinary watcher checks do not themselves
+assign the admission snapshot version. Null/omitted explicit creation versions may use this
+attested fallback; malformed versions and finite timestamp mismatches refuse.
+The derived timestamp still goes through the same ref-bound native freshness
+query and reservation. Save retains its matched decision identity. This adds
+bounded metadata to existing receipts, not a body read or endpoint.
+Actual Save ACK acceptance releases delivery/correlation pins before the
+matched native query; no physical owner-row deletion or capacity campaign is
+claimed. Verified Save advances genuine bookkeeping while the earlier body
+receipt remains historical. Rejected native renders after freeze/supersession
+perform no late metadata/quarantine/visual work. Rollback checks a real live
+capability before abandoning it, for both unchanged and disk-drift cases,
+preserving earlier RAM and refusing spent replay.
+R895-R903 and affected R860/R893/R899 are individually exact PROVEN. The
+initial receipt/rollback fixture mistakes and unusable older-permutation
+proof remain retained, not replaced by their corrected results.
+The R3 teardown review exposed incomplete read-lifetime observation and a
+missing post-yield recheck. Sol agreed with Luna's finding after adjudication.
+R4 preserves and de-registers the private root and registered ancestors
+before diagnostics, independent of observer counters; a genuine delayed
+Main continuation after window destruction and closed observed handles
+still resolves/reads its fixture. R900's exact revert removes that protection
+and produces the intended preservation/ENOENT failures. Cleanup outside the
+native process requires verified child/descendant termination. Both reviewers
+converged on this correction. The original intermittent issuance delay remains
+unexplained; these functional results are not repeated-run stability or timing
+evidence. Parent's initial footer matcher expected the wrong grammar; its
+correction validated the existing native creation transcript without retrying it.
+Evidence is retained in `tab-authority-controls-r1`,
+`tab-authority-full-review-r5` and `tab-authority-parent-final-r5`.
+Remaining browser/path helpers, production Node-off/context isolation/sandbox
+and measured responsiveness are still release gates.
 
 The capability-protocol unit is IMPLEMENTED / PROVEN, unintegrated: preparation, commit, completion and abandonment
 of existing disk-adoption capabilities to four fixed preload methods. It

@@ -62,6 +62,7 @@ function copyDocumentDescriptor(value) {
     ref: value.ref, entryId: value.entryId, logicalPath: value.logicalPath,
     spellingKey: value.spellingKey, readTarget: value.readTarget,
     pathKey: value.pathKey, documentUrl: value.documentUrl,
+    diskVersion: copyDiskVersion(value.diskVersion, "admitted document"),
     ...(value.openTicket === undefined ? {} : { openTicket: value.openTicket }),
   });
 }
@@ -318,7 +319,7 @@ const DOCUMENT_EVENT_FIELDS = {
 const DOCUMENT_EVENT_RECORD_FIELDS = {
   diskVersion: ["dev", "ino", "size", "mtimeMs", "ctimeMs"],
   document: ["ref", "entryId", "logicalPath", "spellingKey", "readTarget",
-    "pathKey", "documentUrl", "openTicket"],
+    "pathKey", "documentUrl", "diskVersion", "openTicket"],
   openRequest: ["token", "targetIndex", "path"],
   reloadRequest: ["sequence", "path", "snapshot", "session", "tabId",
     "documentGeneration", "pathKey", "rendererGeneration", "selectionGeneration", "documentRef"],
