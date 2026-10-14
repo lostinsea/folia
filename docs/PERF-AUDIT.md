@@ -1402,6 +1402,58 @@ Evidence: `final-verification-20261014/retained-save-analysis.json` beneath
 `.context-viewport-evidence/`. No source-supported isolation root fix was
 established. Actual no-visible-slowdown acceptance remains unmet.
 
+## 2026-10-14 corrected Save phase stopped before its first pair
+
+- Later coordinator authorization allowed one new large-document phase:
+  the original 21 matched pairs, 42 launches maximum, and a fixed 60-minute
+  ceiling. The closed 73-of-84 comparison was not continued or overwritten.
+- The corrected existing harness uses explicit browser SHA-256/UTF-8 in
+  both apps. Normal input drives actual preview/render/history callbacks.
+  Settled Save waits for those callbacks and prior layout; immediate Save
+  clicks in the same input action without an intervening wait.
+- First natural-view observation is independent of ACK and preserved.
+  Store, post-Save view, layout barriers and full setup intervals remain
+  separate. Main receipt/ACK and observed layout replies are recorded;
+  isolated metadata, serialization, fsync and future-layout costs remain
+  unknown. No guard or durability behavior changed.
+- Fresh Sol/Luna feedback converged. Both required actual runtime identity,
+  not the CLI's assumed resolution. Direct verified Electron and installed
+  dependency bytes are frozen. Sol's timestamp, failure-preservation and
+  process-ownership corrections were applied. Luna withdrew two findings
+  after checking the actual readiness bound and VM source slices.
+- **Fixed outcome: one reference launch completed; no candidate launched;
+  zero matched pairs.** All six reference Saves passed normal mode, exact
+  disk/store, natural preview/history and accepted-ACK controls.
+- The supervisor stopped after 43.38 seconds when its second
+  `Set-Content progress.json` failed with a Windows file-sharing exception.
+  The file holder is unknown. This is a private result-journal failure,
+  not evidence of an application defect or its performance cause.
+- The reference's first natural-draft setup took 14,330.77 ms and recorded
+  14,235.47 ms maximum Main-loop delay. Its natural draft was observed at
+  867.90 ms; its later Save endpoint took 169.44 ms. Keep all these distinct
+  observations; do not subtract them into an explained share or infer an
+  environmental cause.
+
+| Reference-only observations, three per mode | Save-to-usable median | Input-to-natural-draft median |
+|---|---:|---:|
+| Settled editor | 116.63 ms | 867.90 ms |
+| Immediate input | 454.16 ms | 851.60 ms |
+
+- These are **not comparative results**. Candidate controls remain
+  unexecuted, so overhead persistence or removal cannot be concluded.
+  All remaining 41 jobs are unexecuted; no retry, replacement, profiler or
+  second campaign followed. No owned app process survived.
+- Source apps were actual `f87aa779` and current `41389fe` with shipping
+  implementation `668d17f3`, not a mismatched private asar. The frozen plan
+  also records shared runtime/dependencies and later Mermaid/logging/menu
+  differences; it is not a pure isolation experiment.
+- Evidence: `.context-viewport-evidence/corrected-large-save-comparison-r1/`
+  (`declaration.json`, `plan.json`, `phase-outcome.json`, `analysis.json`,
+  `review-outcome.json`, and the first reference's raw logs/result).
+- The original worse candidate medians and long ingress-to-ACK stalls remain
+  relevant. No-visible-slowdown acceptance remains unmet; publication stays
+  held. Further comparative execution is not automatic.
+
 ## Measured and found already fast
 - **Custom tab sync I/O is not the current bottleneck.**
   - `custom-tabs.js:69-111,640`

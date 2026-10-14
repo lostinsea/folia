@@ -5428,6 +5428,29 @@ is **not** the packaged/profiled R3 source. No replacement build was made.
   not claimed. P2 Save/shutdown/hosted-CI exceptions and R886 sensitivity
   remain as recorded. No-visible-slowdown still blocks merge/tag/publication.
 
+**2026-10-14 corrected Save comparison: blocked, no release acceptance**
+
+- A distinct authorized phase froze actual `f87aa779` versus `41389fe`
+  shipping `668d17f3`, the original large-only pair order, two normal Save
+  modes, 42 launches maximum and a fixed 60-minute ceiling.
+- Only the existing benchmark and its static fixture changed. Explicit
+  browser crypto, actual natural preview/history, separate ACK/store/view/
+  layout endpoints and failure preservation received independent Sol/Luna
+  feedback. Existing readiness and launch deadlines stayed unchanged.
+- One reference launch completed normally with three Saves per mode;
+  candidate execution never began. The supervisor then hit a Windows
+  sharing exception while rewriting its private progress journal.
+  Zero matched pairs; the exact remaining 41 jobs stay unexecuted.
+- Preserve the reference's multi-second setup/Main-loop pause without
+  assigning it to isolation or the environment. No comparative overhead
+  conclusion, risk waiver, retry, extra profiler or replacement campaign.
+- Evidence: `.context-viewport-evidence/corrected-large-save-comparison-r1/`.
+  Native exit 0, source/runtime identity rechecked, no owned survivors.
+- Shipping sources and both private package identities above are unchanged.
+  All prior failed/partial evidence, P2 exceptions, R886 sensitivity and
+  nonblocking F03/kbscroll dispositions remain. Delivery and publication
+  remain held on actual no-visible-slowdown acceptance.
+
 ### `w2-upstream` — classify the outstanding upstream commits · CLASSIFIED; dispositions complete, integration pending
 
 Folia is a hard fork, not a branch: upstream commits are taken as deliberate

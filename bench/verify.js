@@ -1955,12 +1955,12 @@ for (const [profile, want] of Object.entries(CORPUS_DIGEST)) {
   let persisted;
   const context = vm.createContext({
     currentSample: pending, samples: [], performance: { now: () => 1000 },
-    finishing: false, deadline: null, clearTimeout() {},
+    finishing: false, firstFailure: null, deadline: null, clearTimeout() {},
     eventLoopDelay: { disable() {} }, job: { output: "oracle-only" },
     mainSha256: "oracle", errorSentinelObserved: true, inputRoot: "oracle",
     sourceHashes: {}, process: { platform: "oracle", arch: "oracle", versions: {} },
     os: { cpus: () => [{ model: "oracle" }] }, viewport: null, window: null,
-    fixtureInputs: [], errors: [],
+    fixtureInputs: [], errors: [], layoutReceipts: [], historicalLayoutWrites: null, failureWitness: null,
     fs: { writeFileSync(_file, text) { persisted = JSON.parse(text); } },
     app: { exit() {} },
   });
@@ -1995,6 +1995,13 @@ for (const [profile, want] of Object.entries(CORPUS_DIGEST)) {
   check("native failed action recorder appends a pending sample only once",
     context.samples.length === 1 && context.samples[0] === duplicate &&
     duplicate.error.includes("initial action rejection"));
+  context.finishing = false;
+  context.firstFailure = new Error("original native rejection");
+  context.currentSample = null;
+  context.finish(new Error("later watchdog deadline"));
+  check("native watchdog preserves the first failure during witness collection",
+    persisted.status === "failed" && persisted.error.includes("original native rejection") &&
+    !persisted.error.includes("later watchdog deadline"));
 
   const appRoot = path.join(__dirname, "oracle-source");
   const main = path.join(appRoot, "src", "main.js");
