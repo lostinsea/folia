@@ -1262,6 +1262,19 @@ unresolved comparative responsiveness continues to hold publication.
   or whole-app acceptance. Actual cold startup/first paint and cold Mermaid
   remain unqualified; no final release is claimed. Full endpoint definitions
   and distributions are in the complete-comparison subsection of the audit.
+- A distinct actual-package cold/Mermaid comparison completed 42/42 launches
+  and 21 pairs in 330.558 seconds. Contentful-paint intervals improve; no old
+  multi-second Mermaid stall reproduced. Adverse results remain: return-100%
+  reload median +29.9 ms / paired +30.0 ms, cold Mermaid paired +20.1 ms and
+  multi-open paired +30.6 ms. This is not no-visible-slowdown acceptance.
+  Source and a separate boundary witness expose an empty Prism idle callback
+  keeping the loading overlay active. The narrow pending-work gate preserves
+  all security checks and genuine deferred highlighting. Isolated native
+  controls are 40/40; R924 is exact PROVEN/restored. Independent Sol/Luna
+  final reviews converge after correcting the older idle test's plain-text
+  fixture without changing its timeout outcome. Source-matched package
+  revalidation remains before performance disposition.
+  The old d52 package is not post-fix evidence. See the audit's cold-path section.
 
 The capability-protocol unit is IMPLEMENTED / PROVEN, unintegrated: preparation, commit, completion and abandonment
 of existing disk-adoption capabilities to four fixed preload methods. It

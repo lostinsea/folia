@@ -21984,6 +21984,27 @@ const REVERTS = [
           ],
           requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
         },
+        {
+          id: "R924", what: "defer empty syntax highlighting while the loading overlay blocks input",
+          file: path.join(ROOT, "src", "renderer.js"),
+          from: "    if (typeof Prism !== 'undefined' &&\n        document.querySelector('pre code:not(.prism-highlighted)')) {",
+          to: "    if (typeof Prism !== 'undefined') {",
+          suite: "test:sec08-browser-isolation-evidence",
+          expect: [
+            /^full render without pending code clears its overlay without idle work$/,
+            /^full render with preserved highlighted code avoids empty idle work$/,
+          ],
+          mustPass: [
+            /^SEC-08 browser isolation actual production window disables Node and enables isolation and sandbox$/,
+            /^idle overlay control renders an actual empty-code document$/,
+            /^new code retains bounded deferred highlighting and its loading overlay$/,
+            /^released real highlighting adds tokens and one copy button before clearing the overlay$/,
+            /^idle overlay control really preserves already-highlighted code$/,
+            /^pending code outside the viewer still requires bounded deferred highlighting$/,
+            /^released document-wide highlighting clears its real pending code and overlay$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 2,
+        },
       ];
 
 // These are release exceptions, not passing or withdrawn proofs. An explicit
@@ -23063,7 +23084,7 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R467,R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760,R840,R841,R845,R849,R853,R858,R860,R871,R876,R877,R878,R879,R880,R881,R882,R883,R884,R885,R886,R887,R888,R889,R890,R891,R892,R893,R894,R895,R896,R897,R898,R899,R900,R901,R902,R903,R904,R905,R906,R907,R908,R909,R910,R911,R912,R913,R914,R915,R916,R917,R918,R919,R920,R921,R922,R923";
+      .join(",") === "R467,R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760,R840,R841,R845,R849,R853,R858,R860,R871,R876,R877,R878,R879,R880,R881,R882,R883,R884,R885,R886,R887,R888,R889,R890,R891,R892,R893,R894,R895,R896,R897,R898,R899,R900,R901,R902,R903,R904,R905,R906,R907,R908,R909,R910,R911,R912,R913,R914,R915,R916,R917,R918,R919,R920,R921,R922,R923,R924";
   const toolbarAllowanceIsRecordScoped =
     REVERTS.filter((r) =>
       exactShutdownTailForMutation(r) === TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL,

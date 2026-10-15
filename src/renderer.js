@@ -6380,8 +6380,10 @@ async function renderMarkdownFull(content, generation) {
     // Scroll to top (skip during undo/redo to preserve position)
     if (!undoRedoRendering) viewer.parentElement.scrollTop = 0;
 
-    // Apply syntax highlighting with PrismJS (asynchronously to avoid blocking)
-    if (typeof Prism !== 'undefined') {
+    // Empty or already-highlighted documents must not wait for idle work
+    // that has nothing to do while the loading overlay still blocks input.
+    if (typeof Prism !== 'undefined' &&
+        document.querySelector('pre code:not(.prism-highlighted)')) {
       // Use requestIdleCallback for non-blocking syntax highlighting.
       // The timeout is load-bearing: a bare requestIdleCallback has no deadline
       // at all, so on a page that never goes idle the callback - and with it
@@ -7160,8 +7162,8 @@ function addCodeBlockCopyButtons() {
     // Wrap pre in container and add button
     //
     // THIS REPARENTS AN EXISTING NODE, which is why the zoom anchor has to know
-    // about it. This pass runs in a requestIdle() callback AFTER
-    // renderMarkdownFull has already resolved, so a <pre> anchored a moment
+    // about it. Deferred highlighting runs this AFTER renderMarkdownFull
+    // has already resolved, so a <pre> anchored a moment
     // earlier moves under a brand-new container without renderGeneration
     // changing at all. Bumped per wrap rather than per pass: the early return
     // above means most calls wrap nothing, and invalidating an anchor for a

@@ -120,8 +120,8 @@ function holdSaveOpens(filePath, fail = false) {
   };
 }
 
-// A render is only finished once the idle callback that highlights code and
-// hides the loading overlay has run. Polling for that is what makes the
+// A render is only finished once required highlighting has run and the loading
+// overlay is down. Polling for that is what makes the
 // preservation counts below meaningful rather than racing the pipeline.
 const RENDER_SETTLED = `
   (() => {

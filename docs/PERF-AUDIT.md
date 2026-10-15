@@ -1698,6 +1698,77 @@ established. Actual no-visible-slowdown acceptance remains unmet.
   `complete-stage-maxima-and-outlier.json`. Raw-result hashes are retained.
   Earlier failures and the user's no-visible-slowdown requirement stay intact.
 
+**Packaged cold-path comparison and no-op idle overlay**
+
+- Separate ordinary f87/d52 package controls first verified existing pre-actor
+  Chrome navigation/paint entries, actual process birth and the original
+  native Mermaid journey. A distinct balanced 21-pair / 42-launch phase then
+  completed in 330.558 seconds, all observations retained, no failures,
+  unexecuted jobs, reporting errors or survivors. Fixed 20-minute phase ceiling;
+  unchanged action / 240-second job / 300-second launch guards.
+- Fresh process/profile and genuinely unloaded Mermaid library, not a cold
+  OS/file-cache claim. No Save, profiler, replacement preload, fake readiness,
+  extra screenshot or product change during data. Same original large open,
+  multi-open, empty Mermaid tab, 150% zoom, newly added exact diagram,
+  cold/warm reload and return-to-100% reload. Later app differences still
+  preclude pure isolation attribution.
+- Standard medians and sample-local nearest-rank p95, reference -> current;
+  one observation per endpoint/arm in each matched pair:
+
+| Endpoint (ms) | Median | Sample p95 |
+|---|---:|---:|
+| Process birth to contentful paint | 762.0 -> 692.7 | 809.6 -> 749.4 |
+| Navigation to contentful paint | 392.0 -> 324.0 | 420.0 -> 364.0 |
+| Navigation to DOMContentLoaded end | 393.7 -> 341.7 | 420.6 -> 369.4 |
+| Navigation to load end | 394.2 -> 342.0 | 420.9 -> 369.7 |
+| Large open, renderer usable | 463.9 -> 463.8 | 464.9 -> 494.1 |
+| Multi-open, renderer usable | 373.3 -> 403.5 | 404.6 -> 435.9 |
+| Cold Mermaid at 150%, renderer usable | 360.1 -> 363.2 | 391.5 -> 394.7 |
+| Warm Mermaid at 150%, renderer usable | 153.8 -> 153.6 | 154.5 -> 154.5 |
+| Return-100% reload, renderer usable | 124.2 -> 154.1 | 154.6 -> 154.9 |
+
+- Do not hide adverse paired results behind pooled medians: cold Mermaid's
+  paired median is +20.1 ms, current slower 19/21; multi-open +30.6 ms,
+  slower 18/21; return-100% +30.0 ms, slower 17/21. The last crosses the
+  retained diagnostic >25 ms AND >10% median rule. No tolerance change or
+  performance acceptance follows. Contentful paint is not final app usability;
+  startup long tasks before actor attachment remain unobserved, not zero.
+- Independent Astra analysis reproduced all raw hashes and endpoint summaries.
+  Return-100% settlement worsens in every pair, median +6.5 ms; most remaining
+  endpoint difference is after notification, before renderer completion.
+  Main observation/verification overhead does not explain that tail. Reference
+  has two distinct endpoint levels; orientation alone does not explain them.
+  This does not establish an environmental or IPC cause.
+- A separate two-app boundary witness completed in 16.006 seconds. At actual
+  return-100% notification, both overlays were active with zero pending code.
+  Reference/current notification: 36.9/42.7 ms; overlay first observed clear:
+  60.5/92.1 ms; final existing frame: 123.0/155.2 ms. These are observed
+  boundaries, not exact overlay-hide timestamps or a paired qualification.
+- Source shows an unnecessary dependency: every full render with Prism waited
+  for an idle callback to hide the click-blocking overlay, even with no code
+  left to highlight. The narrow fix queues highlighting only when the same
+  document-wide pending-code selector finds work. Empty and already-highlighted
+  documents take the existing immediate cleanup path. New/external code keeps
+  its bounded idle callback, generation/overlay ownership, tokens and buttons.
+  No authorization, metadata, durability or real-frame guard is removed.
+- Actual isolated native controls pass 40/40. Exact R924 restores unconditional
+  idle scheduling: only the empty/already-highlighted no-op assertions fail;
+  new-code, external-code and isolation controls pass. Renderer restored
+  byte-for-byte. The initial legacy patch-suite attempt remains failed on its
+  Node-only trap/raw-IPC actor; it is not a full-suite pass. The new controls
+  now use the existing isolated browser suite, not a new harness.
+- Independent final Sol/Luna reviews agree the product fix is sound. Sol also
+  found an older idle-deadline test still rendering plain text while expecting
+  deferred highlighting. It now renders real code and proves that setup;
+  the timeout outcome is unchanged. Both focused follow-ups found no blocker.
+  Final native controls remain 40/40 and R924 is exact PROVEN/restored.
+  Authentic package revalidation remains; the older d52 archive is not
+  post-fix evidence.
+  Evidence beneath `.context-viewport-evidence/`:
+  `packaged-cold-mermaid-controls-r1/`,
+  `packaged-cold-mermaid-comparison-r1/complete-analysis.json`, and
+  `packaged-mermaid-tail-witness-r1/` including positive/proof/failed-actor logs.
+
 ## Measured and found already fast
 - **Custom tab sync I/O is not the current bottleneck.**
   - `custom-tabs.js:69-111,640`

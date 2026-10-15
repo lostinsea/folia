@@ -8814,6 +8814,109 @@ async function runBrowserIsolationControls(win, exec, dir, controlId, openNative
   await exec(`window.CustomTabs.switchToTab(${controlId})`);
   await closeOwnedMetadataFixtureTabs(exec, [...new Set([id, prefixId, relativeEvent.id, droppedId])],
     "SEC-08 browser isolation closes the exact native tab and retires its admitted reference");
+
+  const idleOverlay = await exec(`
+    (async () => {
+      const originalIdle = window.requestIdleCallback;
+      const queued = [];
+      let external;
+      window.requestIdleCallback = (callback, options) => {
+        queued.push({ callback, options });
+        return queued.length;
+      };
+      const drain = () => {
+        while (queued.length) queued.shift().callback({
+          didTimeout: false, timeRemaining: () => 50,
+        });
+      };
+      const snapshot = () => ({
+        heading: viewer.querySelector('h1')?.textContent,
+        pending: document.querySelectorAll('pre code:not(.prism-highlighted)').length,
+        overlay: loadingScreen.classList.contains('active'),
+        queued: queued.length,
+        timeout: queued[0]?.options?.timeout,
+      });
+      try {
+        const observations = {};
+        await renderMarkdown('# Idle empty control\\n\\nReadable plain body.\\n', 'full');
+        observations.empty = snapshot();
+        drain();
+
+        const codeBody = '# Idle code control\\n\\nIntro.\\n\\n' +
+          '\`\`\`js\\nconst queuedHighlightControl = 7;\\n\`\`\`\\n';
+        await renderMarkdown(codeBody, 'full');
+        const code = viewer.querySelector('pre code');
+        observations.newCode = snapshot();
+        observations.newCode.codeLanded = code?.textContent.includes('queuedHighlightControl');
+        observations.newCode.spansBefore = code?.querySelectorAll('.token').length;
+        drain();
+        observations.highlighted = snapshot();
+        observations.highlighted.spans = code?.querySelectorAll('.token').length;
+        observations.highlighted.copyButtons = viewer.querySelectorAll('.code-copy-btn').length;
+
+        await renderMarkdown(codeBody.replace('Intro.', 'Changed intro.'), 'full');
+        observations.preserved = snapshot();
+        observations.preserved.sameCode = viewer.querySelector('pre code') === code;
+        observations.preserved.spans = code?.querySelectorAll('.token').length;
+        observations.preserved.copyButtons = viewer.querySelectorAll('.code-copy-btn').length;
+        drain();
+
+        external = document.createElement('pre');
+        const outsideCode = document.createElement('code');
+        outsideCode.className = 'language-js';
+        outsideCode.textContent = 'const outsideHighlightControl = 9;';
+        external.appendChild(outsideCode);
+        document.body.appendChild(external);
+        await renderMarkdown('# Idle external control\\n\\nPlain viewer.\\n', 'full');
+        observations.external = snapshot();
+        observations.external.viewerPending = viewer.querySelectorAll('pre code:not(.prism-highlighted)').length;
+        drain();
+        observations.externalDone = snapshot();
+        observations.externalDone.highlighted = outsideCode.classList.contains('prism-highlighted') &&
+          outsideCode.querySelectorAll('.token').length > 0;
+        return observations;
+      } finally {
+        try { drain(); }
+        finally {
+          window.requestIdleCallback = originalIdle;
+          external?.remove();
+        }
+      }
+    })()
+  `);
+  check("idle overlay control renders an actual empty-code document",
+    idleOverlay.empty.heading === "Idle empty control" && idleOverlay.empty.pending === 0,
+    JSON.stringify(idleOverlay.empty));
+  check("full render without pending code clears its overlay without idle work",
+    !idleOverlay.empty.overlay && idleOverlay.empty.queued === 0,
+    JSON.stringify(idleOverlay.empty));
+  check("new code retains bounded deferred highlighting and its loading overlay",
+    idleOverlay.newCode.codeLanded && idleOverlay.newCode.pending === 1 &&
+      idleOverlay.newCode.spansBefore === 0 && idleOverlay.newCode.overlay &&
+      idleOverlay.newCode.queued === 1 && idleOverlay.newCode.timeout === 1000,
+    JSON.stringify(idleOverlay.newCode));
+  check("released real highlighting adds tokens and one copy button before clearing the overlay",
+    idleOverlay.highlighted.pending === 0 && !idleOverlay.highlighted.overlay &&
+      idleOverlay.highlighted.spans > 0 && idleOverlay.highlighted.copyButtons === 1,
+    JSON.stringify(idleOverlay.highlighted));
+  check("idle overlay control really preserves already-highlighted code",
+    idleOverlay.preserved.heading === "Idle code control" &&
+      idleOverlay.preserved.sameCode && idleOverlay.preserved.pending === 0 &&
+      idleOverlay.preserved.spans > 0 && idleOverlay.preserved.copyButtons === 1,
+    JSON.stringify(idleOverlay.preserved));
+  check("full render with preserved highlighted code avoids empty idle work",
+    !idleOverlay.preserved.overlay && idleOverlay.preserved.queued === 0,
+    JSON.stringify(idleOverlay.preserved));
+  check("pending code outside the viewer still requires bounded deferred highlighting",
+    idleOverlay.external.heading === "Idle external control" &&
+      idleOverlay.external.viewerPending === 0 && idleOverlay.external.pending === 1 &&
+      idleOverlay.external.overlay && idleOverlay.external.queued === 1 &&
+      idleOverlay.external.timeout === 1000,
+    JSON.stringify(idleOverlay.external));
+  check("released document-wide highlighting clears its real pending code and overlay",
+    idleOverlay.externalDone.highlighted && idleOverlay.externalDone.pending === 0 &&
+      !idleOverlay.externalDone.overlay,
+    JSON.stringify(idleOverlay.externalDone));
 }
 
 async function runTabAuthorityReceiptScenarios(win, exec, dir, controlId, openNative) {
@@ -17959,7 +18062,7 @@ async function run(win) {
   );
 
   // ---- Scenario 6d: the idle callback must carry a deadline --------------
-  // The winning render hides the overlay from inside a requestIdleCallback. A
+  // New code hides the overlay from inside a requestIdleCallback. A
   // bare requestIdleCallback has NO deadline - the browser may defer it
   // indefinitely on a page that never goes idle, which would strand the overlay
   // for the winner in the same way the missing hide stranded it for the loser.
@@ -17970,25 +18073,42 @@ async function run(win) {
     (() => {
       const real = window.requestIdleCallback;
       window.__idleSeen = [];
+      window.__idlePendingCode = 0;
       window.requestIdleCallback = function (cb, opts) {
+        window.__idlePendingCode = document.querySelectorAll('pre code:not(.prism-highlighted)').length;
         window.__idleSeen.push(opts || null);
         return real.call(window, cb, opts);
       };
       window.__restoreIdle = () => { window.requestIdleCallback = real; };
-      renderMarkdown('# Idle deadline\\n\\nbody text', 'full');
+      renderMarkdown('# Idle deadline\\n\\n\`\`\`js\\nconst idleDeadline = 1;\\n\`\`\`', 'full');
       return true;
     })()
   `);
-  await waitForCondition(
-    exec,
-    `(() => {
-       const el = document.getElementById('loadingScreen');
-       return el && !el.classList.contains('active');
-     })()`,
-    8000,
-  );
-  const idleSeen = await exec(`window.__idleSeen`);
-  await exec(`(window.__restoreIdle(), true)`);
+  let idleSeen;
+  let idleSetup;
+  try {
+    await waitForCondition(
+      exec,
+      `(() => {
+         const el = document.getElementById('loadingScreen');
+         return el && !el.classList.contains('active');
+       })()`,
+      8000,
+    );
+    idleSeen = await exec(`window.__idleSeen`);
+    idleSetup = await exec(`({
+      pending: window.__idlePendingCode,
+      heading: document.querySelector('#viewer h1')?.textContent,
+      code: document.querySelector('#viewer pre code')?.textContent,
+    })`);
+  } finally {
+    await exec(`window.__restoreIdle(); delete window.__restoreIdle;
+      delete window.__idleSeen; delete window.__idlePendingCode; null;`);
+  }
+  check("idle deadline control schedules real pending code",
+    idleSetup.pending === 1 && idleSetup.heading === "Idle deadline" &&
+      idleSetup.code.includes("idleDeadline"),
+    JSON.stringify(idleSetup));
   check(
     "the render's idle callback is given a timeout so the overlay cannot be stranded",
     Array.isArray(idleSeen) &&
