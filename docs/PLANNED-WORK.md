@@ -5775,6 +5775,19 @@ and the saving is stated as a measured number.
 
 ## D. Performance and UI correctness
 
+### `left-toc-tracking` — left drawer and scroll-following section · VERIFIED ON FEATURE BRANCH
+
+- Owner and sole register writer: the isolated `folia-left-toc-tracking` feature stream. Base: `c0d41f284f013e1982971dfa4ed70f1ffffb4cb2`.
+- Scope: move TOC left, track the current section cheaply, preserve navigation and reading position. The user confirmed that TOC and All Notes show one at a time.
+- This is a new post-0.5.0 feature, not a release campaign. No main integration, release, install or changes to previous release evidence are included.
+- Investigation, a separate measured PoC and independent Sol/Luna design feedback are complete. The first implementation review found invalid nav closing order and an unchanged active row that could become hidden after resizing; both are corrected. Native-button theme coverage also exposed and corrected an unthemed menu fill.
+- Current handoff: focused TOC coverage passes 30/30, including actual H1-H6 tracking/clicks, skipped levels and long nested sections in normal/split view at 100/200%. Theme passes 398/398, tables 215/215 and packaging 402 with built-asar checks skipped. Final-source measurements and viewed UI evidence are recorded in `docs/PERF-AUDIT.md`.
+- Fresh post-correction Sol and Luna reviews both found no significant issues. Related exact mutation proofs pass, including the existing TOC proofs rerun against the expanded multi-level suite. Focused sandbox and empty-Prism overlay controls pass 40/40.
+- Final disposition: implementation and scoped verification are complete on `users/vinma-microsoft/folia-left-toc-tracking`. Nothing is merged, released or installed; main integration is outside this task. The known render-patch baseline failures and initial-opening performance limit remain explicit in `docs/PERF-AUDIT.md`.
+- The task-specific model policy is Sol/high implementation, Astra investigation/design, and independent fresh Sol/high and Luna/high review. The feature owner runs all source mutations and runtime checks serially.
+- Settled-scroll results do not cover opening/reflow cost. The first product measurement included a 27.1ms split-view initial tracker callback with 1,001 headings; retain that observation when assessing responsiveness.
+- Evidence and measurement limits: `docs/PERF-AUDIT.md`, section "Left TOC tracking"; runtime artifacts remain in the feature session. Completion requires final focused suites, exact revert failures with passing controls, viewed UI captures and the matched scroll comparison.
+
 ### `ctime-byte-witness` — restore content-aware disk-change detection · PENDING · DEFERRED
 
 **Not a wave-2 release blocker.** The 2026-10-01 maintainer decision accepts

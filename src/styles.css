@@ -1091,12 +1091,8 @@ body {
      scroller's own coordinate space - see scrollElementIntoView() in
      renderer.js for why that distinction is load-bearing under `zoom`. */
   scroll-padding-top: 20px;
-  /* Matches .index-panel's slide so the text reflows with the drawer rather
-     than jumping ahead of it. applyTableBreakout() is not driven off this
-     transition - a ResizeObserver watches the scroller instead, because a
-     transition that is interrupted or disabled by prefers-reduced-motion never
-     fires transitionend. */
-  transition: margin-right 0.3s ease;
+  /* Keep width changes atomic. Animating the margin repeatedly reflows the
+     document and invalidates TOC geometry throughout the drawer animation. */
 }
 
 /* Drag-and-drop file-open overlay. The label comes from the string table via
@@ -2217,38 +2213,28 @@ html {
 /* Index/TOC panel */
 .index-panel {
   position: absolute;
-  right: 0;
+  left: 0;
   top: 0;
   bottom: 0;
-  width: var(--toc-width);
+  width: min(var(--toc-width), 40vw);
   background: var(--bg-secondary);
-  border-left: 1px solid var(--border-color);
+  border-right: 1px solid var(--border-color);
   display: flex;
   flex-direction: column;
-  transform: translateX(100%);
+  transform: translateX(-100%);
   transition: transform 0.3s ease;
   z-index: 50;
-  box-shadow: -2px 0 10px rgba(0, 0, 0, 0.1);
+  box-shadow: 2px 0 10px rgba(0, 0, 0, 0.1);
 }
 
 .index-panel.visible {
   transform: translateX(0);
 }
 
-/* The panel is an absolutely positioned overlay anchored to .main-content (the
-   nearest positioned ancestor), so at `right: 0` with z-index 50 it paints on
-   top of the scroller's scrollbar. Measured, with the panel open: the 16px
-   gutter is still there and the scroller is unchanged, but elementFromPoint at
-   the gutter returns #indexList - in BOTH normal view (scroller
-   .content-wrapper) and split view (scroller #viewer). The document became
-   unscrollable by mouse for as long as the table of contents was shown.
-
-   Fixed by having the scroller give up exactly the panel's width rather than by
-   restacking, so the scrollbar sits beside the panel instead of under it. The
-   panel does not move with it: it is positioned against .main-content, not
-   against .content-wrapper. */
+/* Reserve the same width as the left drawer, including at narrow widths.
+   The document and its scrollbar must stay beside it, not underneath it. */
 .content-wrapper:has(> #indexPanel.visible) {
-  margin-right: var(--toc-width);
+  margin-left: min(var(--toc-width), 40vw);
 }
 
 .index-header {
@@ -2276,6 +2262,13 @@ html {
 }
 
 .index-item {
+  display: block;
+  width: 100%;
+  background: none;
+  border: 0;
+  font-family: inherit;
+  text-align: left;
+  overflow-wrap: anywhere;
   padding: 8px 12px;
   margin: 2px 0;
   cursor: pointer;
@@ -2291,11 +2284,15 @@ html {
   border-left-color: var(--primary-color);
 }
 
+.index-item:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: -2px;
+}
+
 .index-item.active {
   background: var(--bg-tertiary);
   border-left-color: var(--primary-color);
   color: var(--primary-color);
-  font-weight: 500;
 }
 
 /* Header level indentation */

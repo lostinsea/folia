@@ -4342,7 +4342,20 @@ app.whenReady().then(async () => {
           fs.readFileSync(path.join(__dirname, "..", "src", "custom-styles.css"), "utf8")),
       },
     };
-    const installGen = (texts) => `(() => {
+    const installGen = (texts, which) => `(() => {
+      for (const pair of window.__tocHeadNodes || []) pair.replacement.replaceWith(pair.original);
+      window.__tocHeadNodes = [];
+      /* Compare the old div controls with the new native buttons, not old
+         styles on new buttons that inherit a browser-default grey fill. */
+      if (${JSON.stringify(which)} === 'head') {
+        for (const original of document.querySelectorAll('button.index-item,button#toggleIndex')) {
+          const replacement = document.createElement('div');
+          for (const a of original.attributes) replacement.setAttribute(a.name, a.value);
+          for (const child of original.childNodes) replacement.appendChild(child.cloneNode(true));
+          original.replaceWith(replacement);
+          window.__tocHeadNodes.push({original,replacement});
+        }
+      }
       for (const s of Array.prototype.slice.call(
         document.querySelectorAll('style[data-head-swap]'))) s.remove();
       const links = Array.prototype.slice.call(
@@ -4651,6 +4664,8 @@ app.whenReady().then(async () => {
       });
     })()`;
     const removeHead = `(() => {
+      for (const pair of window.__tocHeadNodes || []) pair.replacement.replaceWith(pair.original);
+      delete window.__tocHeadNodes;
       for (const s of Array.prototype.slice.call(
         document.querySelectorAll('style[data-head-swap]'))) s.remove();
       const k = document.getElementById('__st_notrans');
@@ -4739,7 +4754,7 @@ app.whenReady().then(async () => {
         `missing ancestry: ${scaffold.missing.join(" | ") || "none"}`,
     );
     for (const which of ["tree", "head"]) {
-      installedCount = await exec(installGen(genSheets[which]));
+      installedCount = await exec(installGen(genSheets[which], which));
       const sels = JSON.parse(await exec(COLLECT_STATE_SELECTORS));
       gen[which] = { sels: sels, byMode: {} };
     }
@@ -4752,7 +4767,7 @@ app.whenReady().then(async () => {
       }
     }
     for (const which of ["tree", "head"]) {
-      await exec(installGen(genSheets[which]));
+      await exec(installGen(genSheets[which], which));
       for (const mode of ["light", "dark"]) {
         await applySettled(mode, null, `${mode} default (${which} stylesheets)`);
         gen[which].byMode[mode] = JSON.parse(await exec(measureStates(plan)));
@@ -9227,11 +9242,19 @@ app.whenReady().then(async () => {
       if (/\[data-theme/.test(o.sel)) continue;
       if (/var\(/.test(o.val)) continue;
       const mode = /\.dark-mode/.test(o.sel) ? "dark" : "light";
-      const survivor = newByKey.get(declKey(o));
+      const survivor = newByKey.get(declKey(o)) ||
+        (o.file === "custom-styles.css" && o.sel === ".tools-menu-item.has-flyout"
+          ? newByKey.get(declKey({ ...o, sel: ".tools-menu-item.has-flyout, button.tools-menu-item" }))
+          : undefined);
       if (survivor) {
         sameSelSeen++;
         const got = subst(survivor.val, mode);
-        if (normCss(got) !== normCss(o.val))
+        // Mirroring the drawer changes layout, not the frozen theme paint.
+        const tocMirror = o.file === "styles.css" && o.sel === ".index-panel" &&
+          ((o.prop === "transform" && o.val === "translateX(100%)" && got === "translateX(-100%)") ||
+           (o.prop === "box-shadow" && o.val === "-2px 0 10px rgba(0, 0, 0, 0.1)" &&
+             got === "2px 0 10px rgba(0, 0, 0, 0.1)"));
+        if (normCss(got) !== normCss(o.val) && !tocMirror)
           sameSelDrift.push(`{${o.sel}} ${o.prop}: was ${o.val}, now ${survivor.val} => ${got}`);
         continue;
       }
@@ -9295,6 +9318,15 @@ app.whenReady().then(async () => {
        is bucketed by the reason it is excused and every bucket is pinned. An
        unclassified remainder fails by name. */
     const REMOVAL_REASONS = [
+      {
+        why: "left TOC layout and metric-stable active rows",
+        match: (u) => [
+          "styles.css {.content-wrapper} transition: margin-right 0.3s ease",
+          "styles.css {.index-panel} right: 0",
+          "styles.css {.index-item.active} font-weight: 500",
+        ].includes(u),
+        count: 3,
+      },
       {
         why: "vendored dark Prism rules, replaced by the --tok-* cells the golden pins directly",
         match: (u) => /\.token\.|code\[class\*=language-\]/.test(u),

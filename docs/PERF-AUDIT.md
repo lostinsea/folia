@@ -72,6 +72,73 @@ app.whenReady().then(async () => {
 });
 ```
 
+## Left TOC tracking
+
+### Method and scope
+
+- Baseline: `c0d41f284f013e1982971dfa4ed70f1ffffb4cb2`, frozen from Git into the feature session, not the primary checkout.
+- Runtime: Windows, AMD EPYC 7763, Electron 43.4.1. Both sides use the same locked dependencies, 1280 x 850 window, 100% reader zoom and an open TOC.
+- Test both the normal `.content-wrapper` scroller and the actual split/edit `#viewer` scroller. Split view is entered through the real edit toggle.
+- Workloads: 1,001 headings / 1,083,194 bytes, and 241 headings / 262,926 bytes with eight real Mermaid diagrams and local SVG images. Include long gaps between headings.
+- Per workload and view: three 240-frame bidirectional/jump sweeps, then three native-wheel runs. Run baseline and feature serially, with isolated profiles.
+- Record animation-frame intervals, long tasks, heading geometry reads and Chrome script/style/layout/task counters. Time the frame-coalesced tracker separately. Keep opening, reopening, resizing and image-reflow callback samples outside settled-scroll measurements.
+- Check the current heading against live geometry, not the tracker's cached positions. View captures with the active row visible in the left drawer.
+- This remote display reports about 31.3ms between frames. Unchanged cadence here is not a 60fps result and cannot prove behavior on every machine or display.
+- The prospective engineering checks were tracker p95 below 1ms, frame-p95 increase no greater than the larger of 2ms or 10%, and no tracker-related long task of 50ms or more. These checks do not redefine the user's no-noticeable-slowdown requirement.
+
+### Investigation and separate PoC
+
+- The initial baseline attempt had the TOC closed. Its results are retained but excluded from the comparison.
+- The first working candidate read sidebar rectangles during scrolling and changed active-row font weight. It caused about 232 layouts per 240-frame sweep and a 1.6ms tracker p95; it was rejected.
+- Caching sidebar bounds and keeping active styling metric-stable removed that layout work. The refined PoC's tracker p95 was about 0.4ms, with no settled heading geometry reads or layouts.
+- PoC cache-refresh samples were 6.2-9.7ms for 1,001 headings and 1.6-4ms for the mixed document. They are not final-product opening measurements.
+- The product uses passive, frame-coalesced scrolling, cached geometry and binary search. Dynamic content can still require a full geometry refresh; there is no claim of zero overhead.
+- An earlier product run recorded a 27.1ms initial split-view tracker callback for 1,001 headings. Retain this cost separately from settled scrolling: opening an extreme outline can consume more than a 60Hz frame.
+- Arbitrary CSS animation that moves headings without a DOM or observed size change is not continuously tracked. Tracking every animation frame was not added.
+
+### Final-source results
+
+- All measured settled-scroll windows had zero heading rectangle reads, zero layouts and no long tasks of 50ms or more.
+- Frame p95 is pooled across the three sweeps. Native-wheel p95 shows the range across the three repetitions; keep the observed 0.1ms differences.
+
+| Workload / view | Sweep frame p95, baseline -> feature | Native-wheel frame p95, baseline -> feature | Tracker p95 |
+|---|---:|---:|---:|
+| 1,001 headings / normal | 31.3 -> 31.3ms | 31.3 -> 31.3ms | 0.5ms |
+| 1,001 headings / split | 31.3 -> 31.3ms | 31.3 -> 31.3-31.4ms | 0.5ms |
+| Mixed / normal | 31.3 -> 31.3ms | 31.3 -> 31.3-31.4ms | 0.5ms |
+| Mixed / split | 31.3 -> 31.3ms | 31.3 -> 31.3-31.4ms | 0.4ms |
+
+- There is real extra CPU/style/paint work. These Chrome counters are milliseconds accumulated per roughly 7.5-second sweep, not frame times. Ranges include every repetition.
+
+| Workload / view | Script, baseline -> feature | Style, baseline -> feature | Total task, baseline -> feature |
+|---|---:|---:|---:|
+| 1,001 headings / normal | 28.7-28.8 -> 60.6-65.2 | 0 -> 83.7-89.8 | 778-794 -> 1,019-1,165 |
+| 1,001 headings / split | 27.4-29.0 -> 62.5-67.2 | 0 -> 87.1-95.1 | 780-805 -> 1,193-1,507 |
+| Mixed / normal | 27.5-29.9 -> 52.6-57.4 | 0 -> 69.6-80.5 | 447-514 -> 711-774 |
+| Mixed / split | 26.1-27.4 -> 52.6-54.9 | 0 -> 69.9-72.0 | 480-542 -> 708-769 |
+
+- Separate opening/reflow checks recorded these largest tracker callbacks. They include any layout paid by the callback; they are not isolated cache-loop timings or end-to-end opening times.
+
+| Workload / view | Initial layout | Reopen | Resize | Image grow/restore |
+|---|---:|---:|---:|---:|
+| 1,001 headings / normal | 8.3ms | 5.3ms | 6.2ms | N/A |
+| 1,001 headings / split | 26.3ms | 4.9ms | 5.7ms | N/A |
+| Mixed / normal | 3.0ms | 1.7ms | 1.2ms | 1.1ms |
+| Mixed / split | 2.3ms | 1.1ms | 1.1ms | 1.1ms |
+
+- Conclusion: no observed scrolling-cadence regression in these workloads/runtime, with measurable additional work. Initial opening of the extreme split-view outline remains a cost, not a hitch-free-opening or high-refresh-display guarantee.
+
+### Evidence
+
+- Nonshipping runner, frozen baseline, source/fixture hashes, raw samples, excluded attempts and viewed screenshots are retained in session `e4dc74e3-37ed-4a60-8879-1bb617017e84`, under `files/`.
+- Runner: `toc-poc-runner.cjs`; excluded attempt: `toc-baseline-a`; rejected candidate: `toc-poc-c`; refined candidate: `toc-poc-d`.
+- Final comparison: `toc-baseline-normal-r1.json`, `toc-baseline-split-r1.json`, `toc-production-normal-r3.json`, `toc-production-split-r3.json` and `toc-final-comparison.txt`. Earlier product runs are retained, including the 27.1ms initial callback.
+- Fixture SHA256: headings `ba32e4f068c3d799d46b14903dc5c52ac744067c1f38e660e248c1b806f9a3b9`; mixed `eb9ce720151ac3cf71708737eebb6511de3c367e03dbb97c338dc01200aca3b6`.
+- Focused behavior coverage is `npm run test:toc`; the related table and theme suites cover drawer geometry and native-button styling. Revert records in `scripts/prove-table-fixes.js` name the exact failing assertions and independent passing controls.
+- The real H1-H6 fixture checks each child heading's exact identity during normal/split 100/200% scrolling, skipped levels, long nested sections and clicks. Excluding H4-H6 from the cache makes those checks fail while the hierarchy and existing scroll controls still pass.
+- Existing focused browser-isolation and empty-Prism overlay controls pass 40/40 on the same final product source. Evidence: `toc-isolation-prism-controls-r2.log`; its generated captures and native-read records are retained in `toc-isolation-controls-captures/`.
+- The render-patch suite remains 105/109, matching its pre-change baseline failures around external-open instrumentation. Its existing normal/split 100/200% TOC navigation checks pass; this is not a claim that the full application suite is green.
+
 ## Findings
 
 ### PERF-01 — Eager main-process `require()`s block startup

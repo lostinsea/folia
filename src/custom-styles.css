@@ -65,7 +65,8 @@ div.container div.header,
 /* The rows are <button>s (a <button> may not contain interactive content, so
    the panel has to be a sibling rather than a child). A button does not
    inherit font or colour and brings its own background and border. */
-.tools-menu-item.has-flyout {
+.tools-menu-item.has-flyout,
+button.tools-menu-item {
   width: 100%;
   background: transparent;
   border: none;

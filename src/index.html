@@ -149,9 +149,9 @@
                 <span data-i18n="openFile">Open File</span>
                 <span class="tools-shortcut">Ctrl+O</span>
               </div>
-              <div class="tools-menu-item" id="toggleIndex">
+              <button type="button" class="tools-menu-item" id="toggleIndex" aria-controls="indexPanel" aria-expanded="false">
                 <span data-i18n="tableOfContents">Table of Contents</span>
-              </div>
+              </button>
               <div class="tools-menu-item" id="toggleEdit">
                 <span data-i18n="editMode">Edit Mode</span>
               </div>
@@ -684,9 +684,9 @@
             </div>
           </div>
 
-          <div id="indexPanel" class="index-panel">
+          <nav id="indexPanel" class="index-panel" aria-labelledby="indexTitle" inert>
             <div class="index-header">
-              <span data-i18n="tableOfContents">Table of Contents</span>
+              <span id="indexTitle" data-i18n="tableOfContents">Table of Contents</span>
               <button id="closeIndex" class="close-btn">×</button>
             </div>
             <div id="indexList" class="index-list">
@@ -694,7 +694,7 @@
                 No headers found
               </div>
             </div>
-          </div>
+          </nav>
         </div>
       </div>
     </div>

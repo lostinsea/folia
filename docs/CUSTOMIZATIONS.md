@@ -340,6 +340,22 @@ adoption, scrolling in normal/split view and width-dependent layouts. Its
 roomy 100% and constrained/zoomed captures must be opened when checking visual
 changes; merely writing PNGs is not visual verification.
 
+### 8. Left table of contents and current section (renderer.js + styles.css)
+
+- The TOC opens on the left. Opening it closes All Notes; opening All Notes closes the TOC.
+- The drawer reserves document space, capped at 40% of the window width. Its transform animates; the document margin does not.
+- Opening or closing the drawer preserves the reading position through the existing zoom-anchor helper. Native scroll anchoring is paused for that correction.
+- The current section is the last visible heading at the 20px reading line. Before the first heading, the first heading is current; at the bottom of an overflowing document, the last heading is current.
+- Tracking includes every supported heading level, H1-H6, including skipped levels and long nested sections. Each row keeps its heading's indentation and direct click target.
+- Native buttons support keyboard navigation. The named navigation region, expanded state, `aria-current="location"` and hidden-panel `inert` state expose the same state to assistive tools.
+- Scrolling updates only the old and new active rows. It never focuses a row or scrolls the document; it reveals the active row inside the TOC when needed.
+- Passive, frame-coalesced listeners follow the real scroll owner in normal and split view. Binary search uses cached heading positions; settled scrolling does not measure every heading or rebuild the list.
+- Content changes, collapse/expand, images, Mermaid adoption, font loading, zoom and resizing invalidate the cache. Closed drawers disconnect their observers and cancel pending tracking work.
+- TOC clicks retain ancestor expansion and document navigation. Switching tabs, reloading, or rendering a document without headings replaces stale outline state.
+- Print hides the drawer and removes its reserved space.
+- Continuous authored CSS animations that move headings without a DOM or observed size change are not tracked continuously. There is no permanent frame loop or per-heading observer.
+- Focused coverage: `npm run test:toc`. Measured scrolling costs and environment limits are recorded in `PERF-AUDIT.md`.
+
 ## How to Maintain After Upstream Merge
 
 **After every upstream merge, run the post-merge script:**

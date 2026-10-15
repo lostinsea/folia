@@ -1994,12 +1994,8 @@ async function run(win) {
 
   // --- 15. The table of contents must not cover the document scrollbar -----
   // Reported by the user: with the ToC open there was no way to scroll the
-  // document. Diagnosed by measurement rather than from the CSS - the scroller
-  // does not change and the gutter is still 16px wide, so every width-based
-  // check reads clean. What changes is what is PAINTED there: .index-panel is
-  // `position: absolute; right: 0; z-index: 50`, anchored to .main-content, so
-  // it lands exactly on top of the scrollbar. elementFromPoint is the only
-  // probe that sees it.
+  // document. Keep the left drawer beside the reading pane, and hit-test the
+  // scrollbar as well as measuring their boxes.
   //
   // Run in both view modes because the scroller differs (.content-wrapper
   // normally, #viewer in split view) and the panel covered both.
@@ -2034,8 +2030,8 @@ async function run(win) {
           scrollable: scroller.scrollHeight > scroller.clientHeight + 1,
           hitInsidePanel: !!(hit && panel.contains(hit)),
           hitId: hit ? (hit.id || hit.className || hit.tagName) : null,
-          panelLeft: Math.round(panel.getBoundingClientRect().left),
-          scrollerRight: Math.round(r.right),
+          panelRight: Math.round(panel.getBoundingClientRect().right),
+          scrollerLeft: Math.round(r.left),
         };
       }
 
@@ -2058,8 +2054,8 @@ async function run(win) {
       out.breakoutSampled = !!widest;
       if (widest) {
         const tr = widest.getBoundingClientRect();
-        out.breakoutRight = Math.round(tr.right);
-        out.breakoutUnderPanel = tr.right > panel.getBoundingClientRect().left + 1;
+        out.breakoutLeft = Math.round(tr.left);
+        out.breakoutUnderPanel = tr.left < panel.getBoundingClientRect().right - 1;
       }
 
       // Same again in split view, where #viewer owns the scrollbar.
@@ -2111,9 +2107,9 @@ async function run(win) {
     JSON.stringify(tocGutter.modes.splitOpen),
   );
   check(
-    "the scroller ends at or before the ToC panel rather than under it",
-    tocGutter.modes.normalOpen.scrollerRight <=
-      tocGutter.modes.normalOpen.panelLeft + 1,
+    "the scroller starts at or after the ToC panel rather than under it",
+    tocGutter.modes.normalOpen.scrollerLeft >=
+      tocGutter.modes.normalOpen.panelRight - 1,
     JSON.stringify(tocGutter.modes.normalOpen),
   );
   check(
@@ -5753,10 +5749,13 @@ app.whenReady().then(async () => {
   } catch (e) {
     check("suite ran to completion", false, e.message);
   }
-  clearTimeout(watchdog);
   failed = results.filter((r) => !r.ok).length;
   const summary = `=== ${results.length - failed}/${results.length} passed ===`;
-  console.log("\n" + summary + "\n");
+  app.once("quit", () => console.log("\n" + summary + "\n"));
   writeReport(summary);
-  app.exit(failed === 0 ? 0 : 1);
+  app.once("will-quit", () => {
+    clearTimeout(watchdog);
+    app.exit(failed === 0 ? 0 : 1);
+  });
+  app.quit();
 });

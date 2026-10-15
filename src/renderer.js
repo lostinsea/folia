@@ -824,6 +824,7 @@ const UI_STRINGS = {
   'title.searchClose': 'Close (Esc)',
   'title.note': 'Title',
   'tableOfContents': 'Table of Contents',
+  'title.tocClose': 'Close table of contents',
   'rawMarkdown': 'Raw Markdown', 'loading': 'Loading...',
   'searchPlaceholder': 'Search in document...', 'noRecentFiles': 'No recent files',
   'noHeaders': 'No headers found', 'unsaved': '● Unsaved',
@@ -5087,11 +5088,14 @@ function assignHeadingIds(headers) {
   });
 }
 
-function buildTableOfContents() {
-  const headers = viewer.querySelectorAll('h1, h2, h3, h4, h5, h6');
+let tocEntries = [];
+
+function buildTableOfContents(headers = viewer.querySelectorAll('h1, h2, h3, h4, h5, h6')) {
+  tocEntries = [];
 
   if (headers.length === 0) {
     indexList.innerHTML = '<div class="index-empty" data-i18n="noHeaders">' + i18n('noHeaders') + '</div>';
+    tocTracking.invalidate();
     return;
   }
 
@@ -5100,28 +5104,197 @@ function buildTableOfContents() {
 
   headers.forEach((header) => {
     const level = parseInt(header.tagName.substring(1));
-    const item = document.createElement('div');
+    const item = document.createElement('button');
+    item.type = 'button';
     item.className = `index-item level-${level}`;
     item.textContent = header.textContent;
     item.dataset.headerId = header.id;
 
     item.addEventListener('click', () => {
-      const targetHeader = document.getElementById(header.id);
-      if (targetHeader) {
+      if (header.isConnected && viewer.contains(header)) {
         // Auto-expand any collapsed sections containing this header
         expandToHeader(header.id);
 
-        scrollElementIntoView(targetHeader, 'start');
-
-        // Update active state
-        document.querySelectorAll('.index-item').forEach(i => i.classList.remove('active'));
-        item.classList.add('active');
+        scrollElementIntoView(header, 'start');
       }
     });
 
     indexList.appendChild(item);
+    tocEntries.push({ header, item });
   });
+  tocTracking.invalidate();
 }
+
+const tocTracking = (() => {
+  let enabled = false;
+  let frame = 0;
+  let measuring = false;
+  let geometryDirty = true;
+  let membershipDirty = true;
+  let labelsDirty = true;
+  let positions = [];
+  let active = null;
+  let scroller = null;
+  let maximum = 0;
+  let listHeight = 0;
+
+  function schedule() {
+    if (enabled && !frame) frame = requestAnimationFrame(flushTocTracking);
+  }
+
+  function invalidate() {
+    geometryDirty = true;
+    schedule();
+  }
+
+  function setActive(entry, revealCurrent = false) {
+    const changed = entry !== active;
+    if (!changed && !revealCurrent) return;
+    let reveal = 0;
+    if (entry) {
+      const top = indexList.scrollTop;
+      if (entry.rowTop < top) reveal = entry.rowTop - top;
+      else if (entry.rowBottom > top + listHeight) reveal = entry.rowBottom - top - listHeight;
+    }
+    if (changed) {
+      active?.item.classList.remove('active');
+      active?.item.removeAttribute('aria-current');
+      entry?.item.classList.add('active');
+      entry?.item.setAttribute('aria-current', 'location');
+      active = entry;
+    }
+    // Never use scrollIntoView here: it can also move the document's scroller.
+    if (reveal) indexList.scrollTop += reveal;
+  }
+
+  function reconcile() {
+    if (membershipDirty) {
+      membershipDirty = false;
+      const headers = [...viewer.querySelectorAll('h1, h2, h3, h4, h5, h6')];
+      if (headers.length !== tocEntries.length ||
+          headers.some((header, i) => header !== tocEntries[i].header)) {
+        buildTableOfContents(headers);
+        active = null;
+      }
+    }
+    if (labelsDirty) {
+      labelsDirty = false;
+      for (const { header, item } of tocEntries) {
+        if (item.textContent !== header.textContent) item.textContent = header.textContent;
+        if (item.dataset.headerId !== header.id) item.dataset.headerId = header.id;
+      }
+    }
+  }
+
+  function measure() {
+    scroller = getViewerScroller();
+    const top = scroller.getBoundingClientRect().top;
+    const scale = scrollerScale(scroller);
+    const offset = scroller.scrollTop;
+    maximum = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    const listTop = indexList.getBoundingClientRect().top;
+    const listOffset = indexList.scrollTop;
+    listHeight = indexList.clientHeight;
+    positions = [];
+    for (const entry of tocEntries) {
+      const row = entry.item.getBoundingClientRect();
+      entry.rowTop = row.top - listTop + listOffset;
+      entry.rowBottom = row.bottom - listTop + listOffset;
+      if (!entry.header.checkVisibility({ visibilityProperty: true, opacityProperty: true })) continue;
+      entry.top = (entry.header.getBoundingClientRect().top - top) / scale + offset;
+      positions.push(entry);
+    }
+    // Author CSS need not preserve document order; keep the outline in DOM
+    // order, but search its measured positions in geometric order.
+    positions.sort((a, b) => a.top - b.top);
+    geometryDirty = false;
+  }
+
+  function updateActive(revealCurrent) {
+    const top = scroller.scrollTop;
+    let low = 0;
+    let high = positions.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (positions[middle].top <= top + 21) low = middle + 1;
+      else high = middle;
+    }
+    // The integer-rounded extents can exceed the actual fractional maximum.
+    const index = maximum > 0 && top >= maximum - 2
+      ? positions.length - 1 : Math.max(0, low - 1);
+    setActive(positions[index] || null, revealCurrent);
+  }
+
+  function flushTocTracking() {
+    frame = 0;
+    if (!enabled) return;
+    const refresh = geometryDirty;
+    if (geometryDirty) {
+      if (!measuring || membershipDirty || labelsDirty) {
+        reconcile();
+        // Row creation, drawer width and zoom writes need an intervening
+        // layout opportunity. Settled scrolling never enters this path.
+        measuring = true;
+        schedule();
+        return;
+      }
+      measure();
+      measuring = false;
+    }
+    updateActive(refresh);
+  }
+
+  const mutations = new MutationObserver(records => {
+    for (const record of records) {
+      if (record.type === 'childList') membershipDirty = true;
+      const element = record.target.nodeType === Node.ELEMENT_NODE
+        ? record.target : record.target.parentElement;
+      if (element?.closest('h1, h2, h3, h4, h5, h6')) labelsDirty = true;
+    }
+    invalidate();
+  });
+  const resize = new ResizeObserver(invalidate);
+
+  function setEnabled(next) {
+    if (enabled === next) return;
+    enabled = next;
+    if (!enabled) {
+      cancelAnimationFrame(frame);
+      frame = 0;
+      measuring = false;
+      mutations.disconnect();
+      resize.disconnect();
+      viewer.removeEventListener('scroll', schedule);
+      contentWrapper.removeEventListener('scroll', schedule);
+      viewer.removeEventListener('load', invalidate, true);
+      viewer.removeEventListener('error', invalidate, true);
+      window.removeEventListener('resize', invalidate);
+      document.fonts.removeEventListener('loadingdone', invalidate);
+      document.fonts.removeEventListener('loadingerror', invalidate);
+      setActive(null);
+      positions = [];
+      scroller = null;
+      return;
+    }
+    membershipDirty = labelsDirty = geometryDirty = true;
+    mutations.observe(viewer, {
+      subtree: true, childList: true, characterData: true, attributes: true,
+      attributeFilter: ['class', 'style', 'hidden', 'open', 'width', 'height', 'id'],
+    });
+    mutations.observe(contentWrapper, { attributes: true, attributeFilter: ['class', 'style'] });
+    for (const element of [viewer, contentWrapper, indexList]) resize.observe(element);
+    viewer.addEventListener('scroll', schedule, { passive: true });
+    contentWrapper.addEventListener('scroll', schedule, { passive: true });
+    viewer.addEventListener('load', invalidate, true);
+    viewer.addEventListener('error', invalidate, true);
+    window.addEventListener('resize', invalidate);
+    document.fonts.addEventListener('loadingdone', invalidate);
+    document.fonts.addEventListener('loadingerror', invalidate);
+    schedule();
+  }
+
+  return { invalidate, setEnabled };
+})();
 
 // Collapsed state, persisted across re-renders.
 //
@@ -5266,30 +5439,60 @@ function expandToHeader(headerId) {
 }
 
 // Index panel toggle
+function setIndexVisible(visible) {
+  if (indexPanel.classList.contains('visible') === visible) return;
+  captureZoomAnchor();
+  const scroller = getViewerScroller();
+  const overflowAnchor = scroller.style.overflowAnchor;
+  // The existing reading-anchor restore owns this reflow. Native scroll
+  // anchoring must not move first and make that restore look superseded.
+  scroller.style.overflowAnchor = 'none';
+  const restoreFocus = !visible && indexPanel.contains(document.activeElement);
+  indexPanel.classList.toggle('visible', visible);
+  indexPanel.inert = !visible;
+  toggleIndexBtn.setAttribute('aria-expanded', String(visible));
+  tocTracking.setEnabled(visible);
+  requestAnimationFrame(() => {
+    if (scroller.style.overflowAnchor === 'none') scroller.style.overflowAnchor = overflowAnchor;
+  });
+  if (restoreFocus) menuBtn.focus({ preventScroll: true });
+}
+
+closeIndexBtn.setAttribute('aria-label', i18n('title.tocClose'));
 toggleIndexBtn.addEventListener('click', () => {
   fileMenu.classList.remove('visible');
-  indexPanel.classList.toggle('visible');
+  const visible = !indexPanel.classList.contains('visible');
+  if (visible) closeNotesPanel();
+  setIndexVisible(visible);
+  if (visible) closeIndexBtn.focus({ preventScroll: true });
 });
 
 closeIndexBtn.addEventListener('click', () => {
-  indexPanel.classList.remove('visible');
+  setIndexVisible(false);
+});
+indexPanel.addEventListener('keydown', event => {
+  if (event.key !== 'Escape') return;
+  event.preventDefault();
+  setIndexVisible(false);
 });
 
 // Notes panel toggle
 toggleNotesBtn.addEventListener('click', () => {
   fileMenu.classList.remove('visible');
   const willOpen = !notesPanel.classList.contains('visible');
+  if (willOpen) setIndexVisible(false);
   notesPanel.classList.toggle('visible');
   if (willOpen) updateNotesList();
 });
 
-closeNotesBtn.addEventListener('click', () => {
+function closeNotesPanel() {
   notesPanel.classList.remove('visible');
   // Reset search state
   notesSearchBar.classList.remove('visible');
   notesSearchToggle.classList.remove('active');
   notesSearchInput.value = '';
-});
+}
+closeNotesBtn.addEventListener('click', closeNotesPanel);
 
 function updateNotesList() {
   const allNotes = viewer.querySelectorAll('.noted-text[data-note-id], .noted-image[data-note-id], .note-label[data-note-id]');
