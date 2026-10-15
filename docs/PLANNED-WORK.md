@@ -5775,22 +5775,6 @@ and the saving is stated as a measured number.
 
 ## D. Performance and UI correctness
 
-### `left-toc-tracking` — left drawer and scroll-following section · READY FOR 0.6.0 PUBLICATION
-
-- Owner and sole register writer: the isolated `folia-left-toc-tracking` feature stream. Base: `c0d41f284f013e1982971dfa4ed70f1ffffb4cb2`.
-- Scope: move TOC left, track the current section cheaply, preserve navigation and reading position. The user confirmed that TOC and All Notes show one at a time.
-- The user authorized a minor release with this feature. Live main remains `c0d41f284f013e1982971dfa4ed70f1ffffb4cb2`, the latest published version is 0.5.0, and 0.6.0 is available. This stream owns normal integration and publication; PC installation, OS changes and changes to previous release evidence are excluded.
-- Investigation, a separate measured PoC and independent Sol/Luna design feedback are complete. The first implementation review found invalid nav closing order and an unchanged active row that could become hidden after resizing; both are corrected. Native-button theme coverage also exposed and corrected an unthemed menu fill.
-- Current handoff: focused TOC coverage passes 30/30, including actual H1-H6 tracking/clicks, skipped levels and long nested sections in normal/split view at 100/200%. Theme passes 398/398, tables 215/215 and packaging 402 with built-asar checks skipped. Final-source measurements and viewed UI evidence are recorded in `docs/PERF-AUDIT.md`.
-- Fresh post-correction Sol and Luna reviews both found no significant issues. Related exact mutation proofs pass, including the existing TOC proofs rerun against the expanded multi-level suite. Focused sandbox and empty-Prism overlay controls pass 40/40.
-- Current handoff: feature commit `85c1183f3a2ea325046bb5740ad0f34bc6f09f1a` is complete. Astra's release-source investigation and independent Sol/Luna release-preparation reviews are complete, with no blocking findings. Sol's material follow-up is to attach the reviewed notes to the GitHub release; the workflow does not supply them.
-- Release package: version and lock are 0.6.0, with no dependency or product-source changes. Strict built-archive packaging passes 414/414. The actual unpacked app passes 23/23 production-path checks, including 48 H1-H6 tracking samples in normal/split view at 100/200%, skipped levels, long H6 sections, clicks, exclusive drawers, tab/reload and narrow layout. Node-off, context isolation, sandboxing, the fixed-method bridge and all packaged product-source hashes are verified. Three captures were viewed.
-- Evidence remains in this feature session: `release-060-strict-packaging.log`, `release-060-local-r5/result.json` and its viewed captures. Earlier failed attempts are retained: the smoke incorrectly assumed preload paths were reflected by Electron's preferences/session getters, assumed multi-file CLI admission, and sampled an unfinished drawer animation. Those were harness repairs, not product changes. Existing P2 deferrals, known render-patch baseline failures and the opening limit remain unchanged.
-- Publication is pending normal main integration, the tag-ref workflow, published-download hashes/update feeds/provenance against the exact release commit and a smoke of the published portable app. Nothing is installed or updated on this PC. Luna's follow-up corrected the wording: a tag ref is not inherently immutable; source verification must pin the commit.
-- The task-specific model policy is Sol/high implementation, Astra investigation/design, and independent fresh Sol/high and Luna/high review. The feature owner runs all source mutations and runtime checks serially.
-- Settled-scroll results do not cover opening/reflow cost. The first product measurement included a 27.1ms split-view initial tracker callback with 1,001 headings; retain that observation when assessing responsiveness.
-- Evidence and measurement limits: `docs/PERF-AUDIT.md`, section "Left TOC tracking"; runtime artifacts remain in the feature session. Completion requires final focused suites, exact revert failures with passing controls, viewed UI captures and the matched scroll comparison.
-
 ### `ctime-byte-witness` — restore content-aware disk-change detection · PENDING · DEFERRED
 
 **Not a wave-2 release blocker.** The 2026-10-01 maintainer decision accepts
@@ -6896,6 +6880,18 @@ audit documents and the commit history.
 | F43 / N18 | `1132fc7` | Hardened block-placeholder assembly (per-render nonce tokens, so a decoy placeholder in a code span cannot capture the real diagram) and restored the Mermaid source attribute. |
 | `w2-ci`, `w2-docs`, `w2-f23`, `w2-f25` | various, through `a80c813` | The wave-2 checkpoint: security, hygiene, CI and payload work. All four are `w2-release` prerequisites and are **done**. |
 | Release 0.4.0 | `eae1429` | The release the register's remaining work builds on top of. Check `package.json` for the version actually on `main`. |
+
+### `left-toc-tracking` — released 0.6.0 · COMPLETE
+
+- Owner and sole register writer: the isolated `folia-left-toc-tracking` stream. Feature: `85c1183f3a2ea325046bb5740ad0f34bc6f09f1a`. Normal main integration and tag `v0.6.0`: [`0030b720961c8925d985e48e6e211d5d8da1f348`](https://github.com/lostinsea/folia/commit/0030b720961c8925d985e48e6e211d5d8da1f348).
+- [Folia 0.6.0 is published](https://github.com/lostinsea/folia/releases/tag/v0.6.0). The [release workflow](https://github.com/lostinsea/folia/actions/runs/38777442670) passed all builds, provenance and publication. The tag push started it; no duplicate dispatch was made. Reviewed release notes are present.
+- Shipped: left TOC, H1-H6 current-section tracking and the user-approved one-at-a-time TOC/All Notes drawer. Investigation, separate PoC, independent Sol/Luna design/change reviews, exact revert proofs and viewed UI are complete. Feature evidence remains TOC 30/30, themes 398/398, tables 215/215 and focused isolation/empty-Prism controls 40/40.
+- Strict built-archive packaging passed 414/414 locally and in the actual Windows release job. The local unpacked app and downloaded portable each passed 23/23 production-path checks, including 48 H1-H6 samples across normal/split view at 100/200%, skipped levels, long H6 sections, clicks, drawers, tabs/reload and narrow layout. Node-off, context isolation, sandboxing, the fixed-method bridge and every packaged product-source hash were verified. Each app's three captures were viewed.
+- Every published asset was downloaded; sizes and GitHub SHA-256 digests match. All three update feeds match their published target names, versions, sizes and SHA-512 digests. All five binaries' provenance verifies against the exact source commit, tag, signer workflow and hosted release run. Feeds/blockmaps are digest-checked, not provenance-attested. A tag name is not inherently immutable; verification pins the commit.
+- Evidence remains in this feature session: `release-060-strict-packaging.log`, `release-060-local-r5/`, `release-060-published-r2/` and `release-060-downloads/`. Failed harness attempts and transient verifier-initialization failures are retained; the two verifier failures passed serial retries. No dependency or product-source changes were needed after the reviewed feature, and documentation-only updates did not rebuild the app.
+- Scrolling scope remains measured, not universal: frame p95 was about 31.3ms before/after on the tested runtime, with added CPU/style work. The final 1,001-heading split initial callback reached 26.3ms; the earlier 27.1ms observation remains. These are callback timings, not total opening time. High-refresh displays and unobserved CSS animation remain unverified. See `docs/PERF-AUDIT.md`, "Left TOC tracking", for the full method and limits.
+- Windows/macOS builds remain unsigned; macOS automatic updates retain the signature-validation limitation. Linux/macOS binaries were built, downloaded and provenance-verified, not launched on this Windows PC. Existing P2 deferrals and known render-patch baseline failures remain unchanged; no full ordinary-CI-green claim is made.
+- Nothing was installed or updated on this PC. Primary checkouts, the running installed app and previous release evidence were not changed. No force push, protection bypass or global credential change was used.
 
 ---
 
