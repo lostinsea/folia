@@ -1776,7 +1776,8 @@ established. Actual no-visible-slowdown acceptance remains unmet.
   files match source; only the renderer changed from d52, plus version metadata.
   Runtime/dependencies, Main, preload and tabs are unchanged. Both executables
   are unsigned. Local update-feed SHA512/size checks pass; private evidence is
-  excluded. This is not installed or published verification.
+  excluded. This initial build record does not itself verify installation or
+  publication; the installed follow-up is recorded below.
 - A separate post-fix phase completed all 42 launches / 21 matched pairs in
   323.861 seconds, without failures, missing jobs, reporting errors or survivors.
   Same successful method modules, balanced order, fixtures, endpoints and fixed
@@ -1822,7 +1823,26 @@ established. Actual no-visible-slowdown acceptance remains unmet.
   `release-050-preparation-r1/artifact-manifest.json`, and
   `release-050-native-smoke-r1/`. A Windows ASAR-path preparation failure
   occurred before any launch and is retained separately. No samples were
-  replaced. Installed verification and final delivery are not supplied here.
+  replaced. This comparison is separate from the installed follow-up below;
+  it does not supply final delivery.
+
+**Installed 0.5.0 verification**
+
+- User approved installation and handled Windows elevation; no warning or
+  administrator prompt was bypassed. Windows registers machine-wide Folia
+  0.5.0 under `C:\Program Files\lostinsea\Folia`.
+- Installed executable and asar match the verified ordinary build byte-for-byte.
+  The same successful native functional method completed in 19.955 seconds:
+  six exact settled/immediate Saves, code/token/copy-button/overlay controls,
+  three fresh code/TOC/short-dialog captures actually viewed, no errors or
+  survivors. Fresh private profile and owned copies; normal user files untouched.
+- This verifies the installed app's tested paths, not updater/association
+  behavior or the deferred shutdown/Save-alias campaigns. Evidence:
+  `.context-viewport-evidence/release-050-installed-smoke-r1/`.
+  Copied generic-method "NOT installed" / "viewed-pending" labels remain
+  unchanged in raw outcomes. Actual deployment/path identities and the
+  separate owner-viewed assessment establish this scoped installed follow-up.
+  Final integration and published artifact verification remain.
 
 ## Measured and found already fast
 - **Custom tab sync I/O is not the current bottleneck.**

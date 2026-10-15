@@ -1295,8 +1295,16 @@ unresolved comparative responsiveness continues to hold publication.
   R886 sensitivity, F03/kbscroll and feature dispositions remain unchanged.
 - Coordinator delegated serialized main integration/publication ownership to
   this isolated child once readiness is real; primary checkout remains untouched.
-  Installed-app verification, normal integration/tag/workflow and actual
-  published artifact verification remain. See the audit's post-fix subsection.
+  At this pre-install boundary, installed verification and final delivery
+  remained. The installed follow-up below closes only the former. See the
+  audit's post-fix subsection.
+- Installed follow-up: user-approved machine-wide 0.5.0 installation, exact
+  exe/asar match, same native six-Save/three-view smoke complete in 19.955 seconds.
+  All three installed captures were viewed; no errors or surviving runtime.
+  Private profile/copies preserve normal user state. This is not deferred
+  updater/shutdown/association acceptance. Ready for serialized normal
+  integration and tag-bound delivery, with the recorded P2/nonblocking
+  dispositions unchanged; no published-release claim yet.
 
 The capability-protocol unit is IMPLEMENTED / PROVEN, unintegrated: preparation, commit, completion and abandonment
 of existing disk-adoption capabilities to four fixed preload methods. It
