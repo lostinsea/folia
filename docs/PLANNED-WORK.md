@@ -1276,6 +1276,28 @@ unresolved comparative responsiveness continues to hold publication.
   revalidation remains before performance disposition.
   The old d52 package is not post-fix evidence. See the audit's cold-path section.
 
+**2026-10-15 post-fix 0.5.0 preparation — measured and viewed**
+
+- Product `676e274f`, version/lock `e2909a95`; ordinary build strict-asar
+  414/0, source matched, private evidence excluded, local feed/digests verified.
+  Portable/installer remain unsigned; no installed or published pass claimed.
+- Separate unchanged-method post-fix comparison: 42/42 launches, 21 pairs,
+  323.861 seconds, no failed/missing observations or survivors. Large open and
+  cold/warm/return Mermaid improve in every pair. Multi-open retains +32.9 ms
+  / +8.8% median, paired +16.8 ms; actor fixture-write outliers remain separate.
+  Both independent Sol/Luna evaluations found no remaining observed noticeable
+  penalty in these representative journeys. No waiver, global equivalence,
+  environment attribution or deletion of earlier failed evidence follows.
+- Final-package functional smoke completes six exact normal Saves and actual
+  code/token/copy-button/overlay controls. Three fresh captures were viewed:
+  code, settled TOC and short Insert Table. Unchanged prior wave views reused.
+  Full ordinary/proof history and P2 exceptions are not relabelled as passes;
+  R886 sensitivity, F03/kbscroll and feature dispositions remain unchanged.
+- Coordinator delegated serialized main integration/publication ownership to
+  this isolated child once readiness is real; primary checkout remains untouched.
+  Installed-app verification, normal integration/tag/workflow and actual
+  published artifact verification remain. See the audit's post-fix subsection.
+
 The capability-protocol unit is IMPLEMENTED / PROVEN, unintegrated: preparation, commit, completion and abandonment
 of existing disk-adoption capabilities to four fixed preload methods. It
 preserves async/sync ordering, nonce/digest/version/owner provenance and

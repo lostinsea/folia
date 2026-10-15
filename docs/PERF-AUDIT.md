@@ -1769,6 +1769,61 @@ established. Actual no-visible-slowdown acceptance remains unmet.
   `packaged-cold-mermaid-comparison-r1/complete-analysis.json`, and
   `packaged-mermaid-tail-witness-r1/` including positive/proof/failed-actor logs.
 
+**Post-fix ordinary 0.5.0 package**
+
+- Product fix `676e274f`; version/lock preparation `e2909a95`. The ordinary
+  Windows build passes strict actual-asar checks 414/0. All frozen shipping
+  files match source; only the renderer changed from d52, plus version metadata.
+  Runtime/dependencies, Main, preload and tabs are unchanged. Both executables
+  are unsigned. Local update-feed SHA512/size checks pass; private evidence is
+  excluded. This is not installed or published verification.
+- A separate post-fix phase completed all 42 launches / 21 matched pairs in
+  323.861 seconds, without failures, missing jobs, reporting errors or survivors.
+  Same successful method modules, balanced order, fixtures, endpoints and fixed
+  20-minute / 240-second job / 300-second launch guards. No competing runtime,
+  source, proof or build changes. All earlier phases remain separate.
+
+| Endpoint (ms), reference -> current | Median | Sample p95 | Paired median delta |
+|---|---:|---:|---:|
+| Process birth to contentful paint | 767.4 -> 683.3 | 816.6 -> 743.4 | -56.2 |
+| Navigation to contentful paint | 376.0 -> 328.0 | 432.0 -> 376.0 | -60.0 |
+| Large open, renderer usable | 463.7 -> 390.8 | 494.9 -> 404.5 | -73.4 |
+| Multi-open, renderer usable | 373.5 -> 406.4 | 404.7 -> 419.8 | +16.8 |
+| Empty Mermaid tab, renderer usable | 123.0 -> 60.2 | 123.8 -> 61.4 | -62.9 |
+| Cold Mermaid at 150%, renderer usable | 332.2 -> 275.9 | 362.4 -> 304.8 | -59.7 |
+| Warm Mermaid at 150%, renderer usable | 153.1 -> 85.6 | 154.4 -> 96.9 | -58.0 |
+| Return-100% reload, renderer usable | 123.6 -> 91.8 | 154.4 -> 92.8 | -31.9 |
+
+- Open and all three Mermaid reload endpoints improve in every pair.
+  Multi-open remains slower in 17/21 pairs: +32.9 ms / +8.8% pooled median,
+  paired median +16.8 ms. It is a measured residual cost, not erased or
+  established as human-visible. None of the declared app/Main-loop endpoints
+  crosses the retained >25 ms AND >10% diagnostic rule.
+- Keep setup outliers separate: the actor's synchronous fixture-write interval
+  has reference/current median 8.731/7.071 ms, sample p95 17.640/220.446 ms,
+  maximum 20.027/328.478 ms. These actual writes/fsyncs are retained, not app
+  action timings or evidence of an environmental cause. Other setup/zoom
+  observations remain in the raw records.
+- Independent Sol/Luna evaluations reproduced the complete endpoint results.
+  Both found no remaining evidence of a noticeable slowdown in these
+  representative release journeys and support the remaining delivery checks
+  without a performance waiver. Both retain the multi-open cost and setup
+  outliers. This is not global equivalence, a population-p95 certificate, pure
+  isolation attribution, or proof that earlier multi-second stalls never occur.
+- The earlier complete Save comparison remains scoped evidence on unchanged
+  Main/preload/tabs/dependencies, not a new post-fix timing cohort. A separate
+  final-package functional smoke completed six exact settled/immediate Saves
+  and real code highlighting/copy-button/input-unblocked controls. All three
+  necessary captures were actually viewed: readable highlighted code, settled
+  TOC, and opaque short Insert Table with usable controls. Unchanged earlier
+  schemes/Search/Mermaid views are reused, not called newly captured.
+- New evidence beneath `.context-viewport-evidence/`:
+  `postfix-cold-mermaid-comparison-r1/complete-analysis.json`,
+  `release-050-preparation-r1/artifact-manifest.json`, and
+  `release-050-native-smoke-r1/`. A Windows ASAR-path preparation failure
+  occurred before any launch and is retained separately. No samples were
+  replaced. Installed verification and final delivery are not supplied here.
+
 ## Measured and found already fast
 - **Custom tab sync I/O is not the current bottleneck.**
   - `custom-tabs.js:69-111,640`
