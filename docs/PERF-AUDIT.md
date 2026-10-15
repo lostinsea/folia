@@ -1844,6 +1844,20 @@ established. Actual no-visible-slowdown acceptance remains unmet.
   separate owner-viewed assessment establish this scoped installed follow-up.
   Final integration and published artifact verification remain.
 
+**Published artifact follow-up**
+
+- v0.5.0 is published from `f5b219818a9846a3ca2ddcc3ad7d79fe27c6d744`;
+  release workflow 38676428597 completed all platform builds and attestations.
+- Actual downloaded Windows portable runtime matches the measured ordinary
+  build completely, including the executable/asar already tested installed.
+  No timing cohort or installed-app run is fabricated for the downloaded copy.
+- All published download SHA256/sizes, updater SHA512/sizes and exact tag-bound
+  runtime attestations verify. Windows remains unsigned; macOS app signing
+  was skipped. Provenance is not OS signing or a broader performance guarantee.
+- The comparison limits, residual multi-open cost, setup-write outliers and
+  earlier failed phases above remain unchanged. Published evidence:
+  `.context-viewport-evidence/release-050-published-verification-r1/`.
+
 ## Measured and found already fast
 - **Custom tab sync I/O is not the current bottleneck.**
   - `custom-tabs.js:69-111,640`

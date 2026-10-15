@@ -1319,6 +1319,33 @@ unresolved comparative responsiveness continues to hold publication.
   R886 sensitivity and F03/kbscroll dispositions remain as above. Tag-bound
   release execution and actual published artifact verification remain.
 
+**2026-10-15 Wave 2 release published — v0.5.0**
+
+- Published [Folia 0.5.0](https://github.com/lostinsea/folia/releases/tag/v0.5.0)
+  from tag commit `f5b219818a9846a3ca2ddcc3ad7d79fe27c6d744`.
+  Normal tag push triggered successful
+  [release run 38676428597](https://github.com/lostinsea/folia/actions/runs/38676428597);
+  no redundant dispatch, force push or v0.4.0 replacement.
+- Windows portable/installer, Linux AppImage/deb, macOS arm64 DMG and all
+  three updater feeds are published. All actual downloads match GitHub SHA256
+  and sizes; feed SHA512/size checks pass. Each runtime artifact's provenance
+  verifies against this exact tag/source digest and release workflow.
+- The downloaded portable's complete decoded runtime matches the tested
+  ordinary build byte-for-byte, including the installed executable and asar.
+  Reuse the actual installed/unpacked functional and viewed evidence; do not
+  invent another published-installer execution. The SFX tail warning remains
+  in the extraction log; every decoded payload file was compared.
+- Windows executables are unsigned; macOS signing/notarization is not supplied.
+  GitHub attestations do not make either OS trust claim.
+- In-scope implemented Wave 2 changes have shipped. Accepted P2 Save-alias,
+  shutdown/full-run/hosted-CI exceptions, R886 sensitivity and nonblocking
+  F03/kbscroll remain follow-ups, not passed tests or newly completed features.
+  Private evidence/worktree/history are retained; primary checkout untouched.
+- Published evidence:
+  `.context-viewport-evidence/release-050-published-verification-r1/`,
+  including final release/workflow records, downloads/feed checks, individual
+  tag-bound attestations and complete runtime-identity comparison.
+
 The capability-protocol unit is IMPLEMENTED / PROVEN, unintegrated: preparation, commit, completion and abandonment
 of existing disk-adoption capabilities to four fixed preload methods. It
 preserves async/sync ordering, nonce/digest/version/owner provenance and
