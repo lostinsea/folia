@@ -398,9 +398,16 @@ async function saveSetup(kind, input, fn, argument) {
     eventContentCodeUnits: 0, sendDispatchMs: 0 };
   currentSample = sample;
   eventLoopDelay.reset();
+  let timer;
   try {
     sample.visibilitySetup = await visibleActionWindow();
-    Object.assign(sample, await exec(fn, argument));
+    Object.assign(sample, await Promise.race([
+      exec(fn, argument),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(
+          "Native Save setup did not settle: " + kind)), 30000);
+      }),
+    ]));
     sample.usableMs = performance.now() - sample.commandStartedAt;
     sample.mainEventLoopDelayMs = { max: eventLoopDelay.max / 1e6,
       p95: eventLoopDelay.percentile(95) / 1e6 };
@@ -409,7 +416,7 @@ async function saveSetup(kind, input, fn, argument) {
   } catch (error) {
     failCurrentSample(error);
     throw error;
-  } finally { currentSample = null; }
+  } finally { clearTimeout(timer); currentSample = null; }
 }
 
 async function armSaveWitness({ file, baselineDigest, expectedDigest, append }) {
@@ -484,6 +491,7 @@ async function armSaveWitness({ file, baselineDigest, expectedDigest, append }) 
       state.inputAt = performance.now();
       editor.value = expected;
       editor.dispatchEvent(new Event("input", { bubbles: true }));
+      state.inputDispatchReturnedAt = performance.now();
       if (!hasUnsavedChanges || editor.value !== expected) throw new Error("Normal input did not dirty the exact draft");
       this.draftSettled().catch(error => { state.error = String(error.stack || error); });
     },
@@ -625,13 +633,20 @@ async function correctedSaveJourney(primary, control) {
       if (mode === "settled") {
         await saveSetup("setup-natural-draft", input, async () => {
           const witness = window.__nativeSaveWitness;
+          witness.state.setupPhase = "input";
           witness.input();
           await witness.draftSettled();
+          witness.state.naturalDraftSettledAt = performance.now();
+          witness.state.setupPhase = "layout";
           const layoutAt = performance.now();
           if (typeof window.CustomTabs.settleSessionLayout === "function") {
             await window.CustomTabs.settleSessionLayout();
           }
+          witness.state.setupPhase = "final-frames";
+          witness.state.finalFramesEnteredAt = performance.now();
           await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          witness.state.finalFramesCompletedAt = performance.now();
+          witness.state.setupPhase = "complete";
           return { exactNaturalDraftBeforeSave: true, settledDraftLayoutBarrierMs: performance.now() - layoutAt };
         });
       }

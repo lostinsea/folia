@@ -1247,6 +1247,10 @@ unresolved comparative responsiveness continues to hold publication.
 - Method, exact source/archive identities, all timing endpoints and retained
   failures: `docs/PERF-AUDIT.md`, "2026-10-15 actual default-package Save
   comparison and viewed preparation". No-visible-slowdown remains required.
+- The concrete enclosing-setup actor deadline gap is corrected, with actual
+  callback controls, corpus 335/335 and exact R923 proof. Both authentic
+  packages complete the repaired normal modes; product bytes are unchanged.
+  This does not attribute or erase reference 13's timeout.
 
 The capability-protocol unit is IMPLEMENTED / PROVEN, unintegrated: preparation, commit, completion and abandonment
 of existing disk-adoption capabilities to four fixed preload methods. It

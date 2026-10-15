@@ -1619,6 +1619,28 @@ established. Actual no-visible-slowdown acceptance remains unmet.
   through `final-wave-visuals-r3/`. Both viewed-assessment files preserve
   the accepted/rejected distinction. All earlier outcomes stay unchanged.
 
+**Enclosing setup deadline correction**
+
+- Source analysis found a real actor gap, not the failed run's cause:
+  successful `observeDraft()` clears its timer, then the caller awaits
+  another double animation frame outside that timer. Main previously
+  awaited the whole execution without a stage deadline.
+- Main now bounds that existing setup execution to 30 seconds after the
+  unchanged visible-window precondition. Timeout remains failure and reaches
+  the existing bounded failure capture; no frame, preview, history or
+  durability requirement is removed. Failure witnesses retain input-return,
+  natural-draft, layout and final-frame progress markers.
+- Existing deterministic corpus controls extract the actual setup and callback:
+  completed natural observation with withheld final frames, silent execution,
+  and healthy two-frame completion. Corpus 335/335; R923 is exact PROVEN
+  with healthy controls and byte-exact actor restoration. Independent
+  Sol/Luna source feedback is clear.
+- Both repaired authentic-package controls completed in 56.705 seconds,
+  three settled and three immediate Saves per app, opposite first modes,
+  exit 0/no survivors. This verifies normal actor wiring, not comparative
+  acceptance or the old failure's cause. Evidence:
+  `save-packaged-bounded-setup-r1/`; old phases remain closed and unchanged.
+
 ## Measured and found already fast
 - **Custom tab sync I/O is not the current bottleneck.**
   - `custom-tabs.js:69-111,640`

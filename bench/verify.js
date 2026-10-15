@@ -2090,6 +2090,58 @@ for (const [profile, want] of Object.entries(CORPUS_DIGEST)) {
     completedDraft.outcome === "settled" && completedDraft.frameCount === 2 &&
     completedDraft.state.visibleAt === 1 && completedDraft.cleared === 1);
 
+  const setupSource = source.slice(source.indexOf("async function saveSetup("),
+    source.indexOf("async function armSaveWitness("));
+  const naturalStart = source.indexOf('await saveSetup("setup-natural-draft", input, async () => {');
+  const naturalCall = source.slice(naturalStart, source.indexOf("        });", naturalStart) + 11);
+  function enclosingSetupControl(mode) {
+    const actor = vm.createContext({
+      input: { file: "oracle" }, samples: [], currentSample: null, failedCalls: 0,
+      performance: { now: () => 1 }, frameCount: 0, timerDelay: null, cleared: 0,
+      outcome: null, inputCalls: 0, draftCompleted: false,
+      eventLoopDelay: { reset() {}, max: 0, percentile: () => 0 },
+    }, { microtaskMode: "afterEvaluate" });
+    vm.runInContext(`
+      const window = { __nativeSaveWitness: { state: {},
+        input() { inputCalls++; },
+        async draftSettled() { draftCompleted = true; }
+      }, CustomTabs: {} };
+      function requestAnimationFrame(callback) { frameCount++; ${mode === "complete" ? "callback();" : ""} }
+      function setTimeout(callback, delay) { timerCallback = callback; timerDelay = delay; return 1; }
+      function clearTimeout(id) { if (id === 1) cleared++; }
+      const visibleActionWindow = async () => ({ visible: true });
+      const exec = ${mode === "silent" ? "() => new Promise(() => {})" : "(fn, argument) => fn(argument)"};
+      function failCurrentSample(error) {
+        failedCalls++; currentSample.status = "failed"; currentSample.error = error.message;
+        samples.push(currentSample);
+      }
+      ${setupSource}
+      (async () => { ${naturalCall} })().then(() => outcome = "complete", error => outcome = error.message);
+    `, actor);
+    return actor;
+  }
+  const finalFramesPending = enclosingSetupControl("frames");
+  const executionSilent = enclosingSetupControl("silent");
+  check("native enclosing setup control reaches final frames after natural draft completion",
+    finalFramesPending.inputCalls === 1 && finalFramesPending.draftCompleted &&
+    finalFramesPending.frameCount === 1 && finalFramesPending.outcome === null &&
+    vm.runInContext("window.__nativeSaveWitness.state.setupPhase", finalFramesPending) === "final-frames");
+  for (const actor of [finalFramesPending, executionSilent]) {
+    vm.runInContext('if (typeof timerCallback === "function") timerCallback()', actor);
+  }
+  check("native enclosing setup deadline rejects stopped final frames and silent execution",
+    [finalFramesPending, executionSilent].every(actor =>
+      actor.timerDelay === 30000 && actor.cleared === 1 && actor.failedCalls === 1 &&
+      actor.currentSample === null && actor.samples.length === 1 &&
+      actor.samples[0].status === "failed" &&
+      actor.outcome === "Native Save setup did not settle: setup-natural-draft"));
+  const finalFramesComplete = enclosingSetupControl("complete");
+  check("native enclosing setup retains real final frames and clears its deadline on success",
+    finalFramesComplete.outcome === "complete" && finalFramesComplete.frameCount === 2 &&
+    finalFramesComplete.cleared === 1 && finalFramesComplete.failedCalls === 0 &&
+    finalFramesComplete.samples[0]?.exactNaturalDraftBeforeSave === true &&
+    finalFramesComplete.currentSample === null);
+
   const visibleWindow = source.slice(source.indexOf("async function visibleActionWindow("),
     source.indexOf("async function ready("));
   function visibilityControl(responds) {
