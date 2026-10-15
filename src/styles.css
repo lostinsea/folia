@@ -1545,6 +1545,19 @@ body.splitter-dragging * {
   overflow-wrap: break-word;
 }
 
+.markdown-body table > thead {
+  position: relative;
+  z-index: 1;
+  background: var(--bg-secondary);
+}
+
+@media print {
+  .markdown-body table > thead {
+    /* Print uses natural table flow, even while a screen animation is paused. */
+    transform: none !important;
+  }
+}
+
 .markdown-body td {
   padding: 12px;
   border-bottom: 1px solid var(--border-color);

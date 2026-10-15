@@ -36,6 +36,37 @@ is documented where it belongs — `docs/SECURITY-AUDIT.md`, `docs/PERF-AUDIT.md
 `bench/BASELINE.md`, `docs/CUSTOMIZATIONS.md` — and only a short recent-history
 section is kept here so the register has a visible edge.
 
+## Current workset
+
+### `reading-improvements` - REVIEWED / READY FOR INTEGRATION (2026-10-15)
+
+- Sole source/docs/register writer: isolated `folia-reading-improvements` worktree.
+- Refreshed base: `66ac16ea`; no main merge, push, release or install is authorized.
+- Scope: remembered left drawer, sticky document table headers, persistent
+  current-file update notice, clearer dark Mermaid connectors.
+- Astra investigated source/lifecycle; independent Sol6.1/high and Luna6/high
+  reviewed design and implementation. Both final reviews have no significant
+  findings. Luna's earlier nested-header finding is fixed and covered.
+- Confirmed user policy: show File Updated only for the visible affected
+  document; clear it on committed departure or closing that document.
+- Expanded focused suite: 50/50, including nested headers, real native wheel,
+  print flow, dark/light high zoom, popout/PDF and former-owner/background
+  notice rejection. Real separate-process drawer restarts use one owned profile.
+- TOC passes 30/30, tables 215/215, theme 398/398 and retained browser-isolation
+  controls 40/40, including the no-empty-Prism overlay checks.
+- Source packaging passes 402 checks; its built-artifact checks are skipped
+  because this workset does not build or release a package.
+- The broader Mermaid suite fails before
+  its first assertion on both untouched `66ac16ea` and the candidate; retain
+  that baseline limit rather than weakening renderer isolation.
+- R932-R935 are individually exact PROVEN with passing controls; source restored.
+- Final-source matched scroll probes show +0.2ms normal / +0.1ms split in median
+  frame-p95, 0.10ms table callback p95, no settled geometry reads or viewer scans.
+- Actual Electron captures were viewed at normal/high zoom and both themes,
+  including sticky original headers, the retained notice and isolated popout.
+- This feature is unintegrated; only the integration owner may land it on main.
+- Light Mermaid styling, document authority and the cheap TOC scroll path remain.
+
 ## Update protocol
 
 Read this before editing the file; the value of the register is entirely in it

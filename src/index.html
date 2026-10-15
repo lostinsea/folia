@@ -155,7 +155,7 @@
               <div class="tools-menu-item" id="toggleEdit">
                 <span data-i18n="editMode">Edit Mode</span>
               </div>
-              <div class="tools-menu-item" id="toggleNotes">
+              <div class="tools-menu-item" id="toggleNotes" aria-controls="notesPanel" aria-expanded="false">
                 <span data-i18n="allNotes">All Notes</span>
               </div>
               <div class="tools-menu-separator"></div>
@@ -643,7 +643,7 @@
             </div>
           </div>
 
-          <div id="notesPanel" class="notes-panel">
+          <div id="notesPanel" class="notes-panel" inert>
             <div class="notes-header">
               <span data-i18n="allNotes">All Notes</span>
               <div class="notes-header-actions">

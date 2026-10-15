@@ -116,7 +116,10 @@ function getMermaidConfig(isDark) {
     // their own default (sequence diagrams rendered at 16px while flowcharts
     // rendered at 13px, an inconsistency visible side by side in one document).
     fontSize: MERMAID_FONT_PX,
-    themeCSS: '.nodeLabel { overflow-wrap: anywhere; }',
+    themeCSS: '.nodeLabel { overflow-wrap: anywhere; }' + (isDark ? `
+      .edge-thickness-normal:not(.edge-thickness-thick):not(.edge-thickness-invisible), .messageLine0, .messageLine1,
+      .relationshipLine, .relation, .actor-line { stroke-width: 2px; }
+    ` : ''),
     themeVariables: isDark ? MERMAID_DARK_THEME : MERMAID_LIGHT_THEME,
     flowchart: MERMAID_FLOWCHART,
     sequence: MERMAID_SEQUENCE

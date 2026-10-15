@@ -17243,8 +17243,8 @@ async function run(win) {
   // Same for Dismiss. Its inline onclick was removed for SEC-09 (no inline
   // handlers under the new CSP) and rebound in custom-tabs.js, which made this
   // a silently-untested path: a click that no longer reaches
-  // dismissFileUpdateNotification() leaves the toast on screen until the
-  // 10-second auto-hide, and nothing else in the suite would notice. Driven
+  // dismissFileUpdateNotification() leaves the toast on screen, and nothing
+  // else in the suite would notice. Driven
   // through a real click on the real element, not by calling the function.
   const dismissState = await exec(`
     (() => {
@@ -17377,8 +17377,8 @@ async function run(win) {
   // ---- Scenario 5b: prompt bookkeeping is reset, not just hidden ---------
   // renderer.js guards showFileUpdateNotification() with a module-level
   // `fileUpdateNotificationShown` flag. If dismissing only hid the DOM without
-  // resetting that flag, the NEXT file change would be silently swallowed for
-  // up to 10s. This asserts the real resetter is reachable and is actually
+  // resetting that flag, the NEXT file change would be silently swallowed.
+  // This asserts the real resetter is reachable and is actually
   // being used.
   check(
     "renderer's dismissFileUpdateNotification is reachable as a global",
