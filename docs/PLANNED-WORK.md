@@ -1251,6 +1251,17 @@ unresolved comparative responsiveness continues to hold publication.
   callback controls, corpus 335/335 and exact R923 proof. Both authentic
   packages complete the repaired normal modes; product bytes are unchanged.
   This does not attribute or erase reference 13's timeout.
+- The separate repaired R2 completed all 42 declared launches / 21 matched
+  pairs / 252 exact Saves in 1,125.210 seconds, without failures, missing jobs,
+  reporting errors or survivors. Earlier phases remain separate.
+  Renderer medians are 123.3 -> 123.2 ms settled and 236.5 -> 238.2 ms immediate;
+  sample p95 is 124.3 -> 124.2 / 295.8 -> 279.9 ms. Full-setup median increases
+  of 58.489 / 21.056 ms and real subsecond outliers remain recorded.
+  Independent Sol/Luna reviews agree this workload does not demonstrate a
+  consistent noticeable Save median/p95 penalty, not practical equivalence
+  or whole-app acceptance. Actual cold startup/first paint and cold Mermaid
+  remain unqualified; no final release is claimed. Full endpoint definitions
+  and distributions are in the complete-comparison subsection of the audit.
 
 The capability-protocol unit is IMPLEMENTED / PROVEN, unintegrated: preparation, commit, completion and abandonment
 of existing disk-adoption capabilities to four fixed preload methods. It

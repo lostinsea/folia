@@ -1641,6 +1641,63 @@ established. Actual no-visible-slowdown acceptance remains unmet.
   acceptance or the old failure's cause. Evidence:
   `save-packaged-bounded-setup-r1/`; old phases remain closed and unchanged.
 
+**Complete corrected packaged Save comparison**
+
+- A distinct, frozen R2 ran the original balanced 21-pair / 42-launch
+  large-document schedule after the concrete setup-deadline repair.
+  Actor, driver and controls match the successful repaired two-app controls.
+  Same f87/d52 packages, fresh ordinary profiles, explicit browser UTF-8
+  crypto, natural preview/history and real frame requirements; unchanged
+  240-second job / 300-second launch deadlines and 60-minute phase ceiling.
+- Complete in 1,125.210 seconds: 42 launches, 21 matched pairs, 252 exact
+  accepted Saves, 63 observations per arm/mode. No failed or unexecuted
+  launches, reporting errors or owned survivors. Earlier phases are not pooled.
+- Medians use every declared observation. p95 below is nearest-rank within
+  these samples, not a population guarantee. Values are reference -> current.
+
+| Endpoint (ms) | Median | Sample p95 |
+|---|---:|---:|
+| Settled Save, renderer action to usable | 123.3 -> 123.2 | 124.3 -> 124.2 |
+| Immediate input/Save, renderer action to usable | 236.5 -> 238.2 | 295.8 -> 279.9 |
+| Settled Save, Main command to usable | 186.558 -> 186.438 | 187.815 -> 187.455 |
+| Immediate input/Save, Main command to usable | 303.332 -> 305.946 | 364.016 -> 347.758 |
+| Settled Save, ingress to accepted ACK | 40.702 -> 39.652 | 55.019 -> 48.159 |
+| Immediate input/Save, ingress to accepted ACK | 171.932 -> 172.592 | 225.828 -> 221.089 |
+| Settled mode, input to store | 1016.5 -> 1018.2 | 1037.0 -> 1035.6 |
+| Immediate mode, input to store | 190.0 -> 194.9 | 244.4 -> 243.2 |
+| Settled mode, input to natural draft/history | 893.6 -> 895.8 | 909.6 -> 914.1 |
+| Immediate mode, input to natural draft/history | 896.5 -> 899.4 | 914.8 -> 915.8 |
+| Settled mode, input to post-Save view | 1205.0 -> 1206.6 | 1225.8 -> 1224.1 |
+| Immediate mode, input to post-Save view | 957.2 -> 960.1 | 974.6 -> 976.3 |
+| Settled mode, input to layout tail | 1205.3 -> 1207.0 | 1226.2 -> 1224.5 |
+| Immediate mode, input to layout tail | 957.6 -> 960.5 | 975.0 -> 976.6 |
+| Settled mode, full setup through tail | 2899.534 -> 2958.023 | 3032.110 -> 3033.093 |
+| Immediate mode, full setup through tail | 2664.052 -> 2685.108 | 2823.105 -> 2808.314 |
+
+- Per-action Main Save timing starts **after** its visible-window precondition;
+  that precondition is recorded separately and included in full setup.
+  Setup-stage timing includes its own visibility wait. Do not mix those clocks
+  or subtract their medians to assign dispatch, serialization or disk cost.
+- Median paired renderer deltas: -0.2 ms settled, +5.4 ms immediate.
+  Current is slower in 6/21 settled pairs, with two ties, and 13/21 immediate
+  pairs. Full-setup median increases remain +58.489 / +21.056 ms.
+- Current's largest immediate Save is real: 406.2 ms renderer, 666.062 ms
+  Main command, 320.146 ms ingress-to-ACK, 298.582 ms Main-loop maximum and
+  a 209 ms renderer long task. Its input-to-layout tail is 968.5 ms.
+  Reference's settled maximum is 466.5 ms renderer, 398.005 ms ingress-to-ACK
+  and 373.031 ms Main-loop maximum. No multi-second individual Save/setup
+  operation stall reproduced; accumulated setup still takes about 2.7-3.0 seconds.
+- Independent Sol/Luna reviews agree: this complete frozen packaged workload
+  does not demonstrate a consistent noticeable Save median/p95 penalty.
+  Neither review establishes practical equivalence, pure isolation attribution,
+  cold-start/Mermaid readiness or whole-app responsiveness. No causal stack
+  attributes the retained spikes; no guard or durability shortcut followed.
+- Evidence: `.context-viewport-evidence/packaged-large-save-comparison-r2/`,
+  including `plan.json`, `phase-outcome.json`,
+  `complete-standard-median-analysis.json` and
+  `complete-stage-maxima-and-outlier.json`. Raw-result hashes are retained.
+  Earlier failures and the user's no-visible-slowdown requirement stay intact.
+
 ## Measured and found already fast
 - **Custom tab sync I/O is not the current bottleneck.**
   - `custom-tabs.js:69-111,640`
