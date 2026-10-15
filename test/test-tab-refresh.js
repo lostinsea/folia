@@ -7322,10 +7322,12 @@ async function runOwnedMetadataScenarios(win, exec, dir, sentinel) {
           diagnostics: window.getFileOpenDiagnostics(),
           notification: document.getElementById('notificationMessage').textContent,
           completed: window.__ownedMetadataNativeOpen.completed,
+          visibility: document.visibilityState,
           tabs: window.CustomTabs.getTabs().map(tab => ({ id: tab.id, path: tab.filePath })),
         })`);
         throw new Error(`Owned metadata native fixture did not paint: ${filePath}; ${JSON.stringify({
           state, native: __shutdown.documentSessionState(), shutdown: __shutdown.state(),
+          window: { visible: win.isVisible(), minimized: win.isMinimized(), focused: win.isFocused() },
         })}`);
       }
       const completed = await exec(`({

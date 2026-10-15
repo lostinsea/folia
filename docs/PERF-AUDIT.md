@@ -1541,6 +1541,84 @@ established. Actual no-visible-slowdown acceptance remains unmet.
   The prior private 407-check archive matches the older `668d17f3` Main,
   not this writer. No final-version package, integration or release is claimed.
 
+## 2026-10-15 actual default-package Save comparison and viewed preparation
+
+- Compare actual `f87aa779b4d402c5c3b398880dd1c2adb313dd26` against
+  `d52fd0aa62f506fd0240f2a2a666698d2fb9b19d`, both ordinary private
+  0.4.0 packages on this Windows host with Electron 43.4.1 / Node 24.18.1.
+  Current Main SHA-256 is
+  `25dde236ff113cc398e9410473c86e4d50d4c301db47bbd7c4c6b18c86153e06`.
+  Keep later Mermaid, menu and logging changes in scope: this is not a
+  pure isolation experiment.
+- Default packaged Main naturally excludes development newline reporting;
+  the actor does not disable it or replace the production preload.
+  The synchronous disk-adoption query remains mandatory. Its separately
+  observed current callback spans were 0.827-1.161 ms; these exclude
+  transport, scheduling and renderer synchronous wait.
+- The declared large-only, balanced 21-pair schedule stopped after 25
+  launches in 1,088.513 seconds: 24 control-qualified launches, twelve
+  complete pairs, 144 accepted exact Saves. Reference 13 timed out during
+  natural-draft setup before any Save; candidate 13 and both arms of pairs
+  14-21 remain unexecuted. No replacement samples or selected green subset.
+- The failed stage lasted 237,277.086 ms before the original 240-second
+  Main watchdog. Native exit 1, no survivors or reporting errors. It is a
+  reference readiness/liveness failure, not a supervisor write failure
+  or demonstrated candidate regression. Its count-only visibility event
+  establishes neither hiding nor continued visibility; cause remains unknown.
+- Standard medians average both middle observations when the count is even.
+  All 36 retained observations per mode/arm are included below.
+
+| Endpoint median (ms) | Reference | Current |
+|---|---:|---:|
+| Settled Save, renderer action to usable | 122.60 | 122.65 |
+| Immediate input/Save, renderer action to usable | 247.80 | 247.80 |
+| Settled Save, Main command to usable | 186.047 | 185.917 |
+| Immediate input/Save, Main command to usable | 315.661 | 316.436 |
+| Settled Save, ingress to accepted ACK | 41.679 | 42.779 |
+| Immediate input/Save, ingress to accepted ACK | 181.452 | 183.756 |
+| Settled mode, input to natural draft | 899.80 | 895.15 |
+| Immediate mode, input to natural draft | 897.75 | 896.55 |
+| Settled mode, input to layout tail | 1211.25 | 1206.40 |
+| Immediate mode, input to layout tail | 958.10 | 957.30 |
+
+- Median twelve-pair renderer deltas are +0.2 ms settled and +2.1 ms
+  immediate; seven pairs are slower in each mode. Renderer maxima are
+  246.7 -> 153.1 ms settled and 306.2 -> 304.4 ms immediate.
+  Input-to-layout maxima are 1337.5 -> 1635.6 ms settled and
+  980.5 -> 973.1 ms immediate. The current settled maximum includes a
+  separately observed 433.5 ms layout wait after the visible draft;
+  historical layout has no equivalent async tail API.
+- The approximately 248 ms immediate Save endpoint does not include
+  completed natural preview/history. Intervals and medians are not additive.
+  Completed packaged observations do not reproduce the earlier typical Save
+  penalty, but this incomplete declared phase is **not acceptance**, a
+  whole-app responsiveness certificate or a pooled p95 qualification.
+  Earlier failed/partial phases and startup/Mermaid stalls remain retained.
+- One separate reference-only liveness diagnostic completed six Saves in
+  51.931 seconds. Its sparse read-only 30-second observer never fired;
+  all 53 observed visibility events were `visible:true`. That successful
+  run does not establish the failed run's visibility state or explain it.
+  No missing comparison jobs, profiler or deadline change followed.
+- Current ordinary portable/NSIS preparation passed strict actual-asar
+  checks 414/0 and every shipped source/resource identity; private/test
+  evidence roots are excluded. Archive SHA-256:
+  `506e057ba3917f3bcbdf42d6312e2bff68a968b2e1061832e9c0870216fd574e`.
+  Assets are unsigned private 0.4.0, not installed or published evidence.
+- Ten current-package visual scenes were actually opened. Eight R2 views
+  were accepted: six schemes with table/list/code/inline styles, Search,
+  and complete Mermaid decision/answer labels at 150%. TOC and Insert Table
+  were rejected as transition-time captures despite passing native controls.
+  A distinct two-scene correction waited for the actual 300 ms TOC slide
+  and 200 ms dialog animation. Both new images were opened and accepted:
+  full readable TOC and opaque dialog within the short window. R3 completed
+  in 8.549 seconds, exit 0/no survivors; no product change or rebuild.
+- Evidence beneath `.context-viewport-evidence/`:
+  `save-packaged-default-r1/`, `packaged-large-save-comparison-r1/`
+  (including `retained-standard-median-analysis.json` and exact unexecuted
+  list), `save-packaged-stage-witness-r1/`, and `final-wave-visuals-r1/`
+  through `final-wave-visuals-r3/`. Both viewed-assessment files preserve
+  the accepted/rejected distinction. All earlier outcomes stay unchanged.
+
 ## Measured and found already fast
 - **Custom tab sync I/O is not the current bottleneck.**
   - `custom-tabs.js:69-111,640`

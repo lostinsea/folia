@@ -1221,6 +1221,33 @@ unresolved comparative responsiveness continues to hold publication.
 - Evidence and exact limitations: `docs/PERF-AUDIT.md`, section
   "2026-10-14 Save syscall diagnosis and guarded writer correction".
 
+**2026-10-15 current-package verification — scoped visuals complete, performance still open**
+
+- Shipping source is `d52fd0aa`; production bytes did not change in this
+  phase. The current ordinary private 0.4.0 package matches those bytes,
+  passes strict actual-asar checks 414/0 and excludes private evidence.
+  It is unsigned, unpacked preparation, not installed or final-version evidence.
+- The corrected packaged Save phase retained twelve complete pairs and
+  144 exact Saves before reference 13's natural-draft timeout. Seventeen
+  declared launches are unexecuted. Standard renderer medians are
+  122.60 -> 122.65 ms settled and 247.80 -> 247.80 ms immediate.
+  This does not qualify responsiveness or replace earlier failed phases.
+- The separate successful reference witness does not explain the failed
+  run. Hiding and continued visibility are both unestablished in that failure.
+- All ten declared current-package scenes now have actually viewed accepted
+  images: six schemes/table/list/code/inline styles, Search, TOC, short
+  Insert Table, and complete 150% Mermaid labels. R2's two transition-time
+  captures remain rejected; separate R3 recaptures only those scenes after
+  natural animations settle. No product fix or repeated private build.
+- Prior source-matched native correctness, toolbar/clipboard and unchanged
+  surface evidence remain scoped to their actual results. R886 sensitivity,
+  F03/kbscroll and P2/full-run exceptions keep their recorded dispositions.
+  No full ordinary/proof chain, installed verification, final version,
+  integration, tag or publication is invented.
+- Method, exact source/archive identities, all timing endpoints and retained
+  failures: `docs/PERF-AUDIT.md`, "2026-10-15 actual default-package Save
+  comparison and viewed preparation". No-visible-slowdown remains required.
+
 The capability-protocol unit is IMPLEMENTED / PROVEN, unintegrated: preparation, commit, completion and abandonment
 of existing disk-adoption capabilities to four fixed preload methods. It
 preserves async/sync ordering, nonce/digest/version/owner provenance and
