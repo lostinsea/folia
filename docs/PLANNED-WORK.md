@@ -1306,6 +1306,19 @@ unresolved comparative responsiveness continues to hold publication.
   integration and tag-bound delivery, with the recorded P2/nonblocking
   dispositions unchanged; no published-release claim yet.
 
+**2026-10-15 serialized main integration**
+
+- Main fast-forwarded from `c61fb365` to `63ecad62` through the normal owner
+  connection, without force, a protection bypass or primary-checkout writes.
+  Live rules/check state was refreshed first; no concurrent main work diverged.
+- Integrated shipping bytes are unchanged from the checked 0.5.0 package.
+  Post-integration native controls pass 40/40 and strict actual-asar checks
+  414/0. Tracked tree is clean; intentional private evidence remains untracked
+  and excluded, not deleted to manufacture cleanliness.
+- Mandatory implemented wave units are now on main. Recorded P2 exceptions,
+  R886 sensitivity and F03/kbscroll dispositions remain as above. Tag-bound
+  release execution and actual published artifact verification remain.
+
 The capability-protocol unit is IMPLEMENTED / PROVEN, unintegrated: preparation, commit, completion and abandonment
 of existing disk-adoption capabilities to four fixed preload methods. It
 preserves async/sync ordering, nonce/digest/version/owner provenance and
