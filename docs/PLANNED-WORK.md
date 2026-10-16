@@ -42,11 +42,11 @@ section is kept here so the register has a visible edge.
   not yet on `main`. The repository is `lostinsea/markaloo`; old release links
   still redirect to it. Existing installs keep their profile, app ID and
   installer folder.
-- The table/TOC and Mermaid-label layout stream is active in its own worktree.
-  Its reviewed commit must be integrated with the rebrand before release.
-- One combined stable release is authorized **after** both streams pass the
-  integrated build, focused tests, proofs and independent review. Nothing
-  from either stream is published on its own.
+- The reviewed table/TOC and Mermaid-label work was integrated as `f7ff2d8a`
+  from `76af7fd7`; both streams are together on the release branch.
+- Stable version 0.8.0 is prepared, not published. The integrated Windows
+  package, focused layout/reading tests and individual regression proofs pass.
+  Independent final review and the published-release checks remain.
 - `reading-improvements` is published as v0.7.0.
 - `mermaid-dark-boundaries` is published as v0.7.1 after the user's local test.
   Completed release and verification records are below.

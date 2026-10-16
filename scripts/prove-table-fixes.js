@@ -22357,7 +22357,7 @@ const REVERTS = [
           requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 46,
         },
         {
-          id: "R944", what: "retain wide compact-cell padding after a cramped table begins wrapping",
+          id: "R948", what: "retain wide compact-cell padding after a cramped table begins wrapping",
           file: CSS,
           from: ".markdown-body table.compact-table.wrap-anyway th,\n.markdown-body table.compact-table.wrap-anyway td {\n  padding-left: 4px;\n  padding-right: 4px;\n}",
           to: ".markdown-body table.compact-table.wrap-anyway th,\n.markdown-body table.compact-table.wrap-anyway td {\n  padding-left: 8px;\n  padding-right: 8px;\n}",
@@ -22372,7 +22372,7 @@ const REVERTS = [
           expectedFailureCount: 1,
         },
         {
-          id: "R945", what: "let long inline links and code dictate the width of the whole table",
+          id: "R949", what: "let long inline links and code dictate the width of the whole table",
           file: CSS,
           from: ".markdown-body td a,\n.markdown-body td code:not(pre code) {\n  overflow-wrap: anywhere;\n}",
           to: ".markdown-body td a,\n.markdown-body td code:not(pre code) {\n  overflow-wrap: break-word;\n}",
@@ -23495,7 +23495,7 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R72,R467,R319,R685,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760,R840,R841,R845,R849,R853,R858,R860,R871,R876,R877,R878,R879,R880,R881,R882,R883,R884,R885,R886,R887,R888,R889,R890,R891,R892,R893,R894,R895,R896,R897,R898,R899,R900,R901,R902,R903,R904,R905,R906,R907,R908,R909,R910,R911,R912,R913,R914,R915,R916,R917,R918,R919,R920,R921,R922,R923,R924,R925,R926,R927,R928,R929,R930,R931,R932,R933,R934,R935,R936,R937,R938,R939,R940,R941,R942,R943,R944,R945,R950,R951";
+      .join(",") === "R72,R467,R319,R685,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760,R840,R841,R845,R849,R853,R858,R860,R871,R876,R877,R878,R879,R880,R881,R882,R883,R884,R885,R886,R887,R888,R889,R890,R891,R892,R893,R894,R895,R896,R897,R898,R899,R900,R901,R902,R903,R904,R905,R906,R907,R908,R909,R910,R911,R912,R913,R914,R915,R916,R917,R918,R919,R920,R921,R922,R923,R924,R925,R926,R927,R928,R929,R930,R931,R932,R933,R934,R935,R936,R937,R938,R939,R940,R941,R942,R943,R948,R949,R950,R951";
   const toolbarAllowanceIsRecordScoped =
     REVERTS.filter((r) =>
       exactShutdownTailForMutation(r) === TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL,
