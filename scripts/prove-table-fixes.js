@@ -667,11 +667,16 @@ const REVERTS = [
   },
   {
     id: "R72",
-    what: "leave wrap-anyway behind when the apply pass is skipped (short columns keep wrapping in split view, where there is room for them)",
+    what: "skip recomputing wrapping in a narrow split pane",
     file: RENDERER,
-    from: "    if (t) t.classList.remove('wrap-anyway');",
-    to: "    /* wrap-anyway reset removed for proof */",
-    expect: [/wrap-anyway is cleared on entering split view/],
+    from: "      if (table) table.classList.toggle('wrap-anyway', cramped[i]);",
+    to: "      /* split-pane wrapping removed for proof */",
+    expect: [/wrap-anyway is recomputed for a narrow split pane/],
+    mustPass: [/the stranded-wrap case really started with wrap-anyway set, in split view/,
+      /the narrow-window case really narrowed the window/],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
+    expectedFailureCount: 1,
   },
   {
     id: "R73",
@@ -18475,7 +18480,7 @@ const REVERTS = [
           mustPass: [
             /^Mermaid label-fit probe measures complete real labels and every shape$/,
             /^Mermaid label-fit journey receives successful real manual reload replies$/,
-            /^Mermaid decision labels wrap into a compact centered diamond$/,
+            /^Mermaid decision labels stay centered in a bounded diamond$/,
             /^Mermaid measurement restores detached-node inline styles after a real rejection$/,
             /^Mermaid reading-position cases really scroll and run delayed native layout$/,
           ],
@@ -18485,20 +18490,23 @@ const REVERTS = [
         },
         {
           id: "R729",
-          what: "restore the wider Mermaid wrapping budget that leaves the representative decision oversized",
+          what: "restore the narrow Mermaid budget that stacks process labels",
           file: MERMAID_CFG,
-          from: "  wrappingWidth: 160,",
-          to: "  wrappingWidth: 200,",
-          suite: "test:mermaid",
-          expect: [/^Mermaid decision labels wrap into a compact centered diamond$/],
+          from: "  wrappingWidth: 260,",
+          to: "  wrappingWidth: 160,",
+          suite: "test:responsive",
+          expect: [
+            /^diagram-(roomy|toc|narrow|split) gives long rectangles room before wrapping$/,
+            /^diagram-(roomy|toc|narrow|split) retains explicit breaks, intrinsic short labels and native shape bounds$/,
+          ],
           mustPass: [
-            /^Mermaid label-fit probe measures complete real labels and every shape$/,
-            /^Mermaid labels retain native geometry through zoom, reload, theme and insertion$/,
-            /^Mermaid short labels stay intrinsic and prose avoids near-single-word columns$/,
+            /^roomy-toc keeps the final column readable without sideways scrolling$/,
+            /^diagram-narrow bounds the decision with native Mermaid layout$/,
+            /^author diagram keeps its narrower wrapping, explicit break and red border$/,
           ],
           requireMustPassAssertions: true,
           requireExactFailures: true,
-          expectedFailureCount: 1,
+          expectedFailureCount: 8,
         },
         {
           id: "R730",
@@ -18510,7 +18518,7 @@ const REVERTS = [
           expect: [/^Mermaid unbroken identifiers wrap within their measured label$/],
           mustPass: [
             /^Mermaid label-fit probe measures complete real labels and every shape$/,
-            /^Mermaid decision labels wrap into a compact centered diamond$/,
+            /^Mermaid decision labels stay centered in a bounded diamond$/,
             /^Mermaid measurement restores detached-node inline styles after a real rejection$/,
             /^Mermaid reading-position cases really scroll and run delayed native layout$/,
           ],
@@ -22348,6 +22356,66 @@ const REVERTS = [
             /^production renderer remains isolated$/],
           requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 46,
         },
+        {
+          id: "R944", what: "retain wide compact-cell padding after a cramped table begins wrapping",
+          file: CSS,
+          from: ".markdown-body table.compact-table.wrap-anyway th,\n.markdown-body table.compact-table.wrap-anyway td {\n  padding-left: 4px;\n  padding-right: 4px;\n}",
+          to: ".markdown-body table.compact-table.wrap-anyway th,\n.markdown-body table.compact-table.wrap-anyway td {\n  padding-left: 8px;\n  padding-right: 8px;\n}",
+          suite: "test:responsive",
+          expect: [/^narrow-zoom-toc keeps the final column readable without sideways scrolling$/],
+          mustPass: [
+            /^roomy-toc keeps the final column readable without sideways scrolling$/,
+            /^diagram-roomy gives long rectangles room before wrapping$/,
+            /^narrow-toc keeps the original header pinned and aligned$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R945", what: "let long inline links and code dictate the width of the whole table",
+          file: CSS,
+          from: ".markdown-body td a,\n.markdown-body td code:not(pre code) {\n  overflow-wrap: anywhere;\n}",
+          to: ".markdown-body td a,\n.markdown-body td code:not(pre code) {\n  overflow-wrap: break-word;\n}",
+          suite: "test:responsive",
+          expect: [/^long link and inline code remain readable without changing preformatted spacing$/],
+          mustPass: [
+            /^narrow-toc keeps the final column readable without sideways scrolling$/,
+            /^diagram-roomy gives long rectangles room before wrapping$/,
+            /^author diagram keeps its narrower wrapping, explicit break and red border$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R950", what: "leave the split table wrapped as though the splitter had not reset",
+          file: RENDERER,
+          from: "    storeEditorSplitRatio(applyEditorSplitRatio(0.5));\n    applyTableBreakout();",
+          to: "    storeEditorSplitRatio(applyEditorSplitRatio(0.5));",
+          suite: "test:responsive",
+          expect: [/^splitter reset recomputes table wrapping$/],
+          mustPass: [
+            /^splitter fixture crosses the wrapping threshold$/,
+            /^splitter drag release recomputes table wrapping$/,
+            /^narrow-toc keeps the final column readable without sideways scrolling$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
+        {
+          id: "R951", what: "retain a narrow-pane wrap choice after dragging the splitter wider",
+          file: RENDERER,
+          from: "        storeEditorSplitRatio(currentRatio);\n        applyTableBreakout();",
+          to: "        storeEditorSplitRatio(currentRatio);",
+          suite: "test:responsive",
+          expect: [/^splitter drag release recomputes table wrapping$/],
+          mustPass: [
+            /^splitter fixture crosses the wrapping threshold$/,
+            /^splitter reset recomputes table wrapping$/,
+            /^narrow-toc keeps the final column readable without sideways scrolling$/,
+          ],
+          requireMustPassAssertions: true, requireExactFailures: true,
+          expectedFailureCount: 1,
+        },
       ];
 
 // These are release exceptions, not passing or withdrawn proofs. An explicit
@@ -23427,7 +23495,7 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R467,R319,R685,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760,R840,R841,R845,R849,R853,R858,R860,R871,R876,R877,R878,R879,R880,R881,R882,R883,R884,R885,R886,R887,R888,R889,R890,R891,R892,R893,R894,R895,R896,R897,R898,R899,R900,R901,R902,R903,R904,R905,R906,R907,R908,R909,R910,R911,R912,R913,R914,R915,R916,R917,R918,R919,R920,R921,R922,R923,R924,R925,R926,R927,R928,R929,R930,R931,R932,R933,R934,R935,R936,R937,R938,R939,R940,R941,R942,R943";
+      .join(",") === "R72,R467,R319,R685,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760,R840,R841,R845,R849,R853,R858,R860,R871,R876,R877,R878,R879,R880,R881,R882,R883,R884,R885,R886,R887,R888,R889,R890,R891,R892,R893,R894,R895,R896,R897,R898,R899,R900,R901,R902,R903,R904,R905,R906,R907,R908,R909,R910,R911,R912,R913,R914,R915,R916,R917,R918,R919,R920,R921,R922,R923,R924,R925,R926,R927,R928,R929,R930,R931,R932,R933,R934,R935,R936,R937,R938,R939,R940,R941,R942,R943,R944,R945,R950,R951";
   const toolbarAllowanceIsRecordScoped =
     REVERTS.filter((r) =>
       exactShutdownTailForMutation(r) === TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL,

@@ -1564,6 +1564,14 @@ body.splitter-dragging * {
   overflow-wrap: break-word;
 }
 
+/* An inline URL or code token can otherwise set the width of the entire
+   column. Keep ordinary words intact; only these long inline tokens may
+   break inside themselves. Preformatted blocks retain their own scrolling. */
+.markdown-body td a,
+.markdown-body td code:not(pre code) {
+  overflow-wrap: anywhere;
+}
+
 .markdown-body tr:last-child td {
   border-bottom: none;
 }
@@ -3966,6 +3974,15 @@ body.dark-mode .context-menu {
 .markdown-body table.wrap-anyway th.nowrap-col,
 .markdown-body table.wrap-anyway td.nowrap-col {
   white-space: normal;
+}
+
+/* Only tables that cannot keep their short columns on one line give back
+   compact-cell padding. This buys room for prose before breaking words in
+   identifiers or headers. Roomy tables keep their original spacing. */
+.markdown-body table.compact-table.wrap-anyway th,
+.markdown-body table.compact-table.wrap-anyway td {
+  padding-left: 4px;
+  padding-right: 4px;
 }
 
 /* ============================================

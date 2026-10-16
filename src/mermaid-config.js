@@ -82,9 +82,10 @@ const MERMAID_FLOWCHART = {
   padding: 6,
   nodeSpacing: 32, // default 50
   rankSpacing: 38, // default 50
-  // 160 keeps the representative decision label on two balanced lines without
-  // the near-single-word wrapping measured at 128.
-  wrappingWidth: 160,
+  // A single flowchart budget also applies to process boxes: 160 forced
+  // ordinary prose into narrow stacks even when the reading pane had room.
+  // Native layout still sizes short labels to their text and bounds long ones.
+  wrappingWidth: 260,
   htmlLabels: true,
 };
 

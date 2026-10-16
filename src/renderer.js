@@ -3867,7 +3867,10 @@ if (editorSplitter) {
       if (editorSplitter.hasPointerCapture(e.pointerId)) {
         editorSplitter.releasePointerCapture(e.pointerId);
       }
-      if (currentRatio !== null) storeEditorSplitRatio(currentRatio);
+      if (currentRatio !== null) {
+        storeEditorSplitRatio(currentRatio);
+        applyTableBreakout();
+      }
     }
 
     try {
@@ -3882,6 +3885,7 @@ if (editorSplitter) {
 
   editorSplitter.addEventListener('dblclick', () => {
     storeEditorSplitRatio(applyEditorSplitRatio(0.5));
+    applyTableBreakout();
   });
 }
 
@@ -7287,13 +7291,25 @@ function applyTableBreakout() {
   visible.forEach((c) => {
     c.classList.remove('table-breakout');
     c.style.removeProperty('--table-breakout-width');
-    // Cleared here rather than only being re-toggled at the end, because the
-    // apply pass is skipped entirely in split view. Left behind, it would make
-    // short columns wrap in a pane that has room for them.
+    // Cleared before measuring either layout, so a stale wrap choice cannot
+    // make an otherwise roomy pane appear to fit.
     const t = c.querySelector('table');
     if (t) t.classList.remove('wrap-anyway');
   });
-  if (splitView) return;
+  if (splitView) {
+    // The pane is the entire available budget in split view. Breakout is
+    // disabled there, but that must not also disable fitting a narrow table.
+    // Read every table before changing any class to avoid per-table layouts.
+    const cramped = visible.map(container => {
+      const table = container.querySelector('table');
+      return table && container.scrollWidth > container.clientWidth + 1;
+    });
+    visible.forEach((container, i) => {
+      const table = container.querySelector('table');
+      if (table) table.classList.toggle('wrap-anyway', cramped[i]);
+    });
+    return;
+  }
 
   // Read pass. Nothing is written in this loop, so it costs ONE layout for the
   // whole document rather than one per container. Both values describe the

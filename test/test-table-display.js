@@ -799,10 +799,8 @@ async function run(win) {
     JSON.stringify(narrow),
   );
 
-  // Still narrow, so wrap-anyway is on. Entering split view skips the apply
-  // pass entirely (breakout cannot work there), so unless the reset clears it,
-  // the class is stranded and short columns keep wrapping in a pane that has
-  // room for them. Driven through the real edit toggle.
+  // The narrow split pane needs its own wrap decision, rather than inheriting
+  // the normal viewer's choice or dropping wrapping with breakout.
   await resizeWindow({ ...originalBounds, width: 1000 });
   await exec(`applyTableBreakout(); null;`);
   await sleep(200);
@@ -828,8 +826,8 @@ async function run(win) {
     JSON.stringify(strandedWrap),
   );
   check(
-    "wrap-anyway is cleared on entering split view, not stranded",
-    strandedWrap.after === false,
+    "wrap-anyway is recomputed for a narrow split pane",
+    strandedWrap.after === true,
     JSON.stringify(strandedWrap),
   );
 
@@ -4802,8 +4800,8 @@ async function run(win) {
       s8OnFlips.join(",") === s8OffFlips.join(",") &&
       s8.on.waMid.every((w) => w === 0) &&
       s8.off.waMid.every((w) => w === 0) &&
-      s8.on.heightMovedAfterAnchor > 0 &&
-      s8.off.heightMovedAfterAnchor > 0 &&
+      Math.abs(s8.on.heightMovedAfterAnchor) > 1 &&
+      Math.abs(s8.off.heightMovedAfterAnchor) > 1 &&
       s8.on.onScreen >= 3 &&
       s8.off.onScreen >= 3,
     JSON.stringify([s8.on, s8.off, s8OnFlips, s8OffFlips]),
@@ -4819,8 +4817,8 @@ async function run(win) {
     s8.on.anchoring !== "none" && s8.off.anchoring === "none",
     JSON.stringify([s8.on.anchoring, s8.off.anchoring]),
   );
-  // THE CONTRACT. The document really does grow under the reader after the
-  // anchor has finished, and the reader still must not move.
+  // THE CONTRACT. The document reflows after the anchor frame; with compact
+  // padding it may now shrink instead of grow, but the reader must not move.
   check(
     "the reflow an ordinary zoom step triggers after the anchor frame does not move the reader",
     Math.abs(s8.on.worst) <= RESID_MAX.normal,

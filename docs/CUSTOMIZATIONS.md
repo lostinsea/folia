@@ -384,13 +384,19 @@ identity. Moving actual child nodes preserves Mermaid's native bindings; stale
 output is neither adopted nor cached, and the staging container is always
 removed, including after a rejected batch.
 
-Flowchart labels use a 160px wrapping budget, the existing 14px font and 6px
-padding, plus emergency wrapping for unbroken identifiers. This makes the
-representative decision label wrap as "Each query or" / "stage language"
-instead of growing a wide square diamond. It is a global wrapping choice, not
-a per-shape sizing override: longer prose can gain lines, and explicit line
-breaks can wrap further. Short labels remain intrinsic. Mermaid still owns
-shape geometry and connector placement; no polygons are resized after layout.
+- Flowchart labels can grow to 260px before automatic wrapping. Short labels
+  stay small; the same budget applies to rectangles and decisions.
+- A roomy rectangle with a long sentence uses fewer lines. A decision may grow
+  wider than before. Explicit breaks and author configuration still win.
+- Mermaid sizes shapes and routes arrows together. No SVG nodes are stretched
+  after rendering.
+- In a narrow TOC or split view, tables first wrap short columns and reduce
+  compact-cell padding. When six columns cannot fit into a split pane, the
+  table remains horizontally scrollable rather than breaking every header
+  into individual letters. Dragging or resetting the split bar updates the
+  table after the pane width changes.
+- Long links and inline code can wrap inside table cells without changing
+  preformatted blocks.
 
 The targeted suite covers the real add/reload/zoom-reset journey, theme and
 insertion paths, full-label geometry, compact decisions, bindings, stale

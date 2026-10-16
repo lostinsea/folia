@@ -3572,8 +3572,8 @@ async function run(win) {
   const nativeFit = fitRecords.find(r => r.stage === "fresh-100").nodes;
   const decision = nativeFit.find(n => n.key === "C");
   const lineTops = [...new Set(decision.fragments.map(r => Math.round(r.y)))];
-  check("Mermaid decision labels wrap into a compact centered diamond",
-    decision.width <= 225 && decision.height <= 225 && lineTops.length === 2 &&
+  check("Mermaid decision labels stay centered in a bounded diamond",
+    decision.width <= 300 && decision.height <= 300 && lineTops.length >= 1 && lineTops.length <= 2 &&
       Math.abs(decision.foreign.x + decision.foreign.width / 2 -
         decision.shape.x - decision.shape.width / 2) <= 1 &&
       Math.abs(decision.foreign.y + decision.foreign.height / 2 -
@@ -3586,7 +3586,7 @@ async function run(win) {
     JSON.stringify(nativeFit));
   check("Mermaid unbroken identifiers wrap within their measured label",
     nativeFit.find(n => n.key === "F").fits &&
-      nativeFit.find(n => n.key === "F").width <= 225,
+      nativeFit.find(n => n.key === "F").width <= 300,
     JSON.stringify(nativeFit.find(n => n.key === "F")));
   win.setSize(1100, 1400);
   await exec(`zoomLevel = 100; updateZoom(); null`);
