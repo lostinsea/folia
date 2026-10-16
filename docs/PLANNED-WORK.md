@@ -38,20 +38,13 @@ section is kept here so the register has a visible edge.
 
 ## Current workset
 
-- The Markaloo rebrand and feather icon are committed in `08af4f3f`, but are
-  not yet on `main`. The repository is `lostinsea/markaloo`; old release links
-  still redirect to it. Existing installs keep their profile, app ID and
-  installer folder.
-- The reviewed table/TOC and Mermaid-label work was integrated as `f7ff2d8a`
-  from `76af7fd7`; both streams are together on the release branch.
-- Stable version 0.8.0 is prepared, not published. The combined Windows app was
-  viewed with an isolated profile; focused layout/reading tests and individual
-  regression proofs pass.
-- First combined review: Sol found that the installer fallback missed a running
-  old `Folia.exe`; Luna found no significant issue. The installer was corrected
-  and rebuilt; strict packaging passed and its new R952 revert was proven.
-  Fresh independent Sol, Terra and Luna reviews found no significant issues.
-  Publishing and the published-release checks remain.
+- The Markaloo rebrand, feather icon, and reviewed table/TOC and Mermaid-label
+  work are published together as [v0.8.0](https://github.com/lostinsea/markaloo/releases/tag/v0.8.0).
+  The repository is `lostinsea/markaloo`; old release links still redirect.
+  Existing installs keep their profile, app ID, updater cache and install folder.
+- The combined source was reviewed independently by Sol, Terra and Luna; the
+  final round found no significant issues. Release and verification receipts
+  are below. No PC installation or old-to-new upgrade was performed.
 - `reading-improvements` is published as v0.7.0.
 - `mermaid-dark-boundaries` is published as v0.7.1 after the user's local test.
   Completed release and verification records are below.
@@ -6901,6 +6894,48 @@ audit documents and the commit history.
 | F43 / N18 | `1132fc7` | Hardened block-placeholder assembly (per-render nonce tokens, so a decoy placeholder in a code span cannot capture the real diagram) and restored the Mermaid source attribute. |
 | `w2-ci`, `w2-docs`, `w2-f23`, `w2-f25` | various, through `a80c813` | The wave-2 checkpoint: security, hygiene, CI and payload work. All four are `w2-release` prerequisites and are **done**. |
 | Release 0.4.0 | `eae1429` | The release the register's remaining work builds on top of. Check `package.json` for the version actually on `main`. |
+
+### Markaloo rebrand and responsive layout - released 0.8.0 / COMPLETE (2026-10-16)
+
+- [Markaloo 0.8.0](https://github.com/lostinsea/markaloo/releases/tag/v0.8.0)
+  is public. The annotated tag points to exact source
+  [`e2fa6e4d1167009c819f2333cb712afa0b8ba602`](https://github.com/lostinsea/markaloo/commit/e2fa6e4d1167009c819f2333cb712afa0b8ba602).
+  [Release run 38961336130](https://github.com/lostinsea/markaloo/actions/runs/38961336130)
+  passed Windows, Linux, macOS, attestation and publication jobs. The tag push
+  started the only run; no duplicate dispatch or old tag was changed.
+- The user-supplied feather is the app icon. The app, repository, menus and new
+  download filenames say Markaloo. The old app ID, `%APPDATA%\Folia` profile,
+  updater cache and Windows install folder stay for existing users. The old
+  release feed serves the new `latest.yml` with version 0.8.0 and the Markaloo
+  installer. The corrected installer checks for both current and old processes;
+  no live installed upgrade was attempted.
+- Wide-TOC tables, narrow split panes, long inline links/code and native
+  Mermaid labels use the reviewed responsive layout. Very narrow panes keep a
+  reachable horizontal-scroll fallback. Authored diagram styles and dark
+  border/connector settings remain. Responsive: 28/28; tables: 215/215;
+  profile: 60/60; corpus: 335/335; TOC: 30/30; reading: 296/296; theme:
+  398/398; strict packaged archive: 416 passed, 0 failed. The layout,
+  rebrand and installer regressions have individually proven reverts.
+- First combined Sol review found that the installer fallback could miss a
+  running old `Folia.exe`; Luna found no significant issue. The installer was
+  fixed and rebuilt, and R952 proved the fallback guard with its unrelated
+  checks still passing. Fresh independent Sol, Terra and Luna reviews found no
+  significant issues.
+- All nine downloaded assets match GitHub sizes and SHA256 digests. The three
+  update feeds match version, filenames, sizes and SHA512 of their four target
+  files. Both Windows executables, the Linux AppImage and deb, and the macOS
+  dmg verify the release workflow, tag and exact source commit.
+- The downloaded portable Windows app was opened with a disposable isolated
+  profile: its window, feather icon, welcome screen and version 0.8.0 were
+  viewed. The downloaded installer also reports Markaloo 0.8.0, but was not
+  run. No PC installation or live old-to-new upgrade was performed.
+  Windows/macOS are unsigned; the existing macOS auto-update signature limit
+  remains. Linux/macOS user interfaces were not tested live. The known legacy
+  tab IPC and Mermaid instrumentation suite failures remain separate.
+- The parent session independently checked the public release, source tag,
+  successful jobs and old-feed 0.8.0 response. Downloaded asset, attestation
+  and portable-UI evidence is in this session's `files/release-080/` and
+  computer-use observation.
 
 ### `mermaid-dark-boundaries` - released 0.7.1 / COMPLETE (2026-10-16)
 
