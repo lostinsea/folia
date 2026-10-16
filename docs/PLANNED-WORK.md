@@ -38,69 +38,9 @@ section is kept here so the register has a visible edge.
 
 ## Current workset
 
-- `reading-improvements` is published as v0.7.0. Its completed entry is below.
-- `mermaid-dark-boundaries` is preparing stable patch release `0.7.1` on
-  the reading feature branch, not yet integrated into `main`.
-- Astra source investigation and the viewed Electron PoC are complete.
-  Sol/Luna reviews found no blocking issues in the earlier 2px/3px correction.
-- Scope: darker-theme shape/container outlines and connecting lines, not text
-  or fills. Ordinary borders and normal connectors use 1.5px; lifelines stay 2px.
-  Faint neutral strokes gain contrast; stronger and authored styles stay intact.
-- Handdrawn/authored visual settings remain author-owned. Fill-only chart data
-  gains no invented borders. Unrelated layout/curve settings do not opt out.
-- Native-render controls cover modern state compartments/concurrency and the
-  unified class alias.
-- Baseline controls reproduce the unavailable legacy state renderer and the TOC
-  opening-animation assertion failure on both released and corrected source.
-- Sol's native size-warning defect is fixed: optional metadata rejection logs a
-  warning without discarding native output or valid neighbors. Its focused
-  controls and mutation proof passed before the width revision. That source's
-  reading checks passed 198/198 and packaging checks passed 414/414.
-  Its proof results remain historical evidence, not new-width results.
-- The muted `#74818f` color remains approved.
-  The user explicitly selected "Use this subtler version" after viewing its
-  preview. This approves the appearance only, not a release or installation.
-- The user then requested "Can we make borders 1.5px? and 2px instead of 2 and 3?"
-  This supersedes the earlier width choice. Combined native-render controls pass
-  246/246, including dark/light/dark, high zoom, special participants and popout.
-  R935/R936/R938/R942/R943 are individually proven on the revised source.
-  Independent Sol/Luna reviews agree: no significant issues. Updated dark/light,
-  high-zoom, special-participant and popout captures have been viewed.
-- The user also requested 1.5px arrows and other connecting lines, including
-  non-arrowed relationships. Lifelines remain a separate 2px default.
-- The unconditional-metadata trial adds 31.4ms to the five-diagram render median.
-  It is not accepted as noise. The implemented marker-free metadata fast path
-  avoids that redundant parse using the actual native render type.
-- Before the optimized measurement: fresh-render median/mean may add at most one
-  16.7ms frame for five diagrams; settled-scroll p95 may add at most 1ms, callback
-  p95 at most 0.1ms, with no geometry/scans or 50ms long tasks. Report added work.
-- The earlier 2px/3px source's optimized matched run meets those budgets: render median 165.8ms to
-  162.9ms, mean 173.1ms to 172.8ms; scroll median stays 16.6-16.7ms, callback
-  p95 about 0.1ms, zero geometry/scans/long tasks. No speedup or free-work claim.
-  Configured-source costs remain outside this bounded measurement.
-  The current 1.5px/2px revision is not separately benchmarked.
-- The private `0.7.1-local.1` portable and NSIS builds are ready from reviewed
-  source `29df561ccbe2aee3d7881fbed37a94919342fa75`.
-  Strict archive checks pass 414/414; packaged runtime checks pass 8/8 with
-  production isolation, dark/light rerender and normal/high zoom.
-  Shipped source hashes match, and the packaged captures have been viewed.
-  Evidence remains in the session's `private-widths-*` receipts and
-  `tmp/private-widths-packaged-r1/`.
-  The installer is `dist/Folia-Setup-0.7.1-local.1.exe`; it is unsigned.
-  The user handled the Windows administrator handoff and installed it.
-  Installed EXE and ASAR hashes match the approved private build, and shipped
-  source/resource hashes match. This does not inspect the user's documents.
-- The user reports their diagrams look good and explicitly says "proceed".
-  Stable `0.7.1` integration and publication are authorized. Promotion changes
-  version metadata, not accepted product code. No further PC installation is
-  authorized. Stable Windows packaging passes strict checks 414/414 and actual
-  isolated runtime checks 11/11; dark/light/high-zoom, preview, special-participant
-  and popout captures have been viewed. Shipped product hashes match the accepted
-  installed private build. Receipts are in the session's `release-071-*` files.
-  Packaged CDP has no PDF-print method; unchanged native PDF source controls
-  remain valid, not a new packaged-PDF result. Failed tool attempts are retained.
-  Integration/publication and downloaded release verification are pending.
-  Independent Sol/Luna release-preparation feedback finds no significant issues.
+- `reading-improvements` is published as v0.7.0.
+- `mermaid-dark-boundaries` is published as v0.7.1 after the user's local test.
+  Completed release and verification records are below.
 - Existing P2 and nonblocking follow-ups keep their recorded scope and status.
 
 ## Update protocol
@@ -6948,10 +6888,53 @@ audit documents and the commit history.
 | `w2-ci`, `w2-docs`, `w2-f23`, `w2-f25` | various, through `a80c813` | The wave-2 checkpoint: security, hygiene, CI and payload work. All four are `w2-release` prerequisites and are **done**. |
 | Release 0.4.0 | `eae1429` | The release the register's remaining work builds on top of. Check `package.json` for the version actually on `main`. |
 
+### `mermaid-dark-boundaries` - released 0.7.1 / COMPLETE (2026-10-16)
+
+- [Folia 0.7.1](https://github.com/lostinsea/folia/releases/tag/v0.7.1) is public.
+  Exact tagged source:
+  [`bd0a6a9429ec6e38bed37547cd622c1fa1596de6`](https://github.com/lostinsea/folia/commit/bd0a6a9429ec6e38bed37547cd622c1fa1596de6).
+  [Release run 38924867380](https://github.com/lostinsea/folia/actions/runs/38924867380)
+  passed builds, attestations and publication. Tag push started the only run.
+- Dark ordinary borders and normal arrowed/non-arrowed connections use 1.5px;
+  lifelines stay 2px. Faint neutral borders use muted `#74818f`.
+  The user explicitly chose "Use this subtler version" and later requested these
+  widths. Authored/stronger strokes, semantic colors, dashes, light mode, text,
+  fills and markers retain their behavior. Detailed coverage and exceptions:
+  `docs/CUSTOMIZATIONS.md`.
+- The user installed `0.7.1-local.1` after handling Windows administrator prompts.
+  Installed EXE/ASAR hashes match the approved private package; shipped source
+  hashes match. The user reports their diagrams look good and said "proceed".
+  Stable promotion changes metadata, not that accepted product code.
+- Astra investigated; independent Sol/high and Luna/high reviews agree on no
+  significant issues. Focused native controls pass 246/246. Width/ownership
+  proofs R935/R936/R938/R942/R943 are individually exact PROVEN.
+- Stable local and downloaded Windows archives pass strict checks 414/414.
+  Both actual packages pass 11/11 isolated runtime checks: dark/light rerender,
+  normal/high zoom, preview, special participants and popout SVG. Captures were
+  viewed. All shipped source/resources, version/lock and updater target match.
+  The downloaded installer and portable contain identical application payloads;
+  downloaded EXE/ASAR also match the checked local stable package.
+- Every downloaded asset matches GitHub's size and SHA256. All three feeds match
+  version, target names, sizes and SHA512. All five runnable binaries verify
+  exact source, signer, workflow, tag and run attempt. The exact commit is pinned;
+  a tag ref alone is not immutable. Feeds/blockmaps are not provenance-attested.
+- Styling adds render work, not scroll work. Earlier 2px/3px measurements are in
+  `docs/PERF-AUDIT.md`; final 1.5px/2px widths and configured-source costs are not
+  freshly benchmarked. No general performance or full ordinary-CI-green claim.
+  Tagged-source ordinary CI still stops at 33/34 on legacy renderer IPC `invoke`.
+  Existing instrumentation failures and P2 follow-ups remain separate.
+- Packaged CDP does not expose PDF printing; unchanged native-source PDF controls
+  remain valid, not a new packaged-PDF result. Initial tool failures are retained.
+  Windows/macOS remain unsigned; macOS auto-update retains its signature limit.
+  Linux/macOS builds and provenance do not prove live UI testing on this PC.
+  Stable 0.7.1 was not installed; the user's local test build is left untouched.
+- Evidence: `private-widths-*` and `release-071-*` receipts in session `b0dbcd9e`;
+  downloaded UI captures are in `tmp/release-071-published-smoke-r1/`.
+
 ### `reading-improvements` - released 0.7.0 / COMPLETE (2026-10-15)
 
-- [Folia 0.7.0](https://github.com/lostinsea/folia/releases/tag/v0.7.0) is public
-  and latest. Exact tagged source:
+- [Folia 0.7.0](https://github.com/lostinsea/folia/releases/tag/v0.7.0) is public.
+  Exact tagged source:
   [`f2fb46dd2d6366fb7279b39a4ad3df8cb5d5d7ec`](https://github.com/lostinsea/folia/commit/f2fb46dd2d6366fb7279b39a4ad3df8cb5d5d7ec).
   Reviewed feature: `d134e71c80ac7f077a67090b7be4afe5a304555c`.
 - [Release run 38848188455](https://github.com/lostinsea/folia/actions/runs/38848188455)
