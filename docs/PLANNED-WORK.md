@@ -1,6 +1,6 @@
 # Planned Work
 
-The open work register for Folia. This file is the **durable** copy: the working
+The open work register for Markaloo. This file is the **durable** copy: the working
 tracker lives in an agent session database that does not survive the session, so
 anything only recorded there is lost the moment the session ends. If a **tracked
 item** is not written down here, assume it does not exist.
@@ -38,6 +38,15 @@ section is kept here so the register has a visible edge.
 
 ## Current workset
 
+- The Markaloo rebrand and feather icon are committed in `08af4f3f`, but are
+  not yet on `main`. The repository is `lostinsea/markaloo`; old release links
+  still redirect to it. Existing installs keep their profile, app ID and
+  installer folder.
+- The table/TOC and Mermaid-label layout stream is active in its own worktree.
+  Its reviewed commit must be integrated with the rebrand before release.
+- One combined stable release is authorized **after** both streams pass the
+  integrated build, focused tests, proofs and independent review. Nothing
+  from either stream is published on its own.
 - `reading-improvements` is published as v0.7.0.
 - `mermaid-dark-boundaries` is published as v0.7.1 after the user's local test.
   Completed release and verification records are below.
