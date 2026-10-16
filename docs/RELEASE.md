@@ -1,10 +1,14 @@
 # Release Guide
 
-This document explains how to create releases for Folia.
+This document explains how to create releases for Markaloo.
+
+The repository is `lostinsea/markaloo`; old `lostinsea/folia` links redirect
+here. The Markaloo artifact names below apply to future builds; existing
+releases retain their original asset names.
 
 **Two paths can put a release on GitHub, and only one of them should.** The tag
 workflow (`.github/workflows/release.yml`) builds on GitHub runners, attests
-what it built, and is the supported way to publish Folia — see "Publishing a
+what it built, and is the supported way to publish Markaloo — see "Publishing a
 release" below and "Build provenance" in [`BUILD.md`](BUILD.md).
 
 `npm run release` (`scripts/release.js`) is the older local path. It builds on a
@@ -12,7 +16,7 @@ workstation and uploads with `gh`, and what it uploads carries **no** GitHub
 attestation, so `gh attestation verify` fails on those files — correctly. It is
 also **not** a completeness check: it publishes whatever it happens to find. It
 remains useful for local packaging, rehearsing the mechanics and dry runs, but
-it should not be used to publish official Folia releases.
+it should not be used to publish official Markaloo releases.
 
 ## Publishing a release (the supported path)
 
@@ -25,30 +29,30 @@ release that looks finished and is not.
    disagree.
 2. Tag and push the tag:
    ```bash
-   git tag -a vX.X.X -m "Folia X.X.X"
+   git tag -a vX.X.X -m "Markaloo X.X.X"
    git push origin vX.X.X
    ```
 3. Check whether the tag push started the release workflow. Do not dispatch a
    duplicate run. If no run exists for the exact tag and commit, dispatch
    **against the tag ref, never a branch:**
    ```bash
-   gh workflow run release.yml --repo lostinsea/folia --ref vX.X.X
+   gh workflow run release.yml --repo lostinsea/markaloo --ref vX.X.X
    ```
    `attest` and `create-release` are both gated on a tag ref, so a dispatch
    against `main` builds all three platforms and then attests and publishes
    nothing.
-4. Watch the run: `gh run watch <id> --repo lostinsea/folia --exit-status`.
+4. Watch the run: `gh run watch <id> --repo lostinsea/markaloo --exit-status`.
    The `attest` job must complete before publication — `create-release`
    declares `needs: [release, attest]`, so a failed attestation blocks the
    release rather than yielding an unattested one.
 5. After publication, verify a **downloaded** artifact rather than trusting the
    run page:
    ```bash
-   gh release download vX.X.X --repo lostinsea/folia \
-     --pattern "Folia-Setup-X.X.X.exe"
-   gh attestation verify Folia-Setup-X.X.X.exe \
-     --repo lostinsea/folia \
-     --signer-workflow lostinsea/folia/.github/workflows/release.yml \
+   gh release download vX.X.X --repo lostinsea/markaloo \
+     --pattern "Markaloo-Setup-X.X.X.exe"
+   gh attestation verify Markaloo-Setup-X.X.X.exe \
+     --repo lostinsea/markaloo \
+     --signer-workflow lostinsea/markaloo/.github/workflows/release.yml \
      --source-ref refs/tags/vX.X.X \
      --source-digest <exact-tagged-commit>
    ```
@@ -185,10 +189,10 @@ subset:
 
 | File | Platform | Description |
 |------|----------|-------------|
-| `Folia-Setup-X.X.X.exe` | Windows | NSIS installer |
-| `Folia-Setup-X.X.X.exe.blockmap` | Windows | Block map emitted alongside the installer |
-| `Folia-X.X.X.AppImage` | Linux | Portable AppImage |
-| `folia_X.X.X_amd64.deb` | Linux | Debian package |
+| `Markaloo-Setup-X.X.X.exe` | Windows | NSIS installer |
+| `Markaloo-Setup-X.X.X.exe.blockmap` | Windows | Block map emitted alongside the installer |
+| `Markaloo-X.X.X-x64.AppImage` | Linux | Portable AppImage |
+| `Markaloo-X.X.X-x64.deb` | Linux | Debian package |
 
 **That list is not enforced.** The script's dry-run list varies only with
 whether the host can build Linux; it is printed by `--dry-run` and compared

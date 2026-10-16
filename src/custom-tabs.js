@@ -354,7 +354,7 @@
         `[CustomTabs] Deferred operation capacity exceeded; dropping ${source}`,
       );
       notify(
-        "Folia could not hold a document update while closing. " +
+        "Markaloo could not hold a document update while closing. " +
           "Check your open documents before relying on them.",
         6000,
       );
@@ -3046,11 +3046,11 @@
       const label = safeDocumentLabel(tab.filename);
       const closeWarning =
         dirty && deleted
-          ? `"${label}" has unsaved changes and was deleted outside Folia. Close this unsaved in-memory copy anyway?`
+          ? `"${label}" has unsaved changes and was deleted outside Markaloo. Close this unsaved in-memory copy anyway?`
           : dirty
             ? `"${label}" has unsaved changes. Close anyway?`
             : deleted
-              ? `"${label}" was deleted outside Folia. Close this in-memory copy anyway?`
+              ? `"${label}" was deleted outside Markaloo. Close this in-memory copy anyway?`
               : null;
       if (closeWarning && !confirm(closeWarning)) return;
       // What the reader was actually shown. Main will not erase deletion
@@ -3096,7 +3096,7 @@
             }
             if (
               !confirm(
-                `"${label}" was deleted outside Folia. Close this in-memory copy anyway?`,
+                `"${label}" was deleted outside Markaloo. Close this in-memory copy anyway?`,
               )
             ) {
               notify("The file became unavailable or changed before adoption.", 6000);
@@ -3156,7 +3156,7 @@
             }
             window.viewer.innerHTML = `
               <div class="welcome">
-                <h1>Welcome to Folia</h1>
+                <h1>Welcome to Markaloo</h1>
                 <p>Press <kbd>Ctrl+O</kbd> to open a markdown file</p>
               </div>
             `;
@@ -5911,7 +5911,7 @@
   // textarea or the live copy, and refuses if anything moved. On success the
   // document is FROZEN: the editor is made read-only so no further keystroke
   // can enter a document that is about to go away. Ordinarily a fresh request
-  // supersedes and releases it. A Folia-owned NSIS hand-off is different:
+  // supersedes and releases it. A Markaloo-owned NSIS hand-off is different:
   // phase two is already the final approval and main marks any serialized
   // request retainFreeze so UAC/process startup cannot expose editable text to
   // the installer's forced process-kill phase.

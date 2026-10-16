@@ -1,16 +1,16 @@
-# Folia
+# Markaloo
 
 <div align="center">
-  <img src="docs/images/folia.png" alt="Folia" width="100">
+  <img src="docs/images/markaloo.png" alt="Markaloo" width="100">
   <p><strong>A fast, offline, cross-platform markdown viewer with full HTML support, Mermaid diagrams, interactive tables, and note-taking</strong></p>
 </div>
 
 
 ---
 
-## What Folia is
+## What Markaloo is
 
-Folia opens markdown files and renders them the way the author wrote them -
+Markaloo opens markdown files and renders them the way the author wrote them -
 including embedded HTML, Mermaid diagrams, sortable tables and syntax-highlighted
 code - and lets you annotate, edit and export without leaving the window.
 
@@ -25,27 +25,27 @@ working.
 
 ### Provenance
 
-Folia is an independent fork of
+Markaloo is an independent fork of
 [yumedzi/markdown-viewer](https://github.com/yumedzi/markdown-viewer) by Viktor
 Moyseyenko, itself a fork of the original
 [OmniCoreST/omnicore-markdown-viewer](https://github.com/OmniCoreST/omnicore-markdown-viewer)
 by Omnicore. Both are MIT-licensed, and their authors' copyright notices are
 retained in [`LICENSE`](LICENSE.txt) as MIT requires - which is why that file names
-three parties. Folia is maintained separately, with its own name and version
+three parties. Markaloo is maintained separately, with its own name and version
 series, and is **not** published, endorsed or supported by Omnicore.
 
-Folia diverged from its parent at commit **`854bdec`** (2026-02-23, upstream
+Markaloo diverged from its parent at commit **`854bdec`** (2026-02-23, upstream
 v2.0.7). It is a fork, not a downstream branch: upstream commits are reviewed
 and picked deliberately rather than merged wholesale, because a merge that looks
 like a clean improvement can silently undo a fix here. What the fork changed,
-and why, is recorded in [`CUSTOMIZATIONS.md`](https://github.com/lostinsea/folia/blob/main/docs/CUSTOMIZATIONS.md)
+and why, is recorded in [`CUSTOMIZATIONS.md`](https://github.com/lostinsea/markaloo/blob/main/docs/CUSTOMIZATIONS.md)
 precisely so that the next merge has something to check against.
 
 ---
 
-## What changed in Folia
+## What changed in Markaloo
 
-Folia is not a rebrand of its parent. The list below is the substantive work,
+Markaloo is not a rebrand of its parent. The list below is the substantive work,
 and every item is covered by tests in this repository.
 
 ### The bug that started it
@@ -64,7 +64,7 @@ rather than pixel offset, so the position survives the document reflowing.
 ### Security
 
 A full audit produced 27 findings, all of which are resolved or recorded as
-measured, justified deferrals in [`SECURITY-AUDIT.md`](https://github.com/lostinsea/folia/blob/main/docs/SECURITY-AUDIT.md).
+measured, justified deferrals in [`SECURITY-AUDIT.md`](https://github.com/lostinsea/markaloo/blob/main/docs/SECURITY-AUDIT.md).
 The substantive ones:
 
 - Every HTML sink that took document-controlled text was rebuilt from DOM nodes and `textContent`. In a Node-privileged renderer these are code execution, not defacement.
@@ -77,8 +77,8 @@ The substantive ones:
 ### Performance
 
 Measured before and after; method and raw numbers in
-[`PERF-AUDIT.md`](https://github.com/lostinsea/folia/blob/main/docs/PERF-AUDIT.md)
-and [`bench/BASELINE.md`](https://github.com/lostinsea/folia/blob/main/bench/BASELINE.md).
+[`PERF-AUDIT.md`](https://github.com/lostinsea/markaloo/blob/main/docs/PERF-AUDIT.md)
+and [`bench/BASELINE.md`](https://github.com/lostinsea/markaloo/blob/main/bench/BASELINE.md).
 
 **Two of the app's own rendering passes were quadratic.** Nobody had noticed,
 because nobody had measured a large document. On a benchmark corpus that is
@@ -101,7 +101,7 @@ rather than four times.
 - **Incremental rendering made to actually work.** Editing now patches only the affected nodes using a keyed diff, so inserting a paragraph mid-document no longer rebuilds everything after it.
 - Search is debounced, and it no longer counts matches in detached nodes after a re-render.
 
-**Folia now estimates what a document will cost before rendering it**, and asks
+**Markaloo now estimates what a document will cost before rendering it**, and asks
 first if that looks like more than ten seconds. The estimate deliberately does
 *not* use file size: at an identical 1 MB, documents in the benchmark corpus
 span 260 ms to 3.4 s of render time, which makes bytes a **12.9x-wrong** proxy.
@@ -215,7 +215,7 @@ The menu adapts to the mode you are in.
 - **Drag and drop** - drop a markdown file onto the window to open it
 - **Table of contents** - hierarchical, H1-H6, one click to jump, current section highlighted
 - **Search** with live highlighting, match counter and keyboard navigation (Ctrl+F)
-- **Themes** - Light, Dark, or follow the desktop's appearance in real time, each with a choice of colour scheme under **View > Themes**: Default Light, Clarity and Parchment for light; Default Dark, Abyss and Ember for dark. Folia remembers a scheme per mode, so following the desktop switches between your chosen light and dark schemes rather than a fixed pair.
+- **Themes** - Light, Dark, or follow the desktop's appearance in real time, each with a choice of colour scheme under **View > Themes**: Default Light, Clarity and Parchment for light; Default Dark, Abyss and Ember for dark. Markaloo remembers a scheme per mode, so following the desktop switches between your chosen light and dark schemes rather than a fixed pair.
 - **Zoom** - 50% to 400%
 - **Collapsible headings** - fold and unfold sections, individually or all at once
 - **Recent files** - the last 100
@@ -230,27 +230,32 @@ The menu adapts to the mode you are in.
 ### Download
 
 Releases are published at
-[lostinsea/folia/releases](https://github.com/lostinsea/folia/releases).
+[lostinsea/markaloo/releases](https://github.com/lostinsea/markaloo/releases).
+Old `lostinsea/folia` links redirect here.
+
+These filenames apply to future Markaloo builds. Earlier releases keep their
+original asset names. Existing settings and open tabs remain in the same private
+profile when the app display name changes.
 
 | Platform | File | Description |
 |----------|------|-------------|
-| Windows | `Folia-Setup-X.X.X.exe` | Installer |
-| Windows | `Folia X.X.X.exe` | Portable, no installation |
-| macOS | `Folia-X.X.X.dmg` | Disk image |
-| Linux | `Folia-X.X.X.AppImage` | Portable AppImage |
-| Linux | `folia_X.X.X_amd64.deb` | Debian / Ubuntu package |
+| Windows | `Markaloo-Setup-X.X.X.exe` | Installer |
+| Windows | `Markaloo-X.X.X.exe` | Portable, no installation |
+| macOS | `Markaloo-X.X.X-arm64.dmg` | Disk image (Apple Silicon) |
+| Linux | `Markaloo-X.X.X-x64.AppImage` | Portable AppImage |
+| Linux | `Markaloo-X.X.X-x64.deb` | Debian / Ubuntu package |
 
 Only the Windows installer registers file associations; the portable build and
 the other platforms are launched directly.
 
 > **"Windows protected your PC"**
 >
-> Folia is not code-signed, so SmartScreen will warn on first run. Click
+> Markaloo is not code-signed, so SmartScreen will warn on first run. Click
 > **More info**, then **Run anyway**. The source is in this repository and the
 > installer can be rebuilt from it. Build provenance (below) does not remove
 > this warning — it is not a code signature.
 
-Folia checks for updates against this fork's own GitHub releases feed: once a
+Markaloo checks for updates against this fork's own GitHub releases feed: once a
 few seconds after launch in packaged builds, and on request from the menu. That
 check downloads release *metadata* automatically — it has to, to know whether a
 newer version exists — but it never downloads or installs the update itself
@@ -260,14 +265,14 @@ The request is deliberately uninformative. It does not carry the current
 version at all: the published version is fetched and compared locally.
 `electron-updater` would normally attach `x-user-staging-id`, a random
 identifier it persists to disk and reuses forever, which would make every check
-from one machine linkable to every other; Folia blanks that header
+from one machine linkable to every other; Markaloo blanks that header
 (`configureAutoUpdater` in `main.js`, proven on the wire by `npm run
 test:startup`). What remains is a plain HTTPS GET with a
 `User-Agent: electron-builder` header. No document, no file path, no usage
 data. GitHub necessarily sees the connecting IP address, as it would for any
 download.
 
-This is the only connection Folia opens on its own initiative. There is
+This is the only connection Markaloo opens on its own initiative. There is
 currently no setting to turn it off; unpackaged (development) runs never check
 at all.
 
@@ -285,9 +290,9 @@ With a recent [GitHub CLI](https://cli.github.com/) (one that has the
 `gh attestation` command group):
 
 ```bash
-gh attestation verify Folia-Setup-X.X.X.exe \
-  --repo lostinsea/folia \
-  --signer-workflow lostinsea/folia/.github/workflows/release.yml \
+gh attestation verify Markaloo-Setup-X.X.X.exe \
+  --repo lostinsea/markaloo \
+  --signer-workflow lostinsea/markaloo/.github/workflows/release.yml \
   --source-ref refs/tags/vX.X.X
 ```
 
@@ -303,12 +308,12 @@ is not a claim that the software is safe or bug-free, it is **SLSA Build Level
 unsigned, so SmartScreen on Windows and Gatekeeper on macOS still warn. Builds
 you make yourself, and any release cut from a workstation rather than by the
 workflow, have no attestation and will fail verification. Detail in
-[`BUILD.md`](https://github.com/lostinsea/folia/blob/main/docs/BUILD.md).
+[`BUILD.md`](https://github.com/lostinsea/markaloo/blob/main/docs/BUILD.md).
 
 ### Build from source
 
 **Prerequisite: Node.js 24.18.1 or newer.** The exact version this project is
-developed against is in [`.nvmrc`](https://github.com/lostinsea/folia/blob/main/.nvmrc).
+developed against is in [`.nvmrc`](https://github.com/lostinsea/markaloo/blob/main/.nvmrc).
 
 Electron 43 downloads its binary lazily on first run using a downloader that
 is ESM-only and needs Node >= 22.12. So that this does not surface as a confusing
@@ -348,8 +353,8 @@ npm run build-linux      # AppImage + .deb
 npm run build-mac        # .dmg
 ```
 
-Output lands in `dist/`. See [`BUILD.md`](https://github.com/lostinsea/folia/blob/main/docs/BUILD.md) for the full guide and
-[`RELEASE.md`](https://github.com/lostinsea/folia/blob/main/docs/RELEASE.md) for the release process.
+Output lands in `dist/`. See [`BUILD.md`](https://github.com/lostinsea/markaloo/blob/main/docs/BUILD.md) for the full guide and
+[`RELEASE.md`](https://github.com/lostinsea/markaloo/blob/main/docs/RELEASE.md) for the release process.
 
 ---
 
@@ -375,7 +380,7 @@ Output lands in `dist/`. See [`BUILD.md`](https://github.com/lostinsea/folia/blo
 
 On macOS, use `Cmd` in place of `Ctrl`.
 
-`F12` opens developer tools when Folia is run from source. **In an installed
+`F12` opens developer tools when Markaloo is run from source. **In an installed
 build it does nothing**, unless the app is started with `FOLIA_DEVTOOLS=1` in
 the environment. That is deliberate: the renderer has full Node access, so the
 developer console can read and write any file you can, and "press F12 and paste
@@ -402,10 +407,10 @@ toolbar, not the keyboard.
 Open them with `Ctrl+O`, from the recent-files list, or by dragging them onto the
 window.
 
-The installer registers Folia as a handler for `.md`, `.mmd` and `.mermaid`
+The installer registers Markaloo as a handler for `.md`, `.mmd` and `.mermaid`
 only, so those are the three that appear under **Open with** without being
 added by hand. The other extensions open perfectly well — the restriction is
-about which types the installer claims in the shell, not which types Folia can
+about which types the installer claims in the shell, not which types Markaloo can
 read.
 
 ---
@@ -447,7 +452,7 @@ Full licence texts for every shipped dependency are in
 
 ## Engineering
 
-Folia's test suite is unusual, and it is unusual on purpose. Almost every defect
+Markaloo's test suite is unusual, and it is unusual on purpose. Almost every defect
 in the list above was invisible - the app looked like it was working. A suite
 that only checks for the failures you already imagined will not find those.
 
@@ -489,20 +494,20 @@ replaced a confident and entirely wrong explanation, including some of my own.
 
 ## Where this is going
 
-Folia is deliberately narrower than what it forked from. The parent is a
+Markaloo is deliberately narrower than what it forked from. The parent is a
 general-purpose viewer that accumulated diagram engines, document modes and
-export formats; Folia gives that space back. Vendor document modes, the bundled
+export formats; Markaloo gives that space back. Vendor document modes, the bundled
 VS Code extension, translation, localisation and Word export are gone, and two
 upstream features - a second diagram system and circuit schematics - were
 evaluated and declined rather than skipped. The installer went from **153.6 MB
 to well under a quarter of that**.
 
-The philosophy is **leaner and faster, and offline**. Folia makes no network
+The philosophy is **leaner and faster, and offline**. Markaloo makes no network
 requests: every library it renders with is vendored inside the app, so it works
 identically on an air-gapped machine and there is no telemetry to opt out of.
 
 Planned next: the authoritative, live roadmap is
-[`PLANNED-WORK.md`](https://github.com/lostinsea/folia/blob/main/docs/PLANNED-WORK.md) -
+[`PLANNED-WORK.md`](https://github.com/lostinsea/markaloo/blob/main/docs/PLANNED-WORK.md) -
 every open item with a stable ID, its status, what it is blocked on, the decision
 gates still open, and the engineering process each change is held to (mandatory
 performance gates, isolated worktrees, serialised integration, revert proofs).
@@ -527,9 +532,9 @@ The two conventions described under [Engineering](#engineering) - every fix is
 proven by reverting it, and measure rather than reason - are not aspirations;
 a change that does not follow them will not pass review here. The full working
 guide, including the traps this codebase is known to set, is in
-[`.github/copilot-instructions.md`](https://github.com/lostinsea/folia/blob/main/.github/copilot-instructions.md).
+[.github/copilot-instructions.md](https://github.com/lostinsea/markaloo/blob/main/.github/copilot-instructions.md).
 
-[`CUSTOMIZATIONS.md`](https://github.com/lostinsea/folia/blob/main/docs/CUSTOMIZATIONS.md) documents the overlay files
+[`CUSTOMIZATIONS.md`](https://github.com/lostinsea/markaloo/blob/main/docs/CUSTOMIZATIONS.md) documents the overlay files
 (`custom-*.js`) inherited from the intermediate fork.
 
 ---
@@ -545,7 +550,7 @@ pull request, and add a test for anything you fix.
 
 MIT - see [`LICENSE`](LICENSE.txt).
 
-Folia retains the copyright notices of the upstream authors as MIT requires.
+Markaloo retains the copyright notices of the upstream authors as MIT requires.
 Licence texts for all bundled third-party components are reproduced in
 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
 

@@ -98,16 +98,13 @@ check(
     path.resolve(devDecision.target) !== path.resolve(path.join(APPDATA, "Folia")),
   JSON.stringify(devDecision)
 );
-// The suffix is appended to app.getName() rather than to a literal, so a rename
-// of the product keeps the two profiles siblings instead of stranding the dev
-// one beside a name nothing uses.
 const renamedDecision = decide(
-  fakeApp({ name: "Renamed", appData: APPDATA, userData: path.join(APPDATA, "Renamed") })
+  fakeApp({ name: "Markaloo", appData: APPDATA, userData: path.join(APPDATA, "Markaloo") })
 );
 check(
-  "the development profile name is derived from the app name, not hardcoded",
+  "the renamed development build keeps the original isolated profile",
   renamedDecision.reason === "dev" &&
-    path.resolve(renamedDecision.target) === path.resolve(path.join(APPDATA, "Renamed-dev")),
+    path.resolve(renamedDecision.target) === path.resolve(path.join(APPDATA, "Folia-dev")),
   JSON.stringify(renamedDecision)
 );
 check(
@@ -130,6 +127,34 @@ check(
       })
     )
   )
+);
+const packagedRename = decide(
+  fakeApp({
+    isPackaged: true,
+    name: "Markaloo",
+    appData: APPDATA,
+    userData: path.join(APPDATA, "Markaloo"),
+  }),
+);
+check(
+  "a renamed packaged build keeps the installed profile and single-instance lock",
+  packagedRename.reason === "packaged-compatibility" &&
+    path.resolve(packagedRename.target) === path.resolve(path.join(APPDATA, "Folia")),
+  JSON.stringify(packagedRename),
+);
+const packagedRelocation = decide(
+  fakeApp({
+    isPackaged: true,
+    name: "Markaloo",
+    appData: APPDATA,
+    userData: path.join(root, "private-profile"),
+  }),
+);
+check(
+  "a renamed packaged build preserves an explicitly relocated profile",
+  packagedRelocation.target === null &&
+    packagedRelocation.reason === "already-relocated",
+  JSON.stringify(packagedRelocation),
 );
 // The one that protects the harness: every windowed suite relocates userData
 // before main.js loads, and clobbering that would put them all back in one
@@ -160,6 +185,95 @@ check(
   "a userData path differing only in case is treated as a relocation, not as the default",
   caseDecision.target === null && caseDecision.reason === "already-relocated",
   JSON.stringify(caseDecision)
+);
+
+const applySource = src.slice(
+  devStart,
+  src.indexOf("\n// MEASURED END TO END", devEnd),
+);
+check(
+  "the profile application function is included in the live-code probe",
+  applySource.includes("function applyDevProfile()") &&
+    applySource.includes("app.setPath(\"userData\", decision.target)"),
+);
+function applyPackagedProfile(setPath) {
+  const packaged = fakeApp({
+    isPackaged: true,
+    name: "Markaloo",
+    appData: APPDATA,
+    userData: path.join(APPDATA, "Markaloo"),
+  });
+  let userData = packaged.getPath("userData");
+  packaged.getPath = key => key === "appData" ? APPDATA : userData;
+  packaged.setPath = (key, value) => {
+    if (!fs.existsSync(value)) {
+      throw new Error("Electron requires an existing userData directory");
+    }
+    setPath(key, value);
+    userData = value;
+  };
+  const apply = new Function(
+    "app",
+    "path",
+    "fs",
+    "console",
+    `${applySource}\nreturn applyDevProfile;`,
+  )(packaged, path, fs, console);
+  return { apply, packaged };
+}
+const firstProfile = path.join(APPDATA, "Folia");
+check(
+  "the first-time install fixture has no legacy profile",
+  !fs.existsSync(firstProfile),
+);
+const applied = applyPackagedProfile(() => {});
+let appliedDecision;
+try {
+  appliedDecision = applied.apply();
+} catch (error) {
+  appliedDecision = { reason: error.message };
+}
+check(
+  "the packaged rebrand actually selects the existing profile before startup",
+  appliedDecision.reason === "packaged-compatibility" &&
+    path.resolve(applied.packaged.getPath("userData")) ===
+      path.resolve(path.join(APPDATA, "Folia")),
+);
+check(
+  "a first-time install creates the legacy profile before Electron sets its path",
+  fs.existsSync(firstProfile) &&
+    appliedDecision.reason === "packaged-compatibility",
+);
+const marker = path.join(firstProfile, "settings-marker");
+if (fs.existsSync(firstProfile)) fs.writeFileSync(marker, "saved");
+const upgraded = applyPackagedProfile(() => {});
+let upgradePreserved = false;
+let upgradeError;
+try {
+  upgradePreserved =
+    upgraded.apply().reason === "packaged-compatibility" &&
+    fs.existsSync(marker) &&
+    fs.readFileSync(marker, "utf8") === "saved";
+} catch (error) {
+  upgradeError = error;
+}
+check(
+  "an upgrade keeps existing profile data",
+  upgradePreserved,
+  upgradeError && upgradeError.message,
+);
+const rejected = applyPackagedProfile(() => {});
+rejected.packaged.setPath = () => {};
+check(
+  "a packaged rebrand refuses an ignored profile redirect instead of losing tabs",
+  (() => {
+    try {
+      rejected.apply();
+      return false;
+    } catch (error) {
+      return error.message === "Cannot select the existing application profile";
+    }
+  })(),
 );
 
 // root is removed by the process.on("exit") hook registered beside its mkdtemp.

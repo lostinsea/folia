@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  if (!window.folia) throw new Error("Folia preload must load before document-events.js");
+  if (!window.folia) throw new Error("Markaloo preload must load before document-events.js");
   const channels = new Map([
     ["file-opened", "onFileOpened"],
     ["file-open-result", "onFileOpenResult"],
@@ -41,7 +41,7 @@
 
   for (const [channel, method] of channels) {
     if (typeof window.folia[method] !== "function") {
-      throw new Error(`Folia preload is missing ${method}`);
+      throw new Error(`Markaloo preload is missing ${method}`);
     }
     unsubscribers.push(window.folia[method](payload => {
       // ContextBridge can freeze its copy. Tabs annotate and memoize one shared

@@ -279,7 +279,7 @@ body.dark-mode {
 
 body {
   /* Solarized Light, by Ethan Schoonover; ported for PrismJS by Hector Matos.
-     http://ethanschoonover.com/solarized - these are the exact values Folia
+     http://ethanschoonover.com/solarized - these are the exact values Markaloo
      shipped when syntax highlighting came from the vendored stylesheet. */
   --syn-comment: #93a1a1; /* base1 */
   --syn-punctuation: #586e75; /* base01 */
@@ -377,7 +377,7 @@ body {
 }
 
 body.dark-mode {
-  /* Tomorrow Night, as ported into Folia. Scheme by Chris Kempson, PrismJS port
+  /* Tomorrow Night, as ported into Markaloo. Scheme by Chris Kempson, PrismJS port
      by Rose Pritchard - see the attribution block in the syntax section. */
   --syn-comment: #999;
   --syn-punctuation: #ccc;
@@ -425,7 +425,7 @@ body.dark-mode {
   --tok-inserted: #8fa876;
   --tok-function-name: #6196cc;
 
-  /* THREE DELIBERATE DEPARTURES from what Folia shipped before the theme
+  /* THREE DELIBERATE DEPARTURES from what Markaloo shipped before the theme
      system, and they are all the same defect: index.html linked exactly one
      PrismJS theme, the LIGHT prism-solarizedlight.css, and the dark block
      overrode `color` ONLY - so everything else in that light stylesheet leaked
@@ -542,7 +542,7 @@ body.dark-mode {
 
 /* Clarity - a crisp achromatic light scheme in the manner of VS Code Light+ and
    GitHub's light theme: near-white paper, near-black prose, and hue reserved
-   entirely for code. Colours are Folia's own, chosen for contrast (see
+   entirely for code. Colours are Markaloo's own, chosen for contrast (see
    test:theme section 10) rather than sampled from either. */
 body[data-theme="clarity"] {
   --primary-color: #0969da;
@@ -4152,7 +4152,7 @@ pre[class*="language-"] {
    reach it and deleting it is provably a zero-appearance change. It was
    inherited from the vendored PrismJS theme; the app's own `::selection` rule
    has never had a moz twin, so keeping one here was vendor cruft rather than a
-   Firefox policy, and Folia ships Chromium only.
+   Firefox policy, and Markaloo ships Chromium only.
 
    DO NOT "TIDY" IT BACK IN BY ADDING ::-moz-selection TO THE LIST BELOW. A
    comma-separated selector list is NOT forgiving outside :is(): one invalid

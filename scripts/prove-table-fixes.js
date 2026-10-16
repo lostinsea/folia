@@ -1549,8 +1549,8 @@ const REVERTS = [
     suite: "test:packaging",
     what: "advertise Linux artifacts in the dry-run list unconditionally",
     file: RELEASE,
-    from: "    if (willBuildLinux()) {\n      expectedArtifacts.push(`Folia-${version}.AppImage`);",
-    to: "    if (true) {\n      expectedArtifacts.push(`Folia-${version}.AppImage`);",
+    from: "    if (willBuildLinux()) {\n      expectedArtifacts.push(`Markaloo-${version}-x64.AppImage`);",
+    to: "    if (true) {\n      expectedArtifacts.push(`Markaloo-${version}-x64.AppImage`);",
     expect: [/advertises Linux builds only where they can be produced/],
     mustPass: [/willBuildLinux\(\) agrees with the host/],
   },
@@ -1963,8 +1963,8 @@ const REVERTS = [
     // in-header `.app-title` this used to quote. <title> is now the only place
     // the product name appears in the markup, so it is also the only stable
     // insertion point - and it cannot rot without the product being renamed.
-    from: "<title>Folia</title>",
-    to: '<title>Folia</title>\n    <span class="app-title-short">MV</span>',
+    from: "<title>Markaloo</title>",
+    to: '<title>Markaloo</title>\n    <span class="app-title-short">MV</span>',
     expect: [/header carries no abbreviated second copy of the product name/],
     mustPass: [
       /the window title is the product name/,
@@ -2037,7 +2037,7 @@ const REVERTS = [
     suite: "test:packaging",
     what: "let the shipped README present the app as the upstream vendor's product",
     file: path.join(ROOT, "README.md"),
-    from: "# Folia\n",
+    from: "# Markaloo\n",
     to: "# Omnicore Markdown Viewer\n",
     expect: [/README titles itself with the product name/],
   },
@@ -2060,8 +2060,8 @@ const REVERTS = [
     suite: "test:packaging",
     what: "embed a README image as a data: URI, which GitHub silently strips",
     file: path.join(ROOT, "README.md"),
-    from: ' alt="Folia" width="100">',
-    to: ' alt="Folia" width="100">\n  <img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" alt="Folia">',
+    from: ' alt="Markaloo" width="100">',
+    to: ' alt="Markaloo" width="100">\n  <img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=" alt="Markaloo">',
     expect: [/no README image is embedded as a data: URI/],
   },
   {
@@ -2076,7 +2076,7 @@ const REVERTS = [
     suite: "test:packaging",
     what: "reference a README image from a directory the installer does not ship",
     file: path.join(ROOT, "README.md"),
-    from: '<img src="docs/images/folia.png"',
+    from: '<img src="docs/images/markaloo.png"',
     to: '<img src="assets/app-icon.png"',
     expect: [/ships beside the installed README/],
     mustPass: [/every README image exists in the repository/],
@@ -2160,8 +2160,8 @@ const REVERTS = [
     suite: "test:packaging",
     what: "put a remote badge back into the README the app itself opens",
     file: path.join(ROOT, "README.md"),
-    from: "# Folia\n",
-    to: "# Folia\n\n![License](https://img.shields.io/badge/license-MIT-green)\n",
+    from: "# Markaloo\n",
+    to: "# Markaloo\n\n![License](https://img.shields.io/badge/license-MIT-green)\n",
     expect: [/fetches no images over the network/],
   },
   {
@@ -3316,26 +3316,87 @@ const REVERTS = [
   },
   {
     id: "R475",
-    // The suffix is appended to app.getName() rather than to a literal so the
-    // two profiles stay SIBLINGS across a product rename. Hardcoding looks
-    // harmless while the product is called Folia and is exactly the kind of
-    // thing a rename leaves behind: the dev profile would strand itself beside
-    // a name nothing uses, and the installed build - which is packaged, so it
-    // never reaches this line - would give no hint that anything had happened.
-    what: "hardcode the dev profile name instead of deriving it from the app name",
+    // The display name changes, but the existing development profile must not.
+    what: "derive the profile name from new branding and strand the old dev profile",
     file: MAIN,
-    from: "    target: path.join(appData, name + DEV_PROFILE_SUFFIX),",
-    to: '    target: path.join(appData, "Folia" + DEV_PROFILE_SUFFIX),',
+    from: "    LEGACY_PROFILE_NAME + (app.isPackaged ? \"\" : DEV_PROFILE_SUFFIX),",
+    to: "    name + (app.isPackaged ? \"\" : DEV_PROFILE_SUFFIX),",
     suite: "test:profile",
     expect: [
-      /^the development profile name is derived from the app name, not hardcoded$/,
+      /^the renamed development build keeps the original isolated profile$/,
+      /^a renamed packaged build keeps the installed profile and single-instance lock$/,
+      /^the packaged rebrand actually selects the existing profile before startup$/,
+      /^a first-time install creates the legacy profile before Electron sets its path$/,
+      /^an upgrade keeps existing profile data$/,
+      /^a packaged rebrand refuses an ignored profile redirect instead of losing tabs$/,
     ],
     mustPass: [
-      // Under the product's own name the hardcoded literal happens to agree, so
-      // these keep passing - which is the whole reason the renamed-app leg
-      // exists. Without it this defect is invisible.
       /^a development run is redirected to a profile of its own$/,
       /^the development profile is a SIBLING of the standard one, not inside it$/,
+    ],
+  },
+  {
+    id: "R944",
+    suite: "test:profile",
+    what: "send a renamed packaged app to a new profile and split its lock",
+    file: MAIN,
+    from: '    LEGACY_PROFILE_NAME + (app.isPackaged ? "" : DEV_PROFILE_SUFFIX),',
+    to: '    LEGACY_PROFILE_NAME + DEV_PROFILE_SUFFIX,',
+    expect: [
+      /^a packaged build is never redirected$/,
+      /^a renamed packaged build keeps the installed profile and single-instance lock$/,
+      /^the packaged rebrand actually selects the existing profile before startup$/,
+      /^a first-time install creates the legacy profile before Electron sets its path$/,
+      /^an upgrade keeps existing profile data$/,
+    ],
+    mustPass: [
+      /^the renamed development build keeps the original isolated profile$/,
+      /^a renamed packaged build preserves an explicitly relocated profile$/,
+    ],
+  },
+  {
+    id: "R945",
+    suite: "test:profile",
+    what: "continue with a new empty profile when the packaged redirect is ignored",
+    file: MAIN,
+    from: '      throw new Error("Cannot select the existing application profile");',
+    to: '      return { target: null, reason: "setpath-ignored" };',
+    expect: [
+      /^a packaged rebrand refuses an ignored profile redirect instead of losing tabs$/,
+    ],
+    mustPass: [
+      /^the packaged rebrand actually selects the existing profile before startup$/,
+    ],
+  },
+  {
+    id: "R946",
+    suite: "test:packaging",
+    what: "let an assisted upgrade nest Markaloo inside the old install folder",
+    file: path.join(ROOT, "build", "installer.nsh"),
+    from: '!define APP_FILENAME "Folia"',
+    to: '!define APP_FILENAME "Markaloo"',
+    expect: [
+      /^the assisted installer keeps the existing install folder while branding new shortcuts$/,
+    ],
+    mustPass: [
+      /^build.productName names the installer, so the installed app is not the old name$/,
+    ],
+  },
+  {
+    id: "R947",
+    suite: "test:profile",
+    what: "omit the profile directory on first install before Electron selects it",
+    file: MAIN,
+    from: "  fs.mkdirSync(decision.target, { recursive: true });",
+    to: "  // Missing fresh-install profile creation.",
+    expect: [
+      /^the packaged rebrand actually selects the existing profile before startup$/,
+      /^a first-time install creates the legacy profile before Electron sets its path$/,
+      /^an upgrade keeps existing profile data$/,
+    ],
+    mustPass: [
+      /^the first-time install fixture has no legacy profile$/,
+      /^a renamed packaged build keeps the installed profile and single-instance lock$/,
     ],
   },
   {
@@ -4468,7 +4529,7 @@ const REVERTS = [
     // worth pinning to the value itself.
     what: "document the pre-rebrand publish repo while package.json says folia",
     file: BUILD_DOC,
-    from: '"repo": "folia" }]',
+    from: '"repo": "markaloo" }]',
     to: '"repo": "markdown-viewer" }]',
     suite: "test:packaging",
     expect: [
@@ -4493,7 +4554,7 @@ const REVERTS = [
     // gets deliberately falsified - so the guard is proven rather than trusted.
     what: "remove the publish example from docs/BUILD.md so the doc check has nothing to read",
     file: BUILD_DOC,
-    from: '"publish": [{ "provider": "github", "owner": "lostinsea", "repo": "folia" }]',
+    from: '"publish": [{ "provider": "github", "owner": "lostinsea", "repo": "markaloo" }]',
     to: '"publish": null',
     suite: "test:packaging",
     expect: [
@@ -4709,11 +4770,11 @@ const REVERTS = [
     what: "restore the rotted app-title check that told maintainers to re-add deleted header markup",
     file: MERGE_SH,
     from:
-      "check_line \"$ROOT/src/index.html\" '<title>Folia</title>'  '<title>Folia</title>'",
+      "check_line \"$ROOT/src/index.html\" '<title>Markaloo</title>'  '<title>Markaloo</title>'",
     to:
       "check_line \"$ROOT/src/index.html\" 'app-title'              " +
-      "'<span class=\"app-title\">Folia</span> - inside #logoLink'\n" +
-      "check_line \"$ROOT/src/index.html\" '<title>Folia</title>'  '<title>Folia</title>'",
+      "'<span class=\"app-title\">Markaloo</span> - inside #logoLink'\n" +
+      "check_line \"$ROOT/src/index.html\" '<title>Markaloo</title>'  '<title>Markaloo</title>'",
     suite: "test:packaging",
     expect: [
       /^post-upstream-merge\.sh index\.html checks all still match$/,
@@ -5029,7 +5090,7 @@ const REVERTS = [
       "      {\n" +
       '        "provider": "github",\n' +
       '        "owner": "lostinsea",\n' +
-      '        "repo": "folia"\n' +
+      '        "repo": "markaloo"\n' +
       "      }\n" +
       "    ],",
     to: '"publish": null,',
@@ -6628,7 +6689,7 @@ const REVERTS = [
     // a NEW target from being silently unchecked rather than reported missing.
     what: "drop the Windows portable row from the README's download table",
     file: path.join(ROOT, "README.md"),
-    from: "| Windows | `Folia X.X.X.exe` | Portable, no installation |\n",
+    from: "| Windows | `Markaloo-X.X.X.exe` | Portable, no installation |\n",
     to: "",
     expect: [/the README's download table lists every artefact the release publishes/],
     mustPass: [
@@ -11215,8 +11276,8 @@ const REVERTS = [
     // tightening rather than of the assertion's existence.
     what: "paste a scheme block between the two dark-default blocks",
     file: CSS,
-    from: "body.dark-mode {\n  /* Tomorrow Night, as ported into Folia.",
-    to: 'body[data-theme="abyss"] {\n  --syn-keyword: #bb9af7;\n}\n\nbody.dark-mode {\n  /* Tomorrow Night, as ported into Folia.',
+    from: "body.dark-mode {\n  /* Tomorrow Night, as ported into Markaloo.",
+    to: 'body[data-theme="abyss"] {\n  --syn-keyword: #bb9af7;\n}\n\nbody.dark-mode {\n  /* Tomorrow Night, as ported into Markaloo.',
     suite: "test:theme",
     expect: [/10b: every scheme block is declared AFTER the dark default/],
   },
@@ -16494,14 +16555,14 @@ const REVERTS = [
       "  // Phase two already committed and froze the exact document revision before\n" +
       "  // any process launch. Re-authorize only this quit and execute it immediately:\n" +
       "  // asking again after NSIS starts is too late because --updated can kill\n" +
-      "  // Folia before another renderer round-trip completes.\n" +
+      "  // Markaloo before another renderer round-trip completes.\n" +
       "  grantShutdownAuthorization();\n" +
       "  quitApprovedUpdateApp();",
     to:
       "  // Phase two already committed and froze the exact document revision before\n" +
       "  // any process launch. Re-authorize only this quit and execute it immediately:\n" +
       "  // asking again after NSIS starts is too late because --updated can kill\n" +
-      "  // Folia before another renderer round-trip completes.\n" +
+      "  // Markaloo before another renderer round-trip completes.\n" +
       '  requestShutdown("update-install", quitApprovedUpdateApp, { forceFresh: true }); /* reverted for proof */',
     expect: [
       /^a direct NSIS spawn proves one exact launcher hand-off under final phase-two approval and blocks duplicate auto-install$/,
@@ -17066,7 +17127,7 @@ const REVERTS = [
           suite: "test:packaging",
           what: "document an attestation verifier command for a different repository",
           file: path.join(ROOT, "README.md"),
-          from: "  --repo lostinsea/folia",
+          from: "  --repo lostinsea/markaloo",
           to: "  --repo example/other-repository",
           expect: [
             /^every documented attestation verification example binds this release repository, attest workflow, and tag ref$/,

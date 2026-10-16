@@ -12,7 +12,7 @@ This guide helps you test the Windows installer to ensure everything works corre
 ### Installation Test
 
 1. **Run the Installer**
-   - Double-click `Folia-Setup-<version>.exe`
+   - Double-click `Markaloo-Setup-<version>.exe`
    - UAC prompt should appear (requires admin rights)
 
 2. **License Agreement**
@@ -20,7 +20,10 @@ This guide helps you test the Windows installer to ensure everything works corre
    - [ ] "I Agree" button is clickable
 
 3. **Installation Directory**
-   - [ ] Default path shows: `C:\Program Files\Folia`
+   - [ ] On an upgrade, the selected path remains the existing install folder
+         (for example, `C:\Program Files\lostinsea\Folia`), with no nested
+         `Markaloo` folder
+   - [ ] On a clean install, confirm the displayed path before proceeding
    - [ ] "Browse" button allows changing install location
    - [ ] Selected path is remembered
 
@@ -34,7 +37,7 @@ This guide helps you test the Windows installer to ensure everything works corre
    - [ ] Installation completes successfully
 
 6. **Post-Installation**
-   - [ ] "Run Folia" checkbox appears
+   - [ ] "Run Markaloo" checkbox appears
    - [ ] Application launches if checkbox is selected
 
 ### Verification Tests
@@ -45,7 +48,7 @@ This guide helps you test the Windows installer to ensure everything works corre
 - [ ] Double-clicking shortcut launches application
 
 #### Start Menu
-- [ ] Start Menu folder exists: `Start > Folia`
+- [ ] Start Menu folder exists: `Start > Markaloo`
 - [ ] Shortcut launches application
 - [ ] Uninstall shortcut is present
 
@@ -66,13 +69,13 @@ echo graph TD; A-->B; > test.mermaid
 ```
 
 Test each file type (only once `build.fileAssociations` exists):
-- [ ] `.md` files show the Folia icon
-- [ ] `.mmd` files show the Folia icon
-- [ ] `.mermaid` files show the Folia icon
-- [ ] Double-clicking `.md` opens in Folia
-- [ ] Double-clicking `.mmd` opens in Folia
-- [ ] Double-clicking `.mermaid` opens in Folia
-- [ ] Right-click > "Open with" shows Folia
+- [ ] `.md` files show the Markaloo icon
+- [ ] `.mmd` files show the Markaloo icon
+- [ ] `.mermaid` files show the Markaloo icon
+- [ ] Double-clicking `.md` opens in Markaloo
+- [ ] Double-clicking `.mmd` opens in Markaloo
+- [ ] Double-clicking `.mermaid` opens in Markaloo
+- [ ] Right-click > "Open with" shows Markaloo
 
 #### Application Functionality
 - [ ] Application window opens correctly
@@ -86,7 +89,7 @@ Test each file type (only once `build.fileAssociations` exists):
 
 #### Programs and Features
 - [ ] Open "Add/Remove Programs" (Windows Settings > Apps)
-- [ ] "Folia" appears in list
+- [ ] "Markaloo" appears in list
 - [ ] Version number matches `package.json`'s `version`
 - [ ] Publisher shows as the signing certificate's subject, or is blank on an
       unsigned build (`build.win.signtoolOptions` is null — see BUILD.md)
@@ -96,21 +99,22 @@ Test each file type (only once `build.fileAssociations` exists):
 
 1. **Via Add/Remove Programs**
    - [ ] Open Settings > Apps > Installed apps
-   - [ ] Find "Folia"
+   - [ ] Find "Markaloo"
    - [ ] Click "Uninstall"
    - [ ] Uninstaller launches
    - [ ] Progress bar shows during uninstallation
    - [ ] Uninstall completes without errors
 
 2. **Via Start Menu**
-   - [ ] Start > Folia > Uninstall
+   - [ ] Start > Markaloo > Uninstall
    - [ ] Uninstaller launches and completes
 
 3. **Post-Uninstallation**
    - [ ] Application removed from Programs and Features
    - [ ] Desktop shortcut removed (if created)
    - [ ] Start Menu folder removed
-   - [ ] Installation directory removed: `C:\Program Files\Folia`
+   - [ ] The selected installation directory is removed
+   - [ ] The existing `%APPDATA%\Folia` settings and tabs remain available
    - [ ] File associations reverted (optional, depends on user settings)
 
 ### Clean Reinstallation
@@ -150,9 +154,8 @@ Test on multiple Windows versions if possible:
 ### Issue: "Windows protected your PC" SmartScreen
 **Cause**: Unsigned executable
 **Solution**:
-- Click "More info"
-- Click "Run anyway"
-- (For production: Get code signing certificate)
+- Stop and verify the source and signature; production distribution needs a
+  trusted code-signing certificate.
 
 ### Issue: Desktop Shortcut Missing
 **Cause**: Option was not selected during install
@@ -165,8 +168,9 @@ Test on multiple Windows versions if possible:
 **Solution**:
 1. Close all instances of the application
 2. Uninstall via Add/Remove Programs
-3. Manually delete `C:\Program Files\Folia` if it remains
-4. Delete `%APPDATA%\Folia` if needed
+3. Inspect the selected installation directory if files remain.
+4. Do not delete `%APPDATA%\Folia`: it contains the saved settings and tabs
+   reused by Markaloo.
 
 ## Automation Testing (Advanced)
 
@@ -174,26 +178,29 @@ For automated testing, use silent installation:
 
 ```batch
 REM Install silently
-Folia-Setup-<version>.exe /S
+Markaloo-Setup-<version>.exe /S
 
 REM Wait for installation
 timeout /t 10
 
+REM Set this to the installation directory shown by the installer.
+set "INSTALL_DIR=C:\Program Files\lostinsea\Folia"
+
 REM Test if installed
-if exist "C:\Program Files\Folia\Folia.exe" (
+if exist "%INSTALL_DIR%\Markaloo.exe" (
     echo [PASS] Installation successful
 ) else (
     echo [FAIL] Installation failed
 )
 
 REM Uninstall silently
-"C:\Program Files\Folia\Uninstall Folia.exe" /S
+"%INSTALL_DIR%\Uninstall Markaloo.exe" /S
 
 REM Wait for uninstallation
 timeout /t 10
 
 REM Test if uninstalled
-if not exist "C:\Program Files\Folia" (
+if not exist "%INSTALL_DIR%" (
     echo [PASS] Uninstallation successful
 ) else (
     echo [FAIL] Uninstallation failed

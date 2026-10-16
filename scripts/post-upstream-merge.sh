@@ -66,7 +66,7 @@ check_line "$ROOT/src/index.html" 'custom-tabs.js'         '<script src="custom-
 check_line "$ROOT/src/index.html" 'custom-performance.js'  '<script src="custom-performance.js"></script>'
 check_line "$ROOT/src/index.html" 'custom-theme.js'        '<script src="custom-theme.js"></script>'
 check_line "$ROOT/src/index.html" 'tabsContainer'          '<div id="tabsContainer" ...> - must be just before <div class="main-content">'
-check_line "$ROOT/src/index.html" '<title>Folia</title>'  '<title>Folia</title>'
+check_line "$ROOT/src/index.html" '<title>Markaloo</title>'  '<title>Markaloo</title>'
 
 # There was an `app-title` check here, and it had rotted into the DIRECT
 # OPPOSITE of what the rest of the repo asserts. The header was deliberately
@@ -80,7 +80,7 @@ check_line "$ROOT/src/index.html" '<title>Folia</title>'  '<title>Folia</title>'
 # Following that instruction would have made the test suite fail immediately.
 #
 # Product NAMING is still pinned, so nothing was lost by deleting it: the
-# `<title>Folia</title>` check above covers the window title, and section 4
+# `<title>Markaloo</title>` check above covers the window title, and section 4
 # below covers the BrowserWindow title in main.js.
 #
 # The general defect - a check in this script that has quietly stopped
@@ -94,7 +94,7 @@ if [ "$MISSING_REFS" -eq 1 ]; then
   echo "     See docs/CUSTOMIZATIONS.md for where to add them."
   echo "     KEY POINTS:"
   echo "       - tabsContainer div must be added just before <div class=\"main-content\">"
-  echo "       - <title> must say 'Folia' - a merge may reset it to the vendor name"
+  echo "       - <title> must say 'Markaloo' - a merge may reset it to the vendor name"
 fi
 
 # -----------------------------------------------------------------------------
@@ -171,11 +171,11 @@ else
   echo "     → Add open-file handler before app.whenReady() so double-clicking .md files works"
 fi
 
-if grep -q "title:.*Folia" "$ROOT/src/main.js"; then
-  echo "   ✓ BrowserWindow title is 'Folia'"
+if grep -q "title:.*Markaloo" "$ROOT/src/main.js"; then
+  echo "   ✓ BrowserWindow title is 'Markaloo'"
 else
-  echo "   ✗ WRONG TITLE: main.js BrowserWindow title should be 'Folia'"
-  echo "     → Set title: 'Folia' in new BrowserWindow()"
+  echo "   ✗ WRONG TITLE: main.js BrowserWindow title should be 'Markaloo'"
+  echo "     → Set title: 'Markaloo' in new BrowserWindow()"
 fi
 
 if grep -q "app-icon" "$ROOT/src/main.js"; then

@@ -97,7 +97,7 @@ allowlist after realpath/executable checks. OS associations intentionally list
 only the selected registered formats in `package.json`.
 
 Upstream `6089305`'s Mermaid paragraph-wrapper cleanup remains deferred.
-Folia preserves the full/light render paths' existing paragraph/patch shape;
+Markaloo preserves the full/light render paths' existing paragraph/patch shape;
 raw-HTML iframe placeholders already unwrap paragraphs separately. No current
 required spacing failure was established, and this is not part of the completed
 Mermaid label-sizing/zoom fix. HTML export and persistent refresh blinking
@@ -369,7 +369,7 @@ Regression coverage: `npm run test:tabs` (see below).
 ### 7. Mermaid label measurement and compact wrapping (renderer.js + mermaid-config.js)
 
 Mermaid's HTML-label measurements use viewport coordinates, but its SVG layout
-uses document coordinates. Folia's reader zoom previously mixed those units:
+uses document coordinates. Markaloo's reader zoom previously mixed those units:
 adding diagrams and manually reloading at 150% could produce clipped labels
 that stayed clipped after returning to 100%, while reopening the same document
 fresh rendered correctly.

@@ -20,7 +20,7 @@ const { pathToFileURL, fileURLToPath } = require("url");
 // ============================================
 // DEVELOPMENT PROFILE ISOLATION
 // ============================================
-// A development run (`npm start`, i.e. `electron .`) and an INSTALLED Folia
+// A development run (`npm start`, i.e. `electron .`) and an installed build
 // share an application name, so Electron hands them the same userData
 // directory - and that directory is not merely storage. MEASURED with two
 // concurrent Electron processes: requestSingleInstanceLock() is keyed on
@@ -31,8 +31,7 @@ const { pathToFileURL, fileURLToPath } = require("url");
 // two also share the tab session, window bounds, recent files and debug.log,
 // so each overwrites the other's state.
 //
-// Guarded on !app.isPackaged, so a shipped build is untouched and keeps the
-// exact profile it has always used.
+// The visible Markaloo name must not change the existing Folia profile.
 //
 // ORDERING IS LOAD-BEARING. app.setPath("userData", ...) is silently ignored
 // once the app is ready, and two things below CAPTURE the profile path into
@@ -45,14 +44,13 @@ const { pathToFileURL, fileURLToPath } = require("url");
 // test/test-packaging.js asserts that statically because "it did not move" is
 // an absence check and absence checks fail open.
 const DEV_PROFILE_SUFFIX = "-dev";
+const LEGACY_PROFILE_NAME = "Folia";
 
 // Pure, and separated from the application of it on purpose: a decision that is
 // only observable by booting Electron and looking at where files landed can
 // only be tested end to end, whereas this can be driven directly against a stub
 // (test/test-dev-profile.js does exactly that).
 function devProfileDecision(app) {
-  if (app.isPackaged) return { target: null, reason: "packaged" };
-
   const appData = app.getPath("appData");
   const name = app.getName();
   const standard = path.join(appData, name);
@@ -67,9 +65,16 @@ function devProfileDecision(app) {
     return { target: null, reason: "already-relocated" };
   }
 
+  const target = path.join(
+    appData,
+    LEGACY_PROFILE_NAME + (app.isPackaged ? "" : DEV_PROFILE_SUFFIX),
+  );
+  if (path.resolve(target) === path.resolve(standard)) {
+    return { target: null, reason: "existing-profile" };
+  }
   return {
-    target: path.join(appData, name + DEV_PROFILE_SUFFIX),
-    reason: "dev",
+    target,
+    reason: app.isPackaged ? "packaged-compatibility" : "dev",
   };
 }
 
@@ -77,13 +82,17 @@ function applyDevProfile() {
   const decision = devProfileDecision(app);
   if (!decision.target) return decision;
 
+  // Electron requires setPath's target to exist; a first-time install has no
+  // legacy profile yet, while an upgrade must leave the existing one intact.
+  fs.mkdirSync(decision.target, { recursive: true });
   app.setPath("userData", decision.target);
 
-  // setPath fails OPEN, so read it back rather than trusting the call. A warning
-  // rather than a throw: an exception raised while the main process is loading
-  // becomes dialog.showErrorBox - a modal owned by the process that is failing -
-  // and this is a developer-convenience path, not a correctness one.
+  // A shipped build must not silently start with an empty profile: its session
+  // and single-instance lock both depend on using the existing directory.
   if (path.resolve(app.getPath("userData")) !== path.resolve(decision.target)) {
+    if (app.isPackaged) {
+      throw new Error("Cannot select the existing application profile");
+    }
     console.warn(
       "dev profile not applied - userData is still " +
         app.getPath("userData") +
@@ -99,7 +108,7 @@ function applyDevProfile() {
 // Hand-run once, on the real product invocation (`electron .`), 2026-08-28:
 // <appData>\Folia-dev was created and received window-state.json and debug.log,
 // while <appData>\Folia's mtime did not move at all. So a development run
-// genuinely lands in the sibling and genuinely leaves an installed Folia's
+// genuinely lands in the sibling and genuinely leaves an installed Markaloo's
 // profile untouched.
 applyDevProfile();
 
@@ -110,7 +119,7 @@ applyDevProfile();
 // The renderer runs with nodeIntegration: true, so the DevTools console is a
 // Node REPL with the user's full filesystem rights. In a SHIPPED build that is
 // the classic self-XSS route - "open this file, press F12, paste this" - and
-// nothing about it requires a bug in Folia to exploit, only a person at the
+// nothing about it requires a bug in Markaloo to exploit, only a person at the
 // keyboard following instructions.
 //
 // Source runs keep DevTools unconditionally, because that is what it is for. A
@@ -583,7 +592,7 @@ const MAX_DELETION_DELIVERIES = 256;
 // Save silently recreates a document the reader deleted. When a new unit
 // cannot be reserved, this process LATCHES CLOSED FIRST and only then drops
 // the evidence: from that moment every Save is refused - including saves for
-// paths that have nothing to do with the dropped evidence - until Folia is
+// paths that have nothing to do with the dropped evidence - until Markaloo is
 // restarted. Nothing releases the latch. Adoption and retirement free
 // capacity, but they do not, and must not, re-open saving: the one fact that
 // was lost cannot be recovered by the arrival of unrelated facts.
@@ -650,7 +659,7 @@ const MAX_KNOWN_DOCUMENT_OWNERS = 256;
 // fence - but never silently, and never in a way a stale owner can use.
 // Before an eviction drops a tab's newest entry the save-authority latch
 // below is closed, so from that moment every write this process would make on
-// the reader's behalf is refused until Folia is restarted; and this counter
+// the reader's behalf is refused until Markaloo is restarted; and this counter
 // seals `canRememberDocumentOwner` against every owner it does not already
 // know, so the generation that lost its fence is never readmitted at all.
 let documentOwnerFenceDropCount = 0;
@@ -1399,7 +1408,7 @@ function latchSaveAuthority({ why, reason, summary, writeError, saveError }) {
   // ONCE. The latch is a one-way door, so a per-drop log would be an unbounded
   // queue by another name; the drop and refusal counters carry the rest.
   console.error(
-    `${summary}. Saving is now refused for every document until Folia is ` +
+    `${summary}. Saving is now refused for every document until Markaloo is ` +
       "restarted.",
   );
 }
@@ -1438,7 +1447,7 @@ function reserveDeletionEvidenceCapacity(why) {
 }
 
 // EVERY WRITE THIS PROCESS MAKES ON THE READER'S BEHALF, not only the markdown
-// Save. The latch's promise is "Folia refuses to write any file until it is
+// Save. The latch's promise is "Markaloo refuses to write any file until it is
 // restarted", and a PDF export, an image export or a table download that still
 // lands on disk breaks that promise in the most visible way available: it
 // creates a file at a destination the reader has just chosen, in a session the
@@ -1447,9 +1456,9 @@ function reserveDeletionEvidenceCapacity(why) {
 // same machine-readable reason and counted on the same counter, and nothing
 // here fabricates an id that the existing protocol never had.
 const DELETION_EVIDENCE_CAPACITY_WRITE_ERROR =
-  "Folia can no longer prove which documents were deleted - its in-memory " +
+  "Markaloo can no longer prove which documents were deleted - its in-memory " +
   "record of deletions is full - so it refuses to write any file, including " +
-  "exports and downloads to newly chosen destinations, until Folia is " +
+  "exports and downloads to newly chosen destinations, until Markaloo is " +
   "restarted.";
 
 // THE SAME PROMISE, THE OTHER FACT. When the stale-owner fence is what was
@@ -1457,10 +1466,10 @@ const DELETION_EVIDENCE_CAPACITY_WRITE_ERROR =
 // the one thing the latch exists to be honest about. The refusal, the stage
 // and the counters are identical; only the sentence differs.
 const DOCUMENT_OWNER_FENCE_WRITE_ERROR =
-  "Folia can no longer prove which document each of its tabs has moved on " +
+  "Markaloo can no longer prove which document each of its tabs has moved on " +
   "to - its in-memory record of replaced documents is full - so it refuses " +
   "to write any file, including exports and downloads to newly chosen " +
-  "destinations, until Folia is restarted.";
+  "destinations, until Markaloo is restarted.";
 
 let saveAuthorityLatchWriteError = DELETION_EVIDENCE_CAPACITY_WRITE_ERROR;
 // A download cannot be told anything - `will-download` can only cancel it - so
@@ -1478,7 +1487,7 @@ function notifyDeletionEvidenceCapacityDownloadBlocked() {
       defaultId: 0,
       cancelId: 0,
       title: "Saving is blocked",
-      message: "Folia stopped writing files and cannot resume until it restarts.",
+      message: "Markaloo stopped writing files and cannot resume until it restarts.",
       detail:
         saveAuthorityLatchWriteError +
         "\n\nThe download you just started was cancelled. Further downloads " +
@@ -1500,18 +1509,18 @@ function notifyDeletionEvidenceCapacityDownloadBlocked() {
 // can arrive second. Only a sentence written for the seal itself is true in
 // both orders.
 const DOCUMENT_OWNER_SEAL_NOTICE_SUMMARY =
-  "Folia stopped tracking documents and cannot resume until it restarts. " +
+  "Markaloo stopped tracking documents and cannot resume until it restarts. " +
   "Any document it is asked to record from now on is refused: that tab " +
   "cannot be saved and will not prompt about unsaved work when it is " +
-  "closed - copy any edits out of it by hand, then restart Folia.";
+  "closed - copy any edits out of it by hand, then restart Markaloo.";
 const DOCUMENT_OWNER_SEAL_NOTICE_DETAIL =
-  "Folia can no longer prove which document each of its tabs has moved on " +
+  "Markaloo can no longer prove which document each of its tabs has moved on " +
   "to, so it has stopped writing files and refuses every document it is " +
-  "asked to record from now on.\n\nA document Folia could not record still " +
+  "asked to record from now on.\n\nA document Markaloo could not record still " +
   "appears in a tab, but it cannot be saved or exported, it is not watched " +
   "for changes on disk, and closing it will not prompt about unsaved work. " +
   "Copy any edits you still need out of those tabs by hand, then restart " +
-  "Folia. Tabs Folia had already recorded keep working, but nothing in this " +
+  "Markaloo. Tabs Markaloo had already recorded keep working, but nothing in this " +
   "session can be saved. There will be no further message.";
 
 // `show-error` is an established main->renderer notice channel - the renderer
@@ -1552,9 +1561,9 @@ function notifyDocumentOwnerSealRefusal(sender) {
       buttons: ["OK"],
       defaultId: 0,
       cancelId: 0,
-      title: "Folia must be restarted",
+      title: "Markaloo must be restarted",
       message:
-        "Folia stopped tracking documents and cannot resume until it restarts.",
+        "Markaloo stopped tracking documents and cannot resume until it restarts.",
       detail: DOCUMENT_OWNER_SEAL_NOTICE_DETAIL,
     };
     const shown = win
@@ -3145,7 +3154,7 @@ function createWindow() {
     width: savedState ? savedState.width : 1200,
     height: savedState ? savedState.height : 800,
     show: false, // Don't show until ready
-    title: "Folia",
+    title: "Markaloo",
     backgroundColor: "#f5f5f5",
     webPreferences: {
       nodeIntegration: false,
@@ -4854,7 +4863,7 @@ ipcMain.on("export-pdf", async (event, data) => {
     const { currentFileName } = data;
 
     // INGRESS. Refused before a destination is even chosen, so the latch never
-    // lets the reader pick a path Folia is going to refuse to write anyway.
+    // lets the reader pick a path Markaloo is going to refuse to write anyway.
     // This protocol carries no request id, so none is invented here: the
     // renderer correlates the result exactly as it always has.
     if (deletionEvidenceCapacityLatched) {
@@ -5841,14 +5850,14 @@ function saveCompletionConflictError(cause = null) {
 }
 
 // A KNOWN DELETION IS NOT AN EMPTY SLOT. Recreating a file that something
-// outside Folia deleted is a decision, not a detail of writing: the write also
+// outside Markaloo deleted is a decision, not a detail of writing: the write also
 // clears the only evidence that the deletion ever happened, so a reader who
 // never saw the warning ends up with a resurrected file and nothing to say it
 // was gone. Refused here rather than after the handle exists - `wx+` CREATES
 // the file, so a refusal any later would leave an empty one behind.
 function deletedDocumentSaveError(filePath) {
   const error = new SaveConflictError(
-    `The file was deleted outside Folia and has not been restored: ${filePath}`,
+    `The file was deleted outside Markaloo and has not been restored: ${filePath}`,
   );
   error.deletedDocument = true;
   return error;
@@ -5985,20 +5994,20 @@ async function readStableRawSnapshot(filePath) {
 // document failed and conflicted, and shows this text; the machine-readable
 // `saveBlocked` reason names the cause for anything reading the payload.
 const DELETION_EVIDENCE_CAPACITY_SAVE_ERROR =
-  "Folia can no longer prove which documents were deleted - its in-memory " +
+  "Markaloo can no longer prove which documents were deleted - its in-memory " +
   "record of deletions is full - so it refuses to write any file rather " +
   "than risk recreating a document you deleted. Saving stays blocked for " +
-  "every document until Folia is restarted. Copy your unsaved changes " +
+  "every document until Markaloo is restarted. Copy your unsaved changes " +
   "somewhere else before closing this window.";
 
 // The stale-owner fence's version of the same refusal. Named for what was
 // actually lost, so the reader is not told a deletion record filled up when
 // the fact that went missing was which document their tab has moved on to.
 const DOCUMENT_OWNER_FENCE_SAVE_ERROR =
-  "Folia can no longer prove which document this tab has moved on to - its " +
+  "Markaloo can no longer prove which document this tab has moved on to - its " +
   "in-memory record of replaced documents is full - so it refuses to write " +
   "any file rather than risk writing an older version of a document over a " +
-  "newer one. Saving stays blocked for every document until Folia is " +
+  "newer one. Saving stays blocked for every document until Markaloo is " +
   "restarted. Copy your unsaved changes somewhere else before closing this " +
   "window.";
 
@@ -10503,7 +10512,7 @@ ipcMain.on("request-open-file", requestApprovedBrowserDocument);
 // title. Without one set explicitly, a dev run groups under Electron's default
 // id and a packaged run relies on the shortcut the installer wrote - so
 // taskbar grouping, jump lists, pinning and toast attribution can all name
-// something other than Folia even though the title bar reads correctly. Read
+// something other than Markaloo even though the title bar reads correctly. Read
 // from package.json rather than repeated as a literal, because electron-builder
 // writes that same appId into the installer and the shortcut: any drift here
 // silently splits one app into two taskbar identities.
@@ -10697,7 +10706,7 @@ app.on("window-all-closed", () => {
 // TIDY: where `autoInstallOnAppQuit` is enabled, electron-updater registers its
 // own quit handler and installs a downloaded update however the app was asked
 // to quit. Windows installed builds deliberately disable that hook because
-// Folia's owned NSIS launcher is the only verified install route there;
+// Markaloo's owned NSIS launcher is the only verified install route there;
 // portable builds never used it. Other installed platforms retain it, so every
 // route out still passes through this approval protocol.
 const QUIT_APPROVAL_REQUEST = "quit-approval-request";
@@ -10858,7 +10867,7 @@ const PORTABLE_LEASE_STALE_POLLS = 15;
 // callback emits before-quit-for-update and calls app.quit synchronously. The
 // event carries no attempt id, so one process-lifetime listener assigns it to
 // the newest eligible updater-owned attempt. Windows NSIS instead uses
-// Folia's positive process-start proof; MacUpdater cannot provide either
+// Markaloo's positive process-start proof; MacUpdater cannot provide either
 // protocol and is rejected explicitly in performUpdateInstall().
 let pendingUpdaterInstallCommit = null;
 let activeUpdaterInstallAttempt = null;
@@ -12260,7 +12269,7 @@ function foliaUpdaterAttemptRetainsFreeze() {
   );
 }
 
-// Tell the renderer it may accept edits again. A Folia-owned installer handoff
+// Tell the renderer it may accept edits again. A Markaloo-owned installer handoff
 // is the exception: after phase two commits, its freeze is the protection
 // against NSIS killing a document that changed during UAC/process startup.
 // Generic cancellation/navigation paths cannot thaw it. Only a retry-safe
@@ -12685,7 +12694,7 @@ function askFallbackApproval(record, cause) {
   // the dedicated warning, but every route that never gets an answer -
   // an unresponsive renderer, a renderer declared unusable, an invalid
   // revision, a commit timeout - landed here instead and told the reader that
-  // Folia "cannot confirm whether anything is unsaved", when what it actually
+  // Markaloo "cannot confirm whether anything is unsaved", when what it actually
   // knows is far more specific: it stopped writing files. The cause is kept on
   // the record (both resumption routes read it) and reported in `why`, so the
   // deferral, timing and revision semantics above are unchanged - only the
@@ -12702,7 +12711,7 @@ function askFallbackApproval(record, cause) {
     askShutdownQuestion(record, {
       confirmLabel: "Close anyway",
       title: "Open tabs could not be saved",
-      message: "Folia could not save the open-tab layout.",
+      message: "Markaloo could not save the open-tab layout.",
       detail: "Your open tabs may not be restored next time. Closing now also " +
         "discards any unsaved changes made since the previous confirmation. " +
         "Cancel to keep working and retry.",
@@ -12713,7 +12722,7 @@ function askFallbackApproval(record, cause) {
   askShutdownQuestion(record, {
     confirmLabel: "Close anyway",
     title: "Unsaved changes cannot be checked",
-    message: "Folia cannot confirm whether anything is unsaved.",
+    message: "Markaloo cannot confirm whether anything is unsaved.",
     detail:
       (cause === "unreadable"
         ? "The document view could not check the open documents."
@@ -12752,7 +12761,7 @@ function askDeletionEvidenceCapacityApproval(record, files, fallbackCause = null
   askShutdownQuestion(record, {
     confirmLabel: "Close anyway",
     title: "Saving is blocked",
-    message: "Folia stopped writing files and cannot resume until it restarts.",
+    message: "Markaloo stopped writing files and cannot resume until it restarts.",
     detail:
       (SAVE_AUTHORITY_LATCH_SHUTDOWN_DETAIL[saveAuthorityLatchReason] ||
         SAVE_AUTHORITY_LATCH_SHUTDOWN_DETAIL["deletion-evidence-capacity"]) +
@@ -13357,7 +13366,7 @@ function configureAutoUpdater(autoUpdater) {
   autoUpdater.autoDownload = false; // Don't download automatically, let user decide
   // Windows NSIS installation is owned by performWindowsInstalledUpdate().
   // Leaving this enabled would let BaseUpdater's ordinary quit hook call its
-  // unverified NsisUpdater.install path, bypassing Folia's positive process-
+  // unverified NsisUpdater.install path, bypassing Markaloo's positive process-
   // start proof and reviving the ENOENT/openPath false hand-off. Portable
   // builds have never used it. Other installed platforms retain their prior
   // behavior, including macOS where explicit Install remains fail-closed.
@@ -13716,7 +13725,7 @@ function reportInstalledUpdateLaunchFailure(attempt, why, retrySafe) {
       status: "error",
       error: retrySafe
         ? "The update installer could not be started. You can try again."
-        : "Folia could not verify whether the update installer started. Restart Folia before trying again.",
+        : "Markaloo could not verify whether the update installer started. Restart Markaloo before trying again.",
     });
   }
   if (!retrySafe) {
@@ -13756,7 +13765,7 @@ function commitWindowsInstalledUpdateLaunch(attempt, child, method) {
     attempt.updater &&
     typeof attempt.updater.quitAndInstallCalled === "boolean"
   ) {
-    // Keep electron-updater's duplicate-install latch aligned with Folia's
+    // Keep electron-updater's duplicate-install latch aligned with Markaloo's
     // launcher. Windows autoInstallOnAppQuit is disabled globally, but this
     // also prevents any direct updater call from starting beside the installer.
     attempt.updater.quitAndInstallCalled = true;
@@ -13769,7 +13778,7 @@ function commitWindowsInstalledUpdateLaunch(attempt, child, method) {
   // Phase two already committed and froze the exact document revision before
   // any process launch. Re-authorize only this quit and execute it immediately:
   // asking again after NSIS starts is too late because --updated can kill
-  // Folia before another renderer round-trip completes.
+  // Markaloo before another renderer round-trip completes.
   grantShutdownAuthorization();
   quitApprovedUpdateApp();
 }
@@ -13904,7 +13913,7 @@ function performWindowsInstalledUpdate(updater) {
 
   // Own the updater's duplicate-install latch from the moment any child launch
   // is attempted. Windows autoInstallOnAppQuit is disabled, and this also
-  // blocks any direct updater call beside Folia's launcher. Retry-safe failure
+  // blocks any direct updater call beside Markaloo's launcher. Retry-safe failure
   // releases it; an ambiguous outcome deliberately keeps it raised.
   if (typeof updater.quitAndInstallCalled === "boolean") {
     updater.quitAndInstallCalled = true;
@@ -13981,7 +13990,7 @@ function performWindowsInstalledUpdate(updater) {
  *   false when nothing started; SHUTDOWN_CONTINUATION_PENDING when the final
  *   approval is committed and an asynchronous Windows hand-off owns its freeze.
  *
- * Windows NSIS uses Folia's own launcher and treats only a child `spawn` event,
+ * Windows NSIS uses Markaloo's own launcher and treats only a child `spawn` event,
  * or elevate.exe's successful ShellExecuteEx result, as positive hand-off
  * proof. Other BaseUpdater platforms retain their public lifecycle boundary.
  */

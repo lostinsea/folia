@@ -829,7 +829,7 @@ const UI_STRINGS = {
   'searchPlaceholder': 'Search in document...', 'noRecentFiles': 'No recent files',
   'noHeaders': 'No headers found', 'unsaved': '● Unsaved',
   'editorPlaceholder': 'Start typing markdown...',
-  'welcome.title': 'Welcome to Folia',
+  'welcome.title': 'Welcome to Markaloo',
   'welcome.subtitle': 'Press Ctrl+O to open a markdown file',
   'fileUpdated': 'File Updated',
   'fileModifiedExternally': 'This file has been modified externally',

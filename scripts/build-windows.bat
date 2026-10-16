@@ -1,9 +1,9 @@
 @echo off
-REM Windows Build Script for Folia
+REM Windows Build Script for Markaloo
 REM This script helps build the Windows installer and portable executable
 
 echo ========================================
-echo Folia - Windows Builder
+echo Markaloo - Windows Builder
 echo ========================================
 echo.
 
@@ -80,7 +80,7 @@ if %errorlevel% neq 0 (
 )
 echo.
 echo [SUCCESS] Portable EXE built successfully!
-echo Location: dist\Folia-*.exe
+echo Location: dist\Markaloo-*.exe
 echo.
 pause
 goto menu
@@ -99,7 +99,7 @@ if %errorlevel% neq 0 (
 )
 echo.
 echo [SUCCESS] Installer built successfully!
-echo Location: dist\Folia-Setup-*.exe
+echo Location: dist\Markaloo-Setup-*.exe
 echo.
 pause
 goto menu

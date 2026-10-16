@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Release Script for Folia
+ * Release Script for Markaloo
  *
  * This script automates the release process:
  * 1. Prompts for version
@@ -354,8 +354,8 @@ function getArtifacts(version) {
     // never produce, and would now omit manifests the release must upload or
     // no installed build ever sees the release.
     const expectedArtifacts = [
-      `Folia-Setup-${version}.exe`,
-      `Folia-Setup-${version}.exe.blockmap`,
+      `Markaloo-Setup-${version}.exe`,
+      `Markaloo-Setup-${version}.exe.blockmap`,
       'latest.yml'
     ];
     // Only list what this host can actually produce. Listing the Linux
@@ -363,8 +363,8 @@ function getArtifacts(version) {
     // real run cannot assemble - the same class of lie as the update manifests
     // above.
     if (willBuildLinux()) {
-      expectedArtifacts.push(`Folia-${version}.AppImage`);
-      expectedArtifacts.push(`folia_${version}_amd64.deb`);
+      expectedArtifacts.push(`Markaloo-${version}-x64.AppImage`);
+      expectedArtifacts.push(`Markaloo-${version}-x64.deb`);
       expectedArtifacts.push('latest-linux.yml');
     }
     logDryRun('Expected artifacts:');
@@ -455,13 +455,13 @@ function createGitHubRelease(version, artifacts) {
     : '2. Run the installer';
 
   // Release notes describe the update path the build actually has. This block
-  // was previously the opposite claim ("Folia does not auto-update"), correct
+  // was previously the opposite claim ("the app does not auto-update"), correct
   // while `build.publish` was null; it now targets this fork's own releases, so
   // an installed NSIS build really does find this release on its own. The
   // portable .exe genuinely does not - electron-updater cannot replace a
   // running single-file executable, which is why main.js carries a separate
   // `isPortable` path - so it is called out rather than glossed over.
-  const releaseNotes = `## Folia v${version}
+  const releaseNotes = `## Markaloo v${version}
 
 ### Downloads
 ${downloads.join('\n')}
@@ -561,7 +561,7 @@ async function main() {
   dryRun = args.includes('--dry-run');
   const versionArg = args.find(a => /^\d+\.\d+\.\d+$/.test(a));
 
-  log('\n🚀 Folia Release Script\n', colors.bright + colors.cyan);
+  log('\n🚀 Markaloo Release Script\n', colors.bright + colors.cyan);
 
   if (dryRun) {
     log('⚠️  DRY-RUN MODE - No changes will be made\n', colors.yellow);

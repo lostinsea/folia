@@ -1,4 +1,4 @@
-# Building Folia
+# Building Markaloo
 
 This guide explains how to create a standalone executable (.exe) file.
 
@@ -36,17 +36,22 @@ npm run build
 After the build completes, look in the `dist/` folder:
 ```
 dist/
-├── Folia-<version>.exe    <- portable, single file
+├── Markaloo-<version>.exe    <- portable, single file
 └── win-unpacked/          <- the same app, unpacked
-    └── Folia.exe
+    └── Markaloo.exe
 ```
 
 The portable `.exe` is your **standalone executable**. The version in the
 filename comes from `version` in `package.json`.
 
 Both the portable exe and the unpacked binary take their name from
-`build.productName`, so the running process appears as **`Folia`** in Task
+`build.productName`, so the running process appears as **`Markaloo`** in Task
 Manager and `Get-Process`.
+
+Windows keeps the old `Folia` installation folder and app ID during upgrades.
+The installer, executable and shortcuts say Markaloo; the fixed folder avoids a
+second nested install and keeps existing install locations. The app also keeps
+the old private profile so settings and tabs survive the rename.
 
 ## Alternative Build Options
 
@@ -111,7 +116,7 @@ alongside any edit; see *Parallel delivery without reducing quality* in
 ```bash
 npm run build-installer
 ```
-Creates: `dist/Folia-Setup-<version>.exe`
+Creates: `dist/Markaloo-Setup-<version>.exe`
 
 ### Build Everything
 ```bash
@@ -215,19 +220,22 @@ proxy's CA into the trust store instead.
   `electron-builder\Cache` folder and `dist/`, then rebuild.
 
 **Missing icon?**
-- Ensure `assets/logo.png` is present (regenerate with `node scripts/generate-logo.js`)
+- Keep `assets/feather-source.jpg` unchanged. To regenerate all PNG and ICO icons,
+  install Pillow (`python -m pip install Pillow`) and run
+  `python scripts/generate-logo.py`. The source is the supplied raster artwork,
+  not a vector drawing.
 
 **Antivirus blocks exe?**
 - This is normal for unsigned executables
 - Add exception or sign the executable with a code signing certificate
 
 **Need developer tools in an installed build?**
-- `F12` opens them only when Folia runs from source. In a packaged build the
+- `F12` opens them only when Markaloo runs from source. In a packaged build the
   toggle is gated, because the renderer runs with `nodeIntegration: true` and so
   the console is a Node REPL with the user's full filesystem rights — a shipped
   build should not hand that to whoever is at the keyboard on one keystroke.
 - Start the installed app with `FOLIA_DEVTOOLS=1` in the environment to re-enable
-  it: `$env:FOLIA_DEVTOOLS="1"; & "$env:LOCALAPPDATA\Programs\Folia\Folia.exe"`.
+  it: `$env:FOLIA_DEVTOOLS="1"; & "C:\path\to\Markaloo.exe"`.
 - Electron's default application menu is removed at startup as well. It is never
   displayed — every window already calls `setMenu(null)` — but its `View` submenu
   binds Toggle Developer Tools to `Ctrl+Shift+I`, which was measured to work on a
@@ -240,25 +248,27 @@ proxy's CA into the trust store instead.
 **Need a diagnostic log for support?**
 
 Diagnostic file logging is off by default in installed and development runs.
-Folia neither opens nor creates `debug.log` while disabled, and leaves any
+Markaloo neither opens nor creates `debug.log` while disabled, and leaves any
 retained log untouched. Development console output is unchanged. To request a
-file temporarily, close any existing Folia process and set the exact value `1`
+file temporarily, close any existing Markaloo process and set the exact value `1`
 in the terminal that starts the new process:
 
 ```powershell
 $env:FOLIA_DIAGNOSTIC_LOG = "1"
-& "C:\path\to\Folia.exe"
+& "C:\path\to\Markaloo.exe"
 ```
 
 The file is in the process's actual `userData` directory: normally
 `%APPDATA%\Folia\debug.log` for an installed app and
 `%APPDATA%\Folia-dev\debug.log` for `npm start`; an explicitly relocated profile
-keeps its own location. Opt-in appends rather than erasing an existing log.
+keeps its own location. These old directory names intentionally keep existing
+settings, tabs and the single-instance lock when the display name changes.
+Opt-in appends rather than erasing an existing log.
 This is an unbounded, unredacted troubleshooting log: it can contain local
-paths, arguments and raw updater errors. Review it before sharing; Folia adds
+paths, arguments and raw updater errors. Review it before sharing; Markaloo adds
 no automatic log-upload path. Rotation and redaction remain separate work.
 
-Reproduce the issue, close Folia, then remove the switch from that terminal:
+Reproduce the issue, close Markaloo, then remove the switch from that terminal:
 
 ```powershell
 Remove-Item Env:\FOLIA_DIAGNOSTIC_LOG -ErrorAction SilentlyContinue
@@ -267,7 +277,7 @@ Remove-Item Env:\FOLIA_DIAGNOSTIC_LOG -ErrorAction SilentlyContinue
 Restart without the switch to stop file logging; removing it cannot change
 the environment of an already-running process. After saving only the evidence
 needed for support, manually delete just that profile's `debug.log` while
-Folia is closed. Do not enable the switch globally or leave it on routinely.
+Markaloo is closed. Do not enable the switch globally or leave it on routinely.
 
 ## Code Signing (Optional)
 
@@ -320,20 +330,21 @@ nothing in the release workflow depends on it.
 `build.publish` targets this fork's own GitHub releases:
 
 ```json
-"publish": [{ "provider": "github", "owner": "lostinsea", "repo": "folia" }]
+"publish": [{ "provider": "github", "owner": "lostinsea", "repo": "markaloo" }]
 ```
 
 electron-builder therefore writes `app-update.yml` into the package and emits
 `latest.yml` (plus `latest-linux.yml` / `latest-mac.yml`) alongside the
 installers. `electron-updater` reads the former at runtime and fetches the
 latter from the release assets. Verified on a real build: `app-update.yml`
-resolves to `github.com/lostinsea/folia`, and until the first release
-is published the check simply returns 404 and is swallowed by the existing
-handler.
+resolves to `github.com/lostinsea/markaloo`. The former
+`github.com/lostinsea/folia` feed still redirects to this repository, so
+existing installers can find their updates. The installed app keeps the
+`folia-updater` channel to retain update compatibility.
 
 **It must never point at a parent repo.** `OmniCoreST/omnicore-markdown-viewer`
 and `yumedzi/markdown-viewer` publish their own releases; aiming the feed at
-either would let their binaries silently replace a Folia build and discard every
+either would let their binaries silently replace a Markaloo build and discard every
 fix in this repository. `test-packaging.js` asserts this and covers the shapes
 that make it easy to get wrong — the `"github"` provider shorthand, an object
 with no `owner`/`repo`, the combined `repo: "owner/name"` form and a per-platform
@@ -401,9 +412,9 @@ Needs a GitHub CLI recent enough to carry the `gh attestation` command group —
 because none has been measured.
 
 ```bash
-gh attestation verify Folia-Setup-X.X.X.exe \
-  --repo lostinsea/folia \
-  --signer-workflow lostinsea/folia/.github/workflows/release.yml \
+gh attestation verify Markaloo-Setup-X.X.X.exe \
+  --repo lostinsea/markaloo \
+  --signer-workflow lostinsea/markaloo/.github/workflows/release.yml \
   --source-ref refs/tags/vX.X.X
 ```
 
@@ -438,10 +449,10 @@ The workflow accepts `v*` tag pushes and manual dispatches.
 - Never move or reuse a published tag.
 
 ```bash
-git tag -a v0.1.0 -m "Folia 0.1.0"
+git tag -a v0.1.0 -m "Markaloo 0.1.0"
 git push origin v0.1.0
-gh workflow run release.yml --repo lostinsea/folia --ref v0.1.0
-gh run watch <id> --repo lostinsea/folia --exit-status
+gh workflow run release.yml --repo lostinsea/markaloo --ref v0.1.0
+gh run watch <id> --repo lostinsea/markaloo --exit-status
 ```
 
 The `--ref v0.1.0` is load-bearing. Both `attest` and `create-release` are gated
@@ -464,8 +475,8 @@ After the run, verify the update manifest actually describes the artifact that
 was uploaded — the two are produced by different jobs on different machines:
 
 ```bash
-gh release download <tag> --repo lostinsea/folia \
-  --pattern "latest.yml" --pattern "Folia-Setup-<v>.exe"
+gh release download <tag> --repo lostinsea/markaloo \
+  --pattern "latest.yml" --pattern "Markaloo-Setup-<v>.exe"
 # the base64 sha512 in latest.yml must equal the installer's own
 ```
 
@@ -473,9 +484,9 @@ Then verify the published artifact's provenance, from the download rather than
 from the run page — an attestation nobody checks is a claim, not a control:
 
 ```bash
-gh attestation verify Folia-Setup-<v>.exe \
-  --repo lostinsea/folia \
-  --signer-workflow lostinsea/folia/.github/workflows/release.yml \
+gh attestation verify Markaloo-Setup-<v>.exe \
+  --repo lostinsea/markaloo \
+  --signer-workflow lostinsea/markaloo/.github/workflows/release.yml \
   --source-ref refs/tags/<tag> \
   --source-digest <exact-tagged-commit>
 ```

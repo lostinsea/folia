@@ -2245,7 +2245,7 @@ async function main() {
     );
     check(
       "auto-update publishes to this fork's own GitHub releases",
-      github.length === 1 && github[0].owner === "lostinsea" && github[0].repo === "folia",
+      github.length === 1 && github[0].owner === "lostinsea" && github[0].repo === "markaloo",
       `build.publish=${JSON.stringify(pkg.build && pkg.build.publish)} - electron-builder writes no app-update.yml without it, so installed builds can never see a release`,
     );
 
@@ -3970,7 +3970,7 @@ async function main() {
     );
     // The README names them inline, so the comparison is against the sentence a
     // reader actually reads rather than against a list maintained beside it.
-    const claimed = (readme.match(/The installer registers Folia as a handler for ([^\n]+?)\n/) || [])[1] || "";
+    const claimed = (readme.match(/The installer registers Markaloo as a handler for ([^\n]+?)\n/) || [])[1] || "";
     const claimedExts = [...claimed.matchAll(/`\.([a-z]+)`/g)].map((m) => m[1]).sort();
     check(
       "the README names exactly the extensions the installer actually registers",
@@ -4014,11 +4014,11 @@ async function main() {
       .concat((pkg.build.linux || {}).target || [])
       .map((t) => (typeof t === "string" ? t : t.target));
     const TABLE_EVIDENCE = {
-      nsis: /Folia-Setup-X\.X\.X\.exe/,
-      portable: /\| Windows \| `Folia X\.X\.X\.exe`/,
-      dmg: /Folia-X\.X\.X\.dmg/,
-      AppImage: /Folia-X\.X\.X\.AppImage/,
-      deb: /folia_X\.X\.X_amd64\.deb/,
+      nsis: /Markaloo-Setup-X\.X\.X\.exe/,
+      portable: /\| Windows \| `Markaloo-X\.X\.X\.exe`/,
+      dmg: /Markaloo-X\.X\.X-arm64\.dmg/,
+      AppImage: /Markaloo-X\.X\.X-x64\.AppImage/,
+      deb: /Markaloo-X\.X\.X-x64\.deb/,
     };
     check(
       "every build target is one the download-table check knows how to look for",
@@ -4188,7 +4188,7 @@ async function main() {
   {
     check(
       "package.json declares a productName, so Electron and the installer agree on the app name",
-      pkg.productName === "Folia",
+      pkg.productName === "Markaloo",
       `productName=${JSON.stringify(pkg.productName)}`,
     );
     check(
@@ -4206,7 +4206,7 @@ async function main() {
     // vendor-mark sweep below, which only looks for the vendor's name.
     check(
       "build.productName names the installer, so the installed app is not the old name",
-      pkg.build && pkg.build.productName === "Folia",
+      pkg.build && pkg.build.productName === "Markaloo",
       `build.productName=${JSON.stringify(pkg.build && pkg.build.productName)}`,
     );
 
@@ -4302,8 +4302,8 @@ async function main() {
       // description of the file's punctuation rather than of its structure.
       {
         const REQUIRED_SECTIONS = [
-          "What Folia is",
-          "What changed in Folia",
+          "What Markaloo is",
+          "What changed in Markaloo",
           "Features",
           "Installation",
           "Controls",
@@ -4566,7 +4566,7 @@ async function main() {
     //                   would force prose that avoids naming its own category.
     // `homepage` used to be exempt too, because the GitHub repository was
     // still named markdown-viewer and the URL had to keep that slug to point
-    // at anything. The repository is now lostinsea/folia, so the exemption is
+    // at anything. The repository is now lostinsea/markaloo, so the exemption is
     // gone and the URL is swept like every other identifier. GitHub keeps the
     // old slug redirecting, which is exactly why this needs an oracle: a stale
     // homepage would go on working indefinitely and nothing would notice.
@@ -4667,11 +4667,21 @@ async function main() {
       check(
         `${where} artifactName uses dashes, matching what release.js expects`,
         typeof value === "string" &&
-          value.startsWith("Folia-") &&
+          value.startsWith(`${pkg.productName}-`) &&
           !/\s/.test(value),
         `${where} artifactName=${JSON.stringify(value)}`,
       );
     }
+    const legacyInstallerInclude = path.join(ROOT, "build", "installer.nsh");
+    check(
+      "the assisted installer keeps the existing install folder while branding new shortcuts",
+      pkg.build.nsis.include === "build/installer.nsh" &&
+        pkg.build.nsis.shortcutName === pkg.productName &&
+        fs.existsSync(legacyInstallerInclude) &&
+        /!undef APP_FILENAME\s*!define APP_FILENAME "Folia"/.test(
+          fs.readFileSync(legacyInstallerInclude, "utf8"),
+        ),
+    );
 
     // release.js spells the expected filenames out in its dry-run listing and
     // its release notes. Those must track build config or the notes tell users
@@ -4818,13 +4828,13 @@ async function main() {
             };
 
             const winOnly = notesFor([
-              "Folia-Setup-9.9.9.exe",
-              "Folia-Setup-9.9.9.exe.blockmap",
+              "Markaloo-Setup-9.9.9.exe",
+              "Markaloo-Setup-9.9.9.exe.blockmap",
             ]);
             const allThree = notesFor([
-              "Folia-Setup-9.9.9.exe",
-              "Folia-9.9.9.AppImage",
-              "folia_9.9.9_amd64.deb",
+              "Markaloo-Setup-9.9.9.exe",
+              "Markaloo-9.9.9-x64.AppImage",
+              "Markaloo-9.9.9-x64.deb",
             ]);
 
             const listedArtifacts = (() => {
@@ -4837,7 +4847,7 @@ async function main() {
 
             check(
               "release notes name the Windows installer that was collected",
-              /Folia-Setup-9\.9\.9\.exe/.test(winOnly),
+              /Markaloo-Setup-9\.9\.9\.exe/.test(winOnly),
             );
             check(
               "release notes do not offer Linux downloads that were not built",
@@ -4848,8 +4858,8 @@ async function main() {
             );
             check(
               "release notes do offer Linux downloads when they were built",
-              /Folia-9\.9\.9\.AppImage/.test(allThree) &&
-                /folia_9\.9\.9_amd64\.deb/.test(allThree),
+              /Markaloo-9\.9\.9-x64\.AppImage/.test(allThree) &&
+                /Markaloo-9\.9\.9-x64\.deb/.test(allThree),
             );
 
             // Independent oracle: decided from the host, not from the
@@ -4891,10 +4901,10 @@ async function main() {
             );
             const dist = path.join(fakeRoot, "dist");
             for (const f of [
-              "Folia-Setup-9.9.9.exe",
-              "Folia-Setup-9.9.9.exe.blockmap",
-              "Folia-Setup-9.9.8.exe",
-              "Folia-9.9.8.AppImage",
+              "Markaloo-Setup-9.9.9.exe",
+              "Markaloo-Setup-9.9.9.exe.blockmap",
+              "Markaloo-Setup-9.9.8.exe",
+              "Markaloo-9.9.8-x64.AppImage",
               "notes.txt",
             ]) {
               fs.writeFileSync(path.join(dist, f), "x");
@@ -4927,8 +4937,8 @@ async function main() {
 
             check(
               "the artifact scan collects this version's files",
-              found.includes("Folia-Setup-9.9.9.exe") &&
-                found.includes("Folia-Setup-9.9.9.exe.blockmap"),
+              found.includes("Markaloo-Setup-9.9.9.exe") &&
+                found.includes("Markaloo-Setup-9.9.9.exe.blockmap"),
               JSON.stringify(found),
             );
             check(
@@ -4938,7 +4948,7 @@ async function main() {
             );
             check(
               "the stale files really were there, so the filter had something to reject",
-              fs.existsSync(path.join(dist, "Folia-9.9.8.AppImage")),
+              fs.existsSync(path.join(dist, "Markaloo-9.9.8-x64.AppImage")),
             );
           } finally {
             fs.rmSync(fakeRoot, { recursive: true, force: true });
@@ -5548,7 +5558,7 @@ async function main() {
               "the packaged app carries an update feed config",
               /provider:\s*github/.test(updateCfg) &&
                 /owner:\s*lostinsea/.test(updateCfg) &&
-                /repo:\s*folia/.test(updateCfg),
+                /repo:\s*markaloo/.test(updateCfg),
               `app-update.yml does not name this fork: ${updateCfg.replace(/\s+/g, " ").trim()}`,
             );
           }
@@ -6062,12 +6072,11 @@ async function main() {
         // about an aborted add stops the commit after it, so the guard has to
         // live here rather than relying on noticing the abort.
         {
-          const pinned = /^assets\/logo\.svg\s+text\s+eol=lf\s*$/m.test(attrs);
-          check(".gitattributes pins the generated logo SVG to LF", pinned);
-          const p = path.join(ROOT, "assets", "logo.svg");
+          const source = path.join(ROOT, "assets", "feather-source.jpg");
           check(
-            "assets/logo.svg is stored with LF endings, as pinned",
-            fs.existsSync(p) && !fs.readFileSync(p, "utf8").includes("\r\n"),
+            "the supplied feather master remains available to regenerate the icons",
+            fs.existsSync(source) && fs.statSync(source).size > 0 &&
+              fs.existsSync(path.join(ROOT, "scripts", "generate-logo.py")),
           );
         }
 

@@ -1,8 +1,8 @@
 {
   "name": "folia",
   "version": "0.7.1",
-  "productName": "Folia",
-  "description": "Folia - a fast, offline markdown viewer with tabs, Mermaid diagrams and live reload",
+  "productName": "Markaloo",
+  "description": "Markaloo - a fast, offline markdown viewer with tabs, Mermaid diagrams and live reload",
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
@@ -43,16 +43,16 @@
     "viewer",
     "electron",
     "mermaid",
-    "folia"
+    "markaloo"
   ],
   "author": {
     "name": "lostinsea"
   },
   "license": "MIT",
-  "homepage": "https://github.com/lostinsea/folia#readme",
+  "homepage": "https://github.com/lostinsea/markaloo#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/lostinsea/folia.git"
+    "url": "https://github.com/lostinsea/markaloo.git"
   },
   "devDependencies": {
     "ajv": "^8.20.0",
@@ -71,12 +71,12 @@
   },
   "build": {
     "appId": "io.github.lostinsea.folia",
-    "productName": "Folia",
+    "productName": "Markaloo",
     "publish": [
       {
         "provider": "github",
         "owner": "lostinsea",
-        "repo": "folia"
+        "repo": "markaloo"
       }
     ],
     "directories": {
@@ -160,9 +160,10 @@
           "role": "Viewer"
         }
       ],
-      "artifactName": "Folia-${version}.${ext}"
+      "artifactName": "Markaloo-${version}.${ext}"
     },
     "mac": {
+      "artifactName": "Markaloo-${version}-${arch}.${ext}",
       "target": [
         "dmg"
       ],
@@ -189,6 +190,7 @@
       ]
     },
     "linux": {
+      "artifactName": "Markaloo-${version}-${arch}.${ext}",
       "target": [
         "deb",
         "AppImage"
@@ -239,7 +241,8 @@
       }
     ],
     "nsis": {
-      "artifactName": "Folia-Setup-${version}.${ext}",
+      "artifactName": "Markaloo-Setup-${version}.${ext}",
+      "include": "build/installer.nsh",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "allowElevation": true,
@@ -248,7 +251,7 @@
       "installerHeaderIcon": "assets/logo.ico",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "Folia",
+      "shortcutName": "Markaloo",
       "runAfterFinish": true,
       "menuCategory": true,
       "displayLanguageSelector": false,

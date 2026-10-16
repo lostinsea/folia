@@ -1,7 +1,11 @@
-# Security Audit — Folia (formerly Omnicore Markdown Viewer)
+# Security Audit — Markaloo
+
+> Markaloo retains the `folia-*` internal channels and temporary-path prefixes
+> described below. They are not displayed as the product name. This audit also
+> preserves exact historical evidence rather than renaming old code samples.
 
 > **Amendment (1.0 rebrand).** This audit was written while the fork was still
-> named Omnicore Markdown Viewer. The product is now **Folia**, and identifiers
+> named Omnicore Markdown Viewer. It was later named Folia, and identifiers
 > derived from the old name changed with it (`omnicore-temp-*` → `folia-*`,
 > `omnicore-update.bat` → a `folia-update-*` temp directory,
 > `omnicore-rawhtml-resize` → `folia-rawhtml-resize`). Code quoted below is

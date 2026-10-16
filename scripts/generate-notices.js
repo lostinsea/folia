@@ -3,12 +3,12 @@
 // generate-notices.js - build THIRD-PARTY-NOTICES.md from what actually ships
 // ============================================
 //
-// Folia is MIT, and it is tempting to conclude that a permissively licensed
+// Markaloo is MIT, and it is tempting to conclude that a permissively licensed
 // product has nothing further to do. That is the wrong reading. Nearly every
 // permissive licence in this tree - MIT, ISC, BSD, Apache-2.0 - grants the
 // right to redistribute ON CONDITION that its own copyright notice and licence
 // text are reproduced in the distribution. The obligation belongs to each
-// dependency and is completely independent of the licence Folia chooses for
+// dependency and is completely independent of the licence Markaloo chooses for
 // itself. `build.files` ships `node_modules/**/*`, so all of them are in the
 // installer, and until this file existed none of their notices were.
 //
@@ -170,7 +170,7 @@ const EXTRA = [
 const DUAL_ELECTION = {
   "(MIT OR GPL-3.0-or-later)": {
     chosen: "MIT",
-    why: "Folia is MIT-licensed; electing MIT keeps the whole distribution permissive.",
+    why: "Markaloo is MIT-licensed; electing MIT keeps the whole distribution permissive.",
     marker: /\bMIT License\b/i,
   },
   "(MPL-2.0 OR Apache-2.0)": {
@@ -666,14 +666,14 @@ function render(components) {
   lines.push("# Third-party notices");
   lines.push("");
   lines.push(
-    "Folia is distributed under the MIT licence (see `LICENSE.txt`). It also " +
+    "Markaloo is distributed under the MIT licence (see `LICENSE.txt`). It also " +
       "redistributes the components listed below, each under its own terms.",
   );
   lines.push("");
   lines.push(
     "Almost every licence here grants redistribution **on condition that its " +
       "copyright notice and licence text are reproduced**. That obligation is " +
-      "the component's, not Folia's, and it is not discharged by Folia also " +
+      "the component's, not Markaloo's, and it is not discharged by Markaloo also " +
       "being permissively licensed - which is why this file exists and ships " +
       "inside the application.",
   );
@@ -709,12 +709,12 @@ function render(components) {
   lines.push("| --- | --- |");
   for (const [k, v] of [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) {
     const elect = DUAL_ELECTION[k];
-    lines.push(`| ${k}${elect ? ` (Folia elects **${elect.chosen}**)` : ""} | ${v} |`);
+    lines.push(`| ${k}${elect ? ` (Markaloo elects **${elect.chosen}**)` : ""} | ${v} |`);
   }
   lines.push("");
   for (const [k, e] of Object.entries(DUAL_ELECTION)) {
     if (!counts.has(k)) continue;
-    lines.push(`Under \`${k}\` Folia elects **${e.chosen}**. ${e.why}`);
+    lines.push(`Under \`${k}\` Markaloo elects **${e.chosen}**. ${e.why}`);
     lines.push("");
   }
 
@@ -733,13 +733,13 @@ function render(components) {
     if (c.spdx && DUAL_ELECTION[c.spdx]) {
       const e = DUAL_ELECTION[c.spdx];
       lines.push(
-        `- Dual-licensed. Folia elects **${e.chosen}**; the other offer is not ` +
+        `- Dual-licensed. Markaloo elects **${e.chosen}**; the other offer is not ` +
           `relied on. ${e.why}`,
       );
     }
     // Said on the entry, and phrased as the opposite of the election line
     // above, because the two expressions look alike and mean opposite things.
-    // A reader who sees "(MIT AND Zlib)" next to entries reading "Folia elects
+    // A reader who sees "(MIT AND Zlib)" next to entries reading "Markaloo elects
     // MIT" would otherwise reasonably assume the same thing happened here.
     if (c.extraLicences && c.extraLicences.length) {
       lines.push(
