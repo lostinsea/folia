@@ -36,6 +36,54 @@ is documented where it belongs — `docs/SECURITY-AUDIT.md`, `docs/PERF-AUDIT.md
 `bench/BASELINE.md`, `docs/CUSTOMIZATIONS.md` — and only a short recent-history
 section is kept here so the register has a visible edge.
 
+## Current workset
+
+### `reading-improvements` - PACKAGE VERIFIED / v0.7.0 (2026-10-15)
+
+- Sole source/docs/register writer: isolated `folia-reading-improvements` worktree.
+- Reviewed feature: `d134e71c80ac7f077a67090b7be4afe5a304555c`.
+- Refreshed main: `66ac16ea`; latest published version: v0.6.0.
+- User authorized normal integration, owner push and publication of this workset.
+  Installation, OS changes and protection bypass remain out of scope.
+- Scope: remembered left drawer, sticky document table headers, persistent
+  current-file update notice, clearer dark Mermaid connectors.
+- Astra investigated source/lifecycle; independent Sol6.1/high and Luna6/high
+  reviewed design and implementation. Both final reviews have no significant
+  findings. Luna's earlier nested-header finding is fixed and covered.
+- Confirmed user policy: show File Updated only for the visible affected
+  document; clear it on committed departure or closing that document.
+- Expanded focused suite: 50/50, including nested headers, real native wheel,
+  print flow, dark/light high zoom, popout/PDF and former-owner/background
+  notice rejection. Real separate-process drawer restarts use one owned profile.
+- TOC passes 30/30, tables 215/215, theme 398/398 and retained browser-isolation
+  controls 40/40, including the no-empty-Prism overlay checks.
+- Fresh Windows portable and Setup builds complete at version 0.7.0.
+- Strict packaging: 414 passed / 0 failed. All shipped source/library/font/asset
+  bytes match the worktree; extra resources and updater repository match.
+- Actual packaged UI: 29/29, including original header bounds, native wheel,
+  normal/split 100/200 zoom, current TOC, dark/light authored Mermaid styles,
+  real watcher lifetime/actions/ownership and separate-process drawer restarts.
+  Release captures were viewed. Diagnostic logging remains off.
+- Release-candidate source checks: reading 50/50 and TOC 30/30.
+- Independent Sol6.1/high and Luna6/high release reviews have no blocker.
+  Luna required exact workflow-run provenance and downloaded CI-payload checks;
+  both remain publication gates, not claims made by the local package.
+- The broader Mermaid suite fails before
+  its first assertion on both untouched `66ac16ea` and the candidate; retain
+  that baseline limit rather than weakening renderer isolation.
+- R932-R935 are individually exact PROVEN with passing controls; source restored.
+- Final-source matched scroll probes show +0.2ms normal / +0.1ms split in median
+  frame-p95, 0.10ms table callback p95, no settled geometry reads or viewer scans.
+- Actual Electron captures were viewed at normal/high zoom and both themes,
+  including sticky original headers, the retained notice and isolated popout.
+- This worktree owns serialized release preparation and integration. Earlier
+  worktrees and their evidence stay untouched; no parallel runtime writers.
+- Evidence: `release-070-*` logs/JSON in session `b0dbcd9e` artifacts, plus
+  viewed captures in this worktree's `tmp/release-070-local-r1`.
+- Publication, downloaded-asset/feed/provenance checks and the actual downloaded
+  Windows payload are still pending. No installed-app test is claimed.
+- Light Mermaid styling, document authority and the cheap TOC scroll path remain.
+
 ## Update protocol
 
 Read this before editing the file; the value of the register is entirely in it

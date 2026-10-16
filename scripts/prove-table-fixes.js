@@ -18437,8 +18437,8 @@ const REVERTS = [
           id: "R730",
           what: "omit Mermaid's emergency wrapping for long unbroken identifiers",
           file: MERMAID_CFG,
-          from: "    themeCSS: '.nodeLabel { overflow-wrap: anywhere; }',",
-          to: "    themeCSS: '',",
+          from: "    themeCSS: '.nodeLabel { overflow-wrap: anywhere; }' + (isDark ? `",
+          to: "    themeCSS: '' + (isDark ? `",
           suite: "test:mermaid",
           expect: [/^Mermaid unbroken identifiers wrap within their measured label$/],
           mustPass: [
@@ -22091,6 +22091,64 @@ const REVERTS = [
             /^TOC tracks forward backward fast jumps long sections top and end in both scrollers and zooms$/],
           requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 2,
         },
+        {
+          id: "R932", what: "ignore the remembered left drawer at real process startup",
+          file: RENDERER,
+          from: "  const savedPanel = localStorage.getItem(SIDE_PANEL_KEY);",
+          to: "  const savedPanel = 'closed';",
+          suite: "test:reading",
+          expect: [/^(toc|notes) restores actual drawer visibility across process exit$/,
+            /^(toc|notes) restore preserves hidden drawer accessibility$/],
+          mustPass: [/^closed restores actual drawer visibility across process exit$/,
+            /^invalid restores actual drawer visibility across process exit$/,
+            /^TOC user intent persists without changing inline notes$/,
+            /^production renderer remains isolated$/],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 4,
+        },
+        {
+          id: "R933", what: "leave original table headers at their natural position during document scroll",
+          file: RENDERER,
+          from: "    if (active) active.animation.currentTime = Math.min(active.travel, Math.max(0, top - active.top));",
+          to: "    if (active) active.animation.currentTime = 0;",
+          suite: "test:reading",
+          expect: [/^actual table headers pin align and release at their own ends across scrollowners and zoom$/,
+            /^wide pinned original headers follow horizontal scrolling in a narrow drawer layout$/,
+            /^native wheel scroll keeps the original long-table header pinned$/,
+            /^nested tables pin their own header and resume the enclosing table afterward$/,
+            /^PDF export contains bytes and screen header tracking resumes$/],
+          mustPass: [/^settled table and open TOC scrolling performs no geometry reads or viewer scans$/,
+            /^collapsing a pinned table retires its animation$/,
+            /^production renderer remains isolated$/],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 5,
+        },
+        {
+          id: "R934", what: "expire the actionable File Updated notice after ten seconds",
+          file: RENDERER,
+          from: "  toast.classList.add('show');\n  fileUpdateNotificationShown = true;",
+          to: "  toast.classList.add('show');\n  fileUpdateNotificationShown = true;\n  setTimeout(dismissFileUpdateNotification, 10000);",
+          suite: "test:reading",
+          expect: [/^File Updated remains visible beyond its former ten-second expiry$/],
+          mustPass: [/^watcher notice leaves original document bytes until Reload$/,
+            /^explicit Dismiss hides the notice and resets suppression$/,
+            /^declined dirty Reload keeps the notice and unsaved bytes$/,
+            /^Reload reads the newest version and dismisses only its notice$/,
+            /^background file changes and former-owner events cannot show a notice over another document$/,
+            /^closing the affected document clears its notice before showing a replacement$/],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
+        },
+        {
+          id: "R935", what: "leave dark Mermaid connectors at their thinner library defaults",
+          file: MERMAID_CFG,
+          from: "    themeCSS: '.nodeLabel { overflow-wrap: anywhere; }' + (isDark ? `",
+          to: "    themeCSS: '.nodeLabel { overflow-wrap: anywhere; }' + (false ? `",
+          suite: "test:reading",
+          expect: [/^Mermaid dark pass (1|3) keeps authored edges dashes invisible edges and markers$/,
+            /^dark Mermaid popout and PDF retain stronger messages without privileged page globals$/],
+          mustPass: [/^Mermaid light pass 2 keeps authored edges dashes invisible edges and markers$/,
+            /^reading fixture has original tables and five actual diagrams$/,
+            /^production renderer remains isolated$/],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 3,
+        },
       ];
 
 // These are release exceptions, not passing or withdrawn proofs. An explicit
@@ -23170,7 +23228,7 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R467,R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760,R840,R841,R845,R849,R853,R858,R860,R871,R876,R877,R878,R879,R880,R881,R882,R883,R884,R885,R886,R887,R888,R889,R890,R891,R892,R893,R894,R895,R896,R897,R898,R899,R900,R901,R902,R903,R904,R905,R906,R907,R908,R909,R910,R911,R912,R913,R914,R915,R916,R917,R918,R919,R920,R921,R922,R923,R924,R925,R926,R927,R928,R929,R930,R931";
+      .join(",") === "R467,R319,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760,R840,R841,R845,R849,R853,R858,R860,R871,R876,R877,R878,R879,R880,R881,R882,R883,R884,R885,R886,R887,R888,R889,R890,R891,R892,R893,R894,R895,R896,R897,R898,R899,R900,R901,R902,R903,R904,R905,R906,R907,R908,R909,R910,R911,R912,R913,R914,R915,R916,R917,R918,R919,R920,R921,R922,R923,R924,R925,R926,R927,R928,R929,R930,R931,R932,R933,R934,R935";
   const toolbarAllowanceIsRecordScoped =
     REVERTS.filter((r) =>
       exactShutdownTailForMutation(r) === TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL,

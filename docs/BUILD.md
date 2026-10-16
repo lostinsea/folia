@@ -429,18 +429,13 @@ tag it ran from. Substitute the tag and filename being checked.
 
 ## Cutting a release
 
-**`git push origin v0.1.0` does not start anything.** The workflow declares a
-`push` trigger on `v*` tags and that trigger has never once fired on this
-repository. Measured rather than assumed: two separate pushes of `v0.1.0` and a
-throwaway `v0.0.0-trigger-probe` tag all completed successfully at the git
-level and produced zero workflow runs, while `workflow_dispatch` through the
-same credentials started a run within seconds. GitHub suppresses the delivery,
-not the workflow — `actions/permissions` reports `enabled: true` and the
-workflow's own state is `active`. This is fork behaviour, and its failure mode
-is the worst kind: the push succeeds, nothing reports a problem, and the release
-simply never appears.
+The workflow accepts `v*` tag pushes and manual dispatches.
 
-Dispatch **on the tag ref**, not on a branch:
+- After pushing, check for a queued or running release workflow with the exact
+  tag and commit. A successful push alone does not prove a workflow started.
+- Do not dispatch a duplicate if the push already started the workflow.
+- If no matching run exists, dispatch **on the tag ref**, not on a branch.
+- Never move or reuse a published tag.
 
 ```bash
 git tag -a v0.1.0 -m "Folia 0.1.0"
@@ -481,8 +476,16 @@ from the run page — an attestation nobody checks is a claim, not a control:
 gh attestation verify Folia-Setup-<v>.exe \
   --repo lostinsea/folia \
   --signer-workflow lostinsea/folia/.github/workflows/release.yml \
-  --source-ref refs/tags/<tag>
+  --source-ref refs/tags/<tag> \
+  --source-digest <exact-tagged-commit>
 ```
+
+- Check every downloaded asset's size and SHA256 against the release API.
+- Check updater versions, filenames, sizes and SHA512 against downloaded files.
+- Verify every runnable artifact's provenance, including its exact source,
+  signer, workflow, ref and run. A tag name alone is a mutable reference.
+- Windows/macOS remain unsigned. Provenance is not code signing or notarization.
+- macOS auto-update retains its signature-validation limitation.
 
 ## Clean Build
 

@@ -28,7 +28,9 @@ release that looks finished and is not.
    git tag -a vX.X.X -m "Folia X.X.X"
    git push origin vX.X.X
    ```
-3. **Dispatch against the tag ref, never a branch:**
+3. Check whether the tag push started the release workflow. Do not dispatch a
+   duplicate run. If no run exists for the exact tag and commit, dispatch
+   **against the tag ref, never a branch:**
    ```bash
    gh workflow run release.yml --repo lostinsea/folia --ref vX.X.X
    ```
@@ -47,11 +49,16 @@ release that looks finished and is not.
    gh attestation verify Folia-Setup-X.X.X.exe \
      --repo lostinsea/folia \
      --signer-workflow lostinsea/folia/.github/workflows/release.yml \
-     --source-ref refs/tags/vX.X.X
+     --source-ref refs/tags/vX.X.X \
+     --source-digest <exact-tagged-commit>
    ```
-6. Confirm the update manifest still describes the artifact that was uploaded —
-   the sha512 in `latest.yml` against the installer's own. See "Cutting a
-   release" in [`BUILD.md`](BUILD.md).
+6. Download every asset. Check sizes and SHA256 against GitHub's asset digests.
+   Check every updater manifest's version, filenames, sizes and base64 SHA512
+   against its downloaded target. Verify provenance for every runnable binary,
+   pinned to the exact commit as well as the tag, workflow and run.
+7. Inspect the actual Windows package and view its UI using an isolated profile.
+   Do not install it unless installation is separately authorized. Linux/macOS
+   builds and attestations do not prove live UI behavior on Windows.
 
 **Do not patch a gap in that sequence with `npm run release`.** A locally cut
 release carries no attestation, so uploading over an attested tag replaces

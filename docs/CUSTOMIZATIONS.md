@@ -27,6 +27,26 @@ This approach means after an upstream merge, you only need to ensure these files
 
 ## Custom Features
 
+### Reading drawers, table headers and update notices
+
+- The left drawer remembers `closed`, `toc` or `notes` in `readingSidePanel`.
+- Only user toggles, close buttons and Escape save that choice.
+- Startup restores it without moving focus. TOC and All Notes remain exclusive.
+- `notesVisible` still controls inline annotations, not the All Notes drawer.
+- Long tables keep their original header visible until that table ends.
+- Horizontal scrolling, column sizing, links and selection use the same table.
+- A nested table uses its own header; its enclosing header resumes afterward.
+- The renderer caches table boundaries after layout changes. Settled scrolling
+  searches that cache and moves one header; it does not scan or measure tables.
+- Header movement uses a paused animation, not style writes that would repeatedly
+  invalidate the TOC. Print uses the header's natural position.
+- File Updated has no expiry. Dismiss, accepted Reload or leaving/closing its
+  document clears it. Cancelling a dirty Reload keeps both notice and edits.
+- Dark Mermaid connectors and sequence messages use 2px lines. Light mode,
+  authored widths, thick/invisible edges, dashes, labels and markers stay intact.
+- `npm run test:reading` covers real process restarts, actual watched-file updates,
+  table scroll boundaries and dark/light Mermaid rendering.
+
 ### File-extension policies
 
 `src/file-helpers-core.js` owns the Markdown/Mermaid extension groups used by
@@ -277,7 +297,7 @@ Two small upstream edits were unavoidable:
   global today, but the overlay must not rely on that: renderer's
   `fileUpdateNotificationShown` flag is module-private, so a DOM-only dismissal
   would leave it stuck `true` and silently swallow the next external-change
-  notification for up to 10 seconds.
+  notification until the real dismissal resets it.
 
 Regression coverage: `npm run test:tabs` (see below).
 

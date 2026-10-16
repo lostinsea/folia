@@ -72,6 +72,26 @@ app.whenReady().then(async () => {
 });
 ```
 
+## Sticky table-header scrolling
+
+- Baseline: `66ac16ea`; candidate uses the same locked dependencies and fixture.
+- Runtime: Windows, Electron 43.4.1. Open TOC, narrow 850 x 800 window,
+  two long tables, a horizontally overflowing table, prose and five diagrams.
+- Three serial runs per version, interleaved baseline/candidate. Each run uses
+  an isolated profile and 90 bidirectional/jump frames per scroll owner.
+- Normal view uses 100% zoom; split view uses 200%.
+- Median of the three frame-p95 samples: normal 32.1ms baseline / 32.3ms
+  candidate (+0.2ms); split 32.2ms / 32.3ms (+0.1ms).
+- Candidate table callback p95: 0.10ms in each run. This is a real added cost,
+  not a zero-overhead claim. Settled scrolling reads no table/heading geometry
+  and performs no viewer scans. No 50ms long tasks were recorded.
+- These are local programmatic-scroll measurements, not a 60fps certificate
+  or a measurement of cache rebuilds. Native-wheel behavior has a separate
+  functional check.
+- Repeat the bounded probe with `FOLIA_READING_PERF=1` and
+  `node test\test-reading.js`. Raw paired samples are retained in the reading
+  feature session's `reading-performance.json`.
+
 ## Left TOC tracking
 
 ### Method and scope

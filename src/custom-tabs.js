@@ -1328,11 +1328,11 @@
     }
     // renderer.js stopped exporting the resetter. We can hide the toast, but
     // its module-private `fileUpdateNotificationShown` flag stays true, so the
-    // next external change is silently swallowed for up to 10s. Warn loudly
+    // next external change is silently swallowed. Warn loudly
     // rather than pretend this worked.
     console.error(
       "[CustomTabs] window.dismissFileUpdateNotification is missing - " +
-        "update prompts will be suppressed until renderer's timer expires. " +
+        "update prompts will be suppressed until its state is reset. " +
         "Re-add the export in renderer.js (see docs/CUSTOMIZATIONS.md).",
     );
     const toast = document.getElementById("fileUpdateToast");
@@ -3124,7 +3124,10 @@
         window.stopFileTrackingIntent();
       }
       tabs.splice(tabIndex, 1);
-      if (tab.id === activeTabId) activeTabForMutations = null;
+      if (tab.id === activeTabId) {
+        activeTabForMutations = null;
+        dismissUpdatePrompt();
+      }
       bumpDocumentRevision();
 
       // Switch to another tab if closing active

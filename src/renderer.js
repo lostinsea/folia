@@ -1239,7 +1239,6 @@ let fileTrackingResumeHold = 0;
 let fileSelectionGeneration = 0;
 let activeFileSelectionGeneration = 0;
 let fileUpdateNotificationShown = false;
-let fileUpdateDismissTimeout = null;
 
 // Editor state
 let isEditMode = false;
@@ -3419,11 +3418,6 @@ function showFileUpdateNotification() {
 
   toast.classList.add('show');
   fileUpdateNotificationShown = true;
-
-  // Auto-dismiss after 10 seconds
-  fileUpdateDismissTimeout = setTimeout(() => {
-    dismissFileUpdateNotification();
-  }, 10000);
 }
 
 function dismissFileUpdateNotification() {
@@ -3432,11 +3426,6 @@ function dismissFileUpdateNotification() {
     toast.classList.remove('show');
   }
   fileUpdateNotificationShown = false;
-
-  if (fileUpdateDismissTimeout) {
-    clearTimeout(fileUpdateDismissTimeout);
-    fileUpdateDismissTimeout = null;
-  }
 }
 
 function reloadCurrentFile() {
@@ -5296,6 +5285,128 @@ const tocTracking = (() => {
   return { invalidate, setEnabled };
 })();
 
+// Horizontal table wrappers own overflow, so CSS sticky cannot follow the
+// document scroller. Move the original header without changing its layout or
+// writing style attributes on scroll (the TOC observes those for reflow).
+const tableHeaderTracking = (() => {
+  let entries = [];
+  let active = null;
+  let frame = 0;
+  let dirty = true;
+  let printing = false;
+  let scroller = null;
+  const observedTables = new Set();
+
+  function schedule() {
+    if (!printing && !frame) frame = requestAnimationFrame(flush);
+  }
+
+  function invalidate() {
+    dirty = true;
+    schedule();
+  }
+
+  function resetActive() {
+    active?.animation?.cancel();
+    if (active) active.animation = null;
+    active = null;
+  }
+
+  function measure() {
+    // Measure natural geometry, never the previously translated header.
+    resetActive();
+    scroller = getViewerScroller();
+    const scale = scrollerScale(scroller);
+    const origin = scroller.getBoundingClientRect().top + scroller.clientTop * scale;
+    const offset = scroller.scrollTop;
+    const zoom = Number(getComputedStyle(viewer).zoom) || 1;
+    entries = [];
+    const tables = new Set();
+    for (const table of viewer.querySelectorAll('table')) {
+      const header = table.tHead;
+      if (!header?.rows.length || table.closest('thead') ||
+          !table.checkVisibility({ visibilityProperty: true, opacityProperty: true })) continue;
+      tables.add(table);
+      if (!observedTables.has(table)) resize.observe(table);
+      const head = header.getBoundingClientRect();
+      const bounds = table.getBoundingClientRect();
+      const travel = (bounds.bottom - head.bottom) / scale;
+      if (head.height <= 0 || travel <= 0) continue;
+      entries.push({
+        table, header, top: (head.top - origin) / scale + offset,
+        travel, height: head.height / scale,
+        translation: travel * scale / zoom, animation: null,
+      });
+    }
+    for (const table of observedTables) if (!tables.has(table)) resize.unobserve(table);
+    observedTables.clear();
+    for (const table of tables) observedTables.add(table);
+    const byTable = new Map(entries.map(entry => [entry.table, entry]));
+    for (const entry of entries) {
+      let parent = entry.table.parentElement.closest('table');
+      while (parent && !byTable.has(parent)) parent = parent.parentElement.closest('table');
+      entry.parent = byTable.get(parent) || null;
+    }
+    entries.sort((a, b) => a.top - b.top);
+    dirty = false;
+  }
+
+  function flush() {
+    frame = 0;
+    if (printing) return;
+    if (dirty) measure();
+    const top = scroller.scrollTop;
+    let low = 0;
+    let high = entries.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (entries[middle].top < top) low = middle + 1;
+      else high = middle;
+    }
+    let next = entries[low - 1] || null;
+    // Prefer the inner table while reading it, then resume its enclosing table.
+    while (next && top >= next.top + next.travel + next.height) next = next.parent;
+    if (next !== active) {
+      resetActive();
+      active = next;
+      if (active) {
+        active.animation = active.header.animate([
+          { transform: 'translateY(0)' },
+          { transform: `translateY(${active.translation}px)` },
+        ], { duration: active.travel, fill: 'both' });
+        active.animation.pause();
+      }
+    }
+    if (active) active.animation.currentTime = Math.min(active.travel, Math.max(0, top - active.top));
+  }
+
+  const resize = new ResizeObserver(invalidate);
+  const mutations = new MutationObserver(invalidate);
+  mutations.observe(viewer, {
+    subtree: true, childList: true, characterData: true, attributes: true,
+    attributeFilter: ['class', 'style', 'hidden', 'open', 'width', 'height'],
+  });
+  mutations.observe(contentWrapper, { attributes: true, attributeFilter: ['class', 'style'] });
+  resize.observe(viewer);
+  resize.observe(contentWrapper);
+  viewer.addEventListener('scroll', schedule, { passive: true });
+  contentWrapper.addEventListener('scroll', schedule, { passive: true });
+  viewer.addEventListener('load', invalidate, true);
+  viewer.addEventListener('error', invalidate, true);
+  window.addEventListener('resize', invalidate);
+  document.fonts.addEventListener('loadingdone', invalidate);
+  document.fonts.addEventListener('loadingerror', invalidate);
+  window.addEventListener('beforeprint', () => {
+    printing = true;
+    cancelAnimationFrame(frame);
+    frame = 0;
+    resetActive();
+  });
+  window.addEventListener('afterprint', () => { printing = false; invalidate(); });
+  schedule();
+  return { invalidate };
+})();
+
 // Collapsed state, persisted across re-renders.
 //
 // Keyed by document *and* heading id. A bare heading-id key leaked state
@@ -5438,61 +5549,93 @@ function expandToHeader(headerId) {
   if (expandedAny) applyTableBreakout();
 }
 
-// Index panel toggle
-function setIndexVisible(visible) {
-  if (indexPanel.classList.contains('visible') === visible) return;
-  captureZoomAnchor();
+// Store the final user choice, not intermediate closes during mutual exclusion.
+const SIDE_PANEL_KEY = 'readingSidePanel';
+function setSidePanel(mode, { restoring = false, persist = true } = {}) {
+  const visible = mode === 'toc';
+  const notesVisible = mode === 'notes';
+  const restoreFocus = (!visible && indexPanel.contains(document.activeElement)) ||
+    (!notesVisible && notesPanel.contains(document.activeElement));
+  if (!restoring) captureZoomAnchor();
   const scroller = getViewerScroller();
   const overflowAnchor = scroller.style.overflowAnchor;
   // The existing reading-anchor restore owns this reflow. Native scroll
   // anchoring must not move first and make that restore look superseded.
   scroller.style.overflowAnchor = 'none';
-  const restoreFocus = !visible && indexPanel.contains(document.activeElement);
   indexPanel.classList.toggle('visible', visible);
   indexPanel.inert = !visible;
   toggleIndexBtn.setAttribute('aria-expanded', String(visible));
   tocTracking.setEnabled(visible);
+  notesPanel.classList.toggle('visible', notesVisible);
+  notesPanel.inert = !notesVisible;
+  toggleNotesBtn.setAttribute('aria-expanded', String(notesVisible));
+  if (notesVisible) updateNotesList();
+  else closeNotesPanel();
+  if (!restoring && persist) {
+    try { localStorage.setItem(SIDE_PANEL_KEY, mode); }
+    catch (error) { console.warn('Could not save reading panel preference:', error); }
+  }
   requestAnimationFrame(() => {
     if (scroller.style.overflowAnchor === 'none') scroller.style.overflowAnchor = overflowAnchor;
   });
-  if (restoreFocus) menuBtn.focus({ preventScroll: true });
+  if (restoreFocus && !restoring) menuBtn.focus({ preventScroll: true });
+}
+
+function setIndexVisible(visible) {
+  setSidePanel(visible ? 'toc' : 'closed', { persist: false });
 }
 
 closeIndexBtn.setAttribute('aria-label', i18n('title.tocClose'));
 toggleIndexBtn.addEventListener('click', () => {
   fileMenu.classList.remove('visible');
   const visible = !indexPanel.classList.contains('visible');
-  if (visible) closeNotesPanel();
-  setIndexVisible(visible);
+  setSidePanel(visible ? 'toc' : 'closed');
   if (visible) closeIndexBtn.focus({ preventScroll: true });
 });
 
 closeIndexBtn.addEventListener('click', () => {
-  setIndexVisible(false);
+  setSidePanel('closed');
 });
 indexPanel.addEventListener('keydown', event => {
   if (event.key !== 'Escape') return;
   event.preventDefault();
-  setIndexVisible(false);
+  setSidePanel('closed');
 });
 
 // Notes panel toggle
 toggleNotesBtn.addEventListener('click', () => {
   fileMenu.classList.remove('visible');
   const willOpen = !notesPanel.classList.contains('visible');
-  if (willOpen) setIndexVisible(false);
-  notesPanel.classList.toggle('visible');
-  if (willOpen) updateNotesList();
+  setSidePanel(willOpen ? 'notes' : 'closed');
 });
 
 function closeNotesPanel() {
   notesPanel.classList.remove('visible');
+  notesPanel.inert = true;
+  toggleNotesBtn.setAttribute('aria-expanded', 'false');
   // Reset search state
   notesSearchBar.classList.remove('visible');
   notesSearchToggle.classList.remove('active');
   notesSearchInput.value = '';
 }
-closeNotesBtn.addEventListener('click', closeNotesPanel);
+closeNotesBtn.addEventListener('click', () => setSidePanel('closed'));
+notesPanel.addEventListener('keydown', event => {
+  if (event.key !== 'Escape') return;
+  event.preventDefault();
+  setSidePanel('closed');
+});
+try {
+  indexPanel.style.transition = notesPanel.style.transition = 'none';
+  const savedPanel = localStorage.getItem(SIDE_PANEL_KEY);
+  setSidePanel(savedPanel === 'toc' || savedPanel === 'notes' ? savedPanel : 'closed', { restoring: true });
+} catch (error) {
+  console.warn('Could not restore reading panel preference:', error);
+  setSidePanel('closed', { restoring: true });
+}
+requestAnimationFrame(() => requestAnimationFrame(() => {
+  indexPanel.style.removeProperty('transition');
+  notesPanel.style.removeProperty('transition');
+}));
 
 function updateNotesList() {
   const allNotes = viewer.querySelectorAll('.noted-text[data-note-id], .noted-image[data-note-id], .note-label[data-note-id]');
@@ -12782,7 +12925,7 @@ window.setUnsavedState = function (value) {
 // It is already an implicit global today (classic script), but the overlay
 // must not depend on that: `fileUpdateNotificationShown` is module-private,
 // so a DOM-only dismissal would leave it stuck true and silently swallow the
-// next change notification for up to 10s.
+// next change notification until a real dismissal resets the state.
 window.dismissFileUpdateNotification = dismissFileUpdateNotification;
 window.requestCurrentFileReload = reloadCurrentFile;
 window.beginFileOpen = beginFileOpen;
