@@ -44,9 +44,13 @@ section is kept here so the register has a visible edge.
   installer folder.
 - The reviewed table/TOC and Mermaid-label work was integrated as `f7ff2d8a`
   from `76af7fd7`; both streams are together on the release branch.
-- Stable version 0.8.0 is prepared, not published. The integrated Windows
-  package, focused layout/reading tests and individual regression proofs pass.
-  Independent final review and the published-release checks remain.
+- Stable version 0.8.0 is prepared, not published. The combined Windows app was
+  viewed with an isolated profile; focused layout/reading tests and individual
+  regression proofs pass.
+- First combined review: Sol found that the installer fallback missed a running
+  old `Folia.exe`; Luna found no significant issue. The installer was corrected
+  and rebuilt; strict packaging passed and its new R952 revert was proven.
+  Fresh independent review and published-release checks remain.
 - `reading-improvements` is published as v0.7.0.
 - `mermaid-dark-boundaries` is published as v0.7.1 after the user's local test.
   Completed release and verification records are below.

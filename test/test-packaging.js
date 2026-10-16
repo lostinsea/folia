@@ -4673,14 +4673,67 @@ async function main() {
       );
     }
     const legacyInstallerInclude = path.join(ROOT, "build", "installer.nsh");
+    const installerSource = fs.existsSync(legacyInstallerInclude)
+      ? fs.readFileSync(legacyInstallerInclude, "utf8")
+      : "";
     check(
       "the assisted installer keeps the existing install folder while branding new shortcuts",
       pkg.build.nsis.include === "build/installer.nsh" &&
         pkg.build.nsis.shortcutName === pkg.productName &&
         fs.existsSync(legacyInstallerInclude) &&
         /!undef APP_FILENAME\s*!define APP_FILENAME "Folia"/.test(
-          fs.readFileSync(legacyInstallerInclude, "utf8"),
+          installerSource,
         ),
+    );
+
+    // electron-builder's ordinary macro covers APP_EXECUTABLE_FILENAME
+    // (Markaloo.exe); an upgrade also has to stop Folia.exe when PowerShell is
+    // unavailable. Keep the current executable on the vendor-tested path and
+    // make the legacy path use its FIND_PROCESS/KILL_PROCESS fallback rather
+    // than adding a second, divergent process implementation.
+    const customRunningCheck =
+      /!macro customCheckAppRunning\b[\s\S]*?!macroend/.exec(installerSource)?.[0] || "";
+    const legacyGuardMatch =
+      /\$\{(?:if|AndIf)\}\s+\$\{FileExists\}\s+"\$INSTDIR\\Folia\.exe"/i.exec(
+        customRunningCheck,
+      );
+    const legacyGuardAt = legacyGuardMatch
+      ? legacyGuardMatch.index
+      : -1;
+    const currentRunningCheckAt = customRunningCheck.indexOf(
+      "!insertmacro _CHECK_APP_RUNNING",
+    );
+    check(
+      "the NSIS custom running-app check delegates the current Markaloo executable to electron-builder",
+      currentRunningCheckAt >= 0 &&
+        customRunningCheck.indexOf("!macro customCheckAppRunning") === 0,
+      JSON.stringify({ currentRunningCheckAt }),
+    );
+    const legacyFindCount = (
+      customRunningCheck.match(/!insertmacro\s+FIND_PROCESS\s+"Folia\.exe"\s+\$R0/g) || []
+    ).length;
+    const gracefulLegacyKill =
+      /!insertmacro\s+KILL_PROCESS\s+"Folia\.exe"\s+0/.test(customRunningCheck);
+    const forcedLegacyKill =
+      /!insertmacro\s+KILL_PROCESS\s+"Folia\.exe"\s+1/.test(customRunningCheck);
+    check(
+      "the NSIS fallback closes a legacy Folia.exe from the old install folder with the normal prompt and retry path",
+      legacyGuardAt >= 0 &&
+        legacyFindCount >= 3 &&
+        gracefulLegacyKill &&
+        forcedLegacyKill &&
+        /MessageBox\s+MB_OKCANCEL\|MB_ICONEXCLAMATION\s+"\$\(appRunning\)"/.test(
+          customRunningCheck,
+        ) &&
+        /MessageBox\s+MB_RETRYCANCEL\|MB_ICONEXCLAMATION\s+"\$\(appCannotBeClosed\)"/.test(
+          customRunningCheck,
+        ),
+      JSON.stringify({
+        legacyGuardAt,
+        legacyFindCount,
+        gracefulLegacyKill,
+        forcedLegacyKill,
+      }),
     );
 
     // release.js spells the expected filenames out in its dry-run listing and

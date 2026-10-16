@@ -3388,6 +3388,23 @@ const REVERTS = [
     ],
   },
   {
+    id: "R952",
+    suite: "test:packaging",
+    what: "look for Markaloo.exe instead of the running legacy Folia.exe on the no-PowerShell installer fallback",
+    file: path.join(ROOT, "build", "installer.nsh"),
+    from: '${AndIf} ${FileExists} "$INSTDIR\\Folia.exe"',
+    to: '${AndIf} ${FileExists} "$INSTDIR\\Markaloo.exe"',
+    expect: [
+      /^the NSIS fallback closes a legacy Folia\.exe from the old install folder with the normal prompt and retry path$/,
+    ],
+    mustPass: [
+      /^the NSIS custom running-app check delegates the current Markaloo executable to electron-builder$/,
+      /^the assisted installer keeps the existing install folder while branding new shortcuts$/,
+    ],
+    requireMustPassAssertions: true,
+    requireExactFailures: true,
+  },
+  {
     id: "R947",
     suite: "test:profile",
     what: "omit the profile directory on first install before Electron selects it",
