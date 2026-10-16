@@ -79,8 +79,16 @@ section is kept here so the register has a visible edge.
   p95 about 0.1ms, zero geometry/scans/long tasks. No speedup or free-work claim.
   Configured-source costs remain outside this bounded measurement.
   The current 1.5px/2px revision is not separately benchmarked.
-- A private `0.7.1-local.1` test build is being prepared for the user's diagrams.
-  Installation waits for specific consent and the user saving/closing Folia.
+- The private `0.7.1-local.1` portable and NSIS builds are ready from reviewed
+  source `29df561ccbe2aee3d7881fbed37a94919342fa75`.
+  Strict archive checks pass 414/414; packaged runtime checks pass 8/8 with
+  production isolation, dark/light rerender and normal/high zoom.
+  Shipped source hashes match, and the packaged captures have been viewed.
+  Evidence remains in the session's `private-widths-*` receipts and
+  `tmp/private-widths-packaged-r1/`.
+  The installer is `dist/Folia-Setup-0.7.1-local.1.exe`; it is unsigned.
+  Nothing is installed. Installation waits for specific consent and the user
+  saving/closing the running Folia app. User diagrams have not been tested.
   No push, main integration, release, tag change or public updater delivery is authorized.
 - Existing P2 and nonblocking follow-ups keep their recorded scope and status.
 
