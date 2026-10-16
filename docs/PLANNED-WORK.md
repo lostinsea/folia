@@ -39,8 +39,8 @@ section is kept here so the register has a visible edge.
 ## Current workset
 
 - `reading-improvements` is published as v0.7.0. Its completed entry is below.
-- `mermaid-dark-boundaries` has a reviewed user-directed width revision on
-  the reading feature branch, not integrated into `main`.
+- `mermaid-dark-boundaries` is preparing stable patch release `0.7.1` on
+  the reading feature branch, not yet integrated into `main`.
 - Astra source investigation and the viewed Electron PoC are complete.
   Sol/Luna reviews found no blocking issues in the earlier 2px/3px correction.
 - Scope: darker-theme shape/container outlines and connecting lines, not text
@@ -87,13 +87,14 @@ section is kept here so the register has a visible edge.
   Evidence remains in the session's `private-widths-*` receipts and
   `tmp/private-widths-packaged-r1/`.
   The installer is `dist/Folia-Setup-0.7.1-local.1.exe`; it is unsigned.
-  Specific unsigned machine-wide installation consent and user save/close
-  confirmation are received; the live process check confirms Folia is closed.
-  The ordinary installer launch was refused with Windows error `0x800702E4`
-  (elevation required). Nothing is installed yet. The user must open the verified
-  installer and handle administrator/security prompts; no workaround is used.
-  User diagrams have not been tested.
-  No push, main integration, release, tag change or public updater delivery is authorized.
+  The user handled the Windows administrator handoff and installed it.
+  Installed EXE and ASAR hashes match the approved private build, and shipped
+  source/resource hashes match. This does not inspect the user's documents.
+- The user reports their diagrams look good and explicitly says "proceed".
+  Stable `0.7.1` integration and publication are authorized. Promotion changes
+  version metadata, not accepted product code. No further PC installation is
+  authorized; stable package and downloaded release verification are pending.
+  Independent Sol/Luna release-preparation feedback finds no significant issues.
 - Existing P2 and nonblocking follow-ups keep their recorded scope and status.
 
 ## Update protocol
