@@ -38,51 +38,8 @@ section is kept here so the register has a visible edge.
 
 ## Current workset
 
-### `reading-improvements` - PACKAGE VERIFIED / v0.7.0 (2026-10-15)
-
-- Sole source/docs/register writer: isolated `folia-reading-improvements` worktree.
-- Reviewed feature: `d134e71c80ac7f077a67090b7be4afe5a304555c`.
-- Refreshed main: `66ac16ea`; latest published version: v0.6.0.
-- User authorized normal integration, owner push and publication of this workset.
-  Installation, OS changes and protection bypass remain out of scope.
-- Scope: remembered left drawer, sticky document table headers, persistent
-  current-file update notice, clearer dark Mermaid connectors.
-- Astra investigated source/lifecycle; independent Sol6.1/high and Luna6/high
-  reviewed design and implementation. Both final reviews have no significant
-  findings. Luna's earlier nested-header finding is fixed and covered.
-- Confirmed user policy: show File Updated only for the visible affected
-  document; clear it on committed departure or closing that document.
-- Expanded focused suite: 50/50, including nested headers, real native wheel,
-  print flow, dark/light high zoom, popout/PDF and former-owner/background
-  notice rejection. Real separate-process drawer restarts use one owned profile.
-- TOC passes 30/30, tables 215/215, theme 398/398 and retained browser-isolation
-  controls 40/40, including the no-empty-Prism overlay checks.
-- Fresh Windows portable and Setup builds complete at version 0.7.0.
-- Strict packaging: 414 passed / 0 failed. All shipped source/library/font/asset
-  bytes match the worktree; extra resources and updater repository match.
-- Actual packaged UI: 29/29, including original header bounds, native wheel,
-  normal/split 100/200 zoom, current TOC, dark/light authored Mermaid styles,
-  real watcher lifetime/actions/ownership and separate-process drawer restarts.
-  Release captures were viewed. Diagnostic logging remains off.
-- Release-candidate source checks: reading 50/50 and TOC 30/30.
-- Independent Sol6.1/high and Luna6/high release reviews have no blocker.
-  Luna required exact workflow-run provenance and downloaded CI-payload checks;
-  both remain publication gates, not claims made by the local package.
-- The broader Mermaid suite fails before
-  its first assertion on both untouched `66ac16ea` and the candidate; retain
-  that baseline limit rather than weakening renderer isolation.
-- R932-R935 are individually exact PROVEN with passing controls; source restored.
-- Final-source matched scroll probes show +0.2ms normal / +0.1ms split in median
-  frame-p95, 0.10ms table callback p95, no settled geometry reads or viewer scans.
-- Actual Electron captures were viewed at normal/high zoom and both themes,
-  including sticky original headers, the retained notice and isolated popout.
-- This worktree owns serialized release preparation and integration. Earlier
-  worktrees and their evidence stay untouched; no parallel runtime writers.
-- Evidence: `release-070-*` logs/JSON in session `b0dbcd9e` artifacts, plus
-  viewed captures in this worktree's `tmp/release-070-local-r1`.
-- Publication, downloaded-asset/feed/provenance checks and the actual downloaded
-  Windows payload are still pending. No installed-app test is claimed.
-- Light Mermaid styling, document authority and the cheap TOC scroll path remain.
+- `reading-improvements` is published as v0.7.0. Its completed entry is below.
+- Existing P2 and nonblocking follow-ups keep their recorded scope and status.
 
 ## Update protocol
 
@@ -6928,6 +6885,55 @@ audit documents and the commit history.
 | F43 / N18 | `1132fc7` | Hardened block-placeholder assembly (per-render nonce tokens, so a decoy placeholder in a code span cannot capture the real diagram) and restored the Mermaid source attribute. |
 | `w2-ci`, `w2-docs`, `w2-f23`, `w2-f25` | various, through `a80c813` | The wave-2 checkpoint: security, hygiene, CI and payload work. All four are `w2-release` prerequisites and are **done**. |
 | Release 0.4.0 | `eae1429` | The release the register's remaining work builds on top of. Check `package.json` for the version actually on `main`. |
+
+### `reading-improvements` - released 0.7.0 / COMPLETE (2026-10-15)
+
+- [Folia 0.7.0](https://github.com/lostinsea/folia/releases/tag/v0.7.0) is public
+  and latest. Exact tagged source:
+  [`f2fb46dd2d6366fb7279b39a4ad3df8cb5d5d7ec`](https://github.com/lostinsea/folia/commit/f2fb46dd2d6366fb7279b39a4ad3df8cb5d5d7ec).
+  Reviewed feature: `d134e71c80ac7f077a67090b7be4afe5a304555c`.
+- [Release run 38848188455](https://github.com/lostinsea/folia/actions/runs/38848188455)
+  passed all platform builds, attestations and publication. The tag push started
+  it; no duplicate dispatch or tag replacement was used.
+- Shipped: remembered closed/TOC/Notes drawer, original sticky table headers,
+  persistent visible-owner File Updated notice and 2px dark Mermaid connectors.
+  The notice clears on explicit Dismiss, accepted Reload, committed departure
+  or affected-document close. Authored diagram styles and light mode remain.
+- Astra investigated; independent Sol6.1/high and Luna6/high reviewed design,
+  implementation and release preparation. Final reviews have no blocker.
+  Luna's nested-header finding is fixed and regression-covered.
+- Focused source suite: 50/50. TOC: 30/30; tables: 215/215; theme: 398/398;
+  isolation/empty-Prism controls: 40/40. Release-candidate reading/TOC reruns
+  pass. R932-R935 are individually exact PROVEN with passing controls.
+- Strict built-archive checks pass 414/0 locally and in the Windows release job.
+  The downloaded portable has the same executable and archive as the checked
+  local package. All shipped source/library/font/asset bytes, extra resources,
+  version, production isolation flags and updater repository match.
+- Actual local and downloaded Windows payloads each pass 29/29: real process
+  drawer restarts, native wheel, table boundaries, normal/split 100/200 zoom,
+  current TOC, dark/light authored Mermaid styles and real watcher notice
+  lifetime/actions/owner changes. Captures were viewed. Diagnostics stay off.
+- Every asset was downloaded and matched by size and SHA256. All three feeds
+  match target versions, filenames, sizes and SHA512. All five runnable assets'
+  provenance verifies exact source, signer, workflow, tag and run attempt.
+  Feeds and blockmaps are digest-checked, not provenance-attested.
+- Matched scrolling showed no observed cadence regression on the tested
+  Windows/Electron runtime: median frame-p95 +0.2ms normal / +0.1ms split;
+  added table callback p95 0.10ms. Settled scrolling has no geometry reads or
+  viewer scans. These are local measurements, not a universal FPS guarantee.
+- The old Mermaid harness still fails before its first assertion on unchanged
+  main and candidate. Ordinary CI's tab harness stops at 33/34 with an undefined
+  legacy renderer IPC `invoke`; no full ordinary-CI-green claim is made.
+  Existing P2 follow-ups remain deferred; production isolation is not weakened.
+- Windows/macOS remain unsigned; macOS automatic updates retain their signature
+  limitation. Linux/macOS artifacts were built and verified, not live-UI tested
+  on this Windows PC. No app was installed or updated.
+- Evidence: `release-070-*` logs/JSON/downloads in session `b0dbcd9e` artifacts;
+  viewed captures in `tmp/release-070-local-r1` and
+  `tmp/release-070-published-ui-r1`. Initial verifier-initialization failures
+  are retained; both passed serial retries. Previous worktrees, the running
+  installed app and private evidence stayed untouched. No force push,
+  protection bypass or global credential change was used.
 
 ### `left-toc-tracking` — released 0.6.0 · COMPLETE
 
