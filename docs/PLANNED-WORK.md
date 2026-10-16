@@ -87,8 +87,12 @@ section is kept here so the register has a visible edge.
   Evidence remains in the session's `private-widths-*` receipts and
   `tmp/private-widths-packaged-r1/`.
   The installer is `dist/Folia-Setup-0.7.1-local.1.exe`; it is unsigned.
-  Nothing is installed. Installation waits for specific consent and the user
-  saving/closing the running Folia app. User diagrams have not been tested.
+  Specific unsigned machine-wide installation consent and user save/close
+  confirmation are received; the live process check confirms Folia is closed.
+  The ordinary installer launch was refused with Windows error `0x800702E4`
+  (elevation required). Nothing is installed yet. The user must open the verified
+  installer and handle administrator/security prompts; no workaround is used.
+  User diagrams have not been tested.
   No push, main integration, release, tag change or public updater delivery is authorized.
 - Existing P2 and nonblocking follow-ups keep their recorded scope and status.
 
