@@ -50,7 +50,8 @@ section is kept here so the register has a visible edge.
 - First combined review: Sol found that the installer fallback missed a running
   old `Folia.exe`; Luna found no significant issue. The installer was corrected
   and rebuilt; strict packaging passed and its new R952 revert was proven.
-  Fresh independent review and published-release checks remain.
+  Fresh independent Sol, Terra and Luna reviews found no significant issues.
+  Publishing and the published-release checks remain.
 - `reading-improvements` is published as v0.7.0.
 - `mermaid-dark-boundaries` is published as v0.7.1 after the user's local test.
   Completed release and verification records are below.
