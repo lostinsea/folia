@@ -94,6 +94,9 @@ app.whenReady().then(async () => {
 
 ## Dark Mermaid boundary styling
 
+- These measurements cover product commit `18dd44b8` and its 2px/3px widths.
+  The later user-selected 1.5px/2px revision keeps the same styling path, but
+  has not been separately benchmarked. Do not relabel these samples as new bytes.
 - Machine: Windows, AMD EPYC 7763, 32 logical processors.
   Runtime: Electron 43.4.1, Mermaid 11.17.0.
 - Baseline: `cf12589ebf5b664e98185ed7f7e3413b8c5fc3e4`.
@@ -120,7 +123,7 @@ app.whenReady().then(async () => {
 - Normal view uses 100% zoom; split view uses 200%. These local measurements
   do not prove all document sizes, rebuild costs or native-wheel frame rates.
 - Evidence: the reading session's `mermaid-boundary-performance-final.json`
-  (unconditional parse) and `mermaid-boundary-performance-fast.json` (current code).
+  (unconditional parse) and `mermaid-boundary-performance-fast.json` (2px/3px source).
   The bounded probe uses `FOLIA_READING_PERF=1 node test\test-reading.js`.
 
 ## Left TOC tracking

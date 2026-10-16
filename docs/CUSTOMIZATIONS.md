@@ -42,15 +42,20 @@ This approach means after an upstream merge, you only need to ensure these files
   invalidate the TOC. Print uses the header's natural position.
 - File Updated has no expiry. Dismiss, accepted Reload or leaving/closing its
   document clears it. Cancelling a dirty Reload keeps both notice and edits.
-- Dark Mermaid connectors and sequence messages use 2px lines. Light mode,
+- Normal dark Mermaid connectors and sequence messages use 1.5px lines. Light mode,
   authored widths, thick/invisible edges, dashes, labels and markers stay intact.
 - `npm run test:reading` covers real process restarts, actual watched-file updates,
   table scroll boundaries and dark/light Mermaid rendering.
 
 ### Dark Mermaid borders and lifelines
 
-- Ordinary 1px borders become 2px. Default 2px borders and lifelines become 3px.
-  Existing strokes of 3px or more keep their width.
+- Ordinary 1px borders become 1.5px. Default 2px borders and lifelines stay 2px.
+  Existing stronger border strokes keep their width.
+- Normal arrows and non-arrowed connections use 1.5px. This includes shared
+  flowchart/class/state/ER/requirement/block edges, sequence messages and C4,
+  architecture, journey, timeline, tree, event-model, Ishikawa, Wardley and
+  railroad links. Git branch guides use 1.5px; bold commit connections keep
+  their intended width. Mindmap depth widths and data-sized links stay intact.
 - Faint neutral borders use muted `#74818f`. Semantic and status colors stay intact.
 - Coverage includes shape outlines, compartments and containers in flowcharts,
   block, class, ER, state, requirement and kanban diagrams.
@@ -70,14 +75,15 @@ This approach means after an upstream merge, you only need to ensure these files
   unified class renderer have native-render coverage; this does not repair old renderers.
 - Inline/class styles, stronger strokes and invisible strokes stay intact.
   Fill-only timeline/mindmap shapes and chart data gain no invented borders.
-- Styling runs once on newly rendered dark SVGs. Light mode and cache hits do
+- Border and connector styling runs once on newly rendered dark SVGs. Light mode and cache hits do
   no extra work. The same SVG styling follows preview, popout and export.
 - Marker-free source uses the actual native render type and has no authored
   configuration. Frontmatter/directives or a missing type use the public parser.
   These checks follow pinned Mermaid 11.17 syntax; body styles still keep ownership.
-- Styling adds render work, not scrolling work. The bounded matched fixture
-  shows no render/cadence regression; configured-source costs are not separately
-  measured. Method and numbers are in `docs/PERF-AUDIT.md`, not a zero-work claim.
+- Styling adds render work, not scrolling work. The earlier 2px/3px treatment's
+  bounded matched fixture showed no render/cadence regression; those measurements
+  are not a fresh benchmark of the current widths. Configured-source costs were
+  not separately measured. Method and numbers are in `docs/PERF-AUDIT.md`.
 
 ### File-extension policies
 

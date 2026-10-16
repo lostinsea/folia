@@ -128,9 +128,18 @@ const MERMAID_BOUNDARIES = [
   '.railroad-comment > ellipse', '.railroad-special > rect',
 ].join(',');
 
+const MERMAID_CONNECTORS = [
+  'path.edge-thickness-normal', 'path.relationshipLine', 'path.relation', 'path.transition',
+  ':is(line,path).messageLine0', ':is(line,path).messageLine1',
+  '.architecture-edges path.edge', 'line.task-line', 'line.treeView-node-line',
+  'path.em-relation', 'line.branch',
+  '.ishikawa line:is(.ishikawa-spine,.ishikawa-branch,.ishikawa-sub-branch)',
+  'line.wardley-link', 'line.wardley-pipeline-evolution-link', 'path.railroad-line',
+].join(',');
+
 function hasMermaidBoundaryStyle(config) {
   return Object.entries(config || {}).some(([key, value]) =>
-    key === 'theme' || key === 'themeCSS' || /border|stroke|color|style/i.test(key) ||
+    key === 'theme' || key === 'themeCSS' || /border|stroke|color|style|edgeWidth|lineThickness/i.test(key) ||
     (key === 'look' && value === 'handDrawn') ||
     (value && typeof value === 'object' && hasMermaidBoundaryStyle(value)));
 }
@@ -156,27 +165,34 @@ function hasInlineMermaidStroke(element, svg, property, type) {
 }
 
 /**
- * Strengthen default dark borders once, before the SVG is cached or displayed.
+ * Set dark border and connector defaults once, before the SVG is displayed.
  * Authored theme settings and inline/class styles keep ownership of their ink.
  */
 function applyMermaidDarkBoundaries(svg, parsed) {
   if (hasMermaidBoundaryStyle(parsed.config)) return;
   const type = parsed.diagramType.toLowerCase();
-  const elements = new Set(svg.querySelectorAll(MERMAID_BOUNDARIES));
+  const boundaries = new Set(svg.querySelectorAll(MERMAID_BOUNDARIES));
+  const connectors = new Set(svg.querySelectorAll(MERMAID_CONNECTORS));
   if (type === 'quadrantchart') {
-    svg.querySelectorAll('g.border > line').forEach(element => elements.add(element));
+    svg.querySelectorAll('g.border > line').forEach(element => boundaries.add(element));
   }
   if (type === 'c4') {
-    svg.querySelectorAll(':scope > g:not([class]) > rect').forEach(element => elements.add(element));
+    svg.querySelectorAll(':scope > g:not([class]) > rect').forEach(element => boundaries.add(element));
+    svg.querySelectorAll(':is(line,path):is([marker-start],[marker-end])').forEach(element => connectors.add(element));
+  }
+  if (type === 'timeline') {
+    svg.querySelectorAll('.lineWrapper > line[stroke-width="2"]').forEach(element => connectors.add(element));
   }
   const changes = [];
-  for (const element of elements) {
+  for (const element of new Set([...boundaries, ...connectors])) {
     if (element.closest('defs,marker,.state-start,.state-end,.statediagram-start,.statediagram-end')) continue;
+    const normalConnector = connectors.has(element);
+    if (normalConnector && element.matches('.edge-thickness-thick,.edge-thickness-invisible,[class*="edge-depth-"]')) continue;
     const participant = type === 'sequence' && element.closest('g.actor-top,g.actor-bottom');
     if (participant && !hasDefaultMermaidActorClasses(participant)) continue;
     const style = getComputedStyle(element);
     const width = parseFloat(style.strokeWidth);
-    if (!Number.isFinite(width) || width <= 0 || width >= 3 ||
+    if (!Number.isFinite(width) || width <= 0 || (!normalConnector && width >= 3) ||
         style.stroke === 'none' || style.strokeOpacity === '0' || style.opacity === '0') continue;
     // Quadrant borders are the one default emitted as inline CSS. Their authored
     // configuration was checked above; ordinary inline SVG styling still wins.
@@ -189,7 +205,10 @@ function applyMermaidDarkBoundaries(svg, parsed) {
     const rgb = style.stroke.match(/^rgb\((\d+), (\d+), (\d+)\)$/);
     const neutral = rgb && Math.max(...rgb.slice(1).map(Number)) < 128 &&
       Math.max(...rgb.slice(1).map(Number)) - Math.min(...rgb.slice(1).map(Number)) < 12;
-    changes.push({ element, width: ownWidth ? null : width < 2 ? 2 : 3, color: !ownColor && neutral });
+    changes.push({
+      element, width: ownWidth ? null : normalConnector ? 1.5 : Math.max(width, 1.5),
+      color: boundaries.has(element) && !ownColor && neutral
+    });
   }
   // Read styles first, then write. This never runs during scrolling or on cache hits.
   for (const { element, width, color } of changes) {
@@ -213,10 +232,7 @@ function getMermaidConfig(isDark) {
     // their own default (sequence diagrams rendered at 16px while flowcharts
     // rendered at 13px, an inconsistency visible side by side in one document).
     fontSize: MERMAID_FONT_PX,
-    themeCSS: '.nodeLabel { overflow-wrap: anywhere; }' + (isDark ? `
-      .edge-thickness-normal:not(.edge-thickness-thick):not(.edge-thickness-invisible), .messageLine0, .messageLine1,
-      .relationshipLine, .relation, .actor-line { stroke-width: 2px; }
-    ` : ''),
+    themeCSS: '.nodeLabel { overflow-wrap: anywhere; }',
     themeVariables: isDark ? MERMAID_DARK_THEME : MERMAID_LIGHT_THEME,
     flowchart: MERMAID_FLOWCHART,
     sequence: MERMAID_SEQUENCE

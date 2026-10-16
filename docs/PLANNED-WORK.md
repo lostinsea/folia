@@ -39,12 +39,12 @@ section is kept here so the register has a visible edge.
 ## Current workset
 
 - `reading-improvements` is published as v0.7.0. Its completed entry is below.
-- `mermaid-dark-boundaries` is complete on the reading feature branch, not yet
-  integrated into `main`.
-- Astra source investigation, the viewed Electron PoC and implementation are
-  complete. Independent Sol/Luna final reviews agree: no blocking findings.
-- Scope: darker-theme shape/container outlines and lifelines, not text or fills.
-  Ordinary 1px borders become 2px; default 2px borders/lifelines become 3px.
+- `mermaid-dark-boundaries` has a reviewed user-directed width revision on
+  the reading feature branch, not integrated into `main`.
+- Astra source investigation and the viewed Electron PoC are complete.
+  Sol/Luna reviews found no blocking issues in the earlier 2px/3px correction.
+- Scope: darker-theme shape/container outlines and connecting lines, not text
+  or fills. Ordinary borders and normal connectors use 1.5px; lifelines stay 2px.
   Faint neutral strokes gain contrast; stronger and authored styles stay intact.
 - Handdrawn/authored visual settings remain author-owned. Fill-only chart data
   gains no invented borders. Unrelated layout/curve settings do not opt out.
@@ -54,25 +54,34 @@ section is kept here so the register has a visible edge.
   opening-animation assertion failure on both released and corrected source.
 - Sol's native size-warning defect is fixed: optional metadata rejection logs a
   warning without discarding native output or valid neighbors. Its focused
-  controls and mutation proof pass. Full reading checks pass 198/198 and source
-  packaging checks pass 414/414. R685 and R936-R941 are individually proven;
-  anchors resolve on restored final source.
-- The muted `#74818f` treatment keeps 2px borders and 3px lifelines.
+  controls and mutation proof passed before the width revision. That source's
+  reading checks passed 198/198 and packaging checks passed 414/414.
+  Its proof results remain historical evidence, not new-width results.
+- The muted `#74818f` color remains approved.
   The user explicitly selected "Use this subtler version" after viewing its
   preview. This approves the appearance only, not a release or installation.
-  Final-source dark/light, high-zoom, participant, preview and popout captures
-  have been viewed. Source-matched visual and performance checks are complete.
+- The user then requested "Can we make borders 1.5px? and 2px instead of 2 and 3?"
+  This supersedes the earlier width choice. Combined native-render controls pass
+  246/246, including dark/light/dark, high zoom, special participants and popout.
+  R935/R936/R938/R942/R943 are individually proven on the revised source.
+  Independent Sol/Luna reviews agree: no significant issues. Updated dark/light,
+  high-zoom, special-participant and popout captures have been viewed.
+- The user also requested 1.5px arrows and other connecting lines, including
+  non-arrowed relationships. Lifelines remain a separate 2px default.
 - The unconditional-metadata trial adds 31.4ms to the five-diagram render median.
   It is not accepted as noise. The implemented marker-free metadata fast path
   avoids that redundant parse using the actual native render type.
 - Before the optimized measurement: fresh-render median/mean may add at most one
   16.7ms frame for five diagrams; settled-scroll p95 may add at most 1ms, callback
   p95 at most 0.1ms, with no geometry/scans or 50ms long tasks. Report added work.
-- The optimized matched run meets those budgets: render median 165.8ms to
+- The earlier 2px/3px source's optimized matched run meets those budgets: render median 165.8ms to
   162.9ms, mean 173.1ms to 172.8ms; scroll median stays 16.6-16.7ms, callback
   p95 about 0.1ms, zero geometry/scans/long tasks. No speedup or free-work claim.
   Configured-source costs remain outside this bounded measurement.
-- No correction push, main integration, release, tag change or install is authorized.
+  The current 1.5px/2px revision is not separately benchmarked.
+- A private `0.7.1-local.1` test build is being prepared for the user's diagrams.
+  Installation waits for specific consent and the user saving/closing Folia.
+  No push, main integration, release, tag change or public updater delivery is authorized.
 - Existing P2 and nonblocking follow-ups keep their recorded scope and status.
 
 ## Update protocol

@@ -309,9 +309,9 @@ if (typeof electron === "string") {
       })()`);
       check(`Mermaid ${dark ? "dark" : "light"} pass ${round + 1} keeps authored edges dashes invisible edges and markers`,
         lines.dark === dark && lines.authored && lines.dashed && lines.invisible.every(w => w === 0) && lines.thick.every(w => w >= 3) && lines.markers &&
-        lines.other.every(widths=>widths.length>0&&widths.every(w=>w===(dark?2:1))) &&
-        lines.message.length >= 2 && lines.message.every(w => w === (dark ? 2 : 1.5)) &&
-        lines.lifeline.length >= 2 && lines.lifeline.every(w => w === (dark ? 3 : 2)), lines);
+        lines.other.every(widths=>widths.length>0&&widths.every(w=>w===(dark?1.5:1))) &&
+        lines.message.length >= 2 && lines.message.every(w => w === 1.5) &&
+        lines.lifeline.length >= 2 && lines.lifeline.every(w => w === 2), lines);
       await exec("viewer.querySelector('#diagrams').scrollIntoView();true");
       await capture(dark ? "mermaid-dark" : "mermaid-light");
       const native = await exec("[...viewer.querySelectorAll('.mermaid svg')].map(svg=>svg.getAttribute('viewBox'))");
@@ -340,7 +340,7 @@ if (typeof electron === "string") {
       fs.writeFileSync(path.join(batch, "mermaid-popup.pdf"), pdf);
       fs.writeFileSync(path.join(batch, "mermaid-popup.png"), (await popup.webContents.capturePage()).toPNG());
       check("dark Mermaid popout and PDF retain stronger messages without privileged page globals",
-        popState.widths.length === 2 && popState.widths.every(width => width === 2) && popState.isolated && pdf.length > 1000, popState);
+        popState.widths.length === 2 && popState.widths.every(width => width === 1.5) && popState.isolated && pdf.length > 1000, popState);
     } finally { popup.close(); }
     await setView(false, 100);
     await exec("document.getElementById('closeIndex').click();getViewerScroller().scrollTop=0;true");
@@ -415,9 +415,11 @@ if (typeof electron === "string") {
     await exec("document.getElementById('toggleIndex').click();true");
   }
   async function borders() {
+    check("production renderer remains isolated",
+      await exec("typeof require==='undefined'&&typeof process==='undefined'&&Object.isFrozen(window.folia)"));
     const templates = await exec("Object.entries(MERMAID_TEMPLATES)");
     const fixtures = Object.fromEntries(templates);
-    fixtures.flowchart = "flowchart LR\n subgraph Group\n A[Rectangle] --> B{Decision}\n B --> C[(Database)]\n end";
+    fixtures.flowchart = "flowchart LR\n subgraph Group\n A[Rectangle] --- B{Decision}\n B -.-> C[(Database)]\n end";
     fixtures.sequence = `sequenceDiagram
  participant A as Compiler adapter
  participant B as Orchestrator
@@ -458,14 +460,15 @@ if (typeof electron === "string") {
       journey: 'journey\n title Reading\n section Read\n Open: 5: Reader\n Review: 3: Reader',
       requirement: 'requirementDiagram\n requirement reading {\n id: 1\n text: Read files\n risk: low\n verifymethod: test\n }\n element folia {\n type: application\n }\n folia - satisfies -> reading',
       packet: 'packet-beta\n 0-7: "Header"\n 8-15: "Content"',
-      architecture: 'architecture-beta\n group group1(cloud)[Group]\n service file(database)[File] in group1',
+      architecture: 'architecture-beta\n group group1(cloud)[Group]\n service file(database)[File] in group1\n service app(server)[App] in group1\n file:R -- L:app\n',
       kanban: 'kanban\n todo[To do]\n item[Read file]',
       treemap: 'treemap-beta\n "Group"\n  "First": 5\n  "Second": 3',
-      treeview: 'treeView-beta\nroot :::highlight',
-      eventmodeling: 'eventmodeling\ntf 1 evt Created',
+      treeview: 'treeView-beta\nroot :::highlight\n    child\n',
+      eventmodeling: 'eventmodeling\ntf 01 cmd Create\ntf 02 evt Created ->> 01\n',
       ishikawa: 'ishikawa-beta\nEffect\n  Cause',
       venn: 'venn-beta\nset A: 10',
-      wardley: 'wardley-beta\ncomponent A [0.5, 0.5]',
+      wardley: 'wardley-beta\ncomponent A [0.8, 0.3]\ncomponent B [0.4, 0.7]\nA -> B\n',
+      timelinevertical: 'timeline TD\n January : Started\n',
       cynefin: 'cynefin-beta\nclear\n"Item"',
       railroad: 'railroad-beta\nrule = terminal("x");',
       ebnf: 'railroad-ebnf-beta\nrule = "x";',
@@ -473,7 +476,10 @@ if (typeof electron === "string") {
       stateconcurrent: 'stateDiagram-v2\n state Processing {\n [*] --> A\n --\n [*] --> B\n }',
       classalias: '---\nconfig:\n  class:\n    defaultRenderer: dagre-d3\n---\nclassDiagram\n class Reader {\n +String name\n +read()\n }',
       unrelated: '---\nconfig:\n  layout: dagre\n  themeVariables:\n    fontSize: "14px"\n  flowchart:\n    curve: linear\n---\nflowchart LR\n A[Unrelated layout settings] --> B{Still readable}',
-      authored: 'flowchart LR\n A[Thin] --> B[Thick]\n B --> C[Invisible]\n classDef thin stroke:#404040,stroke-width:1px,stroke-dasharray:5 3\n class A thin\n style B stroke:#aabbcc,stroke-width:6px\n style C stroke-width:0px',
+      authored: 'flowchart LR\n A[Thin] --> B[Thick]\n B --> C[Invisible]\n classDef thin stroke:#404040,stroke-width:1px,stroke-dasharray:5 3\n class A thin\n style B stroke:#aabbcc,stroke-width:6px\n style C stroke-width:0px\n linkStyle 0 stroke-width:1px,stroke-dasharray:5 3\n linkStyle 1 stroke-width:4px',
+      connectorstyles: 'flowchart LR\n A --- B\n B -.-> C\n C ==> D\n A ~~~ D\n linkStyle 0 stroke-width:4px\n linkStyle 1 stroke-width:0px',
+      customarch: '---\nconfig:\n  themeVariables:\n    archEdgeWidth: 5\n---\narchitecture-beta\n service a(server)[A]\n service b(database)[B]\n a:R -- L:b\n',
+      customtree: '---\nconfig:\n  treeView:\n    lineThickness: 4\n---\ntreeView-beta\nroot\n    child\n',
       custom: '---\nconfig:\n  themeVariables:\n    primaryBorderColor: "#404040"\n    actorBorder: "#505050"\n    actorLineColor: "#505050"\n    strokeWidth: 1\n---\nsequenceDiagram\n participant A\n participant B\n A->>B: Authored palette',
       directive: '%%{initialize: {"themeVariables": {"actorBorder": "#505050", "actorLineColor": "#505050"}}}%%\nsequenceDiagram\n participant A\n participant B\n A->>B: Authored directive palette',
       customquadrant: '---\nconfig:\n  quadrantChart:\n    quadrantInternalBorderStrokeWidth: 0.5\n    quadrantExternalBorderStrokeWidth: 0\n---\nquadrantChart\n x-axis Low --> High\n y-axis Low --> High\n quadrant-1 First\n quadrant-2 Second\n quadrant-3 Third\n quadrant-4 Fourth\n Point: [0.3, 0.4]',
@@ -508,10 +514,28 @@ if (typeof electron === "string") {
       wardley: '.wardley-node>circle:not([class])', cynefin: 'rect.cynefinItem,path.cynefinBoundary',
       railroad: '.railroad-terminal>rect,.railroad-nonterminal>rect', ebnf: '.railroad-terminal>rect,.railroad-nonterminal>rect',
       treeview: 'rect.treeView-highlight-bg',
+      timeline: 'rect,path,circle,ellipse,polygon,polyline,text,tspan',
+      timelinevertical: 'rect,path,circle,ellipse,polygon,polyline,text,tspan',
       customparticipant: 'g.customParticipant > path',
       statecompartments: '.label-container,.statediagram-state>g>:is(line,rect).divider',
       stateconcurrent: '.statediagram-cluster rect,.node>.divider>:is(path,line),.statediagram-state>g>:is(line,rect).divider',
       classalias: '.outer-path>path[fill="none"],.divider>path',
+    };
+    const sharedLinks = 'path.edge-thickness-normal,path.relationshipLine,path.relation,path.transition';
+    const linkTargets = {
+      flowchart: sharedLinks, sequence: '.messageLine0,.messageLine1', participants: '.messageLine0,.messageLine1',
+      class: sharedLinks, state: sharedLinks, er: sharedLinks, requirement: sharedLinks, block: sharedLinks,
+      unrelated: sharedLinks, authored: sharedLinks, connectorstyles: sharedLinks, handdrawn: sharedLinks,
+      custom: '.messageLine0,.messageLine1', directive: '.messageLine0,.messageLine1',
+      architecture: '.architecture-edges path.edge', c4: ':is(line,path):is([marker-start],[marker-end])',
+      customarch: '.architecture-edges path.edge', customtree: 'line.treeView-node-line',
+      journey: 'line.task-line', timeline: '.lineWrapper>line[stroke-width="2"]',
+      timelinevertical: '.lineWrapper>line[stroke-width="2"]',
+      treeview: 'line.treeView-node-line', eventmodeling: 'path.em-relation',
+      ishikawa: 'line:is(.ishikawa-spine,.ishikawa-branch,.ishikawa-sub-branch)',
+      wardley: 'line.wardley-link,line.wardley-pipeline-evolution-link',
+      railroad: 'path.railroad-line', ebnf: 'path.railroad-line',
+      gitgraph: 'line.branch,.commit-arrows>path.arrow', mindmap: 'path.edge-thickness-normal',
     };
     const receipts = [];
     for (const [round, dark] of [true, false, true].entries()) {
@@ -520,9 +544,14 @@ if (typeof electron === "string") {
       await exec("(async()=>{await whenMermaidSettled();return true})()");
       await settle();
       const receipt = await exec(`queueMermaidWork(async()=>{
-        const targets=${JSON.stringify(targets)},names=${JSON.stringify(Object.keys(fixtures))},result=[];
+        const targets=${JSON.stringify(targets)},links=${JSON.stringify(linkTargets)},names=${JSON.stringify(Object.keys(fixtures))},result=[];
         const paint=(svg,selector)=>[...svg.querySelectorAll(selector)].filter(e=>!e.closest('defs,marker')).map(e=>{
           const s=getComputedStyle(e);return {tag:e.tagName,stroke:s.stroke,width:parseFloat(s.strokeWidth),fill:s.fill,dash:s.strokeDasharray,font:s.fontSize,opacity:s.opacity};
+        });
+        const linkPaint=(svg,selector)=>[...svg.querySelectorAll(selector)].filter(e=>!e.closest('defs,marker')).map(e=>{
+          const s=getComputedStyle(e);
+          return {width:parseFloat(s.strokeWidth),stroke:s.stroke,dash:s.strokeDasharray,opacity:s.opacity,
+            preserve:!!e.style.getPropertyValue('stroke-width')||e.matches('.edge-thickness-thick,.edge-thickness-invisible,[class*="edge-depth-"]')||!!e.closest('.commit-arrows')};
         });
         for(const [index,node] of [...viewer.querySelectorAll('.mermaid')].entries()){
           const source=node.dataset.mermaidSrc,svg=node.querySelector('svg'),name=names[index];
@@ -537,6 +566,7 @@ if (typeof electron === "string") {
             const geometry='rect,circle,ellipse,path,line,polygon,polyline,text,tspan,foreignObject';
             const contents=s=>paint(s,geometry).map(e=>({fill:e.fill,dash:e.dash,font:e.font,opacity:e.opacity}));
             result.push({name,before:paint(old,selector),after:paint(svg,selector),
+              beforeLinks:links[name]?linkPaint(old,links[name]):[],afterLinks:links[name]?linkPaint(svg,links[name]):[],
               contents:JSON.stringify(contents(old))===JSON.stringify(contents(svg)),
               unchanged:JSON.stringify(paint(old,'text,tspan,foreignObject,marker *'))===JSON.stringify(paint(svg,'text,tspan,foreignObject,marker *'))});
           }finally{stage.remove()}
@@ -544,7 +574,7 @@ if (typeof electron === "string") {
       })`);
       receipts.push({ dark, receipt });
       for (const row of receipt) {
-        const negative = ["authored", "custom", "directive", "customquadrant", "customparticipant", "handdrawn", "mindmap", "timeline", "venn", "xychart"].includes(row.name);
+        const negative = ["authored", "custom", "directive", "customquadrant", "customparticipant", "customarch", "customtree", "handdrawn", "mindmap", "timeline", "timelinevertical", "venn", "xychart"].includes(row.name);
         if (negative || !dark) {
           check(`boundary ${mode} ${row.name} preserves authored or light ink`,
             row.before.length > 0 && JSON.stringify(row.before) === JSON.stringify(row.after), row);
@@ -552,11 +582,22 @@ if (typeof electron === "string") {
           const eligible = row.before.map((ink, i) => ({ ink, next: row.after[i] }))
             .filter(({ ink }) => ink.stroke !== "none" && ink.width > 0 && ink.width < 3 && ink.opacity !== "0");
           check(`boundary ${mode} ${row.name} strengthens actual default borders`,
-            eligible.length > 0 && eligible.every(({ ink, next }) => next && next.width === (ink.width < 2 ? 2 : 3) &&
+            eligible.length > 0 && eligible.every(({ ink, next }) => next && next.width === Math.max(ink.width, 1.5) &&
               next.fill === ink.fill && next.dash === ink.dash && next.font === ink.font), row);
         } else if (row.name === "customc4") {
           check(`C4 authored shape and container colors keep their original authority pass ${round + 1}`,
             row.before.length > 0 && row.before.every((ink, i) => ink.stroke === row.after[i]?.stroke && ink.fill === row.after[i]?.fill), row);
+        }
+        if (linkTargets[row.name]) {
+          const authorOwned = ["authored", "custom", "directive", "customarch", "customtree", "handdrawn", "mindmap", "connectorstyles"].includes(row.name);
+          const normal = row.beforeLinks.filter(ink => !ink.preserve && ink.width > 0 && ink.stroke !== "none" && ink.opacity !== "0");
+          check(`connector ${mode} ${row.name} keeps 1.5px defaults and authored or semantic ink`,
+            row.beforeLinks.length > 0 && (authorOwned || !dark || normal.length > 0) &&
+            row.beforeLinks.every((ink, i) => {
+              const next = row.afterLinks[i], width = dark && !authorOwned && !ink.preserve &&
+                ink.width > 0 && ink.stroke !== "none" && ink.opacity !== "0" ? 1.5 : ink.width;
+              return next && next.width === width && next.stroke === ink.stroke && next.dash === ink.dash && next.opacity === ink.opacity;
+            }), row);
         }
       }
       check(`boundary ${mode} keeps text fills and marker artwork`,
@@ -577,8 +618,15 @@ if (typeof electron === "string") {
       const native = await exec("[...viewer.querySelectorAll('.mermaid')].map(node=>node.querySelector('svg').getAttribute('viewBox'))");
       await setView(false, 200);
       await exec("viewer.querySelectorAll('.mermaid')[1].scrollIntoView();true");
-      check(`boundary ${mode} high zoom keeps layout coordinates`,
-        await exec(`[...viewer.querySelectorAll('.mermaid')].every((node,i)=>node.querySelector('svg').getAttribute('viewBox')===${JSON.stringify(native)}[i])`));
+      check(`boundary ${mode} high zoom keeps layout coordinates and boundary widths`,
+        await exec(`(()=>{
+          const nodes=[...viewer.querySelectorAll('.mermaid')],sequence=nodes[1];
+          return nodes.every((node,i)=>node.querySelector('svg').getAttribute('viewBox')===${JSON.stringify(native)}[i])&&
+            [...sequence.querySelectorAll('rect.actor')].length>=4&&
+            [...sequence.querySelectorAll('rect.actor')].every(e=>parseFloat(getComputedStyle(e).strokeWidth)===${dark ? 1.5 : 1})&&
+            [...sequence.querySelectorAll('line.actor-line')].length>=4&&
+            [...sequence.querySelectorAll('line.actor-line')].every(e=>parseFloat(getComputedStyle(e).strokeWidth)===2);
+        })()`));
       await capture(dark ? "boundaries-dark-zoom" : "boundaries-light-zoom");
       await setView(false, 100);
       if (round === 2) for (const name of ["flowchart", "class", "state", "er", "participants", "c4", "packet", "wardley"]) {
@@ -590,7 +638,7 @@ if (typeof electron === "string") {
     await exec("openMermaidTemplateDialog(MERMAID_TEMPLATES.sequence);true");
     await wait("styled template preview", "!!mermaidTemplatePreviewEl.querySelector('svg line.actor-line')");
     check("dark template preview shares stronger participant borders and lifelines",
-      await exec("[...mermaidTemplatePreviewEl.querySelectorAll('rect.actor')].length>=4&&[...mermaidTemplatePreviewEl.querySelectorAll('rect.actor')].every(e=>parseFloat(getComputedStyle(e).strokeWidth)===2)&&[...mermaidTemplatePreviewEl.querySelectorAll('line.actor-line')].every(e=>parseFloat(getComputedStyle(e).strokeWidth)===3)"));
+      await exec("[...mermaidTemplatePreviewEl.querySelectorAll('rect.actor')].length>=4&&[...mermaidTemplatePreviewEl.querySelectorAll('rect.actor')].every(e=>parseFloat(getComputedStyle(e).strokeWidth)===1.5)&&[...mermaidTemplatePreviewEl.querySelectorAll('line.actor-line')].every(e=>parseFloat(getComputedStyle(e).strokeWidth)===2)&&[...mermaidTemplatePreviewEl.querySelectorAll('.messageLine0,.messageLine1')].length>=2&&[...mermaidTemplatePreviewEl.querySelectorAll('.messageLine0,.messageLine1')].every(e=>parseFloat(getComputedStyle(e).strokeWidth)===1.5)"));
     await capture("boundaries-preview");
     await exec("mermaidTemplateClose.click();viewer.querySelectorAll('.mermaid-maximize-btn')[1].click();true");
     let popup;
@@ -611,8 +659,10 @@ if (typeof electron === "string") {
       fs.writeFileSync(path.join(batch, "boundaries-popup.pdf"), pdf);
       fs.writeFileSync(path.join(batch, "boundaries-popup.png"), (await popup.webContents.capturePage()).toPNG());
       check("boundary popout and exported SVG retain original styled geometry under isolation",
-        state.actors.length >= 4 && state.actors.every(w => w === "2px") && state.lifelines.length >= 2 &&
-        state.lifelines.every(w => w === "3px") && state.source.includes("stroke: rgb(116, 129, 143)") && state.isolated && pdf.length > 1000, state);
+        state.actors.length >= 4 && state.actors.every(w => w === "1.5px") && state.lifelines.length >= 2 &&
+        state.lifelines.every(w => w === "2px") && state.source.includes("stroke: rgb(116, 129, 143)") &&
+        await popup.webContents.executeJavaScript("[...document.querySelectorAll('.messageLine0,.messageLine1')].every(e=>parseFloat(getComputedStyle(e).strokeWidth)===1.5)") &&
+        state.isolated && pdf.length > 1000, state);
     } finally { popup.destroy(); }
     for (const scenario of ["overlap", "reopen", "theme"]) {
       const state = await exec(`(async()=>{
@@ -644,7 +694,7 @@ if (typeof electron === "string") {
       })()`);
       check(`queued Mermaid preview ${scenario} discards the older result`,
         state.current && !state.stale && state.widths.length >= 4 &&
-        state.widths.every(width => width === (scenario === "theme" ? 1 : 2)), state);
+        state.widths.every(width => width === (scenario === "theme" ? 1 : 1.5)), state);
     }
     await exec("mermaidTemplateClose.click();if(!document.body.classList.contains('dark-mode'))document.getElementById('darkModeToggle').click();true");
     await exec("(async()=>{await whenMermaidSettled();return true})()");
@@ -677,7 +727,7 @@ if (typeof electron === "string") {
       check("native maximum-size warning survives a metadata parse failure", mixed.limit && mixed.warned, mixed);
       check("ordinary Mermaid renders avoid redundant metadata parsing", mixed.parseCalls >= 1 && mixed.onlyConfigured, mixed);
       check("dark mixed Mermaid batch keeps valid neighbors styled around its syntax error",
-        mixed.widths.length === 2 && mixed.widths.every(widths => widths.length >= 1 && widths.every(width => width === 2)), mixed);
+        mixed.widths.length === 2 && mixed.widths.every(widths => widths.length >= 1 && widths.every(width => width === 1.5)), mixed);
       const preview = await exec(`(async()=>{
         openMermaidTemplateDialog(${JSON.stringify(oversized)});await updateMermaidPreview();
         return !!mermaidTemplatePreviewEl.querySelector('svg')&&

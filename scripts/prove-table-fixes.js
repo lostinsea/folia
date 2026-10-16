@@ -137,6 +137,10 @@ const TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL = Object.freeze([
   "Shutdown approval renderer unusable: webContents destroyed",
 ]);
 const VIRTUAL_SUITES = Object.freeze({
+  "test:reading-mermaid-evidence": Object.freeze({
+    npmScript: "test:reading",
+    environment: Object.freeze({ FOLIA_READING_BORDERS: "1" }),
+  }),
   "test:sec08-browser-isolation-evidence": Object.freeze({
     npmScript: "test:tabs",
     environment: Object.freeze({
@@ -18439,8 +18443,8 @@ const REVERTS = [
           id: "R730",
           what: "omit Mermaid's emergency wrapping for long unbroken identifiers",
           file: MERMAID_CFG,
-          from: "    themeCSS: '.nodeLabel { overflow-wrap: anywhere; }' + (isDark ? `",
-          to: "    themeCSS: '' + (isDark ? `",
+          from: "    themeCSS: '.nodeLabel { overflow-wrap: anywhere; }',",
+          to: "    themeCSS: '',",
           suite: "test:mermaid",
           expect: [/^Mermaid unbroken identifiers wrap within their measured label$/],
           mustPass: [
@@ -22139,26 +22143,28 @@ const REVERTS = [
           requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 1,
         },
         {
-          id: "R935", what: "leave dark Mermaid connectors at their thinner library defaults",
+          id: "R935", what: "leave normal dark Mermaid connectors at mixed library widths",
           file: MERMAID_CFG,
-          from: "    themeCSS: '.nodeLabel { overflow-wrap: anywhere; }' + (isDark ? `",
-          to: "    themeCSS: '.nodeLabel { overflow-wrap: anywhere; }' + (false ? `",
-          suite: "test:reading",
-          expect: [/^Mermaid dark pass (1|3) keeps authored edges dashes invisible edges and markers$/,
-            /^dark Mermaid popout and PDF retain stronger messages without privileged page globals$/],
-          mustPass: [/^Mermaid light pass 2 keeps authored edges dashes invisible edges and markers$/,
-            /^reading fixture has original tables and five actual diagrams$/,
+          from: "    const normalConnector = connectors.has(element);",
+          to: "    const normalConnector = connectors.has(element);\n    if (normalConnector) continue;",
+          suite: "test:reading-mermaid-evidence",
+          expect: [/^connector dark pass (1|3) .+ keeps 1.5px defaults and authored or semantic ink$/,
+            /^boundary dark pass (1|3) journey strengthens actual default borders$/],
+          mustPass: [/^connector light pass 2 .+ keeps 1.5px defaults and authored or semantic ink$/,
+            /^connector dark pass (1|3) (authored|custom|directive|handdrawn|mindmap|connectorstyles) keeps 1.5px defaults and authored or semantic ink$/,
+            /^dark sequence boxes and lifelines gain visible neutral contrast pass (1|3)$/,
             /^production renderer remains isolated$/],
-          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 3,
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 40,
         },
         {
           id: "R936", what: "leave dark Mermaid boundaries at their original faint widths and colors",
           file: MERMAID_CFG,
           from: "function applyMermaidDarkBoundaries(svg, parsed) {\n",
           to: "function applyMermaidDarkBoundaries(svg, parsed) {\n  return;\n",
-          suite: "test:reading",
-          expect: [/^Mermaid dark pass (1|3) keeps authored edges dashes invisible edges and markers$/,
-            /^boundary dark pass (1|3) (flowchart|sequence|participants|class|state|er|gantt|pie|gitgraph|quadrant|block|c4|journey|requirement|packet|architecture|kanban|treemap|unrelated|eventmodeling|ishikawa|wardley|cynefin|railroad|ebnf|treeview|statecompartments|stateconcurrent|classalias) strengthens actual default borders$/,
+          suite: "test:reading-mermaid-evidence",
+          expect: [/^boundary dark pass (1|3) (flowchart|sequence|participants|class|state|er|gantt|pie|gitgraph|quadrant|block|c4|journey|requirement|packet|architecture|kanban|treemap|unrelated|eventmodeling|ishikawa|wardley|cynefin|railroad|ebnf|treeview|statecompartments|stateconcurrent|classalias) strengthens actual default borders$/,
+            /^connector dark pass (1|3) .+ keeps 1.5px defaults and authored or semantic ink$/,
+            /^boundary dark pass (1|3) high zoom keeps layout coordinates and boundary widths$/,
             /^dark sequence boxes and lifelines gain visible neutral contrast pass (1|3)$/,
             /^dark special participant outlines gain contrast without changing semantic fills pass (1|3)$/,
             /^dark template preview shares stronger participant borders and lifelines$/,
@@ -22170,7 +22176,7 @@ const REVERTS = [
             /^boundary light pass 2 .+ preserves authored or light ink$/,
             /^boundary dark pass (1|3) (authored|custom|directive|customquadrant|handdrawn) preserves authored or light ink$/,
             /^boundary (dark pass (1|3)|light pass 2) keeps text fills and marker artwork$/],
-          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 69,
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 93,
         },
         {
           id: "R937", what: "widen dark Mermaid borders without improving their near-background contrast",
@@ -22192,14 +22198,14 @@ const REVERTS = [
           file: MERMAID_CFG,
           from: "  if (hasMermaidBoundaryStyle(parsed.config)) return;",
           to: "  if (false && hasMermaidBoundaryStyle(parsed.config)) return;",
-          suite: "test:reading",
-          expect: [/^boundary dark pass (1|3) (custom|directive|customquadrant) preserves authored or light ink$/],
+          suite: "test:reading-mermaid-evidence",
+          expect: [/^boundary dark pass (1|3) (custom|directive|customquadrant|customarch|customtree|handdrawn) preserves authored or light ink$/,
+            /^connector dark pass (1|3) (customarch|customtree|handdrawn) keeps 1.5px defaults and authored or semantic ink$/],
           mustPass: [/^boundary dark pass (1|3) unrelated strengthens actual default borders$/,
             /^boundary dark pass (1|3) authored preserves authored or light ink$/,
-            /^boundary dark pass (1|3) handdrawn preserves authored or light ink$/,
             /^boundary light pass 2 .+ preserves authored or light ink$/,
             /^production renderer remains isolated$/],
-          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 6,
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 18,
         },
         {
           id: "R939", what: "display an older queued Mermaid preview after its request was replaced",
@@ -22243,6 +22249,43 @@ const REVERTS = [
             /^configuration-free native warning keeps text fill and layout$/,
             /^production renderer remains isolated$/],
           requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 2,
+        },
+        {
+          id: "R942", what: "restore the superseded 2px borders and 3px lifelines instead of the requested 1.5px and 2px",
+          file: MERMAID_CFG,
+          from: "normalConnector ? 1.5 : Math.max(width, 1.5)",
+          to: "normalConnector ? 1.5 : width < 2 ? 2 : 3",
+          suite: "test:reading-mermaid-evidence",
+          expect: [/^boundary dark pass (1|3) (flowchart|sequence|participants|class|state|er|gantt|pie|gitgraph|quadrant|block|c4|journey|requirement|packet|architecture|kanban|treemap|unrelated|eventmodeling|ishikawa|wardley|cynefin|railroad|ebnf|treeview|statecompartments|stateconcurrent|classalias) strengthens actual default borders$/,
+            /^boundary dark pass (1|3) high zoom keeps layout coordinates and boundary widths$/,
+            /^dark template preview shares stronger participant borders and lifelines$/,
+            /^queued Mermaid preview (overlap|reopen) discards the older result$/,
+            /^dark mixed Mermaid batch keeps valid neighbors styled around its syntax error$/,
+            /^boundary popout and exported SVG retain original styled geometry under isolation$/],
+          mustPass: [/^boundary light pass 2 .+ preserves authored or light ink$/,
+            /^boundary dark pass (1|3) (authored|custom|directive|customquadrant|handdrawn) preserves authored or light ink$/,
+            /^dark sequence boxes and lifelines gain visible neutral contrast pass (1|3)$/,
+            /^dark special participant outlines gain contrast without changing semantic fills pass (1|3)$/,
+            /^boundary (dark pass (1|3)|light pass 2) keeps text fills and marker artwork$/,
+            /^production renderer remains isolated$/],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 65,
+        },
+        {
+          id: "R943", what: "restore 2px normal dark connectors instead of the requested 1.5px",
+          file: MERMAID_CFG,
+          from: "normalConnector ? 1.5 : Math.max(width, 1.5)",
+          to: "normalConnector ? 2 : Math.max(width, 1.5)",
+          suite: "test:reading-mermaid-evidence",
+          expect: [/^connector dark pass (1|3) .+ keeps 1.5px defaults and authored or semantic ink$/,
+            /^boundary dark pass (1|3) journey strengthens actual default borders$/,
+            /^dark template preview shares stronger participant borders and lifelines$/,
+            /^boundary popout and exported SVG retain original styled geometry under isolation$/],
+          mustPass: [/^connector light pass 2 .+ keeps 1.5px defaults and authored or semantic ink$/,
+            /^connector dark pass (1|3) (authored|custom|directive|handdrawn|mindmap|connectorstyles) keeps 1.5px defaults and authored or semantic ink$/,
+            /^boundary (dark pass (1|3)|light pass 2) keeps text fills and marker artwork$/,
+            /^dark sequence boxes and lifelines gain visible neutral contrast pass (1|3)$/,
+            /^production renderer remains isolated$/],
+          requireMustPassAssertions: true, requireExactFailures: true, expectedFailureCount: 46,
         },
       ];
 
@@ -23323,7 +23366,7 @@ function proveCompanionTranscriptRoles() {
       .join(",") === "R319" &&
     REVERTS.filter((r) => Number.isSafeInteger(r.expectedFailureCount))
       .map((r) => r.id)
-      .join(",") === "R467,R319,R685,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760,R840,R841,R845,R849,R853,R858,R860,R871,R876,R877,R878,R879,R880,R881,R882,R883,R884,R885,R886,R887,R888,R889,R890,R891,R892,R893,R894,R895,R896,R897,R898,R899,R900,R901,R902,R903,R904,R905,R906,R907,R908,R909,R910,R911,R912,R913,R914,R915,R916,R917,R918,R919,R920,R921,R922,R923,R924,R925,R926,R927,R928,R929,R930,R931,R932,R933,R934,R935,R936,R937,R938,R939,R940,R941";
+      .join(",") === "R467,R319,R685,R709,R710,R711,R712,R714,R715,R716,R717,R718,R719,R720,R721,R722,R723,R724,R725,R726,R727,R728,R729,R730,R731,R732,R735,R736,R737,R738,R739,R740,R741,R742,R743,R744,R745,R746,R747,R748,R749,R750,R751,R752,R753,R754,R755,R756,R759,R760,R840,R841,R845,R849,R853,R858,R860,R871,R876,R877,R878,R879,R880,R881,R882,R883,R884,R885,R886,R887,R888,R889,R890,R891,R892,R893,R894,R895,R896,R897,R898,R899,R900,R901,R902,R903,R904,R905,R906,R907,R908,R909,R910,R911,R912,R913,R914,R915,R916,R917,R918,R919,R920,R921,R922,R923,R924,R925,R926,R927,R928,R929,R930,R931,R932,R933,R934,R935,R936,R937,R938,R939,R940,R941,R942,R943";
   const toolbarAllowanceIsRecordScoped =
     REVERTS.filter((r) =>
       exactShutdownTailForMutation(r) === TOOLBAR_PROOF_ONLY_SHUTDOWN_TAIL,
