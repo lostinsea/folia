@@ -58,6 +58,8 @@ section is kept here so the register has a visible edge.
   packaging checks pass 414/414. R685 and R936-R941 are individually proven;
   anchors resolve on restored final source.
 - The muted `#74818f` treatment keeps 2px borders and 3px lifelines.
+  The user explicitly selected "Use this subtler version" after viewing its
+  preview. This approves the appearance only, not a release or installation.
   Final-source dark/light, high-zoom, participant, preview and popout captures
   have been viewed. Source-matched visual and performance checks are complete.
 - The unconditional-metadata trial adds 31.4ms to the five-diagram render median.
