@@ -93,7 +93,13 @@ section is kept here so the register has a visible edge.
 - The user reports their diagrams look good and explicitly says "proceed".
   Stable `0.7.1` integration and publication are authorized. Promotion changes
   version metadata, not accepted product code. No further PC installation is
-  authorized; stable package and downloaded release verification are pending.
+  authorized. Stable Windows packaging passes strict checks 414/414 and actual
+  isolated runtime checks 11/11; dark/light/high-zoom, preview, special-participant
+  and popout captures have been viewed. Shipped product hashes match the accepted
+  installed private build. Receipts are in the session's `release-071-*` files.
+  Packaged CDP has no PDF-print method; unchanged native PDF source controls
+  remain valid, not a new packaged-PDF result. Failed tool attempts are retained.
+  Integration/publication and downloaded release verification are pending.
   Independent Sol/Luna release-preparation feedback finds no significant issues.
 - Existing P2 and nonblocking follow-ups keep their recorded scope and status.
 
