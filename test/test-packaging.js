@@ -1287,7 +1287,7 @@ async function main() {
     JSON.stringify({ utilsBinding, utilsRequire }),
   );
   const mermaidConfigBinding =
-    /const\s*\{\s*getMermaidConfig\s*\}\s*=\s*window\.FoliaMermaidConfig\s*;/.test(
+    /const\s*\{\s*getMermaidConfig\s*,\s*applyMermaidDarkBoundaries\s*\}\s*=\s*window\.FoliaMermaidConfig\s*;/.test(
       rendererSource,
     );
   const mermaidConfigRequire =

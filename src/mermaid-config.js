@@ -101,6 +101,103 @@ const MERMAID_SEQUENCE = {
   noteFontSize: 13,
 };
 
+// Geometry only: labels, markers, chart data and fill-only symbols are not borders.
+const MERMAID_BOUNDARIES = [
+  ':is(rect,polygon,path,circle,ellipse,line,polyline).label-container',
+  '.node > .outer-path > path', '.node > .divider > :is(path,line)',
+  '.node > :is(.row-rect-even,.row-rect-odd) > path',
+  '.cluster > rect', 'g.classGroup > rect', 'g.stateGroup > rect',
+  '.statediagram-cluster rect.outer', '.statediagram-cluster rect.inner',
+  '.statediagram-state > g > :is(line,rect).divider',
+  '.statediagram-note > g.label-container > path',
+  'rect.actor', 'line.actor-line', 'rect.note', 'rect[class^="activation"]',
+  'g:is(.actor-top,.actor-bottom) > :is(circle,line,path)',
+  'g:is(.actor-top,.actor-bottom) > g > path',
+  'polygon.labelBox', 'line.loopLine', 'rect.rect',
+  'rect.task', 'rect.journey-section', 'line.task-line',
+  '.tag-label-bkg', '.branchLabelBkg', 'path.node-bkg',
+  'path.pieCircle', 'circle.pieOuterCircle', '.architecture-groups .node-bkg',
+  'rect.packetBlock', 'rect.treemapSection', 'rect.treemapLeaf',
+  'rect.treeView-highlight-bg', '.em-box > rect', '.em-swimlane > rect',
+  'path.ishikawa-head', 'rect.ishikawa-label-box', '.venn-circle',
+  'rect.cynefinItem', 'rect.cynefinItemOverflow', 'path.cynefinBoundary',
+  'path.cynefinCliff', 'path.cynefinConfusion',
+  '.wardley-node > circle:not([class])', '.wardley-node > rect',
+  '.wardley-annotation > circle', '.wardley-annotations-box > rect', 'rect.wardley-pipeline-box',
+  '.railroad-terminal > rect', '.railroad-nonterminal > rect',
+  '.railroad-comment > ellipse', '.railroad-special > rect',
+].join(',');
+
+function hasMermaidBoundaryStyle(config) {
+  return Object.entries(config || {}).some(([key, value]) =>
+    key === 'theme' || key === 'themeCSS' || /border|stroke|color|style/i.test(key) ||
+    (key === 'look' && value === 'handDrawn') ||
+    (value && typeof value === 'object' && hasMermaidBoundaryStyle(value)));
+}
+
+function hasDefaultMermaidActorClasses(group) {
+  return [...group.classList].every(name => ['actor', 'actor-man', 'actor-top', 'actor-bottom'].includes(name));
+}
+
+function hasInlineMermaidStroke(element, svg, property, type) {
+  for (let node = element; node && node !== svg; node = node.parentElement) {
+    const value = node.style.getPropertyValue(property);
+    if (!value) continue;
+    // Mermaid 11.17 writes its own actorBorder inline on special participant
+    // groups. Body syntax cannot style these primitives; custom classes and
+    // primitive-local or important declarations are still left to the author.
+    const generatedActor = type === 'sequence' && property === 'stroke' && node !== element &&
+      node.matches('g.actor-top,g.actor-bottom') && hasDefaultMermaidActorClasses(node) &&
+      !node.style.getPropertyPriority(property) &&
+      (value === '#404040' || value === 'rgb(64, 64, 64)');
+    if (!generatedActor) return true;
+  }
+  return false;
+}
+
+/**
+ * Strengthen default dark borders once, before the SVG is cached or displayed.
+ * Authored theme settings and inline/class styles keep ownership of their ink.
+ */
+function applyMermaidDarkBoundaries(svg, parsed) {
+  if (hasMermaidBoundaryStyle(parsed.config)) return;
+  const type = parsed.diagramType.toLowerCase();
+  const elements = new Set(svg.querySelectorAll(MERMAID_BOUNDARIES));
+  if (type === 'quadrantchart') {
+    svg.querySelectorAll('g.border > line').forEach(element => elements.add(element));
+  }
+  if (type === 'c4') {
+    svg.querySelectorAll(':scope > g:not([class]) > rect').forEach(element => elements.add(element));
+  }
+  const changes = [];
+  for (const element of elements) {
+    if (element.closest('defs,marker,.state-start,.state-end,.statediagram-start,.statediagram-end')) continue;
+    const participant = type === 'sequence' && element.closest('g.actor-top,g.actor-bottom');
+    if (participant && !hasDefaultMermaidActorClasses(participant)) continue;
+    const style = getComputedStyle(element);
+    const width = parseFloat(style.strokeWidth);
+    if (!Number.isFinite(width) || width <= 0 || width >= 3 ||
+        style.stroke === 'none' || style.strokeOpacity === '0' || style.opacity === '0') continue;
+    // Quadrant borders are the one default emitted as inline CSS. Their authored
+    // configuration was checked above; ordinary inline SVG styling still wins.
+    const quadrant = type === 'quadrantchart' && element.matches('g.border > line');
+    const ownWidth = !quadrant && hasInlineMermaidStroke(element, svg, 'stroke-width', type);
+    // C4 container commands write authored colors as presentation attributes,
+    // indistinguishable from the default. Widen those borders without recoloring.
+    const ownColor = (!quadrant && hasInlineMermaidStroke(element, svg, 'stroke', type)) ||
+      (type === 'c4' && element.hasAttribute('stroke'));
+    const rgb = style.stroke.match(/^rgb\((\d+), (\d+), (\d+)\)$/);
+    const neutral = rgb && Math.max(...rgb.slice(1).map(Number)) < 128 &&
+      Math.max(...rgb.slice(1).map(Number)) - Math.min(...rgb.slice(1).map(Number)) < 12;
+    changes.push({ element, width: ownWidth ? null : width < 2 ? 2 : 3, color: !ownColor && neutral });
+  }
+  // Read styles first, then write. This never runs during scrolling or on cache hits.
+  for (const { element, width, color } of changes) {
+    if (width !== null) element.style.setProperty('stroke-width', width + 'px');
+    if (color) element.style.setProperty('stroke', '#74818f');
+  }
+}
+
 /**
  * Get full Mermaid configuration object
  * @param {boolean} isDark - Whether dark mode is enabled
@@ -132,7 +229,8 @@ const mermaidConfig = {
   MERMAID_FLOWCHART,
   MERMAID_SEQUENCE,
   MERMAID_FONT_PX,
-  getMermaidConfig
+  getMermaidConfig,
+  applyMermaidDarkBoundaries
 };
 
 if (typeof module !== 'undefined' && module.exports) {

@@ -25,7 +25,7 @@ const { removeBOM, getFileName, getDirectory, normaliseDocumentPath, escapeRegex
 if (!window.FoliaMermaidConfig) {
   throw new Error('FoliaMermaidConfig must load before renderer.js');
 }
-const { getMermaidConfig } = window.FoliaMermaidConfig;
+const { getMermaidConfig, applyMermaidDarkBoundaries } = window.FoliaMermaidConfig;
 if (!window.FoliaContextMenu) {
   throw new Error('FoliaContextMenu must load before renderer.js');
 }
@@ -2665,8 +2665,24 @@ function queueMermaidWork(fn) {
   return mermaidWorkQueue;
 }
 
+async function getMermaidBoundaryMetadata(source, diagramType) {
+  // Mermaid 11.17 configuration requires these literal introducers. Harmless
+  // occurrences still take the parser path; the type comes from native rendering.
+  if (diagramType && !source.includes('---') && !source.includes('%%{')) {
+    return { diagramType, config: {} };
+  }
+  // Rendering can substitute a size-limit warning for invalid source. Optional
+  // styling metadata must not discard that SVG or its valid neighbors.
+  const parsed = await mermaid.parse(source, { suppressErrors: true });
+  if (parsed === false) {
+    console.warn('Mermaid border styling skipped: source metadata could not be parsed; native output was kept.');
+  }
+  return parsed;
+}
+
 async function runMermaidAtDocumentScale(options, isCurrent = () => true) {
   if (!isCurrent()) return [];
+  const dark = mermaidDesiredDark;
   // Mermaid writes viewport measurements into SVG coordinates. Measure outside
   // the zoomed viewer, without shrinking live diagrams and disturbing its
   // scroll anchoring. Keep each diagram's layout-space width and typography.
@@ -2708,6 +2724,15 @@ async function runMermaidAtDocumentScale(options, isCurrent = () => true) {
     if (entries.length === 0) return [];
     document.body.appendChild(stage);
     await mermaid.run({ ...options, nodes: entries.map(entry => entry.clone) });
+    if (dark) {
+      for (const { clone, source } of entries) {
+        const svg = clone.querySelector('svg');
+        if (!svg || svg.getAttribute('aria-roledescription') === 'error' || !isCurrent()) continue;
+        const parsed = await getMermaidBoundaryMetadata(source, svg.getAttribute('aria-roledescription'));
+        if (!isCurrent()) return [];
+        if (parsed) applyMermaidDarkBoundaries(svg, parsed);
+      }
+    }
     const adopted = [];
     if (!isCurrent()) return adopted;
     for (const { node, clone, source, id } of entries) {
@@ -11998,7 +12023,9 @@ let mermaidPreviewDebounce = null;
 
 async function updateMermaidPreview() {
   if (!mermaidTemplatePreviewEl) return;
+  const request = ++mermaidPreviewCounter;
   const code = mermaidTemplateCode ? mermaidTemplateCode.value.trim() : '';
+  const isCurrent = () => request === mermaidPreviewCounter && code === mermaidTemplateCode?.value.trim();
   if (!code) {
     mermaidTemplatePreviewEl.innerHTML = '<span class="mermaid-preview-placeholder">Select a template to preview</span>';
     return;
@@ -12010,14 +12037,21 @@ async function updateMermaidPreview() {
   try {
     await ensureMermaid();
   } catch {
+    if (!isCurrent()) return;
     mermaidTemplatePreviewEl.innerHTML = '<span class="mermaid-preview-error">Diagram engine could not be loaded - try reopening the app</span>';
     return;
   }
   try {
-    const id = 'mermaid-tpl-prev-' + (++mermaidPreviewCounter);
-    const { svg } = await mermaid.render(id, code);
+    const { svg, parsed } = await queueMermaidWork(async () => {
+      const result = await mermaid.render('mermaid-tpl-prev-' + request, code);
+      const parsed = mermaidDesiredDark ? await getMermaidBoundaryMetadata(code, result.diagramType) : null;
+      return { svg: result.svg, parsed };
+    });
+    if (!isCurrent()) return;
     mermaidTemplatePreviewEl.innerHTML = svg;
+    if (parsed) applyMermaidDarkBoundaries(mermaidTemplatePreviewEl.querySelector('svg'), parsed);
   } catch {
+    if (!isCurrent()) return;
     mermaidTemplatePreviewEl.innerHTML = '<span class="mermaid-preview-error">Invalid diagram syntax</span>';
   }
 }

@@ -92,6 +92,37 @@ app.whenReady().then(async () => {
   `node test\test-reading.js`. Raw paired samples are retained in the reading
   feature session's `reading-performance.json`.
 
+## Dark Mermaid boundary styling
+
+- Machine: Windows, AMD EPYC 7763, 32 logical processors.
+  Runtime: Electron 43.4.1, Mermaid 11.17.0.
+- Baseline: `cf12589ebf5b664e98185ed7f7e3413b8c5fc3e4`.
+  Both versions use the same dependencies and isolated profiles.
+- Method: the existing reading fixture, with long/wide tables, prose, an open
+  TOC and five diagrams. Run baseline/candidate/candidate/baseline/baseline/candidate
+  serially, with no other suite running. Each process measures three forced
+  uncached full renders and 90 scroll frames per scroll owner.
+- Reparsing every diagram adds a measured render cost: median 161.8ms to 193.2ms
+  (+31.4ms); mean 170.1ms to 198.1ms (+28.0ms). This is not accepted as noise.
+  The current code avoids that redundant parse for configuration-free source.
+- Before the optimized run, the budget was at most 16.7ms added fresh-render
+  median/mean, 1ms added scroll p95, 0.1ms added callback p95, and no settled-scroll
+  geometry/scans or 50ms long tasks.
+- Optimized fresh renders: median 165.8ms baseline / 162.9ms candidate; mean
+  173.1ms / 172.8ms. Sample ranges are 155.9-196.5ms / 150.3-203.1ms.
+  No fresh-render regression was observed; the spread does not support a speedup claim.
+- Settled-scroll medians remain 16.6-16.7ms. Optimized frame p95 ranges are
+  17.7-18.1ms baseline and 17.6-18.3ms candidate. Both record zero viewer geometry
+  reads, viewer scans and 50ms long tasks; callback p95 is about 0.1ms.
+- Styling still scans and reads/writes boundary styles once on a new dark SVG.
+  Configured sources still require the public parser; their added cost is not
+  separately measured here. Cache hits and scrolling do not repeat that work.
+- Normal view uses 100% zoom; split view uses 200%. These local measurements
+  do not prove all document sizes, rebuild costs or native-wheel frame rates.
+- Evidence: the reading session's `mermaid-boundary-performance-final.json`
+  (unconditional parse) and `mermaid-boundary-performance-fast.json` (current code).
+  The bounded probe uses `FOLIA_READING_PERF=1 node test\test-reading.js`.
+
 ## Left TOC tracking
 
 ### Method and scope

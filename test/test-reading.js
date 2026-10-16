@@ -17,7 +17,8 @@ if (typeof electron === "string") {
   console.log("Reading evidence: " + batch);
   let total = 0;
   let passed = 0;
-  const phases = process.env.FOLIA_READING_PERF ? ["screen"] : ["screen", "toc", "notes", "closed", "invalid"];
+  const phases = process.env.FOLIA_READING_BORDERS ? ["borders"] :
+    process.env.FOLIA_READING_PERF ? ["screen"] : ["screen", "toc", "notes", "closed", "invalid", "borders"];
   for (const phase of phases) {
     const run = spawnSync(electron, [__filename, phase], {
       cwd: root, encoding: "utf8", timeout: 180000,
@@ -100,6 +101,9 @@ if (typeof electron === "string") {
   async function screen() {
     fs.writeFileSync(first, markdown());
     fs.writeFileSync(other, "# Other reading document\n\nOther content.");
+    if (process.env.FOLIA_READING_PERF) {
+      await exec("if(!document.body.classList.contains('dark-mode'))document.getElementById('darkModeToggle').click();true");
+    }
     const sentinel = startErrorSentinel(win, { label: "reading" });
     let watcherSnapshot = null;
     const send = win.webContents.send.bind(win.webContents);
@@ -234,6 +238,15 @@ if (typeof electron === "string") {
     }
     if (!process.env.FOLIA_READING_PERF) check("settled table and open TOC scrolling performs no geometry reads or viewer scans", measurements.every(work => work.geometry === 0 && work.scans === 0), measurements);
     if (process.env.FOLIA_READING_PERF) {
+      const renders = await exec(`(async()=>{
+        const samples=[];
+        for(let i=0;i<3;i++){
+          mermaidSvgCache.clear();const started=performance.now();
+          await renderMarkdown(window.originalMarkdown,'full');
+          samples.push(performance.now()-started);
+        }return samples;
+      })()`);
+      console.log("READING_RENDER_PERF " + JSON.stringify(renders));
       check("matched scroll measurement is nonempty", measurements.length === 2 && measurements.every(work => work.p95 > 0));
       check("matched baseline has a real overflowing document", await exec("getViewerScroller().scrollHeight>getViewerScroller().clientHeight+1000"));
       check("matched measurement keeps all original table nodes", await exec("viewer.querySelectorAll('table').length===3"));
@@ -298,7 +311,7 @@ if (typeof electron === "string") {
         lines.dark === dark && lines.authored && lines.dashed && lines.invisible.every(w => w === 0) && lines.thick.every(w => w >= 3) && lines.markers &&
         lines.other.every(widths=>widths.length>0&&widths.every(w=>w===(dark?2:1))) &&
         lines.message.length >= 2 && lines.message.every(w => w === (dark ? 2 : 1.5)) &&
-        lines.lifeline.every(w => w === 2), lines);
+        lines.lifeline.length >= 2 && lines.lifeline.every(w => w === (dark ? 3 : 2)), lines);
       await exec("viewer.querySelector('#diagrams').scrollIntoView();true");
       await capture(dark ? "mermaid-dark" : "mermaid-light");
       const native = await exec("[...viewer.querySelectorAll('.mermaid svg')].map(svg=>svg.getAttribute('viewBox'))");
@@ -401,6 +414,322 @@ if (typeof electron === "string") {
     check("reading features produce no renderer or visible document errors", errors.hits.length === 0, errors.hits);
     await exec("document.getElementById('toggleIndex').click();true");
   }
+  async function borders() {
+    const templates = await exec("Object.entries(MERMAID_TEMPLATES)");
+    const fixtures = Object.fromEntries(templates);
+    fixtures.flowchart = "flowchart LR\n subgraph Group\n A[Rectangle] --> B{Decision}\n B --> C[(Database)]\n end";
+    fixtures.sequence = `sequenceDiagram
+ participant A as Compiler adapter
+ participant B as Orchestrator
+ participant DB@{ "type": "database" }
+ participant Q@{ "type": "queue" }
+ participant E@{ "type": "entity" }
+ participant C@{ "type": "control" }
+ participant X@{ "type": "boundary" }
+ participant S@{ "type": "collections" }
+ actor U as Reader
+ A->>B: Logical plan
+ activate B
+ note over A,B: Trusted policy
+ loop Bind fragments
+ B-->>A: Result batches
+ end
+ deactivate B
+ U->>DB: Read`;
+    const participants = fixtures.sequence;
+    fixtures.sequence = `sequenceDiagram
+ participant A as Compiler adapter
+ participant B as Splitter
+ participant C as Orchestrator
+ participant D as Timely executor
+ A->>B: Logical plan with semantic function objects
+ C->>B: Trusted typed recipe policy
+ B->>C: Local fragments and surviving tail
+ C->>C: Check tail capabilities and bind actual objects
+ C->>C: Recompute fields and lower owned nodes
+ C->>D: Prepared tail and runtime source/provider bindings
+ D-->>C: Result batches and execution metadata`;
+    fixtures.state = "stateDiagram-v2\n [*] --> Reading\n state Reading {\n [*] --> Open\n Open --> Closed\n }\n note right of Reading: Readable note";
+    fixtures.gitgraph = 'gitGraph\n commit id:"First" tag:"v1"\n branch feature\n commit\n checkout main\n merge feature';
+    Object.assign(fixtures, {
+      participants,
+      block: 'block-beta\n columns 2\n a["First"] b["Second"]\n a --> b',
+      c4: 'C4Context\n Person(reader, "Reader")\n System_Boundary(group, "Group") {\n System(app, "Folia")\n }\n Rel(reader, app, "Reads")',
+      journey: 'journey\n title Reading\n section Read\n Open: 5: Reader\n Review: 3: Reader',
+      requirement: 'requirementDiagram\n requirement reading {\n id: 1\n text: Read files\n risk: low\n verifymethod: test\n }\n element folia {\n type: application\n }\n folia - satisfies -> reading',
+      packet: 'packet-beta\n 0-7: "Header"\n 8-15: "Content"',
+      architecture: 'architecture-beta\n group group1(cloud)[Group]\n service file(database)[File] in group1',
+      kanban: 'kanban\n todo[To do]\n item[Read file]',
+      treemap: 'treemap-beta\n "Group"\n  "First": 5\n  "Second": 3',
+      treeview: 'treeView-beta\nroot :::highlight',
+      eventmodeling: 'eventmodeling\ntf 1 evt Created',
+      ishikawa: 'ishikawa-beta\nEffect\n  Cause',
+      venn: 'venn-beta\nset A: 10',
+      wardley: 'wardley-beta\ncomponent A [0.5, 0.5]',
+      cynefin: 'cynefin-beta\nclear\n"Item"',
+      railroad: 'railroad-beta\nrule = terminal("x");',
+      ebnf: 'railroad-ebnf-beta\nrule = "x";',
+      statecompartments: 'stateDiagram-v2\n Reading: Reading\n Reading: Additional description',
+      stateconcurrent: 'stateDiagram-v2\n state Processing {\n [*] --> A\n --\n [*] --> B\n }',
+      classalias: '---\nconfig:\n  class:\n    defaultRenderer: dagre-d3\n---\nclassDiagram\n class Reader {\n +String name\n +read()\n }',
+      unrelated: '---\nconfig:\n  layout: dagre\n  themeVariables:\n    fontSize: "14px"\n  flowchart:\n    curve: linear\n---\nflowchart LR\n A[Unrelated layout settings] --> B{Still readable}',
+      authored: 'flowchart LR\n A[Thin] --> B[Thick]\n B --> C[Invisible]\n classDef thin stroke:#404040,stroke-width:1px,stroke-dasharray:5 3\n class A thin\n style B stroke:#aabbcc,stroke-width:6px\n style C stroke-width:0px',
+      custom: '---\nconfig:\n  themeVariables:\n    primaryBorderColor: "#404040"\n    actorBorder: "#505050"\n    actorLineColor: "#505050"\n    strokeWidth: 1\n---\nsequenceDiagram\n participant A\n participant B\n A->>B: Authored palette',
+      directive: '%%{initialize: {"themeVariables": {"actorBorder": "#505050", "actorLineColor": "#505050"}}}%%\nsequenceDiagram\n participant A\n participant B\n A->>B: Authored directive palette',
+      customquadrant: '---\nconfig:\n  quadrantChart:\n    quadrantInternalBorderStrokeWidth: 0.5\n    quadrantExternalBorderStrokeWidth: 0\n---\nquadrantChart\n x-axis Low --> High\n y-axis Low --> High\n quadrant-1 First\n quadrant-2 Second\n quadrant-3 Third\n quadrant-4 Fourth\n Point: [0.3, 0.4]',
+      customc4: 'C4Context\n System_Boundary(group, "Authored group") {\n System(app, "Folia")\n }\n UpdateElementStyle(group, $borderColor="#404040")\n UpdateElementStyle(app, $borderColor="#404040")',
+      customparticipant: 'sequenceDiagram\n participant D@{ "type": "database" }\n properties D: {"class":"customParticipant"}\n participant A\n D->>A: Custom class',
+      handdrawn: '---\nconfig:\n  look: handDrawn\n---\nflowchart LR\n A[Sketch] --> B{Hatching}',
+    });
+    fs.writeFileSync(first, "# Mermaid boundary controls\n\n" + Object.entries(fixtures).map(([name, code]) =>
+      "## " + name + "\n\n```mermaid\n" + code + "\n```").join("\n\n"));
+    const sentinel = startErrorSentinel(win, { label: "borders" });
+    await exec("if(!document.body.classList.contains('dark-mode'))document.getElementById('darkModeToggle').click();document.getElementById('openFile').click();true");
+    await wait("boundary fixture admitted and finished", "viewer.querySelector('h1')?.textContent==='Mermaid boundary controls'&&!loadingScreen.classList.contains('active')");
+    await exec("(async()=>{await whenMermaidSettled();return true})()");
+    await settle();
+    const ready = await exec(`({svg:[...viewer.querySelectorAll('.mermaid')].filter(node=>node.querySelector('svg')).length,
+      missing:[...viewer.querySelectorAll('.mermaid')].filter(node=>!node.querySelector('svg')).map(node=>node.textContent),
+      errors:[...viewer.querySelectorAll('.mermaid-error,svg[aria-roledescription="error"],.mermaid svg .error-icon')].map(e=>e.closest('.mermaid')?.dataset.mermaidSrc||e.textContent)})`);
+    check("boundary fixtures draw every actual diagram without syntax errors", ready.svg === Object.keys(fixtures).length && ready.errors.length === 0, ready);
+    if (ready.errors.length || ready.svg !== Object.keys(fixtures).length) throw new Error(JSON.stringify(ready));
+    const targets = {
+      flowchart: '.label-container,.cluster>rect', sequence: 'rect.actor,line.actor-line',
+      participants: 'rect.actor,line.actor-line,rect.note,rect[class^="activation"],polygon.labelBox,line.loopLine,g:is(.actor-top,.actor-bottom)>:is(circle,line,path),g:is(.actor-top,.actor-bottom)>g>path',
+      class: '.outer-path>path[fill="none"],.divider>path', state: '.statediagram-cluster rect,.statediagram-note>g.label-container>path',
+      er: '.outer-path>path[fill="none"],.row-rect-even>path,.row-rect-odd>path',
+      gantt: 'rect.task', pie: 'path.pieCircle,circle.pieOuterCircle',
+      gitgraph: '.tag-label-bkg,.branchLabelBkg', quadrant: 'g.border>line', block: '.label-container,.cluster>rect',
+      c4: '.c4-shape,:scope>g:not([class])>rect', journey: 'rect.task,rect.journey-section,line.task-line',
+      requirement: '.outer-path>path[fill="none"],.divider>path', packet: 'rect.packetBlock',
+      architecture: '.architecture-groups .node-bkg', kanban: '.label-container,.outer-path>path[fill="none"],.cluster>rect',
+      treemap: 'rect.treemapSection,rect.treemapLeaf', unrelated: '.label-container',
+      eventmodeling: '.em-box>rect,.em-swimlane>rect', ishikawa: 'path.ishikawa-head,rect.ishikawa-label-box',
+      wardley: '.wardley-node>circle:not([class])', cynefin: 'rect.cynefinItem,path.cynefinBoundary',
+      railroad: '.railroad-terminal>rect,.railroad-nonterminal>rect', ebnf: '.railroad-terminal>rect,.railroad-nonterminal>rect',
+      treeview: 'rect.treeView-highlight-bg',
+      customparticipant: 'g.customParticipant > path',
+      statecompartments: '.label-container,.statediagram-state>g>:is(line,rect).divider',
+      stateconcurrent: '.statediagram-cluster rect,.node>.divider>:is(path,line),.statediagram-state>g>:is(line,rect).divider',
+      classalias: '.outer-path>path[fill="none"],.divider>path',
+    };
+    const receipts = [];
+    for (const [round, dark] of [true, false, true].entries()) {
+      const mode = `${dark ? "dark" : "light"} pass ${round + 1}`;
+      await exec(`if(document.body.classList.contains('dark-mode')!==${dark})document.getElementById('darkModeToggle').click();true`);
+      await exec("(async()=>{await whenMermaidSettled();return true})()");
+      await settle();
+      const receipt = await exec(`queueMermaidWork(async()=>{
+        const targets=${JSON.stringify(targets)},names=${JSON.stringify(Object.keys(fixtures))},result=[];
+        const paint=(svg,selector)=>[...svg.querySelectorAll(selector)].filter(e=>!e.closest('defs,marker')).map(e=>{
+          const s=getComputedStyle(e);return {tag:e.tagName,stroke:s.stroke,width:parseFloat(s.strokeWidth),fill:s.fill,dash:s.strokeDasharray,font:s.fontSize,opacity:s.opacity};
+        });
+        for(const [index,node] of [...viewer.querySelectorAll('.mermaid')].entries()){
+          const source=node.dataset.mermaidSrc,svg=node.querySelector('svg'),name=names[index];
+          let baseline;
+          try{baseline=await mermaid.render('boundary-baseline-'+index+'-'+Date.now(),source)}
+          catch(error){throw new Error('Native boundary baseline '+name+': '+error.message)}
+          const stage=document.createElement('div');stage.style.cssText='position:fixed;visibility:hidden;pointer-events:none';
+          stage.style.font=getComputedStyle(node).font;stage.style.lineHeight=getComputedStyle(node).lineHeight;
+          stage.innerHTML=baseline.svg;document.body.appendChild(stage);
+          try {
+            const old=stage.querySelector('svg'),selector=targets[name]||'rect,circle,ellipse,path,line,polygon,polyline,text,tspan';
+            const geometry='rect,circle,ellipse,path,line,polygon,polyline,text,tspan,foreignObject';
+            const contents=s=>paint(s,geometry).map(e=>({fill:e.fill,dash:e.dash,font:e.font,opacity:e.opacity}));
+            result.push({name,before:paint(old,selector),after:paint(svg,selector),
+              contents:JSON.stringify(contents(old))===JSON.stringify(contents(svg)),
+              unchanged:JSON.stringify(paint(old,'text,tspan,foreignObject,marker *'))===JSON.stringify(paint(svg,'text,tspan,foreignObject,marker *'))});
+          }finally{stage.remove()}
+        }return result;
+      })`);
+      receipts.push({ dark, receipt });
+      for (const row of receipt) {
+        const negative = ["authored", "custom", "directive", "customquadrant", "customparticipant", "handdrawn", "mindmap", "timeline", "venn", "xychart"].includes(row.name);
+        if (negative || !dark) {
+          check(`boundary ${mode} ${row.name} preserves authored or light ink`,
+            row.before.length > 0 && JSON.stringify(row.before) === JSON.stringify(row.after), row);
+        } else if (targets[row.name]) {
+          const eligible = row.before.map((ink, i) => ({ ink, next: row.after[i] }))
+            .filter(({ ink }) => ink.stroke !== "none" && ink.width > 0 && ink.width < 3 && ink.opacity !== "0");
+          check(`boundary ${mode} ${row.name} strengthens actual default borders`,
+            eligible.length > 0 && eligible.every(({ ink, next }) => next && next.width === (ink.width < 2 ? 2 : 3) &&
+              next.fill === ink.fill && next.dash === ink.dash && next.font === ink.font), row);
+        } else if (row.name === "customc4") {
+          check(`C4 authored shape and container colors keep their original authority pass ${round + 1}`,
+            row.before.length > 0 && row.before.every((ink, i) => ink.stroke === row.after[i]?.stroke && ink.fill === row.after[i]?.fill), row);
+        }
+      }
+      check(`boundary ${mode} keeps text fills and marker artwork`,
+        receipt.length === Object.keys(fixtures).length && receipt.every(row => row.unchanged && row.contents));
+      if (dark) {
+        const scene = receipt.find(row => row.name === "sequence");
+        check(`dark sequence boxes and lifelines gain visible neutral contrast pass ${round + 1}`,
+          scene.before.length >= 12 && scene.before.every(ink => ink.stroke === "rgb(64, 64, 64)") &&
+          scene.after.every(ink => ink.stroke === "rgb(116, 129, 143)"), scene);
+        const variants = receipt.find(row => row.name === "participants");
+        const faint = variants.before.map((ink, i) => ({ ink, next: variants.after[i] }))
+          .filter(({ ink }) => ink.stroke === "rgb(64, 64, 64)");
+        check(`dark special participant outlines gain contrast without changing semantic fills pass ${round + 1}`,
+          faint.length >= 40 && faint.every(({ ink, next }) => next.stroke === "rgb(116, 129, 143)" && next.fill === ink.fill), variants);
+      }
+      await exec("viewer.querySelectorAll('.mermaid')[1].scrollIntoView();true");
+      await capture(dark ? "boundaries-dark" : "boundaries-light");
+      const native = await exec("[...viewer.querySelectorAll('.mermaid')].map(node=>node.querySelector('svg').getAttribute('viewBox'))");
+      await setView(false, 200);
+      await exec("viewer.querySelectorAll('.mermaid')[1].scrollIntoView();true");
+      check(`boundary ${mode} high zoom keeps layout coordinates`,
+        await exec(`[...viewer.querySelectorAll('.mermaid')].every((node,i)=>node.querySelector('svg').getAttribute('viewBox')===${JSON.stringify(native)}[i])`));
+      await capture(dark ? "boundaries-dark-zoom" : "boundaries-light-zoom");
+      await setView(false, 100);
+      if (round === 2) for (const name of ["flowchart", "class", "state", "er", "participants", "c4", "packet", "wardley"]) {
+        await exec(`viewer.querySelectorAll('.mermaid')[${Object.keys(fixtures).indexOf(name)}].scrollIntoView();true`);
+        await capture("boundary-" + name);
+      }
+    }
+    fs.writeFileSync(path.join(batch, "boundary-paints.json"), JSON.stringify(receipts, null, 2));
+    await exec("openMermaidTemplateDialog(MERMAID_TEMPLATES.sequence);true");
+    await wait("styled template preview", "!!mermaidTemplatePreviewEl.querySelector('svg line.actor-line')");
+    check("dark template preview shares stronger participant borders and lifelines",
+      await exec("[...mermaidTemplatePreviewEl.querySelectorAll('rect.actor')].length>=4&&[...mermaidTemplatePreviewEl.querySelectorAll('rect.actor')].every(e=>parseFloat(getComputedStyle(e).strokeWidth)===2)&&[...mermaidTemplatePreviewEl.querySelectorAll('line.actor-line')].every(e=>parseFloat(getComputedStyle(e).strokeWidth)===3)"));
+    await capture("boundaries-preview");
+    await exec("mermaidTemplateClose.click();viewer.querySelectorAll('.mermaid-maximize-btn')[1].click();true");
+    let popup;
+    for (let i = 0; i < 100; i++) {
+      popup = BrowserWindow.getAllWindows().find(window => window !== win);
+      if (popup && await popup.webContents.executeJavaScript("!!document.querySelector('line.actor-line')").catch(() => false)) break;
+      await sleep(50);
+    }
+    if (!popup) throw new Error("Boundary popup did not open");
+    try {
+      const state = await popup.webContents.executeJavaScript(`({
+        actors:[...document.querySelectorAll('rect.actor')].map(e=>getComputedStyle(e).strokeWidth),
+        lifelines:[...document.querySelectorAll('line.actor-line')].map(e=>getComputedStyle(e).strokeWidth),
+        source:document.querySelector('svg').outerHTML,
+        isolated:typeof require==='undefined'&&typeof process==='undefined'})`);
+      const pdf = await popup.webContents.printToPDF({ printBackground: true });
+      fs.writeFileSync(path.join(batch, "boundaries-popup.svg"), state.source);
+      fs.writeFileSync(path.join(batch, "boundaries-popup.pdf"), pdf);
+      fs.writeFileSync(path.join(batch, "boundaries-popup.png"), (await popup.webContents.capturePage()).toPNG());
+      check("boundary popout and exported SVG retain original styled geometry under isolation",
+        state.actors.length >= 4 && state.actors.every(w => w === "2px") && state.lifelines.length >= 2 &&
+        state.lifelines.every(w => w === "3px") && state.source.includes("stroke: rgb(116, 129, 143)") && state.isolated && pdf.length > 1000, state);
+    } finally { popup.destroy(); }
+    for (const scenario of ["overlap", "reopen", "theme"]) {
+      const state = await exec(`(async()=>{
+        const original=mermaid.render,seen=[];let release,entered;
+        const parked=new Promise(r=>release=r),started=new Promise(r=>entered=r);
+        const observer=new MutationObserver(()=>seen.push(mermaidTemplatePreviewEl.textContent));
+        observer.observe(mermaidTemplatePreviewEl,{childList:true,subtree:true});
+        mermaid.render=async function(...args){
+          if(args[1].includes('Slow old')){entered();await parked}
+          return original.apply(this,args);
+        };
+        try{
+          mermaidTemplateCode.value='flowchart LR\\n A[Slow old] --> B[Parked]';
+          const older=updateMermaidPreview();await started;
+          const current='sequenceDiagram\\n participant Current\\n participant Reader\\n Current->>Reader: Latest request';
+          let newer;
+          if(${JSON.stringify(scenario)}==='reopen'){
+            mermaidTemplateClose.click();openMermaidTemplateDialog(current);
+          }else{
+            if(${JSON.stringify(scenario)}==='theme')document.getElementById('darkModeToggle').click();
+            mermaidTemplateCode.value=current;newer=updateMermaidPreview();
+          }
+          release();await older;if(newer)await newer;await queueMermaidWork(async()=>true);
+          return {current:mermaidTemplatePreviewEl.textContent.includes('Latest request'),
+            stale:seen.some(text=>text.includes('Slow old')),
+            dark:document.body.classList.contains('dark-mode'),
+            widths:[...mermaidTemplatePreviewEl.querySelectorAll('rect.actor')].map(e=>parseFloat(getComputedStyle(e).strokeWidth))};
+        }finally{release();mermaid.render=original;observer.disconnect()}
+      })()`);
+      check(`queued Mermaid preview ${scenario} discards the older result`,
+        state.current && !state.stale && state.widths.length >= 4 &&
+        state.widths.every(width => width === (scenario === "theme" ? 1 : 2)), state);
+    }
+    await exec("mermaidTemplateClose.click();if(!document.body.classList.contains('dark-mode'))document.getElementById('darkModeToggle').click();true");
+    await exec("(async()=>{await whenMermaidSettled();return true})()");
+    await sentinel.mute("one intentional Mermaid syntax error between valid neighbors");
+    try {
+      const oversized = "---\ntitle: Native size limit\n---\nflowchart LR\nA[" + "x".repeat(50010);
+      const limit = await exec("mermaid.mermaidAPI.getConfig().maxTextSize");
+      check("oversized Mermaid control exceeds the native limit and rejects source metadata",
+        limit === 50000 && oversized.length > limit &&
+        await exec(`queueMermaidWork(async()=>await mermaid.parse(${JSON.stringify(oversized)},{suppressErrors:true})===false)`));
+      await exec(`window.__boundaryWarn=console.warn;window.__boundaryWarnings=[];
+        console.warn=(...args)=>{window.__boundaryWarnings.push(args.join(' '));window.__boundaryWarn(...args)};
+        window.__boundaryParse=mermaid.parse;window.__boundaryParsed=[];
+        mermaid.parse=async function(...args){window.__boundaryParsed.push(args[0]);return window.__boundaryParse.apply(this,args)};true`);
+      chosen = path.join(batch, "mixed.md");
+      fs.writeFileSync(chosen, "# Mixed Mermaid controls\n\n```mermaid\nflowchart LR\nA[First] --> B\n```\n\n```mermaid\nflowchart LR\nA[\n```\n\n```mermaid\n" + oversized + "\n```\n\n```mermaid\nflowchart LR\nC[Last] --> D\n```");
+      await exec("document.getElementById('openFile').click();true");
+      await wait("mixed Mermaid render completion", "viewer.querySelector('h1')?.textContent==='Mixed Mermaid controls'&&!loadingScreen.classList.contains('active')");
+      await settle();
+      const mixed = await exec(`(()=>{
+        const nodes=[...viewer.querySelectorAll('.mermaid')];
+        return {count:nodes.length,error:!!nodes[1]?.querySelector('svg[aria-roledescription="error"],.error-icon,.error-text'),
+          limit:!!nodes[2]?.querySelector('svg')&&nodes[2].textContent.includes('Maximum text size in diagram exceeded'),
+          warned:window.__boundaryWarnings.some(text=>text.includes('Mermaid border styling skipped:')),
+          parseCalls:window.__boundaryParsed.length,
+          onlyConfigured:window.__boundaryParsed.every(source=>source.includes('---')||source.includes('%%{')),
+          widths:[nodes[0],nodes[3]].map(node=>[...node.querySelectorAll('.label-container')].map(e=>parseFloat(getComputedStyle(e).strokeWidth)))};
+      })()`);
+      check("mixed Mermaid batch really contains its native syntax error", mixed.count === 4 && mixed.error, mixed);
+      check("native maximum-size warning survives a metadata parse failure", mixed.limit && mixed.warned, mixed);
+      check("ordinary Mermaid renders avoid redundant metadata parsing", mixed.parseCalls >= 1 && mixed.onlyConfigured, mixed);
+      check("dark mixed Mermaid batch keeps valid neighbors styled around its syntax error",
+        mixed.widths.length === 2 && mixed.widths.every(widths => widths.length >= 1 && widths.every(width => width === 2)), mixed);
+      const preview = await exec(`(async()=>{
+        openMermaidTemplateDialog(${JSON.stringify(oversized)});await updateMermaidPreview();
+        return !!mermaidTemplatePreviewEl.querySelector('svg')&&
+          mermaidTemplatePreviewEl.textContent.includes('Maximum text size in diagram exceeded');
+      })()`);
+      check("Mermaid preview keeps its native maximum-size warning", preview);
+      const fast = await exec(`(async()=>{
+        const before=window.__boundaryParsed.length;
+        openMermaidTemplateDialog(MERMAID_TEMPLATES.sequence);await updateMermaidPreview();
+        return {calls:window.__boundaryParsed.length-before,drawn:!!mermaidTemplatePreviewEl.querySelector('svg line.actor-line')};
+      })()`);
+      check("ordinary Mermaid previews avoid redundant metadata parsing", fast.drawn && fast.calls === 0, fast);
+      const missing = await exec(`queueMermaidWork(async()=>{
+        const before=window.__boundaryParsed.length;
+        const metadata=await getMermaidBoundaryMetadata(MERMAID_TEMPLATES.sequence,'');
+        return {calls:window.__boundaryParsed.length-before,type:metadata.diagramType};
+      })`);
+      check("missing native Mermaid type uses the public parser", missing.calls === 1 && missing.type === "sequence", missing);
+      const plainLimit = await exec(`(async()=>{
+        const source='flowchart LR\\nA['+'x'.repeat(50010);
+        openMermaidTemplateDialog(source);await updateMermaidPreview();
+        const svg=mermaidTemplatePreviewEl.querySelector('svg');
+        const native=await queueMermaidWork(()=>mermaid.render('boundary-limit-native',source));
+        const stage=document.createElement('div');stage.style.cssText='position:fixed;visibility:hidden';
+        stage.style.font=getComputedStyle(mermaidTemplatePreviewEl).font;
+        stage.innerHTML=native.svg;document.body.appendChild(stage);
+        const picture=s=>({box:s.getAttribute('viewBox'),content:[...s.querySelectorAll('rect,path,polygon,text,tspan,foreignObject')].map(e=>{
+          const style=getComputedStyle(e);
+          return {fill:style.fill,font:style.fontSize,text:e.textContent,
+            geometry:['d','x','y','width','height','points','transform'].map(key=>e.getAttribute(key))};
+        })});
+        try{return {shown:!!svg&&svg.textContent.includes('Maximum text size in diagram exceeded'),
+          unchanged:!!svg&&JSON.stringify(picture(svg))===JSON.stringify(picture(stage.querySelector('svg')))}}
+        finally{stage.remove()}
+      })()`);
+      check("configuration-free oversized Mermaid keeps its native warning", plainLimit.shown, plainLimit);
+      check("configuration-free native warning keeps text fill and layout", plainLimit.unchanged, plainLimit);
+    } finally {
+      await exec(`if(window.__boundaryWarn){console.warn=window.__boundaryWarn;delete window.__boundaryWarn;delete window.__boundaryWarnings}
+        if(window.__boundaryParse){mermaid.parse=window.__boundaryParse;delete window.__boundaryParse;delete window.__boundaryParsed}
+        mermaidTemplateClose.click();true`);
+      chosen = first;
+      await exec("document.getElementById('openFile').click();true");
+      await wait("clean boundary document after intentional syntax error", "viewer.querySelector('h1')?.textContent==='Mermaid boundary controls'&&!loadingScreen.classList.contains('active')");
+      await settle();
+      await sentinel.unmute();
+    }
+    const alive = await proveSentinelAlive(win, sentinel);
+    check("boundary error sentinel proves both channels alive", alive.console && alive.dom, alive);
+    const errors = await sentinel.stop();
+    check("boundary controls produce no renderer or document errors", errors.hits.length === 0, errors.hits);
+  }
   async function restart() {
     const expected = phase === "invalid" ? "closed" : phase;
     const state = await exec(panelState);
@@ -420,6 +749,7 @@ if (typeof electron === "string") {
     try {
       await wait("production ready", "typeof window.CustomTabs?.getTabs==='function'&&typeof renderMarkdown==='function'");
       if (phase === "screen") await screen();
+      else if (phase === "borders") await borders();
       else {
         await wait("real saved document restoration", "viewer.querySelector('h1')?.textContent==='Other reading document'&&!loadingScreen.classList.contains('active')");
         await restart();

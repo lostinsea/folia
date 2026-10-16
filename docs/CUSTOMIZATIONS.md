@@ -47,6 +47,38 @@ This approach means after an upstream merge, you only need to ensure these files
 - `npm run test:reading` covers real process restarts, actual watched-file updates,
   table scroll boundaries and dark/light Mermaid rendering.
 
+### Dark Mermaid borders and lifelines
+
+- Ordinary 1px borders become 2px. Default 2px borders and lifelines become 3px.
+  Existing strokes of 3px or more keep their width.
+- Faint neutral borders use muted `#74818f`. Semantic and status colors stay intact.
+- Coverage includes shape outlines, compartments and containers in flowcharts,
+  block, class, ER, state, requirement and kanban diagrams.
+- Sequence coverage includes mirrored participants, actor variants, lifelines,
+  notes, activations and loop labels/borders.
+- Other border types include C4, Gantt tasks, journey sections/tasks, Git labels,
+  pie outlines, architecture groups, packets, treemaps, tree highlights,
+  event-model boxes, Ishikawa labels, Wardley nodes and Cynefin regions/items.
+  Railroad and EBNF share the same border handling.
+- C4 container colors stay authored: Mermaid stores default and authored colors
+  in the same SVG attributes, so those borders widen without being recolored.
+- Authored theme, border, stroke, color and handdrawn settings keep ownership.
+  Ordinary layout, curve and font-size settings do not disable the correction.
+- Native size-limit warnings stay visible if optional styling metadata fails.
+  A warning is logged, and valid neighboring diagrams still render.
+- The pinned Mermaid legacy state renderer is unavailable. State-v2 and the
+  unified class renderer have native-render coverage; this does not repair old renderers.
+- Inline/class styles, stronger strokes and invisible strokes stay intact.
+  Fill-only timeline/mindmap shapes and chart data gain no invented borders.
+- Styling runs once on newly rendered dark SVGs. Light mode and cache hits do
+  no extra work. The same SVG styling follows preview, popout and export.
+- Marker-free source uses the actual native render type and has no authored
+  configuration. Frontmatter/directives or a missing type use the public parser.
+  These checks follow pinned Mermaid 11.17 syntax; body styles still keep ownership.
+- Styling adds render work, not scrolling work. The bounded matched fixture
+  shows no render/cadence regression; configured-source costs are not separately
+  measured. Method and numbers are in `docs/PERF-AUDIT.md`, not a zero-work claim.
+
 ### File-extension policies
 
 `src/file-helpers-core.js` owns the Markdown/Mermaid extension groups used by

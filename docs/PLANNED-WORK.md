@@ -39,6 +39,38 @@ section is kept here so the register has a visible edge.
 ## Current workset
 
 - `reading-improvements` is published as v0.7.0. Its completed entry is below.
+- `mermaid-dark-boundaries` is complete on the reading feature branch, not yet
+  integrated into `main`.
+- Astra source investigation, the viewed Electron PoC and implementation are
+  complete. Independent Sol/Luna final reviews agree: no blocking findings.
+- Scope: darker-theme shape/container outlines and lifelines, not text or fills.
+  Ordinary 1px borders become 2px; default 2px borders/lifelines become 3px.
+  Faint neutral strokes gain contrast; stronger and authored styles stay intact.
+- Handdrawn/authored visual settings remain author-owned. Fill-only chart data
+  gains no invented borders. Unrelated layout/curve settings do not opt out.
+- Native-render controls cover modern state compartments/concurrency and the
+  unified class alias.
+- Baseline controls reproduce the unavailable legacy state renderer and the TOC
+  opening-animation assertion failure on both released and corrected source.
+- Sol's native size-warning defect is fixed: optional metadata rejection logs a
+  warning without discarding native output or valid neighbors. Its focused
+  controls and mutation proof pass. Full reading checks pass 198/198 and source
+  packaging checks pass 414/414. R685 and R936-R941 are individually proven;
+  anchors resolve on restored final source.
+- The muted `#74818f` treatment keeps 2px borders and 3px lifelines.
+  Final-source dark/light, high-zoom, participant, preview and popout captures
+  have been viewed. Source-matched visual and performance checks are complete.
+- The unconditional-metadata trial adds 31.4ms to the five-diagram render median.
+  It is not accepted as noise. The implemented marker-free metadata fast path
+  avoids that redundant parse using the actual native render type.
+- Before the optimized measurement: fresh-render median/mean may add at most one
+  16.7ms frame for five diagrams; settled-scroll p95 may add at most 1ms, callback
+  p95 at most 0.1ms, with no geometry/scans or 50ms long tasks. Report added work.
+- The optimized matched run meets those budgets: render median 165.8ms to
+  162.9ms, mean 173.1ms to 172.8ms; scroll median stays 16.6-16.7ms, callback
+  p95 about 0.1ms, zero geometry/scans/long tasks. No speedup or free-work claim.
+  Configured-source costs remain outside this bounded measurement.
+- No correction push, main integration, release, tag change or install is authorized.
 - Existing P2 and nonblocking follow-ups keep their recorded scope and status.
 
 ## Update protocol
